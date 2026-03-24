@@ -30,6 +30,7 @@ out/
 
 # Test and coverage artifacts
 coverage.out
+coverage*.out
 cover.out
 *.coverprofile
 *.prof
