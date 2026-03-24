@@ -176,6 +176,7 @@ Worklog requirements:
 - prefer a clean repo layout with minimal root clutter
 - use `Justfile` as the command source of truth when present
 - keep CI and local command recipes aligned
+- after every push, run `gh run watch` for the triggered workflow and confirm the result before considering the push complete
 
 ## 13) Sandbox And Go Tooling
 
