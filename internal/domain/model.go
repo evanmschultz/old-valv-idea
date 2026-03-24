@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/evanmschultz/valv/internal/pathutil"
 )
 
 type Project struct {
@@ -46,9 +48,9 @@ type RuntimeRecord struct {
 }
 
 func NewProject(root string) (Project, error) {
-	cleanRoot := filepath.Clean(strings.TrimSpace(root))
-	if cleanRoot == "." || cleanRoot == "" {
-		return Project{}, fmt.Errorf("new project: root is required")
+	normalizedRoot, err := pathutil.Normalize(root)
+	if err != nil {
+		return Project{}, fmt.Errorf("new project: %w", err)
 	}
 	id, err := newID()
 	if err != nil {
@@ -56,8 +58,8 @@ func NewProject(root string) (Project, error) {
 	}
 	return Project{
 		ID:        id,
-		Root:      cleanRoot,
-		Name:      filepath.Base(cleanRoot),
+		Root:      normalizedRoot,
+		Name:      filepath.Base(normalizedRoot),
 		CreatedAt: time.Now().UTC(),
 	}, nil
 }
@@ -67,9 +69,9 @@ func NewProfile(provider Provider, name string, homePath string) (Profile, error
 	if trimmedName == "" {
 		return Profile{}, fmt.Errorf("new profile: name is required")
 	}
-	trimmedHome := strings.TrimSpace(homePath)
-	if trimmedHome == "" {
-		return Profile{}, fmt.Errorf("new profile: home path is required")
+	normalizedHome, err := pathutil.Normalize(homePath)
+	if err != nil {
+		return Profile{}, fmt.Errorf("new profile: %w", err)
 	}
 	id, err := newID()
 	if err != nil {
@@ -79,7 +81,7 @@ func NewProfile(provider Provider, name string, homePath string) (Profile, error
 		ID:        id,
 		Provider:  provider,
 		Name:      trimmedName,
-		HomePath:  filepath.Clean(trimmedHome),
+		HomePath:  normalizedHome,
 		CreatedAt: time.Now().UTC(),
 	}, nil
 }

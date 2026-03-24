@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/evanmschultz/valv/internal/pathutil"
 )
 
 // Result describes the resolved project root and whether it was identified by a git marker.
@@ -64,7 +66,7 @@ func normalizeStart(start string) (string, error) {
 		start = wd
 	}
 
-	abs, err := filepath.Abs(start)
+	abs, err := pathutil.Normalize(start)
 	if err != nil {
 		return "", err
 	}

@@ -174,6 +174,7 @@ Testing standards:
 
 - prefer real end-to-end and integration tests over mocks
 - use `testcontainers-go` for real Docker-backed integration tests when the behavior under test crosses the runtime boundary
+- keep Docker-backed integration tests in CI on Linux runners where Docker is the normal hosted path
 - use real SQLite, real filesystem state, and real process execution where practical
 - mocks, fakes, and stubs are allowed only when there is no practical real-environment option or when isolating a narrow pure-domain concern
 - do not default to mock-heavy unit tests for runtime, provider, storage, Docker, or CLI launch-path behavior

@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/evanmschultz/valv/internal/pathutil"
 )
 
 func TestDetectFromNormalRepoRoot(t *testing.T) {
@@ -56,8 +58,8 @@ func TestDetectFromFallsBackToCurrentDirectory(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
-	wantRoot := mustAbs(t, filepath.Join(root, "project", "nested"))
 	mustMkdirAll(t, filepath.Join(root, "project", "nested"))
+	wantRoot := mustAbs(t, filepath.Join(root, "project", "nested"))
 
 	got, err := DetectFrom(filepath.Join(root, "project", "nested"))
 	if err != nil {
@@ -133,9 +135,31 @@ func mustWriteFile(t *testing.T, path string, content string) {
 
 func mustAbs(t *testing.T, path string) string {
 	t.Helper()
-	got, err := filepath.Abs(path)
+	got, err := pathutil.Normalize(path)
 	if err != nil {
-		t.Fatalf("Abs(%q) error = %v", path, err)
+		t.Fatalf("Normalize(%q) error = %v", path, err)
 	}
 	return got
+}
+
+func TestDetectFromNormalizesSymlinkedRoot(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	mustMkdirAll(t, filepath.Join(root, ".git"))
+	linkParent := t.TempDir()
+	link := filepath.Join(linkParent, "repo-link")
+	if err := os.Symlink(root, link); err != nil {
+		t.Fatalf("Symlink() error = %v", err)
+	}
+	mustMkdirAll(t, filepath.Join(link, "nested", "child"))
+
+	got, err := DetectFrom(filepath.Join(link, "nested", "child"))
+	if err != nil {
+		t.Fatalf("DetectFrom() error = %v", err)
+	}
+	wantRoot := mustAbs(t, root)
+	if got.Root != wantRoot {
+		t.Fatalf("DetectFrom().Root = %q, want %q", got.Root, wantRoot)
+	}
 }

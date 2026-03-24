@@ -1,6 +1,10 @@
 package domain
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestNewProject(t *testing.T) {
 	t.Parallel()
@@ -67,5 +71,28 @@ func TestNewProjectRejectsEmptyRoot(t *testing.T) {
 
 	if _, err := NewProject(""); err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+func TestNewProjectNormalizesExistingSymlinkedPath(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	wantRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q) error = %v", root, err)
+	}
+	linkParent := t.TempDir()
+	link := filepath.Join(linkParent, "project-link")
+	if err := os.Symlink(root, link); err != nil {
+		t.Fatalf("Symlink() error = %v", err)
+	}
+
+	project, err := NewProject(link)
+	if err != nil {
+		t.Fatalf("NewProject() error = %v", err)
+	}
+	if project.Root != wantRoot {
+		t.Fatalf("NewProject().Root = %q, want %q", project.Root, wantRoot)
 	}
 }

@@ -15,10 +15,14 @@ import (
 
 	sqliteadapter "github.com/evanmschultz/valv/internal/adapters/sqlite"
 	"github.com/evanmschultz/valv/internal/domain"
+	"github.com/evanmschultz/valv/internal/pathutil"
 )
 
 func TestCodexCommandRunsFixtureImageEndToEnd(t *testing.T) {
 	paths := testCodexPaths(t)
+	if err := paths.Ensure(); err != nil {
+		t.Fatalf("paths.Ensure() error = %v", err)
+	}
 	projectRoot := filepath.Join(t.TempDir(), "project")
 	workDir := filepath.Join(projectRoot, "subdir")
 	if err := os.MkdirAll(filepath.Join(projectRoot, ".git"), 0o755); err != nil {
@@ -31,6 +35,14 @@ func TestCodexCommandRunsFixtureImageEndToEnd(t *testing.T) {
 	profileHome := filepath.Join(paths.ProviderRoot, "codex", "profiles", "dev")
 	if err := os.MkdirAll(profileHome, 0o755); err != nil {
 		t.Fatalf("MkdirAll(profileHome) error = %v", err)
+	}
+	wantWorkDir, err := pathutil.Normalize(workDir)
+	if err != nil {
+		t.Fatalf("Normalize(workDir) error = %v", err)
+	}
+	wantProfileHome, err := pathutil.Normalize(profileHome)
+	if err != nil {
+		t.Fatalf("Normalize(profileHome) error = %v", err)
 	}
 
 	imageRef := buildFixtureImage(t)
@@ -62,11 +74,11 @@ func TestCodexCommandRunsFixtureImageEndToEnd(t *testing.T) {
 	}
 
 	runResult := readKeyValueFile(t, filepath.Join(workDir, ".valv-fixture", "codex-run.txt"))
-	if got := runResult["pwd"]; got != workDir {
-		t.Fatalf("fixture pwd = %q, want %q", got, workDir)
+	if got := runResult["pwd"]; got != wantWorkDir {
+		t.Fatalf("fixture pwd = %q, want %q", got, wantWorkDir)
 	}
-	if got := runResult["codex_home"]; got != profileHome {
-		t.Fatalf("fixture CODEX_HOME = %q, want %q", got, profileHome)
+	if got := runResult["codex_home"]; got != wantProfileHome {
+		t.Fatalf("fixture CODEX_HOME = %q, want %q", got, wantProfileHome)
 	}
 	if got := runResult["stdin_tty"]; got != "false" {
 		t.Fatalf("fixture stdin_tty = %q, want false", got)
@@ -83,8 +95,8 @@ func TestCodexCommandRunsFixtureImageEndToEnd(t *testing.T) {
 	}
 
 	homeResult := readKeyValueFile(t, filepath.Join(profileHome, ".valv-fixture-home.txt"))
-	if got := homeResult["pwd"]; got != workDir {
-		t.Fatalf("fixture home pwd = %q, want %q", got, workDir)
+	if got := homeResult["pwd"]; got != wantWorkDir {
+		t.Fatalf("fixture home pwd = %q, want %q", got, wantWorkDir)
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 
 	"github.com/evanmschultz/valv/internal/adapters/docker"
 	"github.com/evanmschultz/valv/internal/domain"
+	"github.com/evanmschultz/valv/internal/pathutil"
 	projectdetect "github.com/evanmschultz/valv/internal/project"
 )
 
@@ -77,9 +78,9 @@ func New(options Options) (Service, error) {
 }
 
 func (s Service) Run(ctx context.Context, cwd string, codexArgs []string) error {
-	workingDir := filepath.Clean(strings.TrimSpace(cwd))
-	if workingDir == "" || workingDir == "." {
-		return fmt.Errorf("run codex launch service: working directory is required")
+	workingDir, err := pathutil.Normalize(cwd)
+	if err != nil {
+		return fmt.Errorf("run codex launch service: normalize working directory: %w", err)
 	}
 
 	projectResult, err := s.detect(workingDir)
