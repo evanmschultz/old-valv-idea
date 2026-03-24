@@ -99,6 +99,20 @@ func TestRunCodexCommandReturnsEnsureError(t *testing.T) {
 	}
 }
 
+func TestCodexImageRefDefaults(t *testing.T) {
+	t.Setenv("VALV_CODEX_IMAGE", "")
+	if got := codexImageRef().String(); got != "valv-codex:dev" {
+		t.Fatalf("codexImageRef() = %q, want %q", got, "valv-codex:dev")
+	}
+}
+
+func TestCodexImageRefParsesOverrideWithTag(t *testing.T) {
+	t.Setenv("VALV_CODEX_IMAGE", "ghcr.io/example/codex:test-fixture")
+	if got := codexImageRef().String(); got != "ghcr.io/example/codex:test-fixture" {
+		t.Fatalf("codexImageRef() = %q, want override image", got)
+	}
+}
+
 func testCodexPaths(t *testing.T) config.Paths {
 	t.Helper()
 

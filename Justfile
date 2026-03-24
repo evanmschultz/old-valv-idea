@@ -30,6 +30,9 @@ fmt-check:
 test:
   @GOFLAGS="${GOFLAGS:+$GOFLAGS }-buildvcs=false" go test -count=1 ./...
 
+integration:
+  @GOFLAGS="${GOFLAGS:+$GOFLAGS }-buildvcs=false" go test -tags=integration -count=1 -run '^TestCodexCommandRunsFixtureImageEndToEnd$' ./internal/cli
+
 race:
   @GOFLAGS="${GOFLAGS:+$GOFLAGS }-buildvcs=false" go test -race -count=1 ./...
 

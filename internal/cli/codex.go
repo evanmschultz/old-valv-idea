@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/charmbracelet/x/term"
 	"github.com/spf13/cobra"
@@ -50,7 +51,7 @@ func runCodexCommand(cmd *cobra.Command, paths config.Paths, args []string) erro
 	service, err := codexservice.New(codexservice.Options{
 		Store:    store,
 		Executor: dockeradapter.NewExecutor(dockeradapter.NewSystemRunner("docker", cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr())),
-		Image:    dockeradapter.NewImageRef("valv-codex", "dev"),
+		Image:    codexImageRef(),
 		User:     fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
 		TTY:      commandHasTTY(cmd.InOrStdin()) && commandHasTTY(cmd.OutOrStdout()),
 		Stdin:    commandHasTTY(cmd.InOrStdin()),
@@ -77,4 +78,18 @@ func commandHasTTY(stream any) bool {
 		return false
 	}
 	return term.IsTerminal(file.Fd())
+}
+
+func codexImageRef() dockeradapter.ImageRef {
+	value := strings.TrimSpace(os.Getenv("VALV_CODEX_IMAGE"))
+	if value == "" {
+		return dockeradapter.NewImageRef("valv-codex", "dev")
+	}
+
+	lastSlash := strings.LastIndex(value, "/")
+	lastColon := strings.LastIndex(value, ":")
+	if lastColon > lastSlash {
+		return dockeradapter.NewImageRef(value[:lastColon], value[lastColon+1:])
+	}
+	return dockeradapter.NewImageRef(value, "")
 }

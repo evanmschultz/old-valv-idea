@@ -170,6 +170,15 @@ Worklog requirements:
 - worklogs should record plan, assumptions, commands, findings, and open issues concisely
 - `.worklog/` is local-only and must remain gitignored
 
+Testing standards:
+
+- prefer real end-to-end and integration tests over mocks
+- use `testcontainers-go` for real Docker-backed integration tests when the behavior under test crosses the runtime boundary
+- use real SQLite, real filesystem state, and real process execution where practical
+- mocks, fakes, and stubs are allowed only when there is no practical real-environment option or when isolating a narrow pure-domain concern
+- do not default to mock-heavy unit tests for runtime, provider, storage, Docker, or CLI launch-path behavior
+- if a mock is introduced, document briefly in the worklog why a real test was not practical
+
 ## 12) Repository Standards
 
 - keep root docs and guidance aligned with implementation
