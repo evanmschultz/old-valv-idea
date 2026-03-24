@@ -72,3 +72,38 @@ func TestParseOutputStyle(t *testing.T) {
 		})
 	}
 }
+
+func TestParseProvider(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		input   string
+		want    Provider
+		wantErr bool
+	}{
+		{name: "codex", input: "codex", want: ProviderCodex},
+		{name: "trimmed", input: " Codex ", want: ProviderCodex},
+		{name: "invalid", input: "claude", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := ParseProvider(tt.input)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("ParseProvider() error = nil, want failure")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseProvider() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("ParseProvider() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

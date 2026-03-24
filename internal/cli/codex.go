@@ -9,7 +9,6 @@ import (
 	"github.com/spf13/cobra"
 
 	dockeradapter "github.com/evanmschultz/valv/internal/adapters/docker"
-	sqliteadapter "github.com/evanmschultz/valv/internal/adapters/sqlite"
 	"github.com/evanmschultz/valv/internal/config"
 	codexservice "github.com/evanmschultz/valv/internal/services/codex"
 )
@@ -34,19 +33,11 @@ func newCodexCommand(paths config.Paths, run codexRunFunc) *cobra.Command {
 }
 
 func runCodexCommand(cmd *cobra.Command, paths config.Paths, args []string) error {
-	if err := paths.Ensure(); err != nil {
-		return fmt.Errorf("run codex command: ensure paths: %w", err)
-	}
-
-	store, err := sqliteadapter.NewStore(paths.DatabasePath)
+	store, err := openStore(paths)
 	if err != nil {
-		return fmt.Errorf("run codex command: open store: %w", err)
+		return fmt.Errorf("run codex command: %w", err)
 	}
 	defer store.Close()
-
-	if err := store.Bootstrap(cmd.Context()); err != nil {
-		return fmt.Errorf("run codex command: bootstrap store: %w", err)
-	}
 
 	service, err := codexservice.New(codexservice.Options{
 		Store:    store,

@@ -1,0 +1,100 @@
+package cli
+
+import (
+	"bytes"
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	sqliteadapter "github.com/evanmschultz/valv/internal/adapters/sqlite"
+	"github.com/evanmschultz/valv/internal/config"
+	"github.com/evanmschultz/valv/internal/domain"
+	"github.com/evanmschultz/valv/internal/pathutil"
+)
+
+func TestManageProfileAddCreatesProfileAndHome(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	profileHome := filepath.Join(paths.ProviderRoot, "codex", "profiles", "dev")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	cmd := newManageCommand(paths, &rootOptions{})
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"profile", "add", "codex", "dev", "--home", profileHome})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !strings.Contains(stdout.String(), "name=dev") {
+		t.Fatalf("unexpected output: %q", stdout.String())
+	}
+	if _, err := os.Stat(profileHome); err != nil {
+		t.Fatalf("Stat(%q) error = %v", profileHome, err)
+	}
+
+	store, err := sqliteadapter.NewStore(paths.DatabasePath)
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+
+	profile, err := store.ProfileByName(context.Background(), domain.ProviderCodex, "dev")
+	if err != nil {
+		t.Fatalf("ProfileByName() error = %v", err)
+	}
+	wantHome, err := pathutil.Normalize(profileHome)
+	if err != nil {
+		t.Fatalf("Normalize(profileHome) error = %v", err)
+	}
+	if profile.HomePath != wantHome {
+		t.Fatalf("profile home = %q, want %q", profile.HomePath, wantHome)
+	}
+}
+
+func TestManageBindAndStatusUseRealStoreAndProjectDetection(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	projectRoot := filepath.Join(t.TempDir(), "project")
+	workDir := filepath.Join(projectRoot, "nested")
+	if err := os.MkdirAll(filepath.Join(projectRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git) error = %v", err)
+	}
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(workDir) error = %v", err)
+	}
+
+	profileHome := filepath.Join(paths.ProviderRoot, "codex", "profiles", "dev")
+	runManage(t, paths, []string{"profile", "add", "codex", "dev", "--home", profileHome})
+	runManage(t, paths, []string{"bind", "codex", "dev", "--project", workDir})
+
+	statusOut := runManage(t, paths, []string{"status", "--project", workDir})
+	if !strings.Contains(statusOut, "profile=dev") {
+		t.Fatalf("unexpected status output: %q", statusOut)
+	}
+	if !strings.Contains(statusOut, "provider=codex") {
+		t.Fatalf("unexpected status output: %q", statusOut)
+	}
+}
+
+func runManage(t *testing.T, paths config.Paths, args []string) string {
+	t.Helper()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd := newManageCommand(paths, &rootOptions{})
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs(args)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute(%v) error = %v\nstderr=%s", args, err, stderr.String())
+	}
+	return stdout.String()
+}

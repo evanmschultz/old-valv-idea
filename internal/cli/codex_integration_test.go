@@ -13,8 +13,7 @@ import (
 
 	testcontainers "github.com/testcontainers/testcontainers-go"
 
-	sqliteadapter "github.com/evanmschultz/valv/internal/adapters/sqlite"
-	"github.com/evanmschultz/valv/internal/domain"
+	"github.com/evanmschultz/valv/internal/config"
 	"github.com/evanmschultz/valv/internal/pathutil"
 )
 
@@ -47,7 +46,8 @@ func TestCodexCommandRunsFixtureImageEndToEnd(t *testing.T) {
 
 	imageRef := buildFixtureImage(t)
 	t.Setenv("VALV_CODEX_IMAGE", imageRef)
-	seedCodexBinding(t, paths.DatabasePath, projectRoot, profileHome)
+	runManageForIntegration(t, paths, projectRoot, []string{"profile", "add", "codex", "dev", "--home", profileHome})
+	runManageForIntegration(t, paths, workDir, []string{"bind", "codex", "dev"})
 
 	prevWD, err := os.Getwd()
 	if err != nil {
@@ -129,41 +129,30 @@ func buildFixtureImage(t *testing.T) string {
 	return repo + ":" + tag
 }
 
-func seedCodexBinding(t *testing.T, databasePath string, projectRoot string, profileHome string) {
+func runManageForIntegration(t *testing.T, paths config.Paths, workingDir string, args []string) {
 	t.Helper()
 
-	store, err := sqliteadapter.NewStore(databasePath)
+	prevWD, err := os.Getwd()
 	if err != nil {
-		t.Fatalf("NewStore() error = %v", err)
+		t.Fatalf("Getwd() error = %v", err)
 	}
-	defer store.Close()
+	if err := os.Chdir(workingDir); err != nil {
+		t.Fatalf("Chdir(%q) error = %v", workingDir, err)
+	}
+	defer func() {
+		_ = os.Chdir(prevWD)
+	}()
 
-	if err := store.Bootstrap(context.Background()); err != nil {
-		t.Fatalf("Bootstrap() error = %v", err)
-	}
-
-	project, err := domain.NewProject(projectRoot)
-	if err != nil {
-		t.Fatalf("NewProject() error = %v", err)
-	}
-	if _, err := store.CreateProject(context.Background(), project); err != nil {
-		t.Fatalf("CreateProject() error = %v", err)
-	}
-
-	profile, err := domain.NewProfile(domain.ProviderCodex, "dev", profileHome)
-	if err != nil {
-		t.Fatalf("NewProfile() error = %v", err)
-	}
-	if _, err := store.CreateProfile(context.Background(), profile); err != nil {
-		t.Fatalf("CreateProfile() error = %v", err)
-	}
-
-	binding, err := domain.NewProjectBinding(project.ID, profile.ID, domain.ProviderCodex)
-	if err != nil {
-		t.Fatalf("NewProjectBinding() error = %v", err)
-	}
-	if _, err := store.UpsertProjectBinding(context.Background(), binding); err != nil {
-		t.Fatalf("UpsertProjectBinding() error = %v", err)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd := newManageCommand(paths, &rootOptions{})
+	cmd.SetContext(context.Background())
+	cmd.SetIn(bytes.NewBuffer(nil))
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs(args)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("manage command %v error = %v\nstderr=%s", args, err, stderr.String())
 	}
 }
 

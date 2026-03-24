@@ -77,7 +77,7 @@ Use the direct runtime commands for provider execution and the management surfac
 	cmd.AddCommand(newPathsCommand(paths, opts))
 	cmd.AddCommand(newVersionCommand(opts))
 	cmd.AddCommand(newCodexCommand(paths, nil))
-	cmd.AddCommand(newStubCommand("manage", "Operator workflows for bindings, runtimes, and updates"))
+	cmd.AddCommand(newManageCommand(paths, opts))
 	cmd.AddCommand(newStubCommand("global", "Host-global convenience commands"))
 	cmd.AddCommand(newStubCommand("api", "Run the Valv API surface"))
 
@@ -120,8 +120,14 @@ func loadEffectiveConfig(path string) (config.EffectiveConfig, config.Config, er
 }
 
 func outputPolicyFromCommand(cmd *cobra.Command, opts *rootOptions) (output.Policy, error) {
-	forceStyle := cmd.Flags().Lookup("style").Changed && opts.style
-	disableStyle := cmd.Flags().Lookup("no-style").Changed && opts.noStyle
+	forceStyle := false
+	if flag := cmd.Flags().Lookup("style"); flag != nil {
+		forceStyle = flag.Changed && opts.style
+	}
+	disableStyle := false
+	if flag := cmd.Flags().Lookup("no-style"); flag != nil {
+		disableStyle = flag.Changed && opts.noStyle
+	}
 	if forceStyle && disableStyle {
 		return output.Policy{}, fmt.Errorf("output flags: --style and --no-style cannot be used together")
 	}
@@ -140,7 +146,7 @@ func outputPolicyFromCommand(cmd *cobra.Command, opts *rootOptions) (output.Poli
 		Format: effective.Output.Format,
 		Style:  effective.Output.Style,
 	}
-	if cmd.Flags().Lookup("format").Changed {
+	if flag := cmd.Flags().Lookup("format"); flag != nil && flag.Changed {
 		parsedFormat, err := domain.ParseOutputFormat(opts.format)
 		if err != nil {
 			return output.Policy{}, err

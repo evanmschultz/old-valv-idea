@@ -11,6 +11,15 @@ const (
 	ProviderCodex Provider = "codex"
 )
 
+func ParseProvider(value string) (Provider, error) {
+	switch normalized := Provider(strings.ToLower(strings.TrimSpace(value))); normalized {
+	case ProviderCodex:
+		return normalized, nil
+	default:
+		return "", fmt.Errorf("parse provider %q: unsupported value", value)
+	}
+}
+
 type Mode string
 
 const (
