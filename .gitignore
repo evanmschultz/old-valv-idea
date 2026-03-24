@@ -1,0 +1,39 @@
+# Local research and scratch
+.tmp/
+.cache/
+.worklog/
+
+# OS clutter
+.DS_Store
+Thumbs.db
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs and debug
+*.log
+
+# Environment and local overrides
+.env
+.env.*
+!.env.example
+
+# Build outputs
+bin/
+dist/
+build/
+out/
+
+# Test and coverage artifacts
+coverage.out
+cover.out
+*.coverprofile
+*.prof
+*.test
+
+# Tooling artifacts
+.gocache/
