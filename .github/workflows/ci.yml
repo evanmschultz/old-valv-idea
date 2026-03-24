@@ -1,0 +1,27 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: check (macos-latest)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: taiki-e/install-action@just
+      - name: Run canonical CI gate
+        shell: bash
+        run: just ci

@@ -9,4 +9,5 @@ var (
 	ErrInvalidOutput   = errors.New("invalid output configuration")
 	ErrInvalidLogLevel = errors.New("invalid log level")
 	ErrInvalidDBPath   = errors.New("invalid database path")
+	ErrNotFound        = errors.New("not found")
 )

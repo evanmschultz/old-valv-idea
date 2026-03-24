@@ -176,3 +176,19 @@ Worklog requirements:
 - prefer a clean repo layout with minimal root clutter
 - use `Justfile` as the command source of truth when present
 - keep CI and local command recipes aligned
+
+## 13) Sandbox And Go Tooling
+
+Do not alter Go cache or module environment variables to work around sandbox restrictions.
+
+Prohibited examples:
+
+- `GOCACHE=... just ci`
+- `GOCACHE=... go test ./...`
+- ad hoc overrides of `GOCACHE`, `GOMODCACHE`, `GOPATH`, or similar Go env paths to bypass local environment constraints
+
+Required behavior:
+
+- use the normal system Go cache and normal local command paths
+- keep `Justfile` recipes correct rather than wrapping them in sandbox workarounds
+- if a Go command or test run fails because of sandbox restrictions, stop, report that clearly, and let the user run it or decide the next step
