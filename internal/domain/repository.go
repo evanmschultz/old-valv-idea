@@ -9,6 +9,7 @@ type ProjectRepository interface {
 
 type ProfileRepository interface {
 	CreateProfile(context.Context, Profile) (Profile, error)
+	ProfileByID(context.Context, string) (Profile, error)
 	ProfileByName(context.Context, Provider, string) (Profile, error)
 }
 

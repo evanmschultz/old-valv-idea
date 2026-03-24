@@ -62,6 +62,13 @@ func TestStoreProfileAndBindingLifecycle(t *testing.T) {
 	if _, err := store.CreateProfile(context.Background(), profile); err != nil {
 		t.Fatalf("CreateProfile() error = %v", err)
 	}
+	fetchedProfile, err := store.ProfileByID(context.Background(), profile.ID)
+	if err != nil {
+		t.Fatalf("ProfileByID() error = %v", err)
+	}
+	if fetchedProfile.ID != profile.ID {
+		t.Fatalf("ProfileByID().ID = %q, want %q", fetchedProfile.ID, profile.ID)
+	}
 
 	binding, err := domain.NewProjectBinding(project.ID, profile.ID, domain.ProviderCodex)
 	if err != nil {
@@ -132,6 +139,9 @@ func TestStoreNotFoundErrors(t *testing.T) {
 	}
 	if _, err := store.ProfileByName(context.Background(), domain.ProviderCodex, "missing"); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("ProfileByName() error = %v, want domain.ErrNotFound", err)
+	}
+	if _, err := store.ProfileByID(context.Background(), "missing"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("ProfileByID() error = %v, want domain.ErrNotFound", err)
 	}
 	if _, err := store.BindingByProjectID(context.Background(), "missing"); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("BindingByProjectID() error = %v, want domain.ErrNotFound", err)

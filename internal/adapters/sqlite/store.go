@@ -148,6 +148,30 @@ func (s *Store) CreateProfile(ctx context.Context, profile domain.Profile) (doma
 	return profile, nil
 }
 
+func (s *Store) ProfileByID(ctx context.Context, id string) (domain.Profile, error) {
+	row := s.db.QueryRowContext(
+		ctx,
+		`SELECT id, provider, name, home_path, created_at FROM profiles WHERE id = ?`,
+		id,
+	)
+	var profile domain.Profile
+	var providerValue string
+	var createdAt string
+	if err := row.Scan(&profile.ID, &providerValue, &profile.Name, &profile.HomePath, &createdAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.Profile{}, fmt.Errorf("profile by id %q: %w", id, domain.ErrNotFound)
+		}
+		return domain.Profile{}, fmt.Errorf("profile by id %q: %w", id, err)
+	}
+	profile.Provider = domain.Provider(providerValue)
+	parsedCreatedAt, err := parseTime("profile by id", "created_at", createdAt)
+	if err != nil {
+		return domain.Profile{}, err
+	}
+	profile.CreatedAt = parsedCreatedAt
+	return profile, nil
+}
+
 func (s *Store) ProfileByName(ctx context.Context, provider domain.Provider, name string) (domain.Profile, error) {
 	row := s.db.QueryRowContext(
 		ctx,

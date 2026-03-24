@@ -56,9 +56,6 @@ func (r ContainerRunRequest) Valid() error {
 	if strings.TrimSpace(r.Image.Repository) == "" {
 		return fmt.Errorf("validate container run request: image is required")
 	}
-	if strings.TrimSpace(r.Name) == "" {
-		return fmt.Errorf("validate container run request: name is required")
-	}
 	if len(r.Mounts) == 0 {
 		return nil
 	}

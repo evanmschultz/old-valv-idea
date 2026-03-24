@@ -76,7 +76,7 @@ Use the direct runtime commands for provider execution and the management surfac
 
 	cmd.AddCommand(newPathsCommand(paths, opts))
 	cmd.AddCommand(newVersionCommand(opts))
-	cmd.AddCommand(newStubCommand("codex", "Run Codex through Valv's Docker runtime"))
+	cmd.AddCommand(newCodexCommand(paths, nil))
 	cmd.AddCommand(newStubCommand("manage", "Operator workflows for bindings, runtimes, and updates"))
 	cmd.AddCommand(newStubCommand("global", "Host-global convenience commands"))
 	cmd.AddCommand(newStubCommand("api", "Run the Valv API surface"))
