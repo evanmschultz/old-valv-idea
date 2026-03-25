@@ -60,6 +60,7 @@ func New(options Options) (Service, error) {
 
 func DefaultLocalTargets(paths config.Paths) []string {
 	return []string{
+		paths.LogsDir,
 		paths.BuildCacheDir,
 		paths.TempCacheDir,
 		paths.RuntimeTmpDir,

@@ -11,6 +11,7 @@ type ProfileRepository interface {
 	CreateProfile(context.Context, Profile) (Profile, error)
 	ProfileByID(context.Context, string) (Profile, error)
 	ProfileByName(context.Context, Provider, string) (Profile, error)
+	ListProfilesByProvider(context.Context, Provider) ([]Profile, error)
 }
 
 type BindingRepository interface {

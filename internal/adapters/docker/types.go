@@ -44,12 +44,33 @@ type ContainerRunRequest struct {
 	Env         map[string]string
 	Mounts      []MountSpec
 	Args        []string
+	Detached    bool
 	Interactive bool
 	TTY         bool
 	Remove      bool
 	User        string
 	Network     string
 	Extra       []string
+}
+
+type ContainerExecRequest struct {
+	ContainerID string
+	WorkingDir  string
+	Env         map[string]string
+	Args        []string
+	Interactive bool
+	TTY         bool
+	User        string
+}
+
+func (r ContainerExecRequest) Valid() error {
+	if strings.TrimSpace(r.ContainerID) == "" {
+		return fmt.Errorf("validate container exec request: container id is required")
+	}
+	if len(r.Args) == 0 {
+		return fmt.Errorf("validate container exec request: args are required")
+	}
+	return nil
 }
 
 func (r ContainerRunRequest) Valid() error {
@@ -83,6 +104,9 @@ func BuildRunArgs(request ContainerRunRequest) ([]string, error) {
 	}
 
 	args := []string{"run"}
+	if request.Detached {
+		args = append(args, "-d")
+	}
 	if request.Remove {
 		args = append(args, "--rm")
 	}
@@ -123,6 +147,39 @@ func BuildRunArgs(request ContainerRunRequest) ([]string, error) {
 	}
 	args = append(args, request.Extra...)
 	args = append(args, request.Image.String())
+	args = append(args, request.Args...)
+	return args, nil
+}
+
+func BuildExecArgs(request ContainerExecRequest) ([]string, error) {
+	if err := request.Valid(); err != nil {
+		return nil, err
+	}
+
+	args := []string{"exec"}
+	if request.Interactive {
+		args = append(args, "-i")
+	}
+	if request.TTY {
+		args = append(args, "-t")
+	}
+	if strings.TrimSpace(request.WorkingDir) != "" {
+		args = append(args, "--workdir", strings.TrimSpace(request.WorkingDir))
+	}
+	if strings.TrimSpace(request.User) != "" {
+		args = append(args, "--user", strings.TrimSpace(request.User))
+	}
+	if len(request.Env) > 0 {
+		keys := make([]string, 0, len(request.Env))
+		for key := range request.Env {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			args = append(args, "-e", fmt.Sprintf("%s=%s", key, request.Env[key]))
+		}
+	}
+	args = append(args, strings.TrimSpace(request.ContainerID))
 	args = append(args, request.Args...)
 	return args, nil
 }

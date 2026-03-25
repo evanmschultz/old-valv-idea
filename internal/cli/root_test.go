@@ -16,8 +16,7 @@ import (
 )
 
 func TestPathsCommandPlain(t *testing.T) {
-	t.Parallel()
-
+	t.Setenv("HOME", t.TempDir())
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
@@ -35,8 +34,7 @@ func TestPathsCommandPlain(t *testing.T) {
 }
 
 func TestVersionCommandJSON(t *testing.T) {
-	t.Parallel()
-
+	t.Setenv("HOME", t.TempDir())
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
@@ -54,8 +52,7 @@ func TestVersionCommandJSON(t *testing.T) {
 }
 
 func TestOutputFlagsConflict(t *testing.T) {
-	t.Parallel()
-
+	t.Setenv("HOME", t.TempDir())
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
@@ -95,8 +92,7 @@ func TestStubCommandReturnsError(t *testing.T) {
 }
 
 func TestOutputPolicyUsesConfigDefaults(t *testing.T) {
-	t.Parallel()
-
+	t.Setenv("HOME", t.TempDir())
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
 	content := []byte("[output]\nformat='json'\nstyle='never'\n[logging]\nlevel='debug'\n")
@@ -120,8 +116,7 @@ func TestOutputPolicyUsesConfigDefaults(t *testing.T) {
 }
 
 func TestOutputPolicyFlagsOverrideConfig(t *testing.T) {
-	t.Parallel()
-
+	t.Setenv("HOME", t.TempDir())
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
 	content := []byte("[output]\nformat='json'\nstyle='never'\n")
@@ -174,5 +169,33 @@ func TestEffectiveConfigFromContext(t *testing.T) {
 	}
 	if got.Output.Format != want.Output.Format || got.Output.Style != want.Output.Style || got.Logging.Level != want.Logging.Level {
 		t.Fatalf("EffectiveConfigFromContext() = %+v, want %+v", got, want)
+	}
+}
+
+func TestRootCommandCreatesDurableLogFile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	cmd, err := NewRootCommand(context.Background(), &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("NewRootCommand() error = %v", err)
+	}
+	cmd.SetArgs([]string{"--debug", "version"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	paths, err := config.ResolvePaths("")
+	if err != nil {
+		t.Fatalf("ResolvePaths() error = %v", err)
+	}
+	content, err := os.ReadFile(filepath.Join(paths.LogsDir, "valv.log"))
+	if err != nil {
+		t.Fatalf("ReadFile(log) error = %v", err)
+	}
+	if !strings.Contains(string(content), "initialized valv logger") {
+		t.Fatalf("unexpected log content: %q", string(content))
 	}
 }

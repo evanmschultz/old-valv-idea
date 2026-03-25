@@ -38,6 +38,7 @@ func TestBuildRunArgs(t *testing.T) {
 		Env:         map[string]string{"B": "2", "A": "1"},
 		Mounts:      []MountSpec{NewMountSpec("/host/project", "/workspace", true)},
 		Args:        []string{"version"},
+		Detached:    true,
 		Interactive: true,
 		TTY:         true,
 		Remove:      true,
@@ -53,6 +54,7 @@ func TestBuildRunArgs(t *testing.T) {
 
 	want := []string{
 		"run",
+		"-d",
 		"--rm",
 		"-i",
 		"-t",
@@ -92,5 +94,37 @@ func TestBuildInspectArgs(t *testing.T) {
 	want := []string{"inspect", "valv-codex-test"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("BuildInspectArgs() = %#v, want %#v", got, want)
+	}
+}
+
+func TestBuildExecArgs(t *testing.T) {
+	t.Parallel()
+
+	got, err := BuildExecArgs(ContainerExecRequest{
+		ContainerID: "valv-api-runtime",
+		WorkingDir:  "/workspace/project",
+		Env:         map[string]string{"B": "2", "A": "1"},
+		Args:        []string{"codex", "exec", "--json"},
+		Interactive: true,
+		TTY:         true,
+		User:        "501:20",
+	})
+	if err != nil {
+		t.Fatalf("BuildExecArgs() error = %v", err)
+	}
+
+	want := []string{
+		"exec",
+		"-i",
+		"-t",
+		"--workdir", "/workspace/project",
+		"--user", "501:20",
+		"-e", "A=1",
+		"-e", "B=2",
+		"valv-api-runtime",
+		"codex", "exec", "--json",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("BuildExecArgs() = %#v, want %#v", got, want)
 	}
 }

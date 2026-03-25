@@ -49,6 +49,11 @@ type StatusResult struct {
 	Binding  domain.ProjectBinding
 }
 
+type ProfileListResult struct {
+	Provider domain.Provider
+	Profiles []domain.Profile
+}
+
 func New(options Options) (Service, error) {
 	if options.Store == nil {
 		return Service{}, fmt.Errorf("new manage service: store is required")
@@ -158,6 +163,18 @@ func (s Service) Status(ctx context.Context, startPath string) (StatusResult, er
 	}
 
 	return StatusResult{Detected: projectResult, Project: projectRecord, Profile: profile, Binding: binding}, nil
+}
+
+func (s Service) ListProfiles(ctx context.Context, provider domain.Provider) (ProfileListResult, error) {
+	profiles, err := s.store.ListProfilesByProvider(ctx, provider)
+	if err != nil {
+		return ProfileListResult{}, fmt.Errorf("list profiles for provider %q: %w", provider, err)
+	}
+	s.debug("listed provider profiles", "provider", provider, "count", len(profiles))
+	return ProfileListResult{
+		Provider: provider,
+		Profiles: profiles,
+	}, nil
 }
 
 func (s Service) debug(msg string, keyvals ...any) {

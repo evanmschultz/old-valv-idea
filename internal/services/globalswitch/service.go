@@ -3,8 +3,10 @@ package globalswitch
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -19,19 +21,21 @@ type Store interface {
 }
 
 type Options struct {
-	Store    Store
-	HomeDir  string
-	StateDir string
-	Logger   *log.Logger
-	Now      func() time.Time
+	Store     Store
+	HomeDir   string
+	StateDir  string
+	Logger    *log.Logger
+	Now       func() time.Time
+	IsRunning func(context.Context, string) (bool, error)
 }
 
 type Service struct {
-	store    Store
-	homeDir  string
-	stateDir string
-	logger   *log.Logger
-	now      func() time.Time
+	store     Store
+	homeDir   string
+	stateDir  string
+	logger    *log.Logger
+	now       func() time.Time
+	isRunning func(context.Context, string) (bool, error)
 }
 
 type Result struct {
@@ -64,12 +68,23 @@ func New(options Options) (Service, error) {
 	if now == nil {
 		now = func() time.Time { return time.Now().UTC() }
 	}
-	return Service{store: options.Store, homeDir: strings.TrimSpace(options.HomeDir), stateDir: strings.TrimSpace(options.StateDir), logger: options.Logger, now: now}, nil
+	isRunning := options.IsRunning
+	if isRunning == nil {
+		isRunning = processRunning
+	}
+	return Service{store: options.Store, homeDir: strings.TrimSpace(options.HomeDir), stateDir: strings.TrimSpace(options.StateDir), logger: options.Logger, now: now, isRunning: isRunning}, nil
 }
 
 func (s Service) Switch(ctx context.Context, provider domain.Provider, profileName string) (Result, error) {
 	if provider != domain.ProviderCodex {
 		return Result{}, fmt.Errorf("switch global profile %q: unsupported provider", provider)
+	}
+	running, err := s.isRunning(ctx, "codex")
+	if err != nil {
+		return Result{}, fmt.Errorf("switch global profile %q/%q: check running processes: %w", provider, profileName, err)
+	}
+	if running {
+		return Result{}, fmt.Errorf("switch global profile %q/%q: host codex is currently running; exit Codex before switching", provider, profileName)
 	}
 	profile, err := s.store.ProfileByName(ctx, provider, strings.TrimSpace(profileName))
 	if err != nil {
@@ -144,4 +159,16 @@ func (s Service) debug(msg string, keyvals ...any) {
 		return
 	}
 	s.logger.Debug(msg, keyvals...)
+}
+
+func processRunning(ctx context.Context, name string) (bool, error) {
+	cmd := exec.CommandContext(ctx, "pgrep", "-x", strings.TrimSpace(name))
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }

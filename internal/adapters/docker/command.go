@@ -25,3 +25,11 @@ func (e Executor) Inspect(ctx context.Context, name string) error {
 	}
 	return e.runner.Run(ctx, args)
 }
+
+func (e Executor) Exec(ctx context.Context, request ContainerExecRequest) error {
+	args, err := BuildExecArgs(request)
+	if err != nil {
+		return err
+	}
+	return e.runner.Run(ctx, args)
+}

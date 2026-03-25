@@ -35,6 +35,7 @@ func TestDefaultLocalTargets(t *testing.T) {
 	t.Parallel()
 
 	paths := config.Paths{
+		LogsDir:       "/tmp/valv/logs",
 		BuildCacheDir: "/tmp/valv/cache/build",
 		TempCacheDir:  "/tmp/valv/cache/tmp",
 		RuntimeTmpDir: "/tmp/valv-runtime",
@@ -45,6 +46,7 @@ func TestDefaultLocalTargets(t *testing.T) {
 
 	got := DefaultLocalTargets(paths)
 	want := []string{
+		"/tmp/valv/logs",
 		"/tmp/valv/cache/build",
 		"/tmp/valv/cache/tmp",
 		"/tmp/valv-runtime",

@@ -3,6 +3,7 @@ package globalswitch
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -57,7 +58,7 @@ func TestSwitchCodexSymlinksSelectedProfileAndBacksUpExistingDir(t *testing.T) {
 	}
 
 	store := &stubStore{profile: domain.Profile{Name: "work", Provider: domain.ProviderCodex, HomePath: profileHome}}
-	service, err := New(Options{Store: store, HomeDir: homeDir, StateDir: stateDir, Now: func() time.Time { return time.Date(2026, 3, 24, 12, 0, 0, 0, time.UTC) }})
+	service, err := New(Options{Store: store, HomeDir: homeDir, StateDir: stateDir, Now: func() time.Time { return time.Date(2026, 3, 24, 12, 0, 0, 0, time.UTC) }, IsRunning: func(context.Context, string) (bool, error) { return false, nil }})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -90,7 +91,7 @@ func TestSwitchCodexSymlinksSelectedProfileAndBacksUpExistingDir(t *testing.T) {
 func TestSwitchRejectsUnsupportedProvider(t *testing.T) {
 	t.Parallel()
 
-	service, err := New(Options{Store: &stubStore{}, HomeDir: t.TempDir(), StateDir: t.TempDir()})
+	service, err := New(Options{Store: &stubStore{}, HomeDir: t.TempDir(), StateDir: t.TempDir(), IsRunning: func(context.Context, string) (bool, error) { return false, nil }})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -103,7 +104,7 @@ func TestSwitchRejectsUnsupportedProvider(t *testing.T) {
 func TestSwitchPropagatesProfileLookupFailure(t *testing.T) {
 	t.Parallel()
 
-	service, err := New(Options{Store: &stubStore{err: errors.New("boom")}, HomeDir: t.TempDir(), StateDir: t.TempDir()})
+	service, err := New(Options{Store: &stubStore{err: errors.New("boom")}, HomeDir: t.TempDir(), StateDir: t.TempDir(), IsRunning: func(context.Context, string) (bool, error) { return false, nil }})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -126,7 +127,7 @@ func TestSwitchReplacesExistingSymlinkWithoutBackup(t *testing.T) {
 		t.Fatalf("Symlink() error = %v", err)
 	}
 
-	service, err := New(Options{Store: &stubStore{profile: domain.Profile{Name: "dev", Provider: domain.ProviderCodex, HomePath: profileHome}}, HomeDir: homeDir, StateDir: t.TempDir()})
+	service, err := New(Options{Store: &stubStore{profile: domain.Profile{Name: "dev", Provider: domain.ProviderCodex, HomePath: profileHome}}, HomeDir: homeDir, StateDir: t.TempDir(), IsRunning: func(context.Context, string) (bool, error) { return false, nil }})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -144,5 +145,41 @@ func TestSwitchReplacesExistingSymlinkWithoutBackup(t *testing.T) {
 	}
 	if linkTarget != profileHome {
 		t.Fatalf("symlink target = %q, want %q", linkTarget, profileHome)
+	}
+}
+
+func TestSwitchRejectsWhenHostCodexIsRunning(t *testing.T) {
+	t.Parallel()
+
+	service, err := New(Options{
+		Store:     &stubStore{profile: domain.Profile{Name: "dev", Provider: domain.ProviderCodex, HomePath: t.TempDir()}},
+		HomeDir:   t.TempDir(),
+		StateDir:  t.TempDir(),
+		IsRunning: func(context.Context, string) (bool, error) { return true, nil },
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := service.Switch(context.Background(), domain.ProviderCodex, "dev"); err == nil {
+		t.Fatal("Switch() error = nil, want running-process failure")
+	}
+}
+
+func TestProcessRunningUsesPgrepExitStatus(t *testing.T) {
+	binDir := t.TempDir()
+	scriptPath := filepath.Join(binDir, "pgrep")
+	script := fmt.Sprintf("#!/bin/sh\nexit %d\n", 1)
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	running, err := processRunning(context.Background(), "codex")
+	if err != nil {
+		t.Fatalf("processRunning() error = %v", err)
+	}
+	if running {
+		t.Fatal("processRunning() = true, want false for exit status 1")
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -106,6 +107,9 @@ func buildFixtureImage(t *testing.T) string {
 	repo := "valv-codex"
 	tag := strings.ToLower(strings.ReplaceAll(t.Name(), "/", "-"))
 	ctx := context.Background()
+	if err := exec.CommandContext(ctx, "docker", "version").Run(); err != nil {
+		t.Skipf("docker unavailable for integration test: %v", err)
+	}
 
 	container, err := testcontainers.Run(
 		ctx,

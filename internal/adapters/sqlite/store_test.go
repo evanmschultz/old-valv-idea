@@ -184,3 +184,38 @@ func TestStoreProjectByRootRejectsInvalidTimestamp(t *testing.T) {
 		t.Fatal("ProjectByRoot() error = nil, want parse failure")
 	}
 }
+
+func TestStoreListProfilesByProviderReturnsSortedProfiles(t *testing.T) {
+	t.Parallel()
+
+	store := newBootstrappedStore(t)
+	profiles := []domain.Profile{
+		mustProfile(t, domain.ProviderCodex, "b", "/tmp/valv/providers/codex/b"),
+		mustProfile(t, domain.ProviderCodex, "a", "/tmp/valv/providers/codex/a"),
+	}
+	for _, profile := range profiles {
+		if _, err := store.CreateProfile(context.Background(), profile); err != nil {
+			t.Fatalf("CreateProfile(%q) error = %v", profile.Name, err)
+		}
+	}
+
+	listed, err := store.ListProfilesByProvider(context.Background(), domain.ProviderCodex)
+	if err != nil {
+		t.Fatalf("ListProfilesByProvider() error = %v", err)
+	}
+	if got, want := len(listed), 2; got != want {
+		t.Fatalf("profiles len = %d, want %d", got, want)
+	}
+	if listed[0].Name != "a" || listed[1].Name != "b" {
+		t.Fatalf("profiles order = [%s %s], want [a b]", listed[0].Name, listed[1].Name)
+	}
+}
+
+func mustProfile(t *testing.T, provider domain.Provider, name, home string) domain.Profile {
+	t.Helper()
+	profile, err := domain.NewProfile(provider, name, home)
+	if err != nil {
+		t.Fatalf("NewProfile(%q) error = %v", name, err)
+	}
+	return profile
+}

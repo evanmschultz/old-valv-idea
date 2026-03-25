@@ -48,6 +48,10 @@ func (f fakeStore) ProfileByName(context.Context, domain.Provider, string) (doma
 	panic("unexpected call")
 }
 
+func (f fakeStore) ListProfilesByProvider(context.Context, domain.Provider) ([]domain.Profile, error) {
+	panic("unexpected call")
+}
+
 func (f fakeStore) UpsertProjectBinding(context.Context, domain.ProjectBinding) (domain.ProjectBinding, error) {
 	panic("unexpected call")
 }

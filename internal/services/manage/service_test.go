@@ -206,6 +206,34 @@ func TestStatusReturnsUnboundProjectWhenMissing(t *testing.T) {
 	}
 }
 
+func TestListProfilesReturnsPersistedProfiles(t *testing.T) {
+	t.Parallel()
+
+	store, providerRoot := testStore(t)
+	service, err := New(Options{Store: store, ProviderRoot: providerRoot})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := service.CreateProfile(context.Background(), domain.ProviderCodex, "b", "/tmp/example/b"); err != nil {
+		t.Fatalf("CreateProfile(b) error = %v", err)
+	}
+	if _, err := service.CreateProfile(context.Background(), domain.ProviderCodex, "a", "/tmp/example/a"); err != nil {
+		t.Fatalf("CreateProfile(a) error = %v", err)
+	}
+
+	result, err := service.ListProfiles(context.Background(), domain.ProviderCodex)
+	if err != nil {
+		t.Fatalf("ListProfiles() error = %v", err)
+	}
+	if got, want := len(result.Profiles), 2; got != want {
+		t.Fatalf("profiles len = %d, want %d", got, want)
+	}
+	if result.Profiles[0].Name != "a" || result.Profiles[1].Name != "b" {
+		t.Fatalf("profiles order = [%s %s], want [a b]", result.Profiles[0].Name, result.Profiles[1].Name)
+	}
+}
+
 func testStore(t *testing.T) (*sqliteadapter.Store, string) {
 	t.Helper()
 

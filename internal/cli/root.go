@@ -26,6 +26,7 @@ type rootOptions struct {
 
 type loggerKey struct{}
 type effectiveConfigKey struct{}
+type logCloserKey struct{}
 
 func NewRootCommand(ctx context.Context, stdout, stderr io.Writer) (*cobra.Command, error) {
 	paths, err := config.ResolvePaths("")
@@ -46,6 +47,9 @@ Use the direct runtime commands for provider execution and the management surfac
 			return cmd.Help()
 		},
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			if err := paths.Ensure(); err != nil {
+				return fmt.Errorf("ensure paths: %w", err)
+			}
 			effective, _, err := loadEffectiveConfig(opts.configPath)
 			if err != nil {
 				return err
@@ -54,19 +58,38 @@ Use the direct runtime commands for provider execution and the management surfac
 			if opts.debug {
 				level = "debug"
 			}
-			logger, err := logging.New(logging.Options{Writer: stderr, Level: level, Prefix: "valv"})
+			logFile, err := logging.OpenFile(paths.LogsDir, "valv.log")
 			if err != nil {
+				return fmt.Errorf("initialize log file: %w", err)
+			}
+			writer := io.MultiWriter(stderr, logFile)
+			logger, err := logging.New(logging.Options{Writer: writer, Level: level, Prefix: "valv"})
+			if err != nil {
+				_ = logFile.Close()
 				return fmt.Errorf("initialize logger: %w", err)
 			}
 			nextCtx := context.WithValue(cmd.Context(), loggerKey{}, logger)
 			nextCtx = context.WithValue(nextCtx, effectiveConfigKey{}, effective)
+			nextCtx = context.WithValue(nextCtx, logCloserKey{}, io.Closer(logFile))
 			cmd.SetContext(nextCtx)
+			logger.Debug("initialized valv logger", "log_path", paths.LogsDir)
 			return nil
+		},
+		PersistentPostRun: func(cmd *cobra.Command, _ []string) {
+			closer, _ := cmd.Context().Value(logCloserKey{}).(io.Closer)
+			if closer != nil {
+				_ = closer.Close()
+			}
 		},
 	}
 	cmd.SetContext(ctx)
 	cmd.SetOut(stdout)
 	cmd.SetErr(stderr)
+	cmd.AddGroup(
+		&cobra.Group{ID: "inspect", Title: "Inspect Commands"},
+		&cobra.Group{ID: "runtime", Title: "Runtime Commands"},
+		&cobra.Group{ID: "manage", Title: "Management Commands"},
+	)
 
 	cmd.PersistentFlags().StringVar(&opts.configPath, "config", config.DefaultConfigPath(paths), "path to the valv config file")
 	cmd.PersistentFlags().StringVar(&opts.format, "format", "auto", "output format: auto, human, plain, json")
@@ -74,12 +97,20 @@ Use the direct runtime commands for provider execution and the management surfac
 	cmd.PersistentFlags().BoolVar(&opts.noStyle, "no-style", false, "disable ANSI styling for human output")
 	cmd.PersistentFlags().BoolVar(&opts.debug, "debug", false, "enable debug logging")
 
-	cmd.AddCommand(newPathsCommand(paths, opts))
-	cmd.AddCommand(newVersionCommand(opts))
-	cmd.AddCommand(newCodexCommand(paths, nil))
-	cmd.AddCommand(newManageCommand(paths, opts))
-	cmd.AddCommand(newStubCommand("global", "Host-global convenience commands"))
-	cmd.AddCommand(newStubCommand("api", "Run the Valv API surface"))
+	pathsCmd := newPathsCommand(paths, opts)
+	pathsCmd.GroupID = "inspect"
+	versionCmd := newVersionCommand(opts)
+	versionCmd.GroupID = "inspect"
+	codexCmd := newCodexCommand(paths, nil)
+	codexCmd.GroupID = "runtime"
+	apiCmd := newAPICommand(paths, opts)
+	apiCmd.GroupID = "runtime"
+	manageCmd := newManageCommand(paths, opts)
+	manageCmd.GroupID = "manage"
+	globalCmd := newGlobalCommand(paths, opts)
+	globalCmd.GroupID = "manage"
+
+	cmd.AddCommand(pathsCmd, versionCmd, codexCmd, apiCmd, manageCmd, globalCmd)
 
 	return cmd, nil
 }

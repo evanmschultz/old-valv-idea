@@ -2,6 +2,8 @@ package logging
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -37,5 +39,27 @@ func TestNewDefaultsToInfoLevel(t *testing.T) {
 	logger.Info("hello")
 	if buf.Len() == 0 {
 		t.Fatal("expected info log output")
+	}
+}
+
+func TestOpenFileCreatesLogPath(t *testing.T) {
+	t.Parallel()
+
+	dir := filepath.Join(t.TempDir(), "logs")
+	file, err := OpenFile(dir, "valv.log")
+	if err != nil {
+		t.Fatalf("OpenFile() error = %v", err)
+	}
+	defer file.Close()
+
+	if _, err := file.WriteString("hello\n"); err != nil {
+		t.Fatalf("WriteString() error = %v", err)
+	}
+	content, err := os.ReadFile(filepath.Join(dir, "valv.log"))
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if !bytes.Contains(content, []byte("hello")) {
+		t.Fatalf("unexpected log file content: %q", content)
 	}
 }

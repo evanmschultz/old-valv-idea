@@ -197,6 +197,39 @@ func (s *Store) ProfileByName(ctx context.Context, provider domain.Provider, nam
 	return profile, nil
 }
 
+func (s *Store) ListProfilesByProvider(ctx context.Context, provider domain.Provider) ([]domain.Profile, error) {
+	rows, err := s.db.QueryContext(
+		ctx,
+		`SELECT id, provider, name, home_path, created_at FROM profiles WHERE provider = ? ORDER BY name ASC`,
+		string(provider),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list profiles by provider %q: %w", provider, err)
+	}
+	defer rows.Close()
+
+	var profiles []domain.Profile
+	for rows.Next() {
+		var profile domain.Profile
+		var providerValue string
+		var createdAt string
+		if err := rows.Scan(&profile.ID, &providerValue, &profile.Name, &profile.HomePath, &createdAt); err != nil {
+			return nil, fmt.Errorf("list profiles by provider %q: scan row: %w", provider, err)
+		}
+		profile.Provider = domain.Provider(providerValue)
+		parsedCreatedAt, err := parseTime("list profiles by provider", "created_at", createdAt)
+		if err != nil {
+			return nil, err
+		}
+		profile.CreatedAt = parsedCreatedAt
+		profiles = append(profiles, profile)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list profiles by provider %q: %w", provider, err)
+	}
+	return profiles, nil
+}
+
 func (s *Store) UpsertProjectBinding(ctx context.Context, binding domain.ProjectBinding) (domain.ProjectBinding, error) {
 	if _, err := s.db.ExecContext(
 		ctx,
