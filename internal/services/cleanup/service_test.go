@@ -2,6 +2,7 @@ package cleanup
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -14,11 +15,20 @@ import (
 
 type cleanupRunnerRecorder struct {
 	calls [][]string
+	err   error
 }
 
 func (r *cleanupRunnerRecorder) Run(_ context.Context, args []string) error {
 	r.calls = append(r.calls, append([]string(nil), args...))
-	return nil
+	return r.err
+}
+
+func TestNewRejectsNilRunner(t *testing.T) {
+	t.Parallel()
+
+	if _, err := New(Options{}); err == nil {
+		t.Fatal("New() error = nil, want failure")
+	}
 }
 
 func TestDefaultLocalTargets(t *testing.T) {
@@ -44,6 +54,22 @@ func TestDefaultLocalTargets(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("DefaultLocalTargets() = %#v, want %#v", got, want)
+	}
+}
+
+func TestCleanLocalRejectsEmptyAndRootPaths(t *testing.T) {
+	t.Parallel()
+
+	svc, err := New(Options{Runner: &cleanupRunnerRecorder{}})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := svc.CleanLocal(context.Background(), LocalCleanupRequest{Paths: []string{"   "}}); err == nil {
+		t.Fatal("CleanLocal() error = nil for blank path, want failure")
+	}
+	if _, err := svc.CleanLocal(context.Background(), LocalCleanupRequest{Paths: []string{string(filepath.Separator)}}); err == nil {
+		t.Fatal("CleanLocal() error = nil for root path, want failure")
 	}
 }
 
@@ -128,5 +154,131 @@ func TestCleanDockerBuildsRemovalCommands(t *testing.T) {
 	}
 	if got, want := runner.calls[2], []string{"builder", "prune", "--force"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("builder prune args = %#v, want %#v", got, want)
+	}
+}
+
+func TestCleanDockerSupportsFiltersAndVolumes(t *testing.T) {
+	t.Parallel()
+
+	runner := &cleanupRunnerRecorder{}
+	svc, err := New(Options{Runner: runner})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	_, err = svc.CleanDocker(context.Background(), DockerCleanupRequest{
+		ContainerIDs:    []string{"abc123"},
+		ImageRefs:       []docker.ImageRef{docker.NewImageRef("ghcr.io/valv/codex", "dev")},
+		PruneBuilder:    true,
+		PruneBuilderAll: true,
+		BuilderFilters:  map[string]string{"until": "24h", "type": "regular"},
+		Force:           true,
+		Volumes:         true,
+	})
+	if err != nil {
+		t.Fatalf("CleanDocker() error = %v", err)
+	}
+
+	if len(runner.calls) != 3 {
+		t.Fatalf("runner call count = %d, want 3", len(runner.calls))
+	}
+	if got, want := runner.calls[0], []string{"rm", "--force", "--volumes", "abc123"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("container rm args = %#v, want %#v", got, want)
+	}
+	if got, want := runner.calls[2], []string{"builder", "prune", "--force", "--all", "--filter", "type=regular", "--filter", "until=24h"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("builder prune args = %#v, want %#v", got, want)
+	}
+}
+
+func TestCleanCompositeRunsBothStages(t *testing.T) {
+	t.Parallel()
+
+	runner := &cleanupRunnerRecorder{}
+	svc, err := New(Options{Runner: runner})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	root := t.TempDir()
+	target := filepath.Join(root, "dir")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+
+	localResult, dockerResult, err := svc.Clean(context.Background(),
+		LocalCleanupRequest{Paths: []string{target}},
+		DockerCleanupRequest{PruneBuilder: true},
+	)
+	if err != nil {
+		t.Fatalf("Clean() error = %v", err)
+	}
+	if len(localResult.Removed) != 1 {
+		t.Fatalf("Clean() local removed len = %d, want 1", len(localResult.Removed))
+	}
+	if len(dockerResult.Commands) != 1 {
+		t.Fatalf("Clean() docker command count = %d, want 1", len(dockerResult.Commands))
+	}
+}
+
+func TestCleanDockerPropagatesRunnerError(t *testing.T) {
+	t.Parallel()
+
+	runner := &cleanupRunnerRecorder{err: errors.New("boom")}
+	svc, err := New(Options{Runner: runner})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := svc.CleanDocker(context.Background(), DockerCleanupRequest{PruneBuilder: true}); err == nil {
+		t.Fatal("CleanDocker() error = nil, want failure")
+	}
+}
+
+func TestNewRequiresRunner(t *testing.T) {
+	t.Parallel()
+
+	if _, err := New(Options{}); err == nil {
+		t.Fatal("New() error = nil, want dependency failure")
+	}
+}
+
+func TestCleanCombinesLocalAndDocker(t *testing.T) {
+	t.Parallel()
+
+	runner := &cleanupRunnerRecorder{}
+	svc, err := New(Options{Runner: runner})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	root := t.TempDir()
+	target := filepath.Join(root, "cache")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+
+	localResult, dockerResult, err := svc.Clean(context.Background(), LocalCleanupRequest{Paths: []string{target}}, DockerCleanupRequest{PruneBuilder: true})
+	if err != nil {
+		t.Fatalf("Clean() error = %v", err)
+	}
+	if len(localResult.Removed) != 1 {
+		t.Fatalf("local removed len = %d, want 1", len(localResult.Removed))
+	}
+	if len(dockerResult.Commands) != 1 {
+		t.Fatalf("docker commands len = %d, want 1", len(dockerResult.Commands))
+	}
+}
+
+func TestCleanLocalRejectsRoot(t *testing.T) {
+	t.Parallel()
+
+	runner := &cleanupRunnerRecorder{}
+	svc, err := New(Options{Runner: runner})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := svc.CleanLocal(context.Background(), LocalCleanupRequest{Paths: []string{string(filepath.Separator)}}); err == nil {
+		t.Fatal("CleanLocal() error = nil, want root-path rejection")
 	}
 }

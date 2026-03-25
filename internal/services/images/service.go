@@ -3,12 +3,18 @@ package images
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/charmbracelet/log"
 
 	"github.com/evanmschultz/valv/internal/adapters/docker"
+)
+
+const (
+	DefaultCodexVersion    = "0.116.0"
+	defaultCodexDockerfile = "Dockerfile"
 )
 
 type Runner interface {
@@ -34,22 +40,18 @@ type Service struct {
 }
 
 type BuildRequest struct {
-	Tag        string
-	Version    string
-	ContextDir string
-	Dockerfile string
-	BuildArgs  map[string]string
-	Labels     map[string]string
-	Target     string
-	Network    string
-	Extra      []string
-	Pull       bool
-	NoCache    bool
+	Version   string
+	Pull      bool
+	NoCache   bool
+	ExtraTags []docker.ImageRef
 }
 
 type BuildResult struct {
-	Image docker.ImageRef
-	Args  []string
+	Image      docker.ImageRef
+	Tags       []docker.ImageRef
+	ContextDir string
+	Dockerfile string
+	Version    string
 }
 
 type UpdateRequest struct {
@@ -68,32 +70,66 @@ func New(options Options) (Service, error) {
 	if strings.TrimSpace(options.ContextDir) == "" {
 		return Service{}, fmt.Errorf("new image service: context dir is required")
 	}
+
+	dockerfile := strings.TrimSpace(options.Dockerfile)
+	if dockerfile == "" {
+		dockerfile = defaultCodexDockerfile
+	}
 	defaultTag := strings.TrimSpace(options.DefaultTag)
 	if defaultTag == "" {
 		defaultTag = "dev"
 	}
+
 	return Service{
 		runner:     options.Runner,
 		repository: strings.TrimSpace(options.Repository),
 		contextDir: strings.TrimSpace(options.ContextDir),
-		dockerfile: strings.TrimSpace(options.Dockerfile),
+		dockerfile: dockerfile,
 		defaultTag: defaultTag,
 		logger:     options.Logger,
 	}, nil
 }
 
 func (s Service) Build(ctx context.Context, request BuildRequest) (BuildResult, error) {
-	buildRequest, image := s.resolveBuildRequest(request)
-	args, err := docker.BuildImageArgs(buildRequest)
-	if err != nil {
-		return BuildResult{}, fmt.Errorf("build codex image: %w", err)
+	version := strings.TrimSpace(request.Version)
+	if version == "" {
+		version = DefaultCodexVersion
 	}
 
-	s.debug("building codex image", "image", image.String(), "context_dir", buildRequest.ContextDir, "dockerfile", buildRequest.Dockerfile)
-	if err := s.runner.Run(ctx, args); err != nil {
-		return BuildResult{}, fmt.Errorf("build codex image %q: %w", image.String(), err)
+	tags := []docker.ImageRef{docker.NewImageRef(s.repository, s.defaultTag)}
+	for _, extra := range request.ExtraTags {
+		if strings.TrimSpace(extra.Repository) == "" {
+			continue
+		}
+		tags = append(tags, extra)
 	}
-	return BuildResult{Image: image, Args: args}, nil
+
+	args, err := docker.BuildImageArgs(docker.ImageBuildRequest{
+		ContextDir: s.contextDir,
+		Dockerfile: filepath.Join(s.contextDir, s.dockerfile),
+		Tags:       tags,
+		BuildArgs: map[string]string{
+			"CODEX_VERSION": version,
+		},
+		Pull:    request.Pull,
+		NoCache: request.NoCache,
+	})
+	if err != nil {
+		return BuildResult{}, fmt.Errorf("build image: %w", err)
+	}
+	if err := s.runner.Run(ctx, args); err != nil {
+		return BuildResult{}, fmt.Errorf("build image: %w", err)
+	}
+
+	result := BuildResult{
+		Image:      tags[0],
+		Tags:       tags,
+		ContextDir: s.contextDir,
+		Dockerfile: filepath.Join(s.contextDir, s.dockerfile),
+		Version:    version,
+	}
+	s.debug("built provider image", "image", result.Image.String(), "version", version, "context_dir", s.contextDir)
+	return result, nil
 }
 
 func (s Service) Update(ctx context.Context, request UpdateRequest) (BuildResult, error) {
@@ -101,79 +137,53 @@ func (s Service) Update(ctx context.Context, request UpdateRequest) (BuildResult
 	if err != nil {
 		return BuildResult{}, err
 	}
-	if !request.RemovePrevious || len(request.PreviousImages) == 0 {
-		return result, nil
+
+	if request.RemovePrevious && len(request.PreviousImages) > 0 {
+		args, err := docker.BuildImageRemoveArgs(docker.ImageRemoveRequest{
+			Refs:  request.PreviousImages,
+			Force: true,
+		})
+		if err != nil {
+			return BuildResult{}, fmt.Errorf("remove previous images: %w", err)
+		}
+		if err := s.runner.Run(ctx, args); err != nil {
+			return BuildResult{}, fmt.Errorf("remove previous images: %w", err)
+		}
+		s.debug("removed previous images", "count", len(request.PreviousImages))
 	}
-	if err := s.Remove(ctx, request.PreviousImages...); err != nil {
-		return BuildResult{}, fmt.Errorf("update codex image %q: remove previous images: %w", result.Image.String(), err)
-	}
+
 	return result, nil
 }
 
-func (s Service) Remove(ctx context.Context, refs ...docker.ImageRef) error {
-	if len(refs) == 0 {
-		return nil
-	}
-	args, err := docker.BuildImageRemoveArgs(docker.ImageRemoveRequest{Refs: refs, Force: true})
-	if err != nil {
-		return fmt.Errorf("remove codex image: %w", err)
-	}
-	s.debug("removing codex image", "images", refs)
-	if err := s.runner.Run(ctx, args); err != nil {
-		return fmt.Errorf("remove codex image: %w", err)
-	}
-	return nil
-}
-
-func (s Service) resolveBuildRequest(request BuildRequest) (docker.ImageBuildRequest, docker.ImageRef) {
-	contextDir := strings.TrimSpace(request.ContextDir)
+func WriteDefaultCodexContext(root string) (string, error) {
+	contextDir := strings.TrimSpace(root)
 	if contextDir == "" {
-		contextDir = s.contextDir
+		return "", fmt.Errorf("write default codex context: root is required")
 	}
-	dockerfile := strings.TrimSpace(request.Dockerfile)
-	if dockerfile == "" {
-		dockerfile = s.dockerfile
+	if err := os.MkdirAll(contextDir, 0o755); err != nil {
+		return "", fmt.Errorf("write default codex context: ensure context dir %q: %w", contextDir, err)
 	}
-	if dockerfile != "" && !filepath.IsAbs(dockerfile) {
-		dockerfile = filepath.Join(contextDir, dockerfile)
+	dockerfilePath := filepath.Join(contextDir, defaultCodexDockerfile)
+	if err := os.WriteFile(dockerfilePath, []byte(DefaultCodexDockerfile()), 0o644); err != nil {
+		return "", fmt.Errorf("write default codex context: write dockerfile %q: %w", dockerfilePath, err)
 	}
-	tag := strings.TrimSpace(request.Tag)
-	if tag == "" {
-		tag = s.defaultTag
-	}
-	image := docker.NewImageRef(s.repository, tag)
-	buildArgs := cloneMap(request.BuildArgs)
-	if request.Version != "" {
-		if buildArgs == nil {
-			buildArgs = make(map[string]string)
-		}
-		if _, ok := buildArgs["CODEX_VERSION"]; !ok {
-			buildArgs["CODEX_VERSION"] = request.Version
-		}
-	}
-	return docker.ImageBuildRequest{
-		ContextDir: contextDir,
-		Dockerfile: dockerfile,
-		Tags:       []docker.ImageRef{image},
-		BuildArgs:  buildArgs,
-		Labels:     cloneMap(request.Labels),
-		Target:     strings.TrimSpace(request.Target),
-		Network:    strings.TrimSpace(request.Network),
-		Extra:      append([]string(nil), request.Extra...),
-		Pull:       request.Pull,
-		NoCache:    request.NoCache,
-	}, image
+	return dockerfilePath, nil
 }
 
-func cloneMap(values map[string]string) map[string]string {
-	if len(values) == 0 {
-		return nil
-	}
-	cloned := make(map[string]string, len(values))
-	for key, value := range values {
-		cloned[key] = value
-	}
-	return cloned
+func DefaultCodexDockerfile() string {
+	return strings.TrimSpace(`
+FROM node:22-bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates git \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG CODEX_VERSION
+RUN npm install --global "@openai/codex@${CODEX_VERSION}"
+
+WORKDIR /workspace
+ENTRYPOINT ["codex"]
+`) + "\n"
 }
 
 func (s Service) debug(msg string, keyvals ...any) {

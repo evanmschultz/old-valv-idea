@@ -2,103 +2,147 @@ package globalswitch
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
+	"time"
 
-	"github.com/evanmschultz/valv/internal/adapters/sqlite"
 	"github.com/evanmschultz/valv/internal/domain"
 )
 
-func TestSwitchAndCurrentProfile(t *testing.T) {
+type stubStore struct {
+	profile domain.Profile
+	called  bool
+	err     error
+}
+
+func (s *stubStore) ProfileByName(_ context.Context, provider domain.Provider, name string) (domain.Profile, error) {
+	s.called = true
+	if s.err != nil {
+		return domain.Profile{}, s.err
+	}
+	return s.profile, nil
+}
+
+func TestNewRequiresStoreAndPaths(t *testing.T) {
 	t.Parallel()
 
-	store, err := bootstrappedStore(t)
-	if err != nil {
-		t.Fatalf("bootstrappedStore() error = %v", err)
+	if _, err := New(Options{}); err == nil {
+		t.Fatal("New() error = nil, want dependency failure")
 	}
 
-	root := t.TempDir()
-	profileHome := filepath.Join(root, "providers", "codex", "profiles", "dev")
-	profile, err := domain.NewProfile(domain.ProviderCodex, "dev", profileHome)
-	if err != nil {
-		t.Fatalf("NewProfile() error = %v", err)
-	}
-	if _, err := store.CreateProfile(context.Background(), profile); err != nil {
-		t.Fatalf("CreateProfile() error = %v", err)
+	if _, err := New(Options{Store: &stubStore{}, StateDir: t.TempDir()}); err == nil {
+		t.Fatal("New() error = nil, want home-dir failure")
 	}
 
-	svc, err := New(Options{
-		Store:        store,
-		ProviderRoot: filepath.Join(root, "providers"),
-		StateDir:     filepath.Join(root, "state"),
-	})
+	if _, err := New(Options{Store: &stubStore{}, HomeDir: t.TempDir()}); err == nil {
+		t.Fatal("New() error = nil, want state-dir failure")
+	}
+}
+
+func TestSwitchCodexSymlinksSelectedProfileAndBacksUpExistingDir(t *testing.T) {
+	homeDir := t.TempDir()
+	stateDir := filepath.Join(homeDir, "state")
+	profileHome := filepath.Join(homeDir, "profiles", "codex", "work")
+	if err := os.MkdirAll(profileHome, 0o755); err != nil {
+		t.Fatalf("MkdirAll(profileHome) error = %v", err)
+	}
+	target := filepath.Join(homeDir, ".codex")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatalf("MkdirAll(target) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "auth.json"), []byte("legacy"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	store := &stubStore{profile: domain.Profile{Name: "work", Provider: domain.ProviderCodex, HomePath: profileHome}}
+	service, err := New(Options{Store: store, HomeDir: homeDir, StateDir: stateDir, Now: func() time.Time { return time.Date(2026, 3, 24, 12, 0, 0, 0, time.UTC) }})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	result, err := svc.Switch(context.Background(), domain.ProviderCodex, "dev")
+	result, err := service.Switch(context.Background(), domain.ProviderCodex, "work")
 	if err != nil {
 		t.Fatalf("Switch() error = %v", err)
 	}
-	if result.Profile.ID != profile.ID {
-		t.Fatalf("Switch() profile id = %q, want %q", result.Profile.ID, profile.ID)
+	if !store.called {
+		t.Fatal("expected profile lookup")
 	}
-	if got, err := os.Readlink(result.LinkPath); err != nil {
-		t.Fatalf("Readlink() error = %v", err)
-	} else if got != profile.HomePath {
-		t.Fatalf("Readlink() = %q, want %q", got, profile.HomePath)
+	if result.BackupPath == "" {
+		t.Fatal("expected backup path")
 	}
-	if _, err := os.Stat(result.StatePath); err != nil {
-		t.Fatalf("StatePath stat error = %v", err)
-	}
-
-	current, err := svc.Current(context.Background(), domain.ProviderCodex)
+	linkTarget, err := os.Readlink(target)
 	if err != nil {
-		t.Fatalf("Current() error = %v", err)
+		t.Fatalf("Readlink(%q) error = %v", target, err)
 	}
-	if current.Profile.ID != profile.ID {
-		t.Fatalf("Current() profile id = %q, want %q", current.Profile.ID, profile.ID)
+	if linkTarget != profileHome {
+		t.Fatalf("symlink target = %q, want %q", linkTarget, profileHome)
+	}
+	if _, err := os.Stat(filepath.Join(result.BackupPath, "auth.json")); err != nil {
+		t.Fatalf("backup auth.json missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, "global-switch", "codex", "current.json")); err != nil {
+		t.Fatalf("current metadata missing: %v", err)
 	}
 }
 
-func TestSwitchMissingProfileFails(t *testing.T) {
+func TestSwitchRejectsUnsupportedProvider(t *testing.T) {
 	t.Parallel()
 
-	store, err := bootstrappedStore(t)
-	if err != nil {
-		t.Fatalf("bootstrappedStore() error = %v", err)
-	}
-
-	root := t.TempDir()
-	svc, err := New(Options{
-		Store:        store,
-		ProviderRoot: filepath.Join(root, "providers"),
-		StateDir:     filepath.Join(root, "state"),
-	})
+	service, err := New(Options{Store: &stubStore{}, HomeDir: t.TempDir(), StateDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	if _, err := svc.Switch(context.Background(), domain.ProviderCodex, "missing"); err == nil {
-		t.Fatal("Switch() error = nil, want failure")
+	if _, err := service.Switch(context.Background(), domain.Provider("claude"), "work"); err == nil {
+		t.Fatal("Switch() error = nil, want unsupported-provider failure")
 	}
 }
 
-func bootstrappedStore(t *testing.T) (*sqlite.Store, error) {
-	t.Helper()
+func TestSwitchPropagatesProfileLookupFailure(t *testing.T) {
+	t.Parallel()
 
-	name := strings.ReplaceAll(strings.ToLower(t.Name()), "/", "-")
-	db, err := sqlite.Open(sqlite.OpenOptions{URI: "file:" + name + "?mode=memory&cache=shared"})
+	service, err := New(Options{Store: &stubStore{err: errors.New("boom")}, HomeDir: t.TempDir(), StateDir: t.TempDir()})
 	if err != nil {
-		return nil, err
+		t.Fatalf("New() error = %v", err)
 	}
-	store := sqlite.NewStoreFromDB(db)
-	if err := store.Bootstrap(context.Background()); err != nil {
-		_ = store.Close()
-		return nil, err
+
+	if _, err := service.Switch(context.Background(), domain.ProviderCodex, "work"); err == nil {
+		t.Fatal("Switch() error = nil, want lookup failure")
 	}
-	t.Cleanup(func() { _ = store.Close() })
-	return store, nil
+}
+
+func TestSwitchReplacesExistingSymlinkWithoutBackup(t *testing.T) {
+	t.Parallel()
+
+	homeDir := t.TempDir()
+	profileHome := filepath.Join(homeDir, "profiles", "codex", "dev")
+	if err := os.MkdirAll(profileHome, 0o755); err != nil {
+		t.Fatalf("MkdirAll(profileHome) error = %v", err)
+	}
+	target := filepath.Join(homeDir, ".codex")
+	if err := os.Symlink(filepath.Join(homeDir, "old"), target); err != nil {
+		t.Fatalf("Symlink() error = %v", err)
+	}
+
+	service, err := New(Options{Store: &stubStore{profile: domain.Profile{Name: "dev", Provider: domain.ProviderCodex, HomePath: profileHome}}, HomeDir: homeDir, StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	result, err := service.Switch(context.Background(), domain.ProviderCodex, "dev")
+	if err != nil {
+		t.Fatalf("Switch() error = %v", err)
+	}
+	if result.BackupPath != "" {
+		t.Fatalf("BackupPath = %q, want empty for symlink replacement", result.BackupPath)
+	}
+	linkTarget, err := os.Readlink(target)
+	if err != nil {
+		t.Fatalf("Readlink() error = %v", err)
+	}
+	if linkTarget != profileHome {
+		t.Fatalf("symlink target = %q, want %q", linkTarget, profileHome)
+	}
 }

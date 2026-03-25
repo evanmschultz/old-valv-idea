@@ -2,7 +2,10 @@ package images
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/evanmschultz/valv/internal/adapters/docker"
@@ -80,5 +83,64 @@ func TestServiceUpdateRemovesPreviousImages(t *testing.T) {
 	}
 	if got, want := runner.calls[1], []string{"image", "rm", "--force", "ghcr.io/valv/codex:0.116.0"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("Remove() args = %#v, want %#v", got, want)
+	}
+}
+
+func TestNewRequiresRunnerAndRepository(t *testing.T) {
+	t.Parallel()
+
+	if _, err := New(Options{}); err == nil {
+		t.Fatal("New() error = nil, want dependency failure")
+	}
+
+	_, err := New(Options{Runner: &runnerRecorder{}, ContextDir: "/tmp/context"})
+	if err == nil {
+		t.Fatal("New() error = nil, want repository failure")
+	}
+}
+
+func TestWriteDefaultCodexContextWritesDockerfile(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	dockerfilePath, err := WriteDefaultCodexContext(root)
+	if err != nil {
+		t.Fatalf("WriteDefaultCodexContext() error = %v", err)
+	}
+	content, err := os.ReadFile(dockerfilePath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if !strings.Contains(string(content), `@openai/codex@${CODEX_VERSION}`) {
+		t.Fatalf("dockerfile missing package install: %q", string(content))
+	}
+	if filepath.Base(dockerfilePath) != "Dockerfile" {
+		t.Fatalf("dockerfile base = %q, want Dockerfile", filepath.Base(dockerfilePath))
+	}
+}
+
+func TestBuildIncludesExtraTags(t *testing.T) {
+	t.Parallel()
+
+	runner := &runnerRecorder{}
+	svc, err := New(Options{Runner: runner, Repository: "ghcr.io/valv/codex", ContextDir: "/tmp/codex-image"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	result, err := svc.Build(context.Background(), BuildRequest{
+		Version: "0.116.0",
+		ExtraTags: []docker.ImageRef{
+			docker.NewImageRef("ghcr.io/valv/codex", "0-116-0"),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if len(result.Tags) != 2 {
+		t.Fatalf("result tags len = %d, want 2", len(result.Tags))
+	}
+	if !reflect.DeepEqual(runner.calls[0], []string{"build", "-f", "/tmp/codex-image/Dockerfile", "-t", "ghcr.io/valv/codex:dev", "-t", "ghcr.io/valv/codex:0-116-0", "--build-arg", "CODEX_VERSION=0.116.0", "/tmp/codex-image"}) {
+		t.Fatalf("Build() args = %#v", runner.calls[0])
 	}
 }
