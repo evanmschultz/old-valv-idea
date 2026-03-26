@@ -6,10 +6,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
 
+	dockeradapter "github.com/evanmschultz/valv/internal/adapters/docker"
 	"github.com/evanmschultz/valv/internal/config"
 	"github.com/evanmschultz/valv/internal/domain"
 )
@@ -111,6 +113,46 @@ func TestCodexImageRefParsesOverrideWithTag(t *testing.T) {
 	if got := codexImageRef().String(); got != "ghcr.io/example/codex:test-fixture" {
 		t.Fatalf("codexImageRef() = %q, want override image", got)
 	}
+}
+
+func TestEnsureCodexImageAvailableReturnsActionableMessageWhenMissing(t *testing.T) {
+	t.Parallel()
+
+	err := ensureCodexImageAvailable(context.Background(), stubDockerRunner{
+		err: errors.New("run docker image inspect valv-codex-dev:dev: exit status 1: Error response from daemon: No such image: valv-codex-dev:dev"),
+	}, dockeradapter.NewImageRef("valv-codex-dev", "dev"))
+	if err == nil {
+		t.Fatal("ensureCodexImageAvailable() error = nil, want missing image failure")
+	}
+	for _, want := range []string{"valv-codex-dev:dev", "valv manage update"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("ensureCodexImageAvailable() error = %q, want substring %q", err.Error(), want)
+		}
+	}
+}
+
+func TestEnsureCodexImageAvailableWrapsUnexpectedInspectErrors(t *testing.T) {
+	t.Parallel()
+
+	err := ensureCodexImageAvailable(context.Background(), stubDockerRunner{
+		err: errors.New("run docker image inspect valv-codex:dev: permission denied"),
+	}, dockeradapter.NewImageRef("valv-codex", "dev"))
+	if err == nil {
+		t.Fatal("ensureCodexImageAvailable() error = nil, want inspect failure")
+	}
+	for _, want := range []string{"inspect codex image", "permission denied"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("ensureCodexImageAvailable() error = %q, want substring %q", err.Error(), want)
+		}
+	}
+}
+
+type stubDockerRunner struct {
+	err error
+}
+
+func (s stubDockerRunner) Run(context.Context, []string) error {
+	return s.err
 }
 
 func testCodexPaths(t *testing.T) config.Paths {

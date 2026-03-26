@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -29,6 +30,8 @@ func newCodexCommand(paths config.Paths, run codexRunFunc) *cobra.Command {
 Run the Codex CLI inside a Valv-managed Docker runtime for the current bound project.
 
 Everything after ` + "`valv codex`" + ` is passed through to Codex as directly as possible. Use the management surface to create profiles and bind projects before launching Codex.
+
+If the Valv-managed Codex image has not been built yet, run ` + "`valv manage update`" + ` first.
 `),
 		Example: strings.TrimSpace(`
 valv codex
@@ -63,6 +66,10 @@ func runCodexCommand(cmd *cobra.Command, paths config.Paths, args []string) erro
 		return fmt.Errorf("run codex command: initialize launcher: %w", err)
 	}
 
+	if err := ensureCodexImageAvailable(cmd.Context(), dockeradapter.NewQuietRunner("docker", LoggerFromContext(cmd.Context())), codexImageRef()); err != nil {
+		return fmt.Errorf("run codex command: %w", err)
+	}
+
 	workingDir, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("run codex command: resolve working directory: %w", err)
@@ -72,6 +79,25 @@ func runCodexCommand(cmd *cobra.Command, paths config.Paths, args []string) erro
 		return fmt.Errorf("run codex command: %w", err)
 	}
 	return nil
+}
+
+func ensureCodexImageAvailable(ctx context.Context, runner interface {
+	Run(context.Context, []string) error
+}, image dockeradapter.ImageRef) error {
+	if err := runner.Run(ctx, []string{"image", "inspect", image.String()}); err != nil {
+		if dockerImageMissingError(err) {
+			return fmt.Errorf("codex image %q is not built locally; run `valv manage update` first", image.String())
+		}
+		return fmt.Errorf("inspect codex image %q: %w", image.String(), err)
+	}
+	return nil
+}
+
+func dockerImageMissingError(err error) bool {
+	message := err.Error()
+	return strings.Contains(message, "No such image") ||
+		strings.Contains(message, "No such object") ||
+		strings.Contains(message, "pull access denied")
 }
 
 func commandHasTTY(stream any) bool {

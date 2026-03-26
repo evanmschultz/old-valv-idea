@@ -485,6 +485,12 @@ Cleanup should be idempotent in normal operator use. Missing cache paths or alre
 
 The TUI does not need to be the terminal isolation mechanism. It is the control surface above the Docker runtime.
 
+TUI testing policy:
+
+- use `github.com/charmbracelet/x/exp/teatest/v2` for Bubble Tea regression coverage
+- keep golden fixtures for user-visible layout/styling where frame sizing, borders, or list rendering can regress
+- TUI changes are not complete until the golden coverage is updated or explicitly shown to be unaffected
+
 Recommended naming:
 
 - `valv manage`

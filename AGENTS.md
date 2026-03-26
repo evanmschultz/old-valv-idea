@@ -126,6 +126,12 @@ Do not use:
 The direct CLI path should stay clean and predictable. The management surface may use Bubble Tea selectors and views.
 Use `.tmp/blick` as the implementation reference for Fang v2 command structure, output policy, renderer separation, and consistent human/plain/json behavior.
 
+For every user-visible Bubble Tea surface:
+
+- use `github.com/charmbracelet/x/exp/teatest/v2`
+- keep golden regression coverage for the final rendered view where that view's layout/styling matters
+- add or update golden fixtures whenever a TUI layout or style change is intentional
+
 CLI alias policy:
 
 - support selective aliases only

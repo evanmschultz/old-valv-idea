@@ -25,7 +25,8 @@ build:
 ensure-dev-home:
   @mkdir -p .tmp
   @if [ ! -f {{dev_home_file}} ]; then \
-    mktemp -d "${TMPDIR:-/tmp}/valv-dev.XXXXXX" > {{dev_home_file}}; \
+    tmp_root="${TMPDIR:-/tmp}"; \
+    mktemp -d "${tmp_root%/}/valv-dev.XXXXXX" > {{dev_home_file}}; \
   fi; \
   dev_home="$(cat {{dev_home_file}})"; \
   mkdir -p "$dev_home"
@@ -33,7 +34,9 @@ ensure-dev-home:
 dev-home: ensure-dev-home
   @dev_home="$(cat {{dev_home_file}})"; \
   printf "Disposable dev home: %s\n" "$dev_home"; \
-  printf "This temp path is only used by 'just dev ...' commands and can be removed with 'just dev-clean'.\n"
+  printf "This temp path is only used by 'just dev ...' commands.\n"; \
+  printf "State persists across dev runs until 'just dev-reset' or 'just dev-clean'.\n"; \
+  printf "Run 'just dev manage update' before the first 'just dev codex ...' or 'just dev api serve'.\n"
 
 dev-reset:
   @mkdir -p .tmp
@@ -42,10 +45,13 @@ dev-reset:
     rm -rf "$old_home"; \
     rm -f {{dev_home_file}}; \
   fi
-  @mktemp -d "${TMPDIR:-/tmp}/valv-dev.XXXXXX" > {{dev_home_file}}
+  @tmp_root="${TMPDIR:-/tmp}"; \
+  mktemp -d "${tmp_root%/}/valv-dev.XXXXXX" > {{dev_home_file}}
   @dev_home="$(cat {{dev_home_file}})"; \
   printf "Disposable dev home reset: %s\n" "$dev_home"; \
-  printf "This temp path is only used by 'just dev ...' commands and can be removed with 'just dev-clean'.\n"
+  printf "This temp path is only used by 'just dev ...' commands.\n"; \
+  printf "State persists across dev runs until 'just dev-reset' or 'just dev-clean'.\n"; \
+  printf "Run 'just dev manage update' before the first 'just dev codex ...' or 'just dev api serve'.\n"
 
 dev-clean:
   @if [ -f {{dev_home_file}} ]; then \
