@@ -8,10 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"syscall"
 
 	"github.com/charmbracelet/log"
-	"github.com/charmbracelet/x/term"
 )
 
 type commandFactory func(context.Context, string, ...string) *exec.Cmd
@@ -49,15 +47,6 @@ func (r SystemRunner) Run(ctx context.Context, args []string) error {
 	cmd.Stdin = r.Stdin
 	cmd.Stdout = r.Stdout
 	cmd.Stderr = r.Stderr
-	if ttyFile, ok := sharedTTYFile(r.Stdin, r.Stdout, r.Stderr); ok {
-		// Give interactive Docker launches a real controlling terminal so attached
-		// CLIs render like native terminal processes instead of degraded pipes.
-		cmd.SysProcAttr = &syscall.SysProcAttr{
-			Setsid:  true,
-			Setctty: true,
-			Ctty:    int(ttyFile.Fd()),
-		}
-	}
 	if len(r.Env) > 0 {
 		cmd.Env = append(os.Environ(), r.Env...)
 	}
@@ -166,38 +155,4 @@ func truncateDockerOutput(value string) string {
 		return trimmed
 	}
 	return trimmed[:limit] + "...(truncated)"
-}
-
-func sharedTTYFile(stdin io.Reader, stdout, stderr io.Writer) (*os.File, bool) {
-	in, ok := stdin.(*os.File)
-	if !ok {
-		return nil, false
-	}
-	if !term.IsTerminal(in.Fd()) {
-		return nil, false
-	}
-	out, ok := stdout.(*os.File)
-	if !ok || !term.IsTerminal(out.Fd()) {
-		return nil, false
-	}
-	errFile, ok := stderr.(*os.File)
-	if !ok || !term.IsTerminal(errFile.Fd()) {
-		return nil, false
-	}
-	if !sameTerminalFile(in, out) || !sameTerminalFile(in, errFile) {
-		return nil, false
-	}
-	return in, true
-}
-
-func sameTerminalFile(left, right *os.File) bool {
-	leftInfo, err := left.Stat()
-	if err != nil {
-		return false
-	}
-	rightInfo, err := right.Stat()
-	if err != nil {
-		return false
-	}
-	return os.SameFile(leftInfo, rightInfo)
 }

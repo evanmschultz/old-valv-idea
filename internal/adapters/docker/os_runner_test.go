@@ -7,10 +7,7 @@ import (
 	"io"
 	"os"
 	"strings"
-	"syscall"
 	"testing"
-
-	"github.com/creack/pty/v2"
 )
 
 func TestSystemRunnerRun(t *testing.T) {
@@ -82,37 +79,5 @@ func TestQuietRunnerReturnsHelpfulBuildxFailure(t *testing.T) {
 	err := runner.Run(context.Background(), []string{"buildx", "version"})
 	if err == nil || !strings.Contains(err.Error(), "docker buildx is required but unavailable") {
 		t.Fatalf("Run() error = %v, want buildx guidance", err)
-	}
-}
-
-func TestSharedTTYFileDetectsSharedPTY(t *testing.T) {
-	t.Parallel()
-
-	master, slave, err := pty.Open()
-	if err != nil {
-		t.Fatalf("pty.Open() error = %v", err)
-	}
-	defer master.Close()
-	defer slave.Close()
-
-	stdoutFD, err := syscall.Dup(int(slave.Fd()))
-	if err != nil {
-		t.Fatalf("syscall.Dup(stdout) error = %v", err)
-	}
-	stderrFD, err := syscall.Dup(int(slave.Fd()))
-	if err != nil {
-		t.Fatalf("syscall.Dup(stderr) error = %v", err)
-	}
-	stdoutFile := os.NewFile(uintptr(stdoutFD), "stdout-tty")
-	stderrFile := os.NewFile(uintptr(stderrFD), "stderr-tty")
-	defer stdoutFile.Close()
-	defer stderrFile.Close()
-
-	file, ok := sharedTTYFile(slave, stdoutFile, stderrFile)
-	if !ok {
-		t.Fatal("sharedTTYFile() = not ok, want shared PTY detection")
-	}
-	if file != slave {
-		t.Fatalf("sharedTTYFile() file = %v, want slave", file)
 	}
 }

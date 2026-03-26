@@ -143,7 +143,7 @@ For interactive `valv codex` runs:
 - ensure the container has a coherent in-container user and `HOME`; do not rely on the host absolute profile path doubling as the Linux home directory
 - preserve Codex auth/session/memory by mounting the selected Valv profile home, but normalize the in-container mount target so the CLI behaves like a normal Linux home layout
 - if Valv generates container-only config overlays, keep auth/session files durable while making the runtime config container-safe
-- attached Docker subprocesses must treat real terminal stdin/stdout/stderr as the same controlling TTY when they refer to the same terminal device, even if they are separate file descriptors
+- attached Docker subprocesses should use direct stdio attachment and be validated with PTY-backed integration tests; do not rely on unsupported controlling-terminal syscalls on the Docker CLI process itself
 
 ## 9.2) MCP Translation Rules
 
