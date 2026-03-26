@@ -105,11 +105,7 @@ func TestCodexCommandRunsFixtureImageEndToEnd(t *testing.T) {
 }
 
 func TestCodexCommandRunsFixtureImageWithTTYEndToEnd(t *testing.T) {
-	devHome := t.TempDir()
-	paths, err := config.ResolvePaths(devHome)
-	if err != nil {
-		t.Fatalf("ResolvePaths() error = %v", err)
-	}
+	paths := testCodexPaths(t)
 	if err := paths.Ensure(); err != nil {
 		t.Fatalf("paths.Ensure() error = %v", err)
 	}
@@ -147,7 +143,7 @@ func TestCodexCommandRunsFixtureImageWithTTYEndToEnd(t *testing.T) {
 	runCmd := exec.Command(binaryPath, "codex", "resume", "session-tty")
 	runCmd.Dir = workDir
 	runCmd.Env = append(os.Environ(),
-		"HOME="+devHome,
+		"HOME="+paths.HomeDir,
 		"VALV_CODEX_IMAGE="+imageRef,
 	)
 

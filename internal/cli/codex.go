@@ -66,6 +66,7 @@ func runCodexCommand(cmd *cobra.Command, paths config.Paths, args []string) erro
 		Store:    store,
 		Executor: dockeradapter.NewExecutor(dockeradapter.NewSystemRunner("docker", cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr())),
 		Image:    codexImageRef(),
+		User:     currentContainerUser(),
 		TTY:      commandHasTTY(cmd.InOrStdin()) && commandHasTTY(cmd.OutOrStdout()),
 		Stdin:    commandHasTTY(cmd.InOrStdin()),
 		TempRoot: paths.TempCacheDir,
@@ -76,13 +77,15 @@ func runCodexCommand(cmd *cobra.Command, paths config.Paths, args []string) erro
 		return fmt.Errorf("run codex command: initialize launcher: %w", err)
 	}
 
-	if err := ensureCodexImageAvailable(cmd.Context(), dockeradapter.NewQuietRunner("docker", LoggerFromContext(cmd.Context())), codexImageRef()); err != nil {
-		return fmt.Errorf("run codex command: %w", err)
-	}
-
 	workingDir, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("run codex command: resolve working directory: %w", err)
+	}
+	if err := service.ValidateBinding(cmd.Context(), workingDir); err != nil {
+		return fmt.Errorf("run codex command: %w", err)
+	}
+	if err := ensureCodexImageAvailable(cmd.Context(), dockeradapter.NewQuietRunner("docker", LoggerFromContext(cmd.Context())), codexImageRef()); err != nil {
+		return fmt.Errorf("run codex command: %w", err)
 	}
 
 	if err := service.Run(cmd.Context(), workingDir, args); err != nil {
@@ -112,6 +115,7 @@ func runCodexImageOnlyCommand(cmd *cobra.Command, args []string) error {
 			"LOGNAME":    "valv",
 			"USER":       "valv",
 		},
+		User:        currentContainerUser(),
 		Args:        append([]string(nil), args...),
 		Interactive: commandHasTTY(cmd.InOrStdin()),
 		TTY:         commandHasTTY(cmd.InOrStdin()) && commandHasTTY(cmd.OutOrStdout()),

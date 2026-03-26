@@ -96,6 +96,7 @@ func newOpenAIAPIService(cmd *cobra.Command, paths config.Paths, projectPath str
 		Store:           store,
 		Executor:        dockeradapter.NewExecutor(dockeradapter.NewQuietRunner("docker", LoggerFromContext(cmd.Context()))),
 		Image:           codexImageRef(),
+		User:            currentContainerUser(),
 		TempRoot:        paths.TempCacheDir,
 		StartPath:       projectPath,
 		WorkspaceAccess: workspaceAccess,
@@ -190,6 +191,10 @@ func realHomeDir() string {
 		return ""
 	}
 	return strings.TrimSpace(home)
+}
+
+func currentContainerUser() string {
+	return fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())
 }
 
 func commandOutputMode(cmd *cobra.Command, opts *rootOptions) (output.Mode, error) {

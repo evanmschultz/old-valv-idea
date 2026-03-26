@@ -33,7 +33,10 @@ func NewRootCommand(ctx context.Context, stdout, stderr io.Writer) (*cobra.Comma
 	if err != nil {
 		return nil, fmt.Errorf("resolve default paths: %w", err)
 	}
+	return newRootCommandWithPaths(ctx, stdout, stderr, paths)
+}
 
+func newRootCommandWithPaths(ctx context.Context, stdout, stderr io.Writer, paths config.Paths) (*cobra.Command, error) {
 	opts := &rootOptions{}
 	cmd := &cobra.Command{
 		Use:   "valv",

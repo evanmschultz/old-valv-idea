@@ -100,50 +100,14 @@ func New(options Options) (Service, error) {
 }
 
 func (s Service) Run(ctx context.Context, cwd string, codexArgs []string) error {
-	workingDir, err := pathutil.Normalize(cwd)
+	resolved, err := s.resolveBinding(ctx, cwd)
 	if err != nil {
-		return fmt.Errorf("run codex launch service: normalize working directory: %w", err)
-	}
-
-	projectResult, err := s.detect(workingDir)
-	if err != nil {
-		return fmt.Errorf("run codex launch service: detect project from %q: %w", workingDir, err)
-	}
-	s.debug("detected project", "cwd", workingDir, "root", projectResult.Root, "has_git_marker", projectResult.HasGitMarker)
-
-	projectRecord, err := s.store.ProjectByRoot(ctx, projectResult.Root)
-	if err != nil {
-		if errors.Is(err, domain.ErrNotFound) {
-			return fmt.Errorf("run codex launch service: project %q: %w", projectResult.Root, domain.ErrUnboundProject)
-		}
-		return fmt.Errorf("run codex launch service: lookup project %q: %w", projectResult.Root, err)
-	}
-
-	binding, err := s.store.BindingByProjectID(ctx, projectRecord.ID)
-	if err != nil {
-		if errors.Is(err, domain.ErrNotFound) {
-			return fmt.Errorf("run codex launch service: project %q: %w", projectRecord.Root, domain.ErrUnboundProject)
-		}
-		return fmt.Errorf("run codex launch service: lookup binding for project %q: %w", projectRecord.Root, err)
-	}
-	if binding.Provider != domain.ProviderCodex {
-		return fmt.Errorf("run codex launch service: binding provider %q: expected %q", binding.Provider, domain.ProviderCodex)
-	}
-
-	profile, err := s.store.ProfileByID(ctx, binding.ProfileID)
-	if err != nil {
-		if errors.Is(err, domain.ErrNotFound) {
-			return fmt.Errorf("run codex launch service: profile for project %q: %w", projectRecord.Root, domain.ErrUnboundProject)
-		}
-		return fmt.Errorf("run codex launch service: lookup profile %q: %w", binding.ProfileID, err)
-	}
-	if profile.Provider != domain.ProviderCodex {
-		return fmt.Errorf("run codex launch service: profile provider %q: expected %q", profile.Provider, domain.ProviderCodex)
+		return err
 	}
 
 	prepared, err := codexruntime.PrepareRuntime(ctx, codexruntime.PrepareRequest{
-		ProfileHome: profile.HomePath,
-		ProjectRoot: projectRecord.Root,
+		ProfileHome: resolved.profile.HomePath,
+		ProjectRoot: resolved.project.Root,
 		TempRoot:    s.tempRoot,
 		Logger:      s.logger,
 	})
@@ -153,16 +117,76 @@ func (s Service) Run(ctx context.Context, cwd string, codexArgs []string) error 
 	defer prepared.Close()
 	s.emitNotices(prepared.Warnings, codexArgs)
 
-	request, err := s.buildRequest(workingDir, projectRecord, profile, prepared, codexArgs)
+	request, err := s.buildRequest(resolved.workingDir, resolved.project, resolved.profile, prepared, codexArgs)
 	if err != nil {
 		return fmt.Errorf("run codex launch service: build docker request: %w", err)
 	}
 	s.debug("launching codex container", "container_name", request.Name, "image", request.Image.String(), "args", request.Args)
 
 	if err := s.executor.Run(ctx, request); err != nil {
-		return fmt.Errorf("run codex launch service: execute docker request for project %q: %w", projectRecord.Root, err)
+		return fmt.Errorf("run codex launch service: execute docker request for project %q: %w", resolved.project.Root, err)
 	}
 	return nil
+}
+
+func (s Service) ValidateBinding(ctx context.Context, cwd string) error {
+	_, err := s.resolveBinding(ctx, cwd)
+	return err
+}
+
+type resolvedLaunchBinding struct {
+	workingDir string
+	project    domain.Project
+	profile    domain.Profile
+}
+
+func (s Service) resolveBinding(ctx context.Context, cwd string) (resolvedLaunchBinding, error) {
+	workingDir, err := pathutil.Normalize(cwd)
+	if err != nil {
+		return resolvedLaunchBinding{}, fmt.Errorf("run codex launch service: normalize working directory: %w", err)
+	}
+
+	projectResult, err := s.detect(workingDir)
+	if err != nil {
+		return resolvedLaunchBinding{}, fmt.Errorf("run codex launch service: detect project from %q: %w", workingDir, err)
+	}
+	s.debug("detected project", "cwd", workingDir, "root", projectResult.Root, "has_git_marker", projectResult.HasGitMarker)
+
+	projectRecord, err := s.store.ProjectByRoot(ctx, projectResult.Root)
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			return resolvedLaunchBinding{}, fmt.Errorf("run codex launch service: project %q: %w", projectResult.Root, domain.ErrUnboundProject)
+		}
+		return resolvedLaunchBinding{}, fmt.Errorf("run codex launch service: lookup project %q: %w", projectResult.Root, err)
+	}
+
+	binding, err := s.store.BindingByProjectID(ctx, projectRecord.ID)
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			return resolvedLaunchBinding{}, fmt.Errorf("run codex launch service: project %q: %w", projectRecord.Root, domain.ErrUnboundProject)
+		}
+		return resolvedLaunchBinding{}, fmt.Errorf("run codex launch service: lookup binding for project %q: %w", projectRecord.Root, err)
+	}
+	if binding.Provider != domain.ProviderCodex {
+		return resolvedLaunchBinding{}, fmt.Errorf("run codex launch service: binding provider %q: expected %q", binding.Provider, domain.ProviderCodex)
+	}
+
+	profile, err := s.store.ProfileByID(ctx, binding.ProfileID)
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			return resolvedLaunchBinding{}, fmt.Errorf("run codex launch service: profile for project %q: %w", projectRecord.Root, domain.ErrUnboundProject)
+		}
+		return resolvedLaunchBinding{}, fmt.Errorf("run codex launch service: lookup profile %q: %w", binding.ProfileID, err)
+	}
+	if profile.Provider != domain.ProviderCodex {
+		return resolvedLaunchBinding{}, fmt.Errorf("run codex launch service: profile provider %q: expected %q", profile.Provider, domain.ProviderCodex)
+	}
+
+	return resolvedLaunchBinding{
+		workingDir: workingDir,
+		project:    projectRecord,
+		profile:    profile,
+	}, nil
 }
 
 func (s Service) buildRequest(workingDir string, project domain.Project, profile domain.Profile, prepared codexruntime.PreparedRuntime, codexArgs []string) (docker.ContainerRunRequest, error) {

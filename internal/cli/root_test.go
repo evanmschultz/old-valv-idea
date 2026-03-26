@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -17,15 +18,21 @@ import (
 	"github.com/evanmschultz/valv/internal/logging"
 )
 
+func newTestRootCommand(t *testing.T, stdout, stderr *bytes.Buffer) *cobra.Command {
+	t.Helper()
+
+	cmd, err := newRootCommandWithPaths(context.Background(), stdout, stderr, testCodexPaths(t))
+	if err != nil {
+		t.Fatalf("newRootCommandWithPaths() error = %v", err)
+	}
+	return cmd
+}
+
 func TestPathsCommandPlain(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
-	cmd, err := NewRootCommand(context.Background(), &stdout, &stderr)
-	if err != nil {
-		t.Fatalf("NewRootCommand() error = %v", err)
-	}
+	cmd := newTestRootCommand(t, &stdout, &stderr)
 	cmd.SetArgs([]string{"paths", "--format", "plain"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v", err)
@@ -35,15 +42,37 @@ func TestPathsCommandPlain(t *testing.T) {
 	}
 }
 
-func TestVersionCommandJSON(t *testing.T) {
+func TestNewRootCommandUsesDefaultPathsOnDarwin(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("default path resolution is macOS-only")
+	}
 	t.Setenv("HOME", t.TempDir())
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
 
-	cmd, err := NewRootCommand(context.Background(), &stdout, &stderr)
+	cmd, err := NewRootCommand(context.Background(), &bytes.Buffer{}, &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("NewRootCommand() error = %v", err)
 	}
+	if cmd.Name() != "valv" {
+		t.Fatalf("NewRootCommand().Name() = %q, want valv", cmd.Name())
+	}
+}
+
+func TestNewRootCommandReturnsUnsupportedOSOnNonDarwin(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		t.Skip("unsupported OS branch does not apply on macOS")
+	}
+
+	_, err := NewRootCommand(context.Background(), &bytes.Buffer{}, &bytes.Buffer{})
+	if !errors.Is(err, domain.ErrUnsupportedOS) {
+		t.Fatalf("NewRootCommand() error = %v, want domain.ErrUnsupportedOS", err)
+	}
+}
+
+func TestVersionCommandJSON(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	cmd := newTestRootCommand(t, &stdout, &stderr)
 	cmd.SetArgs([]string{"version", "--format", "json"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v", err)
@@ -54,14 +83,10 @@ func TestVersionCommandJSON(t *testing.T) {
 }
 
 func TestHelpAliasDisplaysRootHelp(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
-	cmd, err := NewRootCommand(context.Background(), &stdout, &stderr)
-	if err != nil {
-		t.Fatalf("NewRootCommand() error = %v", err)
-	}
+	cmd := newTestRootCommand(t, &stdout, &stderr)
 	cmd.SetArgs([]string{"h"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v", err)
@@ -74,14 +99,10 @@ func TestHelpAliasDisplaysRootHelp(t *testing.T) {
 }
 
 func TestManageAliasWorks(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
-	cmd, err := NewRootCommand(context.Background(), &stdout, &stderr)
-	if err != nil {
-		t.Fatalf("NewRootCommand() error = %v", err)
-	}
+	cmd := newTestRootCommand(t, &stdout, &stderr)
 	cmd.SetArgs([]string{"m"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v", err)
@@ -94,14 +115,10 @@ func TestManageAliasWorks(t *testing.T) {
 }
 
 func TestGlobalAliasWorks(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
-	cmd, err := NewRootCommand(context.Background(), &stdout, &stderr)
-	if err != nil {
-		t.Fatalf("NewRootCommand() error = %v", err)
-	}
+	cmd := newTestRootCommand(t, &stdout, &stderr)
 	cmd.SetArgs([]string{"g"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v", err)
@@ -114,14 +131,10 @@ func TestGlobalAliasWorks(t *testing.T) {
 }
 
 func TestManageHelpSubcommandWorks(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
-	cmd, err := NewRootCommand(context.Background(), &stdout, &stderr)
-	if err != nil {
-		t.Fatalf("NewRootCommand() error = %v", err)
-	}
+	cmd := newTestRootCommand(t, &stdout, &stderr)
 	cmd.SetArgs([]string{"manage", "help"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v", err)
@@ -134,14 +147,10 @@ func TestManageHelpSubcommandWorks(t *testing.T) {
 }
 
 func TestGlobalHelpAliasWorks(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
-	cmd, err := NewRootCommand(context.Background(), &stdout, &stderr)
-	if err != nil {
-		t.Fatalf("NewRootCommand() error = %v", err)
-	}
+	cmd := newTestRootCommand(t, &stdout, &stderr)
 	cmd.SetArgs([]string{"g", "h"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v", err)
@@ -154,11 +163,7 @@ func TestGlobalHelpAliasWorks(t *testing.T) {
 }
 
 func TestVisibleCommandsDefineLongAndExample(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	cmd, err := NewRootCommand(context.Background(), &bytes.Buffer{}, &bytes.Buffer{})
-	if err != nil {
-		t.Fatalf("NewRootCommand() error = %v", err)
-	}
+	cmd := newTestRootCommand(t, &bytes.Buffer{}, &bytes.Buffer{})
 
 	var visit func(*cobra.Command)
 	visit = func(current *cobra.Command) {
@@ -181,14 +186,10 @@ func TestVisibleCommandsDefineLongAndExample(t *testing.T) {
 }
 
 func TestOutputFlagsConflict(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
-	cmd, err := NewRootCommand(context.Background(), &stdout, &stderr)
-	if err != nil {
-		t.Fatalf("NewRootCommand() error = %v", err)
-	}
+	cmd := newTestRootCommand(t, &stdout, &stderr)
 	cmd.SetArgs([]string{"version", "--style", "--no-style"})
 	if err := cmd.Execute(); err == nil {
 		t.Fatal("expected error")
@@ -221,7 +222,6 @@ func TestStubCommandReturnsError(t *testing.T) {
 }
 
 func TestOutputPolicyUsesConfigDefaults(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
 	content := []byte("[output]\nformat='json'\nstyle='never'\n[logging]\nlevel='debug'\n")
@@ -231,10 +231,7 @@ func TestOutputPolicyUsesConfigDefaults(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	cmd, err := NewRootCommand(context.Background(), &stdout, &stderr)
-	if err != nil {
-		t.Fatalf("NewRootCommand() error = %v", err)
-	}
+	cmd := newTestRootCommand(t, &stdout, &stderr)
 	cmd.SetArgs([]string{"--config", configPath, "version"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v", err)
@@ -245,7 +242,6 @@ func TestOutputPolicyUsesConfigDefaults(t *testing.T) {
 }
 
 func TestOutputPolicyFlagsOverrideConfig(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
 	content := []byte("[output]\nformat='json'\nstyle='never'\n")
@@ -255,10 +251,7 @@ func TestOutputPolicyFlagsOverrideConfig(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	cmd, err := NewRootCommand(context.Background(), &stdout, &stderr)
-	if err != nil {
-		t.Fatalf("NewRootCommand() error = %v", err)
-	}
+	cmd := newTestRootCommand(t, &stdout, &stderr)
 	cmd.SetArgs([]string{"--config", configPath, "version", "--format", "plain"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v", err)
@@ -302,23 +295,17 @@ func TestEffectiveConfigFromContext(t *testing.T) {
 }
 
 func TestRootCommandCreatesDurableLogFile(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
-	cmd, err := NewRootCommand(context.Background(), &stdout, &stderr)
+	paths := testCodexPaths(t)
+	cmd, err := newRootCommandWithPaths(context.Background(), &stdout, &stderr, paths)
 	if err != nil {
-		t.Fatalf("NewRootCommand() error = %v", err)
+		t.Fatalf("newRootCommandWithPaths() error = %v", err)
 	}
 	cmd.SetArgs([]string{"--debug", "version"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v", err)
-	}
-
-	paths, err := config.ResolvePaths("")
-	if err != nil {
-		t.Fatalf("ResolvePaths() error = %v", err)
 	}
 	content, err := os.ReadFile(filepath.Join(paths.LogsDir, "valv.log"))
 	if err != nil {
