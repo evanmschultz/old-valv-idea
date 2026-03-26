@@ -141,6 +141,7 @@ Output policy:
 - treat `Short`, `Long`, and `Example` as mandatory for every visible command
 - help screens should become more explanatory deeper in the command tree
 - help for output-producing commands should explain the meaning of key output fields and show realistic examples
+- prefer clear placeholder names such as `profile-name`, `alternate-profile`, or `host-codex` in help/examples; avoid ambiguous example names like `dev` that read like environment modes instead of profile identifiers
 - prefer deterministic, minimal human output
 - prefer explicit empty states over silent emptiness
 - prefer slim machine-readable JSON payloads over human-style wrapper envelopes

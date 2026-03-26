@@ -61,7 +61,7 @@ dev-clean:
 dev *ARGS: build ensure-dev-home
   @dev_home="$(cat {{dev_home_file}})"; \
   host_home="$(cd ~ && pwd)"; \
-  HOME="$dev_home" DOCKER_CONFIG="$host_home/.docker" VALV_CODEX_IMAGE="{{dev_image}}" ./valv {{ARGS}}
+  HOME="$dev_home" DOCKER_CONFIG="$host_home/.docker" VALV_REAL_HOME="$host_home" VALV_CODEX_IMAGE="{{dev_image}}" ./valv {{ARGS}}
 
 [private]
 fmt-check:

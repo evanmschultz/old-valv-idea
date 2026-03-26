@@ -58,6 +58,21 @@ func TestManageProfileListOutputsStoredProfiles(t *testing.T) {
 	}
 }
 
+func TestManageProfileListWithoutProviderGroupsByProvider(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	profileHome := filepath.Join(paths.ProviderRoot, "codex", "profiles", "alpha")
+	runManage(t, paths, []string{"profile", "add", "codex", "alpha", "--home", profileHome})
+
+	output := runManage(t, paths, []string{"profile", "list"})
+	for _, want := range []string{"codex profiles", "- alpha", "home="} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("unexpected grouped profile list output %q missing %q", output, want)
+		}
+	}
+}
+
 func TestManageProfileListJSONUsesCommandKey(t *testing.T) {
 	t.Parallel()
 
@@ -97,6 +112,32 @@ func TestManageProfileListShowsEmptyState(t *testing.T) {
 		if !strings.Contains(output, want) {
 			t.Fatalf("unexpected empty profile list output %q missing %q", output, want)
 		}
+	}
+}
+
+func TestManageProfileSwitchRebindsCurrentProject(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	projectRoot := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(filepath.Join(projectRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git) error = %v", err)
+	}
+
+	alphaHome := filepath.Join(paths.ProviderRoot, "codex", "profiles", "alpha")
+	betaHome := filepath.Join(paths.ProviderRoot, "codex", "profiles", "beta")
+	runManage(t, paths, []string{"profile", "add", "codex", "alpha", "--home", alphaHome})
+	runManage(t, paths, []string{"profile", "add", "codex", "beta", "--home", betaHome})
+	runManage(t, paths, []string{"bind", "codex", "alpha", "--project", projectRoot})
+
+	output := runManage(t, paths, []string{"profile", "switch", "beta", "--project", projectRoot})
+	if !strings.Contains(output, "profile=beta") {
+		t.Fatalf("unexpected profile switch output: %q", output)
+	}
+
+	status := runManage(t, paths, []string{"status", "--project", projectRoot})
+	if !strings.Contains(status, "profile=beta") {
+		t.Fatalf("unexpected status after profile switch: %q", status)
 	}
 }
 

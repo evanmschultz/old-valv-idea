@@ -270,6 +270,7 @@ Current validation follow-ups to preserve:
 - dev-mode output should make it obvious which paths are disposable, which images are dev-only, and how to clean them up
 - help menus should grow more explanatory as the command tree gets deeper
 - help menus should include realistic examples, and output-producing commands should explain the meaning of their key output fields
+- help/examples should prefer unambiguous placeholder profile names like `profile-name` or `alternate-profile`; avoid example names like `dev` that can be confused with environment modes
 - the CLI should support `<command> help` and `<command> h` where that is unambiguous and does not collide with real subcommands
 - the CLI should not reinterpret trailing help-like args on leaf/pass-through commands such as `valv codex`
 - output paths and record/list rendering should stay DRY and closer to the `blick` reference shape
@@ -281,6 +282,10 @@ Current validation follow-ups to preserve:
 - API runtime sweeps should use the server lifecycle context and quiet Docker execution so shutdown is clean and HTTP-facing stdout/stderr stay stable
 - Codex profile-home mounting and Codex-native resume/session behavior need explicit validation on macOS Docker Desktop so the containerized runtime preserves Codex's own `.codex` state model rather than introducing Valv-owned session semantics
 - using the literal host `~/.codex` path should remain an explicit profile choice, not an implicit default; default Valv profiles should preserve Codex-native state within the selected profile home
+- mounted host Codex homes can preserve auth and resume state, but host-oriented MCP config cannot be reused blindly inside Linux containers
+- containerized Codex needs a Valv-managed MCP overlay or translation layer for host-specific entries such as macOS absolute binary paths and host-loopback URLs
+- host-loopback MCP URLs used from inside Docker Desktop containers should be translated to `host.docker.internal` where appropriate
+- local stdio MCP tools that should work in containerized Codex sessions need Linux-native installation inside the image, or a network-accessible host bridge instead of direct reuse of macOS binaries
 
 ## Account Switching Research
 

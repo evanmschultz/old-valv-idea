@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -166,10 +167,41 @@ func TestSwitchRejectsWhenHostCodexIsRunning(t *testing.T) {
 	}
 }
 
+func TestSwitchSkipsHostProcessGuardForDisposableHome(t *testing.T) {
+	t.Parallel()
+
+	realHome := t.TempDir()
+	devHome := t.TempDir()
+	profileHome := filepath.Join(devHome, "profiles", "codex", "profile-name")
+	if err := os.MkdirAll(profileHome, 0o755); err != nil {
+		t.Fatalf("MkdirAll(profileHome) error = %v", err)
+	}
+
+	service, err := New(Options{
+		Store:       &stubStore{profile: domain.Profile{Name: "profile-name", Provider: domain.ProviderCodex, HomePath: profileHome}},
+		HomeDir:     devHome,
+		RealHomeDir: realHome,
+		StateDir:    t.TempDir(),
+		IsRunning:   func(context.Context, string) (bool, error) { return true, nil },
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	result, err := service.Switch(context.Background(), domain.ProviderCodex, "profile-name")
+	if err != nil {
+		t.Fatalf("Switch() error = %v", err)
+	}
+	if got, want := result.TargetPath, filepath.Join(devHome, ".codex"); got != want {
+		t.Fatalf("TargetPath = %q, want %q", got, want)
+	}
+}
+
 func TestProcessRunningUsesPgrepExitStatus(t *testing.T) {
 	binDir := t.TempDir()
+	argsPath := filepath.Join(binDir, "args.txt")
 	scriptPath := filepath.Join(binDir, "pgrep")
-	script := fmt.Sprintf("#!/bin/sh\nexit %d\n", 1)
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" > %q\nexit %d\n", argsPath, 1)
 	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
@@ -181,5 +213,12 @@ func TestProcessRunningUsesPgrepExitStatus(t *testing.T) {
 	}
 	if running {
 		t.Fatal("processRunning() = true, want false for exit status 1")
+	}
+	recorded, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("ReadFile(argsPath) error = %v", err)
+	}
+	if got := string(recorded); !strings.Contains(got, "-x -U") {
+		t.Fatalf("pgrep args = %q, want current-user-scoped exact-name lookup", got)
 	}
 }

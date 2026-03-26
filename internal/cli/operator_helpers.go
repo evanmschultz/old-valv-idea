@@ -47,10 +47,11 @@ func openGlobalSwitchService(cmd *cobra.Command, paths config.Paths) (globalswit
 		return globalswitchservice.Service{}, nil, err
 	}
 	service, err := globalswitchservice.New(globalswitchservice.Options{
-		Store:    store,
-		HomeDir:  paths.HomeDir,
-		StateDir: paths.StateDir,
-		Logger:   LoggerFromContext(cmd.Context()),
+		Store:       store,
+		HomeDir:     paths.HomeDir,
+		RealHomeDir: realHomeDir(),
+		StateDir:    paths.StateDir,
+		Logger:      LoggerFromContext(cmd.Context()),
 	})
 	if err != nil {
 		_ = store.Close()
@@ -174,6 +175,17 @@ func listItemsForProfiles(profiles []domain.Profile) []output.ListItem {
 		})
 	}
 	return items
+}
+
+func realHomeDir() string {
+	if value := strings.TrimSpace(os.Getenv("VALV_REAL_HOME")); value != "" {
+		return value
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(home)
 }
 
 func commandOutputMode(cmd *cobra.Command, opts *rootOptions) (output.Mode, error) {

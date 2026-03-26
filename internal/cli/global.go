@@ -22,7 +22,7 @@ Host-global convenience commands.
 Use host-global commands when you intentionally want to manipulate the machine-level provider state instead of the normal Valv-isolated runtime path.
 `),
 		Example: strings.TrimSpace(`
-valv global switch codex dev
+valv global switch codex profile-name
 valv g switch codex
 `),
 		Args: cobra.NoArgs,
@@ -45,7 +45,7 @@ Switch the host-global provider profile as a convenience flow.
 For Codex, this updates the host-side ` + "`~/.codex`" + ` path target rather than launching a containerized runtime.
 `),
 		Example: strings.TrimSpace(`
-valv global switch codex dev
+valv global switch codex profile-name
 valv g switch codex
 `),
 		Args: cobra.RangeArgs(1, 2),
