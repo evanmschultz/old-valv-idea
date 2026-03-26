@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -87,6 +88,9 @@ func runGlobalSwitch(cmd *cobra.Command, paths config.Paths, opts *rootOptions, 
 		}
 		selected, err = pickProfile(cmd, provider, profiles.Profiles)
 		if err != nil {
+			if errors.Is(err, errSelectionCanceled) {
+				return writeNoOpRecord(cmd, opts, "No global switch made", "no profile selected")
+			}
 			return fmt.Errorf("global switch: %w", err)
 		}
 	}

@@ -9,6 +9,7 @@ require (
 	charm.land/lipgloss/v2 v2.0.0
 	github.com/BurntSushi/toml v1.6.0
 	github.com/charmbracelet/log v0.4.2
+	github.com/charmbracelet/x/exp/teatest/v2 v2.0.0-20260323091123-df7b1bcffcca
 	github.com/charmbracelet/x/term v0.2.2
 	github.com/spf13/cobra v1.10.2
 	github.com/testcontainers/testcontainers-go v0.41.0
@@ -21,6 +22,7 @@ require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/atotto/clipboard v0.1.4 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
+	github.com/aymanbagabas/go-udiff v0.4.0 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
@@ -30,6 +32,7 @@ require (
 	github.com/charmbracelet/x/ansi v0.11.6 // indirect
 	github.com/charmbracelet/x/cellbuf v0.0.15 // indirect
 	github.com/charmbracelet/x/exp/charmtone v0.0.0-20250603201427-c31516f43444 // indirect
+	github.com/charmbracelet/x/exp/golden v0.0.0-20251109135125-8916d276318f // indirect
 	github.com/charmbracelet/x/termios v0.1.1 // indirect
 	github.com/charmbracelet/x/windows v0.2.2 // indirect
 	github.com/clipperhouse/displaywidth v0.11.0 // indirect

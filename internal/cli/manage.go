@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -229,6 +230,9 @@ func runManageBindInteractive(cmd *cobra.Command, paths config.Paths, opts *root
 	}
 	selected, err := pickProfile(cmd, domain.ProviderCodex, profiles.Profiles)
 	if err != nil {
+		if errors.Is(err, errSelectionCanceled) {
+			return nil
+		}
 		return fmt.Errorf("manage bind: %w", err)
 	}
 	return runManageBind(cmd, paths, opts, domain.ProviderCodex, selected, "")
@@ -284,6 +288,9 @@ func runManageProfileSwitch(cmd *cobra.Command, paths config.Paths, opts *rootOp
 		}
 		profileName, err = pickProfile(cmd, provider, profiles.Profiles)
 		if err != nil {
+			if errors.Is(err, errSelectionCanceled) {
+				return writeNoOpRecord(cmd, opts, "No profile switch made", "no profile selected")
+			}
 			return fmt.Errorf("manage profile switch: %w", err)
 		}
 	}
@@ -376,6 +383,14 @@ type profileSection struct {
 
 func supportedProviders() []domain.Provider {
 	return []domain.Provider{domain.ProviderCodex}
+}
+
+func writeNoOpRecord(cmd *cobra.Command, opts *rootOptions, heading, reason string) error {
+	mode, err := commandOutputMode(cmd, opts)
+	if err != nil {
+		return fmt.Errorf("resolve output policy: %w", err)
+	}
+	return output.WriteRecord(cmd.OutOrStdout(), mode, heading, []output.Field{{Label: "reason", Value: reason, Muted: true}})
 }
 
 func newManageStatusCommand(paths config.Paths, opts *rootOptions) *cobra.Command {

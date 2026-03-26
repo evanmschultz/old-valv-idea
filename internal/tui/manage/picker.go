@@ -21,11 +21,13 @@ func (i profileItem) Description() string { return i.home }
 type ProfilePickerModel struct {
 	list      list.Model
 	provider  domain.Provider
+	styles    Styles
 	selected  string
 	confirmed bool
 }
 
 func NewProfilePicker(provider domain.Provider, profiles []domain.Profile) ProfilePickerModel {
+	styles := DefaultStyles()
 	delegate := list.NewDefaultDelegate()
 	delegate.ShowDescription = true
 	delegate.Styles.NormalTitle = delegate.Styles.NormalTitle.Foreground(lipgloss.Color("#EAF6FF"))
@@ -37,7 +39,12 @@ func NewProfilePicker(provider domain.Provider, profiles []domain.Profile) Profi
 	for _, profile := range profiles {
 		items = append(items, profileItem{name: profile.Name, home: profile.HomePath})
 	}
-	menu := list.New(items, delegate, defaultWidth, defaultHeight)
+	menu := list.New(
+		items,
+		delegate,
+		max(1, defaultWidth-styles.Frame.GetHorizontalFrameSize()),
+		max(1, defaultHeight-layoutMargin-styles.Frame.GetVerticalFrameSize()),
+	)
 	menu.Title = fmt.Sprintf("%s profiles", provider)
 	menu.SetShowFilter(false)
 	menu.SetShowPagination(false)
@@ -45,7 +52,7 @@ func NewProfilePicker(provider domain.Provider, profiles []domain.Profile) Profi
 	menu.SetShowHelp(true)
 	menu.SetStatusBarItemName("profile", "profiles")
 
-	return ProfilePickerModel{list: menu, provider: provider}
+	return ProfilePickerModel{list: menu, provider: provider, styles: styles}
 }
 
 func (m ProfilePickerModel) Init() tea.Cmd { return nil }
@@ -53,7 +60,10 @@ func (m ProfilePickerModel) Init() tea.Cmd { return nil }
 func (m ProfilePickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.list.SetSize(msg.Width, max(1, msg.Height-layoutMargin))
+		m.list.SetSize(
+			max(1, msg.Width-m.styles.Frame.GetHorizontalFrameSize()),
+			max(1, msg.Height-layoutMargin-m.styles.Frame.GetVerticalFrameSize()),
+		)
 		return m, nil
 	case tea.KeyPressMsg:
 		if msg.String() == "enter" && !m.list.SettingFilter() {
@@ -72,9 +82,9 @@ func (m ProfilePickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m ProfilePickerModel) View() tea.View {
 	content := lipgloss.JoinVertical(
 		lipgloss.Left,
-		DefaultStyles().header(),
-		DefaultStyles().Frame.Render(m.list.View()),
-		DefaultStyles().footer("Select a profile and press enter."),
+		m.styles.header(),
+		m.styles.Frame.Render(m.list.View()),
+		m.styles.footer("Select a profile and press enter, or press esc to leave without changing anything."),
 	)
 	view := tea.NewView(content)
 	view.AltScreen = true

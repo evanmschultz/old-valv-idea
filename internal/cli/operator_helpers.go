@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -23,6 +24,8 @@ import (
 	openaiapiservice "github.com/evanmschultz/valv/internal/services/openaiapi"
 	managetui "github.com/evanmschultz/valv/internal/tui/manage"
 )
+
+var errSelectionCanceled = errors.New("selection canceled")
 
 func openManageService(cmd *cobra.Command, paths config.Paths) (manageservice.Service, func(), error) {
 	store, err := openStore(paths)
@@ -158,7 +161,7 @@ func pickProfile(cmd *cobra.Command, provider domain.Provider, profiles []domain
 	}
 	selected, ok := model.Selected()
 	if !ok {
-		return "", fmt.Errorf("run profile picker: no profile selected")
+		return "", errSelectionCanceled
 	}
 	return selected, nil
 }

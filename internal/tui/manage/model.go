@@ -34,6 +34,7 @@ func NewWithItems(items []Item) Model {
 	if len(items) == 0 {
 		items = DefaultItems()
 	}
+	styles := DefaultStyles()
 
 	delegate := list.NewDefaultDelegate()
 	delegate.ShowDescription = true
@@ -46,7 +47,12 @@ func NewWithItems(items []Item) Model {
 	delegate.Styles.DimmedTitle = delegate.Styles.DimmedTitle.Foreground(lipgloss.Color("#6E8291"))
 	delegate.Styles.DimmedDesc = delegate.Styles.DimmedDesc.Foreground(lipgloss.Color("#6E8291"))
 
-	menu := list.New(itemsAsList(items), delegate, defaultWidth, defaultHeight)
+	menu := list.New(
+		itemsAsList(items),
+		delegate,
+		max(1, defaultWidth-styles.Frame.GetHorizontalFrameSize()),
+		max(1, defaultHeight-layoutMargin-styles.Frame.GetVerticalFrameSize()),
+	)
 	menu.Title = "Actions"
 	menu.SetShowFilter(false)
 	menu.SetShowStatusBar(true)
@@ -57,7 +63,7 @@ func NewWithItems(items []Item) Model {
 
 	return Model{
 		list:   menu,
-		styles: DefaultStyles(),
+		styles: styles,
 	}
 }
 
@@ -70,7 +76,10 @@ func (m Model) Init() tea.Cmd {
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.list.SetSize(msg.Width, max(1, msg.Height-layoutMargin))
+		m.list.SetSize(
+			max(1, msg.Width-m.styles.Frame.GetHorizontalFrameSize()),
+			max(1, msg.Height-layoutMargin-m.styles.Frame.GetVerticalFrameSize()),
+		)
 		return m, nil
 	case tea.KeyPressMsg:
 		if msg.String() == "enter" && !m.list.SettingFilter() {
