@@ -180,7 +180,7 @@ func TestCleanDockerBuildsRemovalCommands(t *testing.T) {
 	}
 }
 
-func TestCleanDockerDiscoversManagedContainersByLabelAndPrefix(t *testing.T) {
+func TestCleanDockerDiscoversManagedContainersByLabel(t *testing.T) {
 	t.Parallel()
 
 	runner := &cleanupRunnerRecorder{out: "abc123\nxyz789\n"}
@@ -190,13 +190,11 @@ func TestCleanDockerDiscoversManagedContainersByLabelAndPrefix(t *testing.T) {
 	}
 
 	result, err := svc.CleanDocker(context.Background(), DockerCleanupRequest{
-		ContainerIDs:          []string{"explicit"},
-		ContainerNamePrefixes: []string{"valv-"},
+		ContainerIDs: []string{"explicit"},
 		ContainerLabels: map[string]string{
 			"label": "io.valv.managed=true",
 		},
-		Force:   true,
-		Volumes: true,
+		Force: true,
 	})
 	if err != nil {
 		t.Fatalf("CleanDocker() error = %v", err)
@@ -204,10 +202,7 @@ func TestCleanDockerDiscoversManagedContainersByLabelAndPrefix(t *testing.T) {
 	if got, want := runner.calls[0], []string{"ps", "-a", "-q", "--filter", "label=io.valv.managed=true"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("label list args = %#v, want %#v", got, want)
 	}
-	if got, want := runner.calls[1], []string{"ps", "-a", "-q", "--filter", "name=valv-"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("name list args = %#v, want %#v", got, want)
-	}
-	if got, want := runner.calls[2], []string{"rm", "--force", "--volumes", "explicit", "abc123", "xyz789"}; !reflect.DeepEqual(got, want) {
+	if got, want := runner.calls[1], []string{"rm", "--force", "explicit", "abc123", "xyz789"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("container rm args = %#v, want %#v", got, want)
 	}
 	if got, want := result.RemovedContainers, []string{"explicit", "abc123", "xyz789"}; !reflect.DeepEqual(got, want) {

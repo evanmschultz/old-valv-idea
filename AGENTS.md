@@ -147,6 +147,9 @@ Output policy:
 - keep machine-readable JSON keys command-owned and stable; do not derive API-like keys from human heading copy
 - reduce raw subprocess noise unless that subprocess output is the actual user-facing payload
 - disposable dev-mode commands should clearly mark temp-home paths and dev-only artifacts as disposable and explain how to clean them up
+- cleanup commands must target Valv-managed artifacts by label or equivalent authoritative metadata; a visible `valv-...` name prefix is for operator clarity, not by itself enough authority to delete containers
+- normal cleanup flows must not remove anonymous Docker volumes or unrelated unlabeled containers unless the user explicitly asks for destructive host cleanup
+- long-running commands such as `api serve` must not announce success before the real runtime boundary is established, and user-visible flag values must not silently disagree with internal effective values
 
 ## 9) Context7 First
 

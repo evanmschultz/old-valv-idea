@@ -331,7 +331,7 @@ func runManageUpdate(cmd *cobra.Command, paths config.Paths, opts *rootOptions, 
 func newManageCleanupCommand(paths config.Paths, opts *rootOptions) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "cleanup [state|images|docker|all]",
-		Short: "Prune local Valv caches and Docker build state",
+		Short: "Prune Valv-managed local state, runtime containers, and images",
 		Long: strings.TrimSpace(`
 Clean Valv-managed local state and Docker artifacts.
 
@@ -371,13 +371,11 @@ func runManageCleanup(cmd *cobra.Command, paths config.Paths, opts *rootOptions,
 	local := cleanupservice.LocalCleanupRequest{Paths: cleanupservice.DefaultLocalTargets(paths)}
 	imageRefs := providerCleanupImageRefs()
 	dockerRequest := cleanupservice.DockerCleanupRequest{
-		ContainerNamePrefixes: []string{"valv-"},
 		ContainerLabels: map[string]string{
 			"label": "io.valv.managed=true",
 		},
 		ImageRefs: imageRefs,
 		Force:     true,
-		Volumes:   true,
 	}
 
 	var summary []output.Field

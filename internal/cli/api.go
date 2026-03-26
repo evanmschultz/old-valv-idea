@@ -83,6 +83,9 @@ func runAPIServe(cmd *cobra.Command, paths config.Paths, opts *rootOptions, list
 	if err != nil {
 		return fmt.Errorf("resolve output policy: %w", err)
 	}
+	if runtimeTTL <= 0 {
+		return fmt.Errorf("api serve: runtime ttl must be greater than zero")
+	}
 	startPath := strings.TrimSpace(projectPath)
 	if startPath == "" {
 		startPath, err = os.Getwd()
@@ -120,9 +123,7 @@ func runAPIServe(cmd *cobra.Command, paths config.Paths, opts *rootOptions, list
 		defer cancel()
 		_ = server.Shutdown(shutdownCtx)
 	}()
-	if runtimeTTL > 0 {
-		go runAPIRuntimeSweeper(cmd.Context(), LoggerFromContext(cmd.Context()), service, runtimeTTL)
-	}
+	go runAPIRuntimeSweeper(cmd.Context(), LoggerFromContext(cmd.Context()), service, runtimeTTL)
 
 	boundAddr := listener.Addr().String()
 	if err := output.WriteRecord(cmd.OutOrStdout(), mode, "API server listening", []output.Field{{Label: "listen", Value: boundAddr, Identifier: true}, {Label: "path", Value: openaihandler.ChatCompletionsPath, Identifier: true}, {Label: "workspace", Value: fmt.Sprintf("%t", workspaceAccess), Badge: true}, {Label: "runtime ttl", Value: runtimeTTL.String(), Identifier: true}, {Label: "project", Value: startPath, Muted: true}}); err != nil {
@@ -156,7 +157,9 @@ func runAPIRuntimeSweeper(ctx context.Context, logger *log.Logger, service inter
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			removed, err := service.PruneExpiredRuntimes(context.Background())
+			sweepCtx, cancel := context.WithTimeout(ctx, interval)
+			removed, err := service.PruneExpiredRuntimes(sweepCtx)
+			cancel()
 			if err != nil {
 				if logger != nil {
 					logger.Debug("api runtime sweep failed", "error", err)

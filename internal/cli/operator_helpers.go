@@ -88,7 +88,7 @@ func newOpenAIAPIService(cmd *cobra.Command, paths config.Paths, projectPath str
 	}
 	service, err := openaiapiservice.New(openaiapiservice.Options{
 		Store:           store,
-		Executor:        dockeradapter.NewExecutor(dockeradapter.NewSystemRunner("docker", nil, cmd.OutOrStdout(), cmd.ErrOrStderr())),
+		Executor:        dockeradapter.NewExecutor(dockeradapter.NewQuietRunner("docker", LoggerFromContext(cmd.Context()))),
 		Image:           codexImageRef(),
 		User:            fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
 		TempRoot:        paths.TempCacheDir,

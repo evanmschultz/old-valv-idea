@@ -342,7 +342,7 @@ func (s Service) startRuntime(ctx context.Context, resolved resolvedBinding, now
 }
 
 func (s Service) stopRuntime(ctx context.Context, record domain.RuntimeRecord, status string) error {
-	if err := s.executor.RemoveContainer(ctx, dockeradapter.ContainerRemoveRequest{IDs: []string{record.ContainerID}, Force: true, Volumes: true}); err != nil {
+	if err := s.executor.RemoveContainer(ctx, dockeradapter.ContainerRemoveRequest{IDs: []string{record.ContainerID}, Force: true}); err != nil {
 		return err
 	}
 	record.Status = status

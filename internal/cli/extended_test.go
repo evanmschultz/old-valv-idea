@@ -228,11 +228,14 @@ func TestManageCleanupAllRemovesLocalStateAndInvokesDocker(t *testing.T) {
 	if !strings.Contains(logContent, "ps -a -q --filter label=io.valv.managed=true") {
 		t.Fatalf("unexpected docker cleanup log: %q", logContent)
 	}
-	if !strings.Contains(logContent, "ps -a -q --filter name=valv-") {
+	if strings.Contains(logContent, "ps -a -q --filter name=valv-") {
+		t.Fatalf("unexpected prefix-based docker cleanup log: %q", logContent)
+	}
+	if !strings.Contains(logContent, "rm --force valv-api-1 valv-api-2") {
 		t.Fatalf("unexpected docker cleanup log: %q", logContent)
 	}
-	if !strings.Contains(logContent, "rm --force --volumes valv-api-1 valv-api-2") {
-		t.Fatalf("unexpected docker cleanup log: %q", logContent)
+	if strings.Contains(logContent, "--volumes") {
+		t.Fatalf("unexpected destructive volume cleanup log: %q", logContent)
 	}
 	if !strings.Contains(logContent, "image rm --force valv-codex:dev valv-codex:0-116-0") {
 		t.Fatalf("unexpected docker cleanup log: %q", logContent)
@@ -469,6 +472,34 @@ func TestRunAPIServeReturnsBindErrorBeforeAnnouncingSuccess(t *testing.T) {
 	}
 	if strings.Contains(stdout.String(), "API server listening") {
 		t.Fatalf("unexpected startup output on bind failure: %q", stdout.String())
+	}
+}
+
+func TestRunAPIServeRejectsNonPositiveRuntimeTTL(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	projectRoot := t.TempDir()
+	profileHome := filepath.Join(paths.ProviderRoot, "codex", "profiles", "dev")
+	runManage(t, paths, []string{"profile", "add", "codex", "dev", "--home", profileHome})
+	runManage(t, paths, []string{"bind", "codex", "dev", "--project", projectRoot})
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+
+	err := runAPIServe(cmd, paths, &rootOptions{}, "127.0.0.1:0", projectRoot, false, 0)
+	if err == nil {
+		t.Fatal("runAPIServe() error = nil, want runtime ttl validation failure")
+	}
+	if !strings.Contains(err.Error(), "runtime ttl must be greater than zero") {
+		t.Fatalf("runAPIServe() error = %v, want runtime ttl validation failure", err)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("unexpected stdout on invalid ttl: %q", stdout.String())
 	}
 }
 

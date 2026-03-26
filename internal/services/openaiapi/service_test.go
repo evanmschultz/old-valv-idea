@@ -334,6 +334,9 @@ func TestPruneExpiredRuntimesStopsOnlyExpiredWarmContainers(t *testing.T) {
 	if got, want := executor.removedRequests[0].IDs, []string{"valv-api-codex-nowork-old"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("removed IDs = %#v, want %#v", got, want)
 	}
+	if executor.removedRequests[0].Volumes {
+		t.Fatal("RemoveContainer() volumes = true, want false")
+	}
 }
 
 type recordingExecutor struct {

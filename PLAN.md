@@ -275,8 +275,10 @@ Current validation follow-ups to preserve:
 - output paths and record/list rendering should stay DRY and closer to the `blick` reference shape
 - `manage update` output should explain what provider/client version was built, which image tags were updated, and whether anything actually changed
 - Valv-managed Docker containers, images, and related runtime artifacts should carry a clear `valv-...` naming scheme so developers can distinguish them from unrelated Docker workloads
-- cleanup behavior should align with that naming scheme, target only Valv-managed artifacts, and avoid broad host-wide Docker builder cleanup in normal operator flows
+- cleanup behavior should align with that naming scheme, but actual cleanup authority should come from Valv labels, not broad `valv-...` prefix matching; normal cleanup must not remove unrelated unlabeled containers or anonymous volumes
 - API serve help and runtime output must make it explicit that `runtime-ttl` is an idle runtime lease timeout, not an automatic server shutdown timer; warm runtimes should still be swept down after expiry
+- API startup output must only announce a listening address after a real successful bind, and non-positive runtime TTL values should fail clearly instead of being silently coerced
+- API runtime sweeps should use the server lifecycle context and quiet Docker execution so shutdown is clean and HTTP-facing stdout/stderr stay stable
 - Codex profile-home mounting and Codex-native resume/session behavior need explicit validation on macOS Docker Desktop so the containerized runtime preserves Codex's own `.codex` state model rather than introducing Valv-owned session semantics
 - using the literal host `~/.codex` path should remain an explicit profile choice, not an implicit default; default Valv profiles should preserve Codex-native state within the selected profile home
 
