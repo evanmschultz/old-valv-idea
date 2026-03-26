@@ -136,7 +136,10 @@ func WriteListWithKey(out io.Writer, mode Mode, heading string, jsonKey string, 
 			return fmt.Errorf("write plain list heading: %w", err)
 		}
 		if len(items) == 0 {
-			return writeEmptyState(out, mode)
+			if _, err := fmt.Fprintln(out, "- (none)"); err != nil {
+				return fmt.Errorf("write plain list empty state: %w", err)
+			}
+			return nil
 		}
 		for _, item := range items {
 			if _, err := fmt.Fprintf(out, "- %s\n", item.Title); err != nil {
@@ -157,7 +160,10 @@ func WriteListWithKey(out io.Writer, mode Mode, heading string, jsonKey string, 
 		return fmt.Errorf("write human list heading: %w", err)
 	}
 	if len(items) == 0 {
-		return writeEmptyState(out, mode)
+		if _, err := fmt.Fprintln(out, "- "+theme.muted.Render("(none)")); err != nil {
+			return fmt.Errorf("write human list empty state: %w", err)
+		}
+		return nil
 	}
 	for _, item := range items {
 		title := item.Title

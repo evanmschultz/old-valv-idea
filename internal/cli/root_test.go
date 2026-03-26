@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
+
 	"github.com/evanmschultz/valv/internal/config"
 	"github.com/evanmschultz/valv/internal/domain"
 	"github.com/evanmschultz/valv/internal/logging"
@@ -109,6 +111,73 @@ func TestGlobalAliasWorks(t *testing.T) {
 			t.Fatalf("unexpected global alias output %q missing %q", stdout.String(), want)
 		}
 	}
+}
+
+func TestManageHelpSubcommandWorks(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	cmd, err := NewRootCommand(context.Background(), &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("NewRootCommand() error = %v", err)
+	}
+	cmd.SetArgs([]string{"manage", "help"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	for _, want := range []string{"Operator workflows", "bind", "update"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("unexpected manage help output %q missing %q", stdout.String(), want)
+		}
+	}
+}
+
+func TestGlobalHelpAliasWorks(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	cmd, err := NewRootCommand(context.Background(), &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("NewRootCommand() error = %v", err)
+	}
+	cmd.SetArgs([]string{"g", "h"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	for _, want := range []string{"Host-global convenience commands", "switch"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("unexpected global help output %q missing %q", stdout.String(), want)
+		}
+	}
+}
+
+func TestVisibleCommandsDefineLongAndExample(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cmd, err := NewRootCommand(context.Background(), &bytes.Buffer{}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("NewRootCommand() error = %v", err)
+	}
+
+	var visit func(*cobra.Command)
+	visit = func(current *cobra.Command) {
+		if current.Name() != "help" {
+			if strings.TrimSpace(current.Long) == "" {
+				t.Fatalf("command %q missing Long help text", current.CommandPath())
+			}
+			if strings.TrimSpace(current.Example) == "" {
+				t.Fatalf("command %q missing Example help text", current.CommandPath())
+			}
+		}
+		for _, child := range current.Commands() {
+			if !child.IsAvailableCommand() || child.IsAdditionalHelpTopicCommand() {
+				continue
+			}
+			visit(child)
+		}
+	}
+	visit(cmd)
 }
 
 func TestOutputFlagsConflict(t *testing.T) {

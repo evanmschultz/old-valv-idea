@@ -23,8 +23,19 @@ func newCodexCommand(paths config.Paths, run codexRunFunc) *cobra.Command {
 	}
 
 	return &cobra.Command{
-		Use:                "codex",
-		Short:              "Run Codex through Valv's Docker runtime",
+		Use:   "codex",
+		Short: "Run Codex through Valv's Docker runtime",
+		Long: strings.TrimSpace(`
+Run the Codex CLI inside a Valv-managed Docker runtime for the current bound project.
+
+Everything after ` + "`valv codex`" + ` is passed through to Codex as directly as possible. Use the management surface to create profiles and bind projects before launching Codex.
+`),
+		Example: strings.TrimSpace(`
+valv codex
+valv codex --help
+valv codex resume --last
+valv codex exec "summarize the latest diff"
+`),
 		DisableFlagParsing: true,
 		Args:               cobra.ArbitraryArgs,
 		SilenceUsage:       true,

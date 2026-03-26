@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -15,12 +16,22 @@ func newGlobalCommand(paths config.Paths, opts *rootOptions) *cobra.Command {
 		Use:     "global",
 		Aliases: []string{"g"},
 		Short:   "Host-global convenience commands",
-		Args:    cobra.NoArgs,
+		Long: strings.TrimSpace(`
+Host-global convenience commands.
+
+Use host-global commands when you intentionally want to manipulate the machine-level provider state instead of the normal Valv-isolated runtime path.
+`),
+		Example: strings.TrimSpace(`
+valv global switch codex dev
+valv g switch codex
+`),
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return cmd.Help()
 		},
 	}
 	cmd.AddCommand(newGlobalSwitchCommand(paths, opts))
+	installBranchHelpCommands(cmd)
 	return cmd
 }
 
@@ -28,7 +39,16 @@ func newGlobalSwitchCommand(paths config.Paths, opts *rootOptions) *cobra.Comman
 	cmd := &cobra.Command{
 		Use:   "switch <provider> [profile]",
 		Short: "Switch the host-global provider profile",
-		Args:  cobra.RangeArgs(1, 2),
+		Long: strings.TrimSpace(`
+Switch the host-global provider profile as a convenience flow.
+
+For Codex, this updates the host-side ` + "`~/.codex`" + ` path target rather than launching a containerized runtime.
+`),
+		Example: strings.TrimSpace(`
+valv global switch codex dev
+valv g switch codex
+`),
+		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			provider, err := domain.ParseProvider(args[0])
 			if err != nil {

@@ -82,6 +82,27 @@ func TestBuildContainerRemoveArgs(t *testing.T) {
 	}
 }
 
+func TestBuildContainerListArgs(t *testing.T) {
+	t.Parallel()
+
+	got, err := BuildContainerListArgs(ContainerListRequest{
+		All:   true,
+		Quiet: true,
+		Filters: map[string]string{
+			"label": "io.valv.managed=true",
+			"name":  "valv-",
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildContainerListArgs() error = %v", err)
+	}
+
+	want := []string{"ps", "-a", "-q", "--filter", "label=io.valv.managed=true", "--filter", "name=valv-"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("BuildContainerListArgs() = %#v, want %#v", got, want)
+	}
+}
+
 func TestBuildBuilderPruneArgs(t *testing.T) {
 	t.Parallel()
 

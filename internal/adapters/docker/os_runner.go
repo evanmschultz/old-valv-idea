@@ -109,6 +109,45 @@ func (r QuietRunner) Run(ctx context.Context, args []string) error {
 	return nil
 }
 
+func (r QuietRunner) Output(ctx context.Context, args []string) (string, error) {
+	binary := strings.TrimSpace(r.Binary)
+	if binary == "" {
+		binary = "docker"
+	}
+
+	factory := r.newCommand
+	if factory == nil {
+		factory = exec.CommandContext
+	}
+
+	cmd := factory(ctx, binary, args...)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if len(r.Env) > 0 {
+		cmd.Env = append(os.Environ(), r.Env...)
+	}
+
+	err := cmd.Run()
+	combined := strings.TrimSpace(strings.Join([]string{stdout.String(), stderr.String()}, "\n"))
+	if err != nil {
+		if r.Logger != nil && combined != "" {
+			r.Logger.Debug("docker command output failed", "args", strings.Join(args, " "), "output", truncateDockerOutput(combined))
+		}
+		if combined != "" {
+			return "", fmt.Errorf("run %s %s: %w: %s", binary, strings.Join(args, " "), err, combined)
+		}
+		return "", fmt.Errorf("run %s %s: %w", binary, strings.Join(args, " "), err)
+	}
+
+	trimmed := strings.TrimSpace(stdout.String())
+	if r.Logger != nil && strings.TrimSpace(stderr.String()) != "" {
+		r.Logger.Debug("docker command stderr", "args", strings.Join(args, " "), "output", truncateDockerOutput(stderr.String()))
+	}
+	return trimmed, nil
+}
+
 func truncateDockerOutput(value string) string {
 	const limit = 4000
 	trimmed := strings.TrimSpace(value)

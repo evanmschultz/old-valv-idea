@@ -109,6 +109,32 @@ func (s Service) ValidateBinding(ctx context.Context) error {
 	return err
 }
 
+func (s Service) PruneExpiredRuntimes(ctx context.Context) (int, error) {
+	resolved, err := s.resolveBinding(ctx)
+	if err != nil {
+		return 0, err
+	}
+	records, err := s.store.ListRuntimesByProjectID(ctx, resolved.project.ID)
+	if err != nil {
+		return 0, fmt.Errorf("prune expired runtimes for project %q: list runtimes: %w", resolved.project.Root, err)
+	}
+	now := s.now()
+	removed := 0
+	for _, record := range records {
+		if !s.matchesRuntime(record, resolved.profile) {
+			continue
+		}
+		if !s.runtimeExpired(record, now) {
+			continue
+		}
+		if err := s.stopRuntime(ctx, record, "expired"); err != nil {
+			return removed, fmt.Errorf("prune expired runtimes for project %q: stop runtime %q: %w", resolved.project.Root, record.ID, err)
+		}
+		removed++
+	}
+	return removed, nil
+}
+
 func (s Service) Complete(ctx context.Context, request openaiapi.Request) (openaiapi.Result, error) {
 	resolved, err := s.resolveBinding(ctx)
 	if err != nil {
@@ -209,6 +235,14 @@ func (s Service) buildRuntimeRequest(runtimeRecord domain.RuntimeRecord, project
 		WorkingDir: workingDir,
 		Env: map[string]string{
 			"CODEX_HOME": profile.HomePath,
+		},
+		Labels: map[string]string{
+			"io.valv.managed":          "true",
+			"io.valv.provider":         "codex",
+			"io.valv.scope":            "api",
+			"io.valv.project_id":       project.ID,
+			"io.valv.profile_id":       profile.ID,
+			"io.valv.workspace_access": fmt.Sprintf("%t", s.workspaceAccess),
 		},
 		Mounts:   mounts,
 		Args:     []string{"-lc", "while :; do sleep 60; done"},

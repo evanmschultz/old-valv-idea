@@ -153,7 +153,7 @@ func TestWriteListHumanEmptyState(t *testing.T) {
 	if err := WriteList(&buf, Mode{Format: domain.OutputFormatHuman, Styled: false}, "Profiles", nil); err != nil {
 		t.Fatalf("WriteList() error = %v", err)
 	}
-	if got, want := buf.String(), "Profiles\n  (none)\n"; got != want {
+	if got, want := buf.String(), "Profiles\n- (none)\n"; got != want {
 		t.Fatalf("WriteList() output = %q, want %q", got, want)
 	}
 }
@@ -165,7 +165,7 @@ func TestWriteListPlainEmptyState(t *testing.T) {
 	if err := WriteList(&buf, Mode{Format: domain.OutputFormatPlain}, "Profiles", nil); err != nil {
 		t.Fatalf("WriteList() error = %v", err)
 	}
-	if got, want := buf.String(), "Profiles\n  (none)\n"; got != want {
+	if got, want := buf.String(), "Profiles\n- (none)\n"; got != want {
 		t.Fatalf("WriteList() output = %q, want %q", got, want)
 	}
 }

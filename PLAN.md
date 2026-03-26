@@ -264,6 +264,22 @@ Development command direction:
 - provide a dev cleanup path that removes the temp-home state and the dev-tagged image set
 - default developer validation should prefer the disposable `just dev ...` path over writing into the real home directory
 
+Current validation follow-ups to preserve:
+
+- `just dev-reset` and other dev-mode entrypoints must clearly explain that the printed root is one disposable temp-home path, not a scary permanent system path
+- dev-mode output should make it obvious which paths are disposable, which images are dev-only, and how to clean them up
+- help menus should grow more explanatory as the command tree gets deeper
+- help menus should include realistic examples, and output-producing commands should explain the meaning of their key output fields
+- the CLI should support `<command> help` and `<command> h` where that is unambiguous and does not collide with real subcommands
+- the CLI should not reinterpret trailing help-like args on leaf/pass-through commands such as `valv codex`
+- output paths and record/list rendering should stay DRY and closer to the `blick` reference shape
+- `manage update` output should explain what provider/client version was built, which image tags were updated, and whether anything actually changed
+- Valv-managed Docker containers, images, and related runtime artifacts should carry a clear `valv-...` naming scheme so developers can distinguish them from unrelated Docker workloads
+- cleanup behavior should align with that naming scheme, target only Valv-managed artifacts, and avoid broad host-wide Docker builder cleanup in normal operator flows
+- API serve help and runtime output must make it explicit that `runtime-ttl` is an idle runtime lease timeout, not an automatic server shutdown timer; warm runtimes should still be swept down after expiry
+- Codex profile-home mounting and Codex-native resume/session behavior need explicit validation on macOS Docker Desktop so the containerized runtime preserves Codex's own `.codex` state model rather than introducing Valv-owned session semantics
+- using the literal host `~/.codex` path should remain an explicit profile choice, not an implicit default; default Valv profiles should preserve Codex-native state within the selected profile home
+
 ## Account Switching Research
 
 The account-switcher repos are useful, but they solve the wrong primary problem for Valv.

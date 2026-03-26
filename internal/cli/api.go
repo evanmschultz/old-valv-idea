@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/log"
 	"github.com/spf13/cobra"
 
 	openaihandler "github.com/evanmschultz/valv/internal/api/openai"
@@ -20,12 +22,20 @@ func newAPICommand(paths config.Paths, opts *rootOptions) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "api",
 		Short: "Run the Valv API surface",
-		Args:  cobra.NoArgs,
+		Long: strings.TrimSpace(`
+Run the OpenAI-compatible Valv API surface backed by the current project's bound provider profile.
+`),
+		Example: strings.TrimSpace(`
+valv api serve
+valv api serve --workspace --runtime-ttl 2m
+`),
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return cmd.Help()
 		},
 	}
 	cmd.AddCommand(newAPIServeCommand(paths, opts))
+	installBranchHelpCommands(cmd)
 	return cmd
 }
 
@@ -37,7 +47,26 @@ func newAPIServeCommand(paths config.Paths, opts *rootOptions) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Serve the OpenAI-compatible Valv API",
-		Args:  cobra.NoArgs,
+		Long: strings.TrimSpace(`
+Serve the OpenAI-compatible /v1/chat/completions surface for the current bound project.
+
+Important behavior:
+- ` + "`--runtime-ttl`" + ` is the idle lifetime for warm API runtime containers, not an automatic shutdown timer for the HTTP server
+- ` + "`--workspace`" + ` controls whether the bound project root is mounted into API runtime containers
+
+Output fields:
+- listen: TCP address the HTTP server is attempting to bind
+- path: API route served by Valv
+- workspace: whether runtime containers get the project workspace mount
+- runtime ttl: idle timeout for warm runtime containers
+- project: project root whose binding backs the API
+`),
+		Example: strings.TrimSpace(`
+valv api serve
+valv api serve --listen 127.0.0.1:18080 --runtime-ttl 30s
+valv api serve --workspace --project /absolute/path/to/repo
+`),
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runAPIServe(cmd, paths, opts, listenAddr, projectPath, workspaceAccess, runtimeTTL)
 		},
@@ -77,6 +106,12 @@ func runAPIServe(cmd *cobra.Command, paths config.Paths, opts *rootOptions, list
 	mux.Handle(openaihandler.ChatCompletionsPath, handler)
 
 	server := &http.Server{Addr: listenAddr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	listener, err := net.Listen("tcp", listenAddr)
+	if err != nil {
+		return fmt.Errorf("api serve: listen: %w", err)
+	}
+	defer listener.Close()
+
 	shutdownDone := make(chan struct{})
 	go func() {
 		defer close(shutdownDone)
@@ -85,14 +120,52 @@ func runAPIServe(cmd *cobra.Command, paths config.Paths, opts *rootOptions, list
 		defer cancel()
 		_ = server.Shutdown(shutdownCtx)
 	}()
+	if runtimeTTL > 0 {
+		go runAPIRuntimeSweeper(cmd.Context(), LoggerFromContext(cmd.Context()), service, runtimeTTL)
+	}
 
-	if err := output.WriteRecord(cmd.OutOrStdout(), mode, "API server starting", []output.Field{{Label: "listen", Value: listenAddr, Identifier: true}, {Label: "path", Value: openaihandler.ChatCompletionsPath, Identifier: true}, {Label: "workspace", Value: fmt.Sprintf("%t", workspaceAccess), Badge: true}, {Label: "runtime ttl", Value: runtimeTTL.String(), Identifier: true}, {Label: "project", Value: startPath, Muted: true}}); err != nil {
+	boundAddr := listener.Addr().String()
+	if err := output.WriteRecord(cmd.OutOrStdout(), mode, "API server listening", []output.Field{{Label: "listen", Value: boundAddr, Identifier: true}, {Label: "path", Value: openaihandler.ChatCompletionsPath, Identifier: true}, {Label: "workspace", Value: fmt.Sprintf("%t", workspaceAccess), Badge: true}, {Label: "runtime ttl", Value: runtimeTTL.String(), Identifier: true}, {Label: "project", Value: startPath, Muted: true}}); err != nil {
 		return fmt.Errorf("api serve: write startup output: %w", err)
 	}
-	serveErr := server.ListenAndServe()
+	serveErr := server.Serve(listener)
 	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 		return fmt.Errorf("api serve: listen: %w", serveErr)
 	}
 	<-shutdownDone
 	return nil
+}
+
+func runAPIRuntimeSweeper(ctx context.Context, logger *log.Logger, service interface {
+	PruneExpiredRuntimes(context.Context) (int, error)
+}, ttl time.Duration) {
+	interval := ttl / 2
+	if interval <= 0 {
+		interval = ttl
+	}
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	if interval > 30*time.Second {
+		interval = 30 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			removed, err := service.PruneExpiredRuntimes(context.Background())
+			if err != nil {
+				if logger != nil {
+					logger.Debug("api runtime sweep failed", "error", err)
+				}
+				continue
+			}
+			if removed > 0 && logger != nil {
+				logger.Debug("api runtime sweep removed expired containers", "count", removed)
+			}
+		}
+	}
 }

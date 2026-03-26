@@ -168,6 +168,33 @@ func BuildContainerRemoveArgs(request ContainerRemoveRequest) ([]string, error) 
 	return args, nil
 }
 
+type ContainerListRequest struct {
+	All     bool
+	Quiet   bool
+	Filters map[string]string
+}
+
+func BuildContainerListArgs(request ContainerListRequest) ([]string, error) {
+	args := []string{"ps"}
+	if request.All {
+		args = append(args, "-a")
+	}
+	if request.Quiet {
+		args = append(args, "-q")
+	}
+	if len(request.Filters) > 0 {
+		keys := make([]string, 0, len(request.Filters))
+		for key := range request.Filters {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			args = append(args, "--filter", fmt.Sprintf("%s=%s", key, request.Filters[key]))
+		}
+	}
+	return args, nil
+}
+
 type BuilderPruneRequest struct {
 	All     bool
 	Filters map[string]string

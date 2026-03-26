@@ -16,11 +16,17 @@ import (
 type cleanupRunnerRecorder struct {
 	calls [][]string
 	err   error
+	out   string
 }
 
 func (r *cleanupRunnerRecorder) Run(_ context.Context, args []string) error {
 	r.calls = append(r.calls, append([]string(nil), args...))
 	return r.err
+}
+
+func (r *cleanupRunnerRecorder) Output(_ context.Context, args []string) (string, error) {
+	r.calls = append(r.calls, append([]string(nil), args...))
+	return r.out, r.err
 }
 
 type cleanupRunnerSequence struct {
@@ -171,6 +177,44 @@ func TestCleanDockerBuildsRemovalCommands(t *testing.T) {
 	}
 	if got, want := runner.calls[2], []string{"builder", "prune", "--force"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("builder prune args = %#v, want %#v", got, want)
+	}
+}
+
+func TestCleanDockerDiscoversManagedContainersByLabelAndPrefix(t *testing.T) {
+	t.Parallel()
+
+	runner := &cleanupRunnerRecorder{out: "abc123\nxyz789\n"}
+	svc, err := New(Options{Runner: runner})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	result, err := svc.CleanDocker(context.Background(), DockerCleanupRequest{
+		ContainerIDs:          []string{"explicit"},
+		ContainerNamePrefixes: []string{"valv-"},
+		ContainerLabels: map[string]string{
+			"label": "io.valv.managed=true",
+		},
+		Force:   true,
+		Volumes: true,
+	})
+	if err != nil {
+		t.Fatalf("CleanDocker() error = %v", err)
+	}
+	if got, want := runner.calls[0], []string{"ps", "-a", "-q", "--filter", "label=io.valv.managed=true"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("label list args = %#v, want %#v", got, want)
+	}
+	if got, want := runner.calls[1], []string{"ps", "-a", "-q", "--filter", "name=valv-"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("name list args = %#v, want %#v", got, want)
+	}
+	if got, want := runner.calls[2], []string{"rm", "--force", "--volumes", "explicit", "abc123", "xyz789"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("container rm args = %#v, want %#v", got, want)
+	}
+	if got, want := result.RemovedContainers, []string{"explicit", "abc123", "xyz789"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("RemovedContainers = %#v, want %#v", got, want)
+	}
+	if got, want := len(result.Commands), 1; got != want {
+		t.Fatalf("Commands len = %d, want %d", got, want)
 	}
 }
 

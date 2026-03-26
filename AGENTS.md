@@ -132,15 +132,21 @@ CLI alias policy:
 - preferred short aliases are `h`, `m`, and `g`
 - do not invent blanket one-letter aliases for every command
 - avoid alias schemes that create ambiguity across commands like `status`, `serve`, and `switch`
+- support trailing `help` / `h` on branch commands when that is unambiguous
+- do not reinterpret trailing args on leaf commands or pass-through commands like `valv codex`
 
 Output policy:
 
 - follow `blick` output patterns as closely as practical
+- treat `Short`, `Long`, and `Example` as mandatory for every visible command
+- help screens should become more explanatory deeper in the command tree
+- help for output-producing commands should explain the meaning of key output fields and show realistic examples
 - prefer deterministic, minimal human output
 - prefer explicit empty states over silent emptiness
 - prefer slim machine-readable JSON payloads over human-style wrapper envelopes
 - keep machine-readable JSON keys command-owned and stable; do not derive API-like keys from human heading copy
 - reduce raw subprocess noise unless that subprocess output is the actual user-facing payload
+- disposable dev-mode commands should clearly mark temp-home paths and dev-only artifacts as disposable and explain how to clean them up
 
 ## 9) Context7 First
 

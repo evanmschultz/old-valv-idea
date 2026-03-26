@@ -42,6 +42,14 @@ func NewRootCommand(ctx context.Context, stdout, stderr io.Writer) (*cobra.Comma
 Valv manages provider profiles, Docker runtimes, and API execution for local AI CLIs.
 Use the direct runtime commands for provider execution and the management surface for setup and operator workflows.
 `),
+		Example: strings.TrimSpace(`
+valv paths
+valv manage update
+valv manage profile add codex dev
+valv manage bind codex dev
+valv codex --help
+valv api serve --runtime-ttl 2m
+`),
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return cmd.Help()
@@ -85,15 +93,6 @@ Use the direct runtime commands for provider execution and the management surfac
 	cmd.SetContext(ctx)
 	cmd.SetOut(stdout)
 	cmd.SetErr(stderr)
-	cmd.SetHelpCommand(&cobra.Command{
-		Use:     "help [command]",
-		Aliases: []string{"h"},
-		Short:   "Help about any command",
-		Args:    cobra.ArbitraryArgs,
-		Run: func(_ *cobra.Command, args []string) {
-			cmd.HelpFunc()(cmd, args)
-		},
-	})
 	cmd.AddGroup(
 		&cobra.Group{ID: "inspect", Title: "Inspect Commands"},
 		&cobra.Group{ID: "runtime", Title: "Runtime Commands"},
@@ -120,6 +119,7 @@ Use the direct runtime commands for provider execution and the management surfac
 	globalCmd.GroupID = "manage"
 
 	cmd.AddCommand(pathsCmd, versionCmd, codexCmd, apiCmd, manageCmd, globalCmd)
+	installBranchHelpCommands(cmd)
 
 	return cmd, nil
 }
@@ -200,4 +200,46 @@ func outputPolicyFromCommand(cmd *cobra.Command, opts *rootOptions) (output.Poli
 		policy.Style = domain.OutputStyleNever
 	}
 	return policy, nil
+}
+
+func installBranchHelpCommands(cmd *cobra.Command) {
+	for _, child := range cmd.Commands() {
+		installBranchHelpCommands(child)
+	}
+	if !hasNonHelpSubcommands(cmd) || hasHelpSubcommand(cmd) {
+		return
+	}
+	cmd.SetHelpCommand(newHelpCommand(cmd))
+	cmd.InitDefaultHelpCmd()
+}
+
+func hasNonHelpSubcommands(cmd *cobra.Command) bool {
+	for _, child := range cmd.Commands() {
+		if child.Name() == "help" {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func hasHelpSubcommand(cmd *cobra.Command) bool {
+	for _, child := range cmd.Commands() {
+		if child.Name() == "help" {
+			return true
+		}
+	}
+	return false
+}
+
+func newHelpCommand(target *cobra.Command) *cobra.Command {
+	return &cobra.Command{
+		Use:     "help [command]",
+		Aliases: []string{"h"},
+		Short:   "Help about any command",
+		Args:    cobra.ArbitraryArgs,
+		Run: func(_ *cobra.Command, args []string) {
+			target.HelpFunc()(target, args)
+		},
+	}
 }

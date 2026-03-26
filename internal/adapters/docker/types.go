@@ -42,6 +42,7 @@ type ContainerRunRequest struct {
 	Image       ImageRef
 	WorkingDir  string
 	Env         map[string]string
+	Labels      map[string]string
 	Mounts      []MountSpec
 	Args        []string
 	Detached    bool
@@ -136,6 +137,16 @@ func BuildRunArgs(request ContainerRunRequest) ([]string, error) {
 		sort.Strings(keys)
 		for _, key := range keys {
 			args = append(args, "-e", fmt.Sprintf("%s=%s", key, request.Env[key]))
+		}
+	}
+	if len(request.Labels) > 0 {
+		keys := make([]string, 0, len(request.Labels))
+		for key := range request.Labels {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			args = append(args, "--label", fmt.Sprintf("%s=%s", key, request.Labels[key]))
 		}
 	}
 	for _, mount := range request.Mounts {

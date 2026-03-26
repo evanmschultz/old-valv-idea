@@ -112,6 +112,12 @@ func (s Service) Build(ctx context.Context, request BuildRequest) (BuildResult, 
 		BuildArgs: map[string]string{
 			"CODEX_VERSION": version,
 		},
+		Labels: map[string]string{
+			"io.valv.managed":  "true",
+			"io.valv.provider": "codex",
+			"io.valv.scope":    "image",
+			"io.valv.version":  version,
+		},
 		Pull:    request.Pull,
 		NoCache: request.NoCache,
 	}

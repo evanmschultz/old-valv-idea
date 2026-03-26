@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
+	"unicode"
 
 	"github.com/charmbracelet/log"
 
@@ -35,6 +37,7 @@ type Options struct {
 	User     string
 	TTY      bool
 	Stdin    bool
+	Now      func() time.Time
 	Logger   *log.Logger
 }
 
@@ -46,6 +49,7 @@ type Service struct {
 	user     string
 	tty      bool
 	stdin    bool
+	now      func() time.Time
 	logger   *log.Logger
 }
 
@@ -64,6 +68,10 @@ func New(options Options) (Service, error) {
 	if detect == nil {
 		detect = projectdetect.DetectFrom
 	}
+	now := options.Now
+	if now == nil {
+		now = func() time.Time { return time.Now().UTC() }
+	}
 
 	return Service{
 		store:    options.Store,
@@ -73,6 +81,7 @@ func New(options Options) (Service, error) {
 		user:     strings.TrimSpace(options.User),
 		tty:      options.TTY,
 		stdin:    options.Stdin,
+		now:      now,
 		logger:   options.Logger,
 	}, nil
 }
@@ -141,10 +150,18 @@ func (s Service) buildRequest(workingDir string, project domain.Project, profile
 	}
 
 	request := docker.ContainerRunRequest{
+		Name:       s.containerName(project),
 		Image:      s.image,
 		WorkingDir: workingDir,
 		Env: map[string]string{
 			"CODEX_HOME": profile.HomePath,
+		},
+		Labels: map[string]string{
+			"io.valv.managed":    "true",
+			"io.valv.provider":   "codex",
+			"io.valv.scope":      "interactive",
+			"io.valv.project_id": project.ID,
+			"io.valv.profile_id": profile.ID,
 		},
 		Mounts: []docker.MountSpec{
 			docker.NewMountSpec(project.Root, project.Root, false),
@@ -178,4 +195,38 @@ func (s Service) debug(msg string, keyvals ...any) {
 		return
 	}
 	s.logger.Debug(msg, keyvals...)
+}
+
+func (s Service) containerName(project domain.Project) string {
+	base := sanitizeContainerPart(project.Name)
+	if base == "" {
+		base = sanitizeContainerPart(filepath.Base(project.Root))
+	}
+	if base == "" {
+		base = "project"
+	}
+	return fmt.Sprintf("valv-codex-interactive-%s-%d", base, s.now().UnixNano())
+}
+
+func sanitizeContainerPart(value string) string {
+	var b strings.Builder
+	lastDash := false
+	for _, r := range strings.ToLower(strings.TrimSpace(value)) {
+		switch {
+		case unicode.IsLetter(r) || unicode.IsDigit(r):
+			b.WriteRune(r)
+			lastDash = false
+		case r == '-' || r == '_' || r == '.':
+			if !lastDash {
+				b.WriteByte('-')
+				lastDash = true
+			}
+		default:
+			if !lastDash {
+				b.WriteByte('-')
+				lastDash = true
+			}
+		}
+	}
+	return strings.Trim(b.String(), "-")
 }

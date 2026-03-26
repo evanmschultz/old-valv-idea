@@ -83,6 +83,29 @@ func TestManageBindAndStatusUseRealStoreAndProjectDetection(t *testing.T) {
 	}
 }
 
+func TestManageProfileHelpSubcommandWorks(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	cmd := newManageCommand(paths, &rootOptions{})
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"profile", "help"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	for _, want := range []string{"Manage Valv provider profiles", "add", "list"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("unexpected profile help output %q missing %q", stdout.String(), want)
+		}
+	}
+}
+
 func runManage(t *testing.T, paths config.Paths, args []string) string {
 	t.Helper()
 

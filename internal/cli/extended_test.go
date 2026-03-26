@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -130,7 +131,7 @@ func TestManageUpdateUsesFakeDockerAndWritesBuildContext(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v\nstderr=%s", err, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "Provider image updated") {
+	if !strings.Contains(stdout.String(), "Provider image rebuilt") {
 		t.Fatalf("unexpected update output: %q", stdout.String())
 	}
 
@@ -141,6 +142,11 @@ func TestManageUpdateUsesFakeDockerAndWritesBuildContext(t *testing.T) {
 
 	logContent := mustReadFile(t, logPath)
 	for _, want := range []string{"build", "--build-arg CODEX_VERSION=0.116.0", "-t valv-codex:dev", "-t valv-codex:0-116-0"} {
+		if !strings.Contains(logContent, want) {
+			t.Fatalf("unexpected docker log %q missing %q", logContent, want)
+		}
+	}
+	for _, want := range []string{"--label io.valv.managed=true", "--label io.valv.provider=codex", "--label io.valv.scope=image", "--label io.valv.version=0.116.0"} {
 		if !strings.Contains(logContent, want) {
 			t.Fatalf("unexpected docker log %q missing %q", logContent, want)
 		}
@@ -175,6 +181,7 @@ func TestManageUpdateUsesOverrideImageRepository(t *testing.T) {
 func TestManageCleanupAllRemovesLocalStateAndInvokesDocker(t *testing.T) {
 	paths := testCodexPaths(t)
 	logPath := installFakeDocker(t)
+	t.Setenv("VALV_DOCKER_PS_OUTPUT", "valv-api-1\nvalv-api-2\n")
 	for _, path := range []string{
 		paths.LogsDir,
 		paths.BuildCacheDir,
@@ -206,7 +213,7 @@ func TestManageCleanupAllRemovesLocalStateAndInvokesDocker(t *testing.T) {
 	if !strings.Contains(stdout.String(), "Cleanup completed") {
 		t.Fatalf("unexpected cleanup output: %q", stdout.String())
 	}
-	for _, want := range []string{"scope=all", "images=2 refs", "docker_commands=2 commands"} {
+	for _, want := range []string{"scope=all", "containers=2 removed", "images=2 refs"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("unexpected cleanup summary %q missing %q", stdout.String(), want)
 		}
@@ -218,10 +225,16 @@ func TestManageCleanupAllRemovesLocalStateAndInvokesDocker(t *testing.T) {
 	}
 
 	logContent := mustReadFile(t, logPath)
-	if !strings.Contains(logContent, "image rm --force valv-codex:dev valv-codex:0-116-0") {
+	if !strings.Contains(logContent, "ps -a -q --filter label=io.valv.managed=true") {
 		t.Fatalf("unexpected docker cleanup log: %q", logContent)
 	}
-	if !strings.Contains(logContent, "builder prune --force --all") {
+	if !strings.Contains(logContent, "ps -a -q --filter name=valv-") {
+		t.Fatalf("unexpected docker cleanup log: %q", logContent)
+	}
+	if !strings.Contains(logContent, "rm --force --volumes valv-api-1 valv-api-2") {
+		t.Fatalf("unexpected docker cleanup log: %q", logContent)
+	}
+	if !strings.Contains(logContent, "image rm --force valv-codex:dev valv-codex:0-116-0") {
 		t.Fatalf("unexpected docker cleanup log: %q", logContent)
 	}
 }
@@ -414,11 +427,48 @@ func TestRunAPIServeStartsAndStopsCleanly(t *testing.T) {
 		t.Fatal("timed out waiting for api server shutdown")
 	}
 
-	if !strings.Contains(stdout.String(), "API server starting") {
+	if !strings.Contains(stdout.String(), "API server listening") {
 		t.Fatalf("unexpected api output: %q", stdout.String())
 	}
 	if !strings.Contains(stdout.String(), "runtime_ttl=1m0s") {
 		t.Fatalf("unexpected api output: %q", stdout.String())
+	}
+}
+
+func TestRunAPIServeReturnsBindErrorBeforeAnnouncingSuccess(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	projectRoot := t.TempDir()
+	profileHome := filepath.Join(paths.ProviderRoot, "codex", "profiles", "dev")
+	runManage(t, paths, []string{"profile", "add", "codex", "dev", "--home", profileHome})
+	runManage(t, paths, []string{"bind", "codex", "dev", "--project", projectRoot})
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		if strings.Contains(err.Error(), "operation not permitted") {
+			t.Skipf("sandbox blocked listener bind: %v", err)
+		}
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer ln.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+
+	err = runAPIServe(cmd, paths, &rootOptions{}, ln.Addr().String(), projectRoot, false, time.Minute)
+	if err == nil {
+		t.Fatal("runAPIServe() error = nil, want bind failure")
+	}
+	if !strings.Contains(err.Error(), "listen") {
+		t.Fatalf("runAPIServe() error = %v, want listen failure", err)
+	}
+	if strings.Contains(stdout.String(), "API server listening") {
+		t.Fatalf("unexpected startup output on bind failure: %q", stdout.String())
 	}
 }
 
@@ -440,7 +490,7 @@ func installFakeDocker(t *testing.T) string {
 	binDir := t.TempDir()
 	logPath := filepath.Join(binDir, "docker.log")
 	scriptPath := filepath.Join(binDir, "docker")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$VALV_DOCKER_LOG\"\n"
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$VALV_DOCKER_LOG\"\nif [ \"$1\" = \"ps\" ]; then\n  printf '%s' \"$VALV_DOCKER_PS_OUTPUT\"\nfi\n"
 	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
 		t.Fatalf("WriteFile(%q) error = %v", scriptPath, err)
 	}

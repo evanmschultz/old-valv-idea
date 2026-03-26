@@ -12,9 +12,11 @@ const version = "dev"
 
 func newVersionCommand(opts *rootOptions) *cobra.Command {
 	return &cobra.Command{
-		Use:   "version",
-		Short: "Show the current Valv version",
-		Args:  cobra.NoArgs,
+		Use:     "version",
+		Short:   "Show the current Valv version",
+		Long:    "Show the current Valv build version.",
+		Example: `valv version`,
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			policy, err := outputPolicyFromCommand(cmd, opts)
 			if err != nil {

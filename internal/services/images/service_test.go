@@ -53,7 +53,7 @@ func TestServiceBuildAddsVersionAndUsesDefaultImageInfo(t *testing.T) {
 	if len(runner.calls) != 1 {
 		t.Fatalf("runner call count = %d, want 1", len(runner.calls))
 	}
-	want := []string{"buildx", "build", "--load", "-f", "/tmp/codex-image/Dockerfile", "-t", "ghcr.io/valv/codex:dev", "--build-arg", "CODEX_VERSION=0.116.0", "/tmp/codex-image"}
+	want := []string{"buildx", "build", "--load", "-f", "/tmp/codex-image/Dockerfile", "-t", "ghcr.io/valv/codex:dev", "--build-arg", "CODEX_VERSION=0.116.0", "--label", "io.valv.managed=true", "--label", "io.valv.provider=codex", "--label", "io.valv.scope=image", "--label", "io.valv.version=0.116.0", "/tmp/codex-image"}
 	if !reflect.DeepEqual(runner.calls[0], want) {
 		t.Fatalf("Build() args = %#v, want %#v", runner.calls[0], want)
 	}
@@ -156,7 +156,7 @@ func TestBuildIncludesExtraTags(t *testing.T) {
 	if len(result.Tags) != 2 {
 		t.Fatalf("result tags len = %d, want 2", len(result.Tags))
 	}
-	if !reflect.DeepEqual(runner.calls[0], []string{"buildx", "build", "--load", "-f", "/tmp/codex-image/Dockerfile", "-t", "ghcr.io/valv/codex:dev", "-t", "ghcr.io/valv/codex:0-116-0", "--build-arg", "CODEX_VERSION=0.116.0", "/tmp/codex-image"}) {
+	if !reflect.DeepEqual(runner.calls[0], []string{"buildx", "build", "--load", "-f", "/tmp/codex-image/Dockerfile", "-t", "ghcr.io/valv/codex:dev", "-t", "ghcr.io/valv/codex:0-116-0", "--build-arg", "CODEX_VERSION=0.116.0", "--label", "io.valv.managed=true", "--label", "io.valv.provider=codex", "--label", "io.valv.scope=image", "--label", "io.valv.version=0.116.0", "/tmp/codex-image"}) {
 		t.Fatalf("Build() args = %#v", runner.calls[0])
 	}
 }
@@ -166,7 +166,7 @@ func TestServiceBuildFallsBackToLegacyBuildWhenBuildxUnavailable(t *testing.T) {
 
 	runner := &runnerRecorder{
 		errs: map[string]error{
-			"buildx build --load -f /tmp/codex-image/Dockerfile -t ghcr.io/valv/codex:dev --build-arg CODEX_VERSION=0.116.0 /tmp/codex-image": fmt.Errorf("docker buildx is required but unavailable"),
+			"buildx build --load -f /tmp/codex-image/Dockerfile -t ghcr.io/valv/codex:dev --build-arg CODEX_VERSION=0.116.0 --label io.valv.managed=true --label io.valv.provider=codex --label io.valv.scope=image --label io.valv.version=0.116.0 /tmp/codex-image": fmt.Errorf("docker buildx is required but unavailable"),
 		},
 	}
 	svc, err := New(Options{
@@ -187,7 +187,7 @@ func TestServiceBuildFallsBackToLegacyBuildWhenBuildxUnavailable(t *testing.T) {
 	if len(runner.calls) != 2 {
 		t.Fatalf("runner call count = %d, want 2", len(runner.calls))
 	}
-	if got, want := runner.calls[1], []string{"build", "-f", "/tmp/codex-image/Dockerfile", "-t", "ghcr.io/valv/codex:dev", "--build-arg", "CODEX_VERSION=0.116.0", "/tmp/codex-image"}; !reflect.DeepEqual(got, want) {
+	if got, want := runner.calls[1], []string{"build", "-f", "/tmp/codex-image/Dockerfile", "-t", "ghcr.io/valv/codex:dev", "--build-arg", "CODEX_VERSION=0.116.0", "--label", "io.valv.managed=true", "--label", "io.valv.provider=codex", "--label", "io.valv.scope=image", "--label", "io.valv.version=0.116.0", "/tmp/codex-image"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("fallback args = %#v, want %#v", got, want)
 	}
 }

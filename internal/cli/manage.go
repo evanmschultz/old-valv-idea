@@ -20,7 +20,21 @@ func newManageCommand(paths config.Paths, opts *rootOptions) *cobra.Command {
 		Use:     "manage",
 		Aliases: []string{"m"},
 		Short:   "Operator workflows for bindings, runtimes, and updates",
-		Args:    cobra.NoArgs,
+		Long: strings.TrimSpace(`
+Operator workflows for bindings, runtimes, and updates.
+
+Use the management surface to create provider profiles, bind projects, rebuild provider images, and clean up Valv-managed state.
+
+This surface owns setup and repair flows. The direct ` + "`valv codex ...`" + ` path stays a Codex pass-through launcher.
+`),
+		Example: strings.TrimSpace(`
+valv manage profile add codex dev
+valv manage bind codex dev
+valv manage status
+valv manage update
+valv manage cleanup all
+`),
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runManageHome(cmd, paths, opts)
 		},
@@ -31,6 +45,7 @@ func newManageCommand(paths config.Paths, opts *rootOptions) *cobra.Command {
 	cmd.AddCommand(newManageStatusCommand(paths, opts))
 	cmd.AddCommand(newManageUpdateCommand(paths, opts))
 	cmd.AddCommand(newManageCleanupCommand(paths, opts))
+	installBranchHelpCommands(cmd)
 	return cmd
 }
 
@@ -38,7 +53,18 @@ func newManageProfileCommand(paths config.Paths, opts *rootOptions) *cobra.Comma
 	cmd := &cobra.Command{
 		Use:   "profile",
 		Short: "Manage Valv provider profiles",
-		Args:  cobra.NoArgs,
+		Long: strings.TrimSpace(`
+Manage Valv provider profiles.
+
+Provider profiles define the home directory Valv mounts into containerized provider runtimes.
+
+For Codex, that home path becomes ` + "`CODEX_HOME`" + ` inside the container.
+`),
+		Example: strings.TrimSpace(`
+valv manage profile add codex dev
+valv manage profile list codex
+`),
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return cmd.Help()
 		},
@@ -53,7 +79,19 @@ func newManageProfileAddCommand(paths config.Paths, opts *rootOptions) *cobra.Co
 	cmd := &cobra.Command{
 		Use:   "add <provider> <name>",
 		Short: "Create a Valv-managed provider profile",
-		Args:  cobra.ExactArgs(2),
+		Long: strings.TrimSpace(`
+Create one provider profile and ensure its home directory exists.
+
+Output fields:
+- provider: provider family for the profile
+- name: Valv profile name
+- home: host path mounted into provider runtimes as that profile's home
+`),
+		Example: strings.TrimSpace(`
+valv manage profile add codex dev
+valv manage profile add codex work --home "$HOME/.codex"
+`),
+		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			mode, err := commandOutputMode(cmd, opts)
 			if err != nil {
@@ -83,7 +121,16 @@ func newManageProfileListCommand(paths config.Paths, opts *rootOptions) *cobra.C
 	cmd := &cobra.Command{
 		Use:   "list <provider>",
 		Short: "List Valv-managed provider profiles",
-		Args:  cobra.ExactArgs(1),
+		Long: strings.TrimSpace(`
+List the profiles Valv knows for one provider.
+
+Human output shows the profile name and mounted home path. JSON output uses one stable command-owned top-level key.
+`),
+		Example: strings.TrimSpace(`
+valv manage profile list codex
+valv manage profile list codex --format json
+`),
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			mode, err := commandOutputMode(cmd, opts)
 			if err != nil {
@@ -113,7 +160,16 @@ func newManageBindCommand(paths config.Paths, opts *rootOptions) *cobra.Command 
 	cmd := &cobra.Command{
 		Use:   "bind <provider> <profile>",
 		Short: "Bind the current project to a provider profile",
-		Args:  cobra.ExactArgs(2),
+		Long: strings.TrimSpace(`
+Bind one detected project root to one provider profile.
+
+After binding, direct runtime commands like ` + "`valv codex ...`" + ` can resolve the profile without additional setup.
+`),
+		Example: strings.TrimSpace(`
+valv manage bind codex dev
+valv manage bind codex dev --project /absolute/path/to/repo
+`),
+		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			provider, err := domain.ParseProvider(args[0])
 			if err != nil {
@@ -172,7 +228,21 @@ func newManageStatusCommand(paths config.Paths, opts *rootOptions) *cobra.Comman
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show the current project's Valv binding status",
-		Args:  cobra.NoArgs,
+		Long: strings.TrimSpace(`
+Show the resolved project binding Valv will use for the current working tree.
+
+Output fields:
+- project: detected project root
+- provider: bound provider
+- profile: bound Valv profile name
+- home: bound provider home path
+- git marker: git directory used to detect the project root
+`),
+		Example: strings.TrimSpace(`
+valv manage status
+valv manage status --project /absolute/path/to/repo
+`),
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runManageStatus(cmd, paths, opts, projectPath)
 		},
@@ -209,7 +279,21 @@ func newManageUpdateCommand(paths config.Paths, opts *rootOptions) *cobra.Comman
 	cmd := &cobra.Command{
 		Use:   "update [provider]",
 		Short: "Rebuild and rotate provider client images",
-		Args:  cobra.MaximumNArgs(1),
+		Long: strings.TrimSpace(`
+Rebuild the provider client image Valv uses for containerized runtime launches.
+
+Output fields:
+- provider: provider whose runtime image was rebuilt
+- image: default image tag Valv will run next
+- tags: all image tags refreshed by the rebuild
+- version: pinned client version installed into the image
+- context: generated Docker build context under the Valv cache root
+`),
+		Example: strings.TrimSpace(`
+valv manage update
+valv manage update codex
+`),
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			provider, err := parseOptionalProvider(args, domain.ProviderCodex)
 			if err != nil {
@@ -237,14 +321,33 @@ func runManageUpdate(cmd *cobra.Command, paths config.Paths, opts *rootOptions, 
 	if err != nil {
 		return fmt.Errorf("manage update: %w", err)
 	}
-	return output.WriteRecord(cmd.OutOrStdout(), mode, "Provider image updated", []output.Field{{Label: "provider", Value: string(provider), Muted: true}, {Label: "image", Value: result.Image.String(), Identifier: true}, {Label: "version", Value: result.Version, Identifier: true}, {Label: "context", Value: result.ContextDir, Muted: true}})
+	tagValues := make([]string, 0, len(result.Tags))
+	for _, tag := range result.Tags {
+		tagValues = append(tagValues, tag.String())
+	}
+	return output.WriteRecord(cmd.OutOrStdout(), mode, "Provider image rebuilt", []output.Field{{Label: "provider", Value: string(provider), Muted: true}, {Label: "image", Value: result.Image.String(), Identifier: true}, {Label: "tags", Value: strings.Join(tagValues, ", "), Muted: true}, {Label: "version", Value: result.Version, Identifier: true}, {Label: "context", Value: result.ContextDir, Muted: true}})
 }
 
 func newManageCleanupCommand(paths config.Paths, opts *rootOptions) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "cleanup [state|images|docker|all]",
 		Short: "Prune local Valv caches and Docker build state",
-		Args:  cobra.MaximumNArgs(1),
+		Long: strings.TrimSpace(`
+Clean Valv-managed local state and Docker artifacts.
+
+Scopes:
+- state: local Valv logs, caches, and runtime scratch only
+- images: provider images only
+- docker: Valv-managed runtime containers plus provider images
+- all: local state plus Valv-managed runtime containers plus provider images
+`),
+		Example: strings.TrimSpace(`
+valv manage cleanup state
+valv manage cleanup images
+valv manage cleanup docker
+valv manage cleanup all
+`),
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			scope := "all"
 			if len(args) == 1 {
@@ -267,7 +370,15 @@ func runManageCleanup(cmd *cobra.Command, paths config.Paths, opts *rootOptions,
 	}
 	local := cleanupservice.LocalCleanupRequest{Paths: cleanupservice.DefaultLocalTargets(paths)}
 	imageRefs := providerCleanupImageRefs()
-	dockerRequest := cleanupservice.DockerCleanupRequest{ImageRefs: imageRefs, PruneBuilder: true, PruneBuilderAll: true, Force: true}
+	dockerRequest := cleanupservice.DockerCleanupRequest{
+		ContainerNamePrefixes: []string{"valv-"},
+		ContainerLabels: map[string]string{
+			"label": "io.valv.managed=true",
+		},
+		ImageRefs: imageRefs,
+		Force:     true,
+		Volumes:   true,
+	}
 
 	var summary []output.Field
 	switch scope {
@@ -278,23 +389,22 @@ func runManageCleanup(cmd *cobra.Command, paths config.Paths, opts *rootOptions,
 		}
 		summary = []output.Field{{Label: "scope", Value: "state", Badge: true}, {Label: "removed", Value: fmt.Sprintf("%d paths", len(result.Removed)), Identifier: true}}
 	case "images":
-		result, err := service.CleanDocker(cmd.Context(), cleanupservice.DockerCleanupRequest{ImageRefs: imageRefs, Force: true})
-		if err != nil {
+		if _, err := service.CleanDocker(cmd.Context(), cleanupservice.DockerCleanupRequest{ImageRefs: imageRefs, Force: true}); err != nil {
 			return fmt.Errorf("manage cleanup: %w", err)
 		}
-		summary = []output.Field{{Label: "scope", Value: "images", Badge: true}, {Label: "images", Value: fmt.Sprintf("%d refs", len(imageRefs)), Identifier: true}, {Label: "commands", Value: fmt.Sprintf("%d commands", len(result.Commands)), Identifier: true}}
+		summary = []output.Field{{Label: "scope", Value: "images", Badge: true}, {Label: "images", Value: fmt.Sprintf("%d refs", len(imageRefs)), Identifier: true}}
 	case "docker":
 		result, err := service.CleanDocker(cmd.Context(), dockerRequest)
 		if err != nil {
 			return fmt.Errorf("manage cleanup: %w", err)
 		}
-		summary = []output.Field{{Label: "scope", Value: "docker", Badge: true}, {Label: "images", Value: fmt.Sprintf("%d refs", len(imageRefs)), Identifier: true}, {Label: "commands", Value: fmt.Sprintf("%d commands", len(result.Commands)), Identifier: true}}
+		summary = []output.Field{{Label: "scope", Value: "docker", Badge: true}, {Label: "containers", Value: fmt.Sprintf("%d removed", len(result.RemovedContainers)), Identifier: true}, {Label: "images", Value: fmt.Sprintf("%d refs", len(imageRefs)), Identifier: true}}
 	case "all":
 		localResult, dockerResult, err := service.Clean(cmd.Context(), local, dockerRequest)
 		if err != nil {
 			return fmt.Errorf("manage cleanup: %w", err)
 		}
-		summary = []output.Field{{Label: "scope", Value: "all", Badge: true}, {Label: "removed", Value: fmt.Sprintf("%d paths", len(localResult.Removed)), Identifier: true}, {Label: "images", Value: fmt.Sprintf("%d refs", len(imageRefs)), Identifier: true}, {Label: "docker commands", Value: fmt.Sprintf("%d commands", len(dockerResult.Commands)), Identifier: true}}
+		summary = []output.Field{{Label: "scope", Value: "all", Badge: true}, {Label: "removed", Value: fmt.Sprintf("%d paths", len(localResult.Removed)), Identifier: true}, {Label: "containers", Value: fmt.Sprintf("%d removed", len(dockerResult.RemovedContainers)), Identifier: true}, {Label: "images", Value: fmt.Sprintf("%d refs", len(imageRefs)), Identifier: true}}
 	default:
 		return fmt.Errorf("manage cleanup: unsupported scope %q", scope)
 	}

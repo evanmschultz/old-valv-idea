@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -63,6 +64,15 @@ func TestBuildRuntimeRequestOmitsWorkspaceByDefault(t *testing.T) {
 	if got := request.Env["CODEX_HOME"]; got != "/tmp/profile" {
 		t.Fatalf("CODEX_HOME = %q, want /tmp/profile", got)
 	}
+	if got := request.Labels["io.valv.managed"]; got != "true" {
+		t.Fatalf("managed label = %q, want true", got)
+	}
+	if got := request.Labels["io.valv.scope"]; got != "api" {
+		t.Fatalf("scope label = %q, want api", got)
+	}
+	if got := request.Labels["io.valv.workspace_access"]; got != "false" {
+		t.Fatalf("workspace_access label = %q, want false", got)
+	}
 }
 
 func TestBuildRuntimeRequestIncludesWorkspaceWhenEnabled(t *testing.T) {
@@ -82,6 +92,9 @@ func TestBuildRuntimeRequestIncludesWorkspaceWhenEnabled(t *testing.T) {
 	}
 	if len(request.Mounts) != 3 {
 		t.Fatalf("mount count = %d, want 3", len(request.Mounts))
+	}
+	if got := request.Labels["io.valv.workspace_access"]; got != "true" {
+		t.Fatalf("workspace_access label = %q, want true", got)
 	}
 }
 
@@ -263,6 +276,63 @@ func TestCompleteExpiresWarmRuntimeAndStartsReplacement(t *testing.T) {
 	}
 	if len(records) != 2 {
 		t.Fatalf("runtime record count = %d, want 2", len(records))
+	}
+}
+
+func TestPruneExpiredRuntimesStopsOnlyExpiredWarmContainers(t *testing.T) {
+	t.Parallel()
+
+	store, project, profile := seededOpenAIStore(t, "/tmp/project", "/tmp/profile")
+	now := time.Date(2026, 3, 25, 15, 0, 0, 0, time.UTC)
+	executor := &recordingExecutor{}
+	service, err := New(Options{
+		Store:     store,
+		Executor:  executor,
+		Image:     dockeradapter.NewImageRef("valv-codex", "dev"),
+		TempRoot:  t.TempDir(),
+		StartPath: "/tmp/project",
+		IdleTTL:   time.Minute,
+		Now:       func() time.Time { return now },
+		Detect: func(string) (projectdetect.Result, error) {
+			return projectdetect.Result{Root: "/tmp/project"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	expired, err := domain.NewRuntimeRecord(domain.ProviderCodex, project.ID, profile.ID, domain.ModeFresh, "valv-api-codex-nowork-old", "valv-codex:dev", "running")
+	if err != nil {
+		t.Fatalf("NewRuntimeRecord(expired) error = %v", err)
+	}
+	expired.CreatedAt = now.Add(-2 * time.Minute)
+	expired.UpdatedAt = now.Add(-2 * time.Minute)
+	if _, err := store.UpsertRuntime(context.Background(), expired); err != nil {
+		t.Fatalf("UpsertRuntime(expired) error = %v", err)
+	}
+
+	fresh, err := domain.NewRuntimeRecord(domain.ProviderCodex, project.ID, profile.ID, domain.ModeFresh, "valv-api-codex-nowork-fresh", "valv-codex:dev", "running")
+	if err != nil {
+		t.Fatalf("NewRuntimeRecord(fresh) error = %v", err)
+	}
+	fresh.CreatedAt = now.Add(-30 * time.Second)
+	fresh.UpdatedAt = now.Add(-30 * time.Second)
+	if _, err := store.UpsertRuntime(context.Background(), fresh); err != nil {
+		t.Fatalf("UpsertRuntime(fresh) error = %v", err)
+	}
+
+	removed, err := service.PruneExpiredRuntimes(context.Background())
+	if err != nil {
+		t.Fatalf("PruneExpiredRuntimes() error = %v", err)
+	}
+	if got, want := removed, 1; got != want {
+		t.Fatalf("PruneExpiredRuntimes() removed = %d, want %d", got, want)
+	}
+	if len(executor.removedRequests) != 1 {
+		t.Fatalf("removedRequests len = %d, want 1", len(executor.removedRequests))
+	}
+	if got, want := executor.removedRequests[0].IDs, []string{"valv-api-codex-nowork-old"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("removed IDs = %#v, want %#v", got, want)
 	}
 }
 

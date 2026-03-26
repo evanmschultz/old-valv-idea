@@ -19,6 +19,10 @@ type Runner interface {
 	Run(context.Context, []string) error
 }
 
+type outputRunner interface {
+	Output(context.Context, []string) (string, error)
+}
+
 type Options struct {
 	Runner Runner
 	Logger *log.Logger
@@ -38,17 +42,21 @@ type LocalCleanupResult struct {
 }
 
 type DockerCleanupRequest struct {
-	ContainerIDs    []string
-	ImageRefs       []docker.ImageRef
-	PruneBuilder    bool
-	PruneBuilderAll bool
-	BuilderFilters  map[string]string
-	Force           bool
-	Volumes         bool
+	ContainerIDs          []string
+	ContainerNamePrefixes []string
+	ContainerLabels       map[string]string
+	ImageRefs             []docker.ImageRef
+	PruneBuilder          bool
+	PruneBuilderAll       bool
+	BuilderFilters        map[string]string
+	Force                 bool
+	Volumes               bool
 }
 
 type DockerCleanupResult struct {
-	Commands [][]string
+	Commands          [][]string
+	RemovedContainers []string
+	RemovedImages     []docker.ImageRef
 }
 
 func New(options Options) (Service, error) {
@@ -109,10 +117,14 @@ func (s Service) CleanLocal(ctx context.Context, request LocalCleanupRequest) (L
 
 func (s Service) CleanDocker(ctx context.Context, request DockerCleanupRequest) (DockerCleanupResult, error) {
 	commands := make([][]string, 0, 3)
+	containerIDs, err := s.resolveContainerIDs(ctx, request.ContainerIDs, request.ContainerNamePrefixes, request.ContainerLabels)
+	if err != nil {
+		return DockerCleanupResult{}, fmt.Errorf("clean docker containers: %w", err)
+	}
 
-	if len(request.ContainerIDs) > 0 {
+	if len(containerIDs) > 0 {
 		args, err := docker.BuildContainerRemoveArgs(docker.ContainerRemoveRequest{
-			IDs:     request.ContainerIDs,
+			IDs:     containerIDs,
 			Force:   request.Force,
 			Volumes: request.Volumes,
 		})
@@ -120,12 +132,17 @@ func (s Service) CleanDocker(ctx context.Context, request DockerCleanupRequest) 
 			return DockerCleanupResult{}, fmt.Errorf("clean docker containers: %w", err)
 		}
 		if err := s.runner.Run(ctx, args); err != nil {
-			return DockerCleanupResult{}, fmt.Errorf("clean docker containers: %w", err)
+			if isMissingContainerError(err) {
+				s.debug("ignored missing docker containers during cleanup", "count", len(containerIDs))
+			} else {
+				return DockerCleanupResult{}, fmt.Errorf("clean docker containers: %w", err)
+			}
 		}
 		commands = append(commands, args)
-		s.debug("removed docker containers", "count", len(request.ContainerIDs))
+		s.debug("removed docker containers", "count", len(containerIDs))
 	}
 
+	removedImages := make([]docker.ImageRef, 0, len(request.ImageRefs))
 	if len(request.ImageRefs) > 0 {
 		args, err := docker.BuildImageRemoveArgs(docker.ImageRemoveRequest{
 			Refs:  request.ImageRefs,
@@ -140,6 +157,8 @@ func (s Service) CleanDocker(ctx context.Context, request DockerCleanupRequest) 
 			} else {
 				return DockerCleanupResult{}, fmt.Errorf("clean docker images: %w", err)
 			}
+		} else {
+			removedImages = append(removedImages, request.ImageRefs...)
 		}
 		commands = append(commands, args)
 		s.debug("removed docker images", "count", len(request.ImageRefs))
@@ -160,7 +179,7 @@ func (s Service) CleanDocker(ctx context.Context, request DockerCleanupRequest) 
 		s.debug("pruned docker builder cache")
 	}
 
-	return DockerCleanupResult{Commands: commands}, nil
+	return DockerCleanupResult{Commands: commands, RemovedContainers: containerIDs, RemovedImages: removedImages}, nil
 }
 
 func isMissingImageError(err error) bool {
@@ -170,6 +189,74 @@ func isMissingImageError(err error) bool {
 	message := strings.ToLower(err.Error())
 	return strings.Contains(message, "no such image") ||
 		strings.Contains(message, "image not known")
+}
+
+func isMissingContainerError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "no such container")
+}
+
+func (s Service) resolveContainerIDs(ctx context.Context, explicitIDs []string, prefixes []string, labels map[string]string) ([]string, error) {
+	seen := make(map[string]struct{}, len(explicitIDs))
+	ids := make([]string, 0, len(explicitIDs))
+	for _, rawID := range explicitIDs {
+		id := strings.TrimSpace(rawID)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	if len(prefixes) == 0 && len(labels) == 0 {
+		return ids, nil
+	}
+	queryRunner, ok := s.runner.(outputRunner)
+	if !ok {
+		return nil, fmt.Errorf("runner does not support listing container ids")
+	}
+	filterSets := make([]map[string]string, 0, len(prefixes)+1)
+	if len(labels) > 0 {
+		filterSets = append(filterSets, cloneMap(labels))
+	}
+	for _, rawPrefix := range prefixes {
+		prefix := strings.TrimSpace(rawPrefix)
+		if prefix == "" {
+			continue
+		}
+		filterSets = append(filterSets, map[string]string{"name": prefix})
+	}
+	for _, filters := range filterSets {
+		args, err := docker.BuildContainerListArgs(docker.ContainerListRequest{
+			All:     true,
+			Quiet:   true,
+			Filters: filters,
+		})
+		if err != nil {
+			return nil, err
+		}
+		output, err := queryRunner.Output(ctx, args)
+		if err != nil {
+			return nil, err
+		}
+		for _, line := range strings.Split(output, "\n") {
+			id := strings.TrimSpace(line)
+			if id == "" {
+				continue
+			}
+			if _, ok := seen[id]; ok {
+				continue
+			}
+			seen[id] = struct{}{}
+			ids = append(ids, id)
+		}
+	}
+	return ids, nil
 }
 
 func (s Service) Clean(ctx context.Context, local LocalCleanupRequest, dockerRequest DockerCleanupRequest) (LocalCleanupResult, DockerCleanupResult, error) {
