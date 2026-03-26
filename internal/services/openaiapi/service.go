@@ -7,11 +7,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/log"
 
 	dockeradapter "github.com/evanmschultz/valv/internal/adapters/docker"
+	codexruntime "github.com/evanmschultz/valv/internal/adapters/providers/codex"
 	openaiapi "github.com/evanmschultz/valv/internal/api/openai"
 	"github.com/evanmschultz/valv/internal/domain"
 	"github.com/evanmschultz/valv/internal/pathutil"
@@ -62,6 +64,12 @@ type Service struct {
 	idleTTL         time.Duration
 	now             func() time.Time
 	logger          *log.Logger
+	artifacts       *runtimeArtifacts
+}
+
+type runtimeArtifacts struct {
+	mu          sync.Mutex
+	byContainer map[string]codexruntime.PreparedRuntime
 }
 
 func New(options Options) (Service, error) {
@@ -101,6 +109,7 @@ func New(options Options) (Service, error) {
 		idleTTL:         idleTTL,
 		now:             now,
 		logger:          options.Logger,
+		artifacts:       &runtimeArtifacts{byContainer: map[string]codexruntime.PreparedRuntime{}},
 	}, nil
 }
 
@@ -144,6 +153,10 @@ func (s Service) Complete(ctx context.Context, request openaiapi.Request) (opena
 	if err != nil {
 		return openaiapi.Result{}, err
 	}
+	prepared, ok := s.lookupArtifacts(runtimeRecord.ContainerID)
+	if !ok {
+		return openaiapi.Result{}, fmt.Errorf("complete chat request: runtime %q is missing prepared artifacts", runtimeRecord.ContainerID)
+	}
 	tempDir, err := os.MkdirTemp(s.tempRoot, "openai-exec-")
 	if err != nil {
 		return openaiapi.Result{}, fmt.Errorf("complete chat request: create temp dir: %w", err)
@@ -151,7 +164,7 @@ func (s Service) Complete(ctx context.Context, request openaiapi.Request) (opena
 	defer os.RemoveAll(tempDir)
 
 	resultPath := filepath.Join(tempDir, "last-message.txt")
-	req, err := s.buildExecRequest(request, runtimeRecord, resolved.project, resolved.profile, tempDir, resultPath)
+	req, err := s.buildExecRequest(request, runtimeRecord, resolved.project, resolved.profile, tempDir, resultPath, prepared)
 	if err != nil {
 		return openaiapi.Result{}, fmt.Errorf("complete chat request: build docker exec request: %w", err)
 	}
@@ -219,11 +232,12 @@ func (s Service) resolveBinding(ctx context.Context) (resolvedBinding, error) {
 	return resolvedBinding{project: projectRecord, profile: profile}, nil
 }
 
-func (s Service) buildRuntimeRequest(runtimeRecord domain.RuntimeRecord, project domain.Project, profile domain.Profile) (dockeradapter.ContainerRunRequest, error) {
-	mounts := []dockeradapter.MountSpec{
-		dockeradapter.NewMountSpec(profile.HomePath, profile.HomePath, false),
-		dockeradapter.NewMountSpec(s.tempRoot, s.tempRoot, false),
+func (s Service) buildRuntimeRequest(runtimeRecord domain.RuntimeRecord, project domain.Project, profile domain.Profile, prepared codexruntime.PreparedRuntime) (dockeradapter.ContainerRunRequest, error) {
+	mounts := append([]dockeradapter.MountSpec{}, prepared.Mounts...)
+	if !s.workspaceAccess {
+		mounts = filterProjectScopedMounts(mounts, project.Root)
 	}
+	mounts = append(mounts, dockeradapter.NewMountSpec(s.tempRoot, s.tempRoot, false))
 	workingDir := "/tmp"
 	if s.workspaceAccess {
 		mounts = append(mounts, dockeradapter.NewMountSpec(project.Root, project.Root, false))
@@ -233,9 +247,7 @@ func (s Service) buildRuntimeRequest(runtimeRecord domain.RuntimeRecord, project
 		Name:       runtimeRecord.ContainerID,
 		Image:      s.image,
 		WorkingDir: workingDir,
-		Env: map[string]string{
-			"CODEX_HOME": profile.HomePath,
-		},
+		Env:        prepared.Env,
 		Labels: map[string]string{
 			"io.valv.managed":          "true",
 			"io.valv.provider":         "codex",
@@ -252,7 +264,21 @@ func (s Service) buildRuntimeRequest(runtimeRecord domain.RuntimeRecord, project
 	}, nil
 }
 
-func (s Service) buildExecRequest(request openaiapi.Request, runtimeRecord domain.RuntimeRecord, project domain.Project, profile domain.Profile, tempDir string, resultPath string) (dockeradapter.ContainerExecRequest, error) {
+func filterProjectScopedMounts(mounts []dockeradapter.MountSpec, projectRoot string) []dockeradapter.MountSpec {
+	if strings.TrimSpace(projectRoot) == "" || len(mounts) == 0 {
+		return mounts
+	}
+	filtered := mounts[:0]
+	for _, mount := range mounts {
+		if mount.Target == projectRoot || strings.HasPrefix(mount.Target, projectRoot+string(filepath.Separator)) {
+			continue
+		}
+		filtered = append(filtered, mount)
+	}
+	return filtered
+}
+
+func (s Service) buildExecRequest(request openaiapi.Request, runtimeRecord domain.RuntimeRecord, project domain.Project, profile domain.Profile, tempDir string, resultPath string, prepared codexruntime.PreparedRuntime) (dockeradapter.ContainerExecRequest, error) {
 	prompt := renderPrompt(request)
 	workingDir := "/tmp"
 	args := []string{"codex", "exec", "--json", "--output-last-message", resultPath, "--skip-git-repo-check"}
@@ -267,11 +293,9 @@ func (s Service) buildExecRequest(request openaiapi.Request, runtimeRecord domai
 	return dockeradapter.ContainerExecRequest{
 		ContainerID: runtimeRecord.ContainerID,
 		WorkingDir:  workingDir,
-		Env: map[string]string{
-			"CODEX_HOME": profile.HomePath,
-		},
-		Args: args,
-		User: s.user,
+		Env:         prepared.Env,
+		Args:        args,
+		User:        s.user,
 	}, nil
 }
 
@@ -306,6 +330,12 @@ func (s Service) leaseRuntime(ctx context.Context, resolved resolvedBinding) (do
 		if err != nil {
 			return domain.RuntimeRecord{}, fmt.Errorf("lease runtime for project %q: touch runtime %q: %w", resolved.project.Root, record.ID, err)
 		}
+		if _, ok := s.lookupArtifacts(record.ContainerID); !ok {
+			if err := s.stopRuntime(ctx, record, "stale"); err != nil {
+				return domain.RuntimeRecord{}, fmt.Errorf("lease runtime for project %q: stop stale runtime %q: %w", resolved.project.Root, record.ID, err)
+			}
+			continue
+		}
 		s.debug("reusing warm runtime", "runtime", record.ID, "container", record.ContainerID)
 		return record, nil
 	}
@@ -324,13 +354,25 @@ func (s Service) startRuntime(ctx context.Context, resolved resolvedBinding, now
 	if err != nil {
 		return domain.RuntimeRecord{}, fmt.Errorf("start runtime for project %q: persist runtime: %w", resolved.project.Root, err)
 	}
-	request, err := s.buildRuntimeRequest(record, resolved.project, resolved.profile)
+	prepared, err := codexruntime.PrepareRuntime(ctx, codexruntime.PrepareRequest{
+		ProfileHome: resolved.profile.HomePath,
+		ProjectRoot: resolved.project.Root,
+		TempRoot:    s.tempRoot,
+		Logger:      s.logger,
+	})
 	if err != nil {
+		return domain.RuntimeRecord{}, fmt.Errorf("start runtime for project %q: prepare runtime: %w", resolved.project.Root, err)
+	}
+	request, err := s.buildRuntimeRequest(record, resolved.project, resolved.profile, prepared)
+	if err != nil {
+		_ = prepared.Close()
 		return domain.RuntimeRecord{}, fmt.Errorf("start runtime for project %q: build docker run request: %w", resolved.project.Root, err)
 	}
 	if err := s.executor.Run(ctx, request); err != nil {
+		_ = prepared.Close()
 		return domain.RuntimeRecord{}, fmt.Errorf("start runtime for project %q: launch runtime container: %w", resolved.project.Root, err)
 	}
+	s.storeArtifacts(record.ContainerID, prepared)
 	record.Status = "running"
 	record.UpdatedAt = s.now()
 	record, err = s.store.UpsertRuntime(ctx, record)
@@ -344,6 +386,11 @@ func (s Service) startRuntime(ctx context.Context, resolved resolvedBinding, now
 func (s Service) stopRuntime(ctx context.Context, record domain.RuntimeRecord, status string) error {
 	if err := s.executor.RemoveContainer(ctx, dockeradapter.ContainerRemoveRequest{IDs: []string{record.ContainerID}, Force: true}); err != nil {
 		return err
+	}
+	if prepared, ok := s.takeArtifacts(record.ContainerID); ok {
+		if err := prepared.Close(); err != nil {
+			return err
+		}
 	}
 	record.Status = status
 	record.UpdatedAt = s.now()
@@ -403,4 +450,36 @@ func (s Service) debug(msg string, keyvals ...any) {
 		return
 	}
 	s.logger.Debug(msg, keyvals...)
+}
+
+func (s Service) storeArtifacts(containerID string, prepared codexruntime.PreparedRuntime) {
+	if s.artifacts == nil {
+		return
+	}
+	s.artifacts.mu.Lock()
+	defer s.artifacts.mu.Unlock()
+	s.artifacts.byContainer[containerID] = prepared
+}
+
+func (s Service) lookupArtifacts(containerID string) (codexruntime.PreparedRuntime, bool) {
+	if s.artifacts == nil {
+		return codexruntime.PreparedRuntime{}, false
+	}
+	s.artifacts.mu.Lock()
+	defer s.artifacts.mu.Unlock()
+	prepared, ok := s.artifacts.byContainer[containerID]
+	return prepared, ok
+}
+
+func (s Service) takeArtifacts(containerID string) (codexruntime.PreparedRuntime, bool) {
+	if s.artifacts == nil {
+		return codexruntime.PreparedRuntime{}, false
+	}
+	s.artifacts.mu.Lock()
+	defer s.artifacts.mu.Unlock()
+	prepared, ok := s.artifacts.byContainer[containerID]
+	if ok {
+		delete(s.artifacts.byContainer, containerID)
+	}
+	return prepared, ok
 }

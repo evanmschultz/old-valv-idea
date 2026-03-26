@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	dockeradapter "github.com/evanmschultz/valv/internal/adapters/docker"
+	codexprovider "github.com/evanmschultz/valv/internal/adapters/providers/codex"
 	"github.com/evanmschultz/valv/internal/config"
 	codexservice "github.com/evanmschultz/valv/internal/services/codex"
 )
@@ -65,10 +66,11 @@ func runCodexCommand(cmd *cobra.Command, paths config.Paths, args []string) erro
 		Store:    store,
 		Executor: dockeradapter.NewExecutor(dockeradapter.NewSystemRunner("docker", cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr())),
 		Image:    codexImageRef(),
-		User:     fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
 		TTY:      commandHasTTY(cmd.InOrStdin()) && commandHasTTY(cmd.OutOrStdout()),
 		Stdin:    commandHasTTY(cmd.InOrStdin()),
+		TempRoot: paths.TempCacheDir,
 		Logger:   LoggerFromContext(cmd.Context()),
+		Notices:  cmd.ErrOrStderr(),
 	})
 	if err != nil {
 		return fmt.Errorf("run codex command: initialize launcher: %w", err)
@@ -104,11 +106,16 @@ func runCodexImageOnlyCommand(cmd *cobra.Command, args []string) error {
 			"io.valv.provider": "codex",
 			"io.valv.scope":    "info",
 		},
+		Env: map[string]string{
+			"CODEX_HOME": codexprovider.ContainerCodexDir,
+			"HOME":       codexprovider.ContainerHomeDir,
+			"LOGNAME":    "valv",
+			"USER":       "valv",
+		},
 		Args:        append([]string(nil), args...),
 		Interactive: commandHasTTY(cmd.InOrStdin()),
 		TTY:         commandHasTTY(cmd.InOrStdin()) && commandHasTTY(cmd.OutOrStdout()),
 		Remove:      true,
-		User:        fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
 	}
 	if err := executor.Run(cmd.Context(), request); err != nil {
 		return fmt.Errorf("run codex command: execute codex image-only request: %w", err)

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	dockeradapter "github.com/evanmschultz/valv/internal/adapters/docker"
+	codexruntime "github.com/evanmschultz/valv/internal/adapters/providers/codex"
 	sqliteadapter "github.com/evanmschultz/valv/internal/adapters/sqlite"
 	openaiapi "github.com/evanmschultz/valv/internal/api/openai"
 	"github.com/evanmschultz/valv/internal/domain"
@@ -47,8 +48,9 @@ func TestBuildRuntimeRequestOmitsWorkspaceByDefault(t *testing.T) {
 	project := domain.Project{Root: "/tmp/project"}
 	profile := domain.Profile{HomePath: "/tmp/profile"}
 	record := domain.RuntimeRecord{ContainerID: "valv-api-codex-nowork-123"}
+	prepared := preparedRuntimeForTests(project.Root)
 
-	request, err := service.buildRuntimeRequest(record, project, profile)
+	request, err := service.buildRuntimeRequest(record, project, profile, prepared)
 	if err != nil {
 		t.Fatalf("buildRuntimeRequest() error = %v", err)
 	}
@@ -58,11 +60,11 @@ func TestBuildRuntimeRequestOmitsWorkspaceByDefault(t *testing.T) {
 	if !request.Detached {
 		t.Fatal("Detached = false, want true")
 	}
-	if len(request.Mounts) != 2 {
-		t.Fatalf("mount count = %d, want 2", len(request.Mounts))
+	if len(request.Mounts) != 3 {
+		t.Fatalf("mount count = %d, want 3", len(request.Mounts))
 	}
-	if got := request.Env["CODEX_HOME"]; got != "/tmp/profile" {
-		t.Fatalf("CODEX_HOME = %q, want /tmp/profile", got)
+	if got := request.Env["CODEX_HOME"]; got != codexruntime.ContainerCodexDir {
+		t.Fatalf("CODEX_HOME = %q, want %q", got, codexruntime.ContainerCodexDir)
 	}
 	if got := request.Labels["io.valv.managed"]; got != "true" {
 		t.Fatalf("managed label = %q, want true", got)
@@ -82,16 +84,17 @@ func TestBuildRuntimeRequestIncludesWorkspaceWhenEnabled(t *testing.T) {
 	project := domain.Project{Root: "/tmp/project"}
 	profile := domain.Profile{HomePath: "/tmp/profile"}
 	record := domain.RuntimeRecord{ContainerID: "valv-api-codex-ws-123"}
+	prepared := preparedRuntimeForTests(project.Root)
 
-	request, err := service.buildRuntimeRequest(record, project, profile)
+	request, err := service.buildRuntimeRequest(record, project, profile, prepared)
 	if err != nil {
 		t.Fatalf("buildRuntimeRequest() error = %v", err)
 	}
 	if request.WorkingDir != "/tmp/project" {
 		t.Fatalf("WorkingDir = %q, want /tmp/project", request.WorkingDir)
 	}
-	if len(request.Mounts) != 3 {
-		t.Fatalf("mount count = %d, want 3", len(request.Mounts))
+	if len(request.Mounts) != 5 {
+		t.Fatalf("mount count = %d, want 5", len(request.Mounts))
 	}
 	if got := request.Labels["io.valv.workspace_access"]; got != "true" {
 		t.Fatalf("workspace_access label = %q, want true", got)
@@ -105,8 +108,9 @@ func TestBuildExecRequestOmitsWorkspaceByDefault(t *testing.T) {
 	project := domain.Project{Root: "/tmp/project"}
 	profile := domain.Profile{HomePath: "/tmp/profile"}
 	record := domain.RuntimeRecord{ContainerID: "valv-api-codex-nowork-123"}
+	prepared := preparedRuntimeForTests(project.Root)
 
-	request, err := service.buildExecRequest(openaiapi.Request{Model: "gpt-5.2", Messages: []openaiapi.Message{{Role: openaiapi.RoleUser, Content: "hello"}}}, record, project, profile, "/tmp/result", "/tmp/result/out.txt")
+	request, err := service.buildExecRequest(openaiapi.Request{Model: "gpt-5.2", Messages: []openaiapi.Message{{Role: openaiapi.RoleUser, Content: "hello"}}}, record, project, profile, "/tmp/result", "/tmp/result/out.txt", prepared)
 	if err != nil {
 		t.Fatalf("buildExecRequest() error = %v", err)
 	}
@@ -128,8 +132,9 @@ func TestBuildExecRequestIncludesWorkspaceWhenEnabled(t *testing.T) {
 	project := domain.Project{Root: "/tmp/project"}
 	profile := domain.Profile{HomePath: "/tmp/profile"}
 	record := domain.RuntimeRecord{ContainerID: "valv-api-codex-ws-123"}
+	prepared := preparedRuntimeForTests(project.Root)
 
-	request, err := service.buildExecRequest(openaiapi.Request{Model: "gpt-5.2", Messages: []openaiapi.Message{{Role: openaiapi.RoleUser, Content: "hello"}}}, record, project, profile, "/tmp/result", "/tmp/result/out.txt")
+	request, err := service.buildExecRequest(openaiapi.Request{Model: "gpt-5.2", Messages: []openaiapi.Message{{Role: openaiapi.RoleUser, Content: "hello"}}}, record, project, profile, "/tmp/result", "/tmp/result/out.txt", prepared)
 	if err != nil {
 		t.Fatalf("buildExecRequest() error = %v", err)
 	}
@@ -138,6 +143,22 @@ func TestBuildExecRequestIncludesWorkspaceWhenEnabled(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(request.Args, " "), "--cd /tmp/project") {
 		t.Fatalf("args missing project cd: %#v", request.Args)
+	}
+}
+
+func preparedRuntimeForTests(projectRoot string) codexruntime.PreparedRuntime {
+	return codexruntime.PreparedRuntime{
+		Env: map[string]string{
+			"CODEX_HOME": codexruntime.ContainerCodexDir,
+			"HOME":       codexruntime.ContainerHomeDir,
+			"LOGNAME":    "valv",
+			"USER":       "valv",
+		},
+		Mounts: []dockeradapter.MountSpec{
+			dockeradapter.NewMountSpec("/tmp/profile", codexruntime.ContainerCodexDir, false),
+			dockeradapter.NewMountSpec("/tmp/profile-overlay.toml", filepath.Join(codexruntime.ContainerCodexDir, "config.toml"), true),
+			dockeradapter.NewMountSpec("/tmp/project-overlay.toml", filepath.Join(projectRoot, ".codex", "config.toml"), true),
+		},
 	}
 }
 

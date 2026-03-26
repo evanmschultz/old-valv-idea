@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/log"
 
 	"github.com/evanmschultz/valv/internal/adapters/docker"
+	codexruntime "github.com/evanmschultz/valv/internal/adapters/providers/codex"
 	"github.com/evanmschultz/valv/internal/domain"
 	projectdetect "github.com/evanmschultz/valv/internal/project"
 )
@@ -121,12 +122,12 @@ func TestRunBuildsDockerRequestFromProjectBindingAndProfile(t *testing.T) {
 		Detect: func(start string) (projectdetect.Result, error) {
 			return projectdetect.Result{Root: project.Root, HasGitMarker: true}, nil
 		},
-		Image:  docker.NewImageRef("valv-codex", "dev"),
-		User:   "501:20",
-		TTY:    true,
-		Stdin:  true,
-		Now:    func() time.Time { return time.Unix(0, 123456789) },
-		Logger: log.NewWithOptions(io.Discard, log.Options{Level: log.DebugLevel}),
+		Image:    docker.NewImageRef("valv-codex", "dev"),
+		TTY:      true,
+		Stdin:    true,
+		TempRoot: t.TempDir(),
+		Now:      func() time.Time { return time.Unix(0, 123456789) },
+		Logger:   log.NewWithOptions(io.Discard, log.Options{Level: log.DebugLevel}),
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -146,14 +147,17 @@ func TestRunBuildsDockerRequestFromProjectBindingAndProfile(t *testing.T) {
 	if executor.got.Image.String() != "valv-codex:dev" {
 		t.Fatalf("Run() image = %q", executor.got.Image.String())
 	}
-	if executor.got.User != "501:20" {
-		t.Fatalf("Run() user = %q", executor.got.User)
+	if executor.got.User != "" {
+		t.Fatalf("Run() user = %q, want empty to use the image default user", executor.got.User)
 	}
 	if !executor.got.Interactive || !executor.got.TTY || !executor.got.Remove {
 		t.Fatalf("Run() interactive flags = %+v", executor.got)
 	}
-	if got := executor.got.Env["CODEX_HOME"]; got != profile.HomePath {
-		t.Fatalf("Run() CODEX_HOME = %q, want %q", got, profile.HomePath)
+	if got := executor.got.Env["CODEX_HOME"]; got != codexruntime.ContainerCodexDir {
+		t.Fatalf("Run() CODEX_HOME = %q, want %q", got, codexruntime.ContainerCodexDir)
+	}
+	if got := executor.got.Env["HOME"]; got != codexruntime.ContainerHomeDir {
+		t.Fatalf("Run() HOME = %q, want %q", got, codexruntime.ContainerHomeDir)
 	}
 	if got := executor.got.Labels["io.valv.managed"]; got != "true" {
 		t.Fatalf("Run() managed label = %q, want true", got)
@@ -173,7 +177,7 @@ func TestRunBuildsDockerRequestFromProjectBindingAndProfile(t *testing.T) {
 	if executor.got.Mounts[0] != docker.NewMountSpec(project.Root, project.Root, false) {
 		t.Fatalf("Run() project mount = %+v", executor.got.Mounts[0])
 	}
-	if executor.got.Mounts[1] != docker.NewMountSpec(profile.HomePath, profile.HomePath, false) {
+	if executor.got.Mounts[1] != docker.NewMountSpec(profile.HomePath, codexruntime.ContainerCodexDir, false) {
 		t.Fatalf("Run() profile mount = %+v", executor.got.Mounts[1])
 	}
 	for index, arg := range args {
@@ -198,7 +202,8 @@ func TestRunBubblesExecutorErrors(t *testing.T) {
 		Detect: func(start string) (projectdetect.Result, error) {
 			return projectdetect.Result{Root: project.Root}, nil
 		},
-		Image: docker.NewImageRef("valv-codex", "dev"),
+		Image:    docker.NewImageRef("valv-codex", "dev"),
+		TempRoot: t.TempDir(),
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -225,7 +230,8 @@ func TestRunBuildsNonInteractiveDockerRequestWhenTTYDisabled(t *testing.T) {
 		Detect: func(start string) (projectdetect.Result, error) {
 			return projectdetect.Result{Root: project.Root}, nil
 		},
-		Image: docker.NewImageRef("valv-codex", "dev"),
+		Image:    docker.NewImageRef("valv-codex", "dev"),
+		TempRoot: t.TempDir(),
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -253,7 +259,8 @@ func TestRunRejectsWorkingDirectoryOutsideProjectRoot(t *testing.T) {
 		Detect: func(start string) (projectdetect.Result, error) {
 			return projectdetect.Result{Root: project.Root}, nil
 		},
-		Image: docker.NewImageRef("valv-codex", "dev"),
+		Image:    docker.NewImageRef("valv-codex", "dev"),
+		TempRoot: t.TempDir(),
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -279,7 +286,8 @@ func TestRunRejectsSiblingPathThatSharesProjectPrefix(t *testing.T) {
 		Detect: func(start string) (projectdetect.Result, error) {
 			return projectdetect.Result{Root: project.Root}, nil
 		},
-		Image: docker.NewImageRef("valv-codex", "dev"),
+		Image:    docker.NewImageRef("valv-codex", "dev"),
+		TempRoot: t.TempDir(),
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)

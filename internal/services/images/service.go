@@ -27,6 +27,8 @@ type Options struct {
 	ContextDir string
 	Dockerfile string
 	DefaultTag string
+	UserID     int
+	GroupID    int
 	Logger     *log.Logger
 }
 
@@ -36,6 +38,8 @@ type Service struct {
 	contextDir string
 	dockerfile string
 	defaultTag string
+	userID     int
+	groupID    int
 	logger     *log.Logger
 }
 
@@ -79,6 +83,14 @@ func New(options Options) (Service, error) {
 	if defaultTag == "" {
 		defaultTag = "dev"
 	}
+	userID := options.UserID
+	if userID == 0 {
+		userID = os.Getuid()
+	}
+	groupID := options.GroupID
+	if groupID == 0 {
+		groupID = os.Getgid()
+	}
 
 	return Service{
 		runner:     options.Runner,
@@ -86,6 +98,8 @@ func New(options Options) (Service, error) {
 		contextDir: strings.TrimSpace(options.ContextDir),
 		dockerfile: dockerfile,
 		defaultTag: defaultTag,
+		userID:     userID,
+		groupID:    groupID,
 		logger:     options.Logger,
 	}, nil
 }
@@ -111,6 +125,8 @@ func (s Service) Build(ctx context.Context, request BuildRequest) (BuildResult, 
 		Builder:    "auto",
 		BuildArgs: map[string]string{
 			"CODEX_VERSION": version,
+			"VALV_GID":      fmt.Sprintf("%d", s.groupID),
+			"VALV_UID":      fmt.Sprintf("%d", s.userID),
 		},
 		Labels: map[string]string{
 			"io.valv.managed":  "true",
@@ -194,17 +210,29 @@ func DefaultCodexDockerfile() string {
 	return strings.TrimSpace(`
 FROM node:22-bookworm-slim
 
+ARG VALV_UID=1000
+ARG VALV_GID=1000
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates git \
     && rm -rf /var/lib/apt/lists/*
 
+RUN groupadd -g "${VALV_GID}" valv \
+    && useradd -m -u "${VALV_UID}" -g "${VALV_GID}" -s /bin/sh valv \
+    && mkdir -p /home/valv/.codex /workspace \
+    && chown -R valv:valv /home/valv /workspace
+
 ENV NPM_CONFIG_UPDATE_NOTIFIER=false \
     NPM_CONFIG_FUND=false \
-    NPM_CONFIG_AUDIT=false
+    NPM_CONFIG_AUDIT=false \
+    HOME=/home/valv \
+    LOGNAME=valv \
+    USER=valv
 
 ARG CODEX_VERSION
 RUN npm install --global "@openai/codex@${CODEX_VERSION}"
 
+USER valv
 WORKDIR /workspace
 ENTRYPOINT ["codex"]
 `) + "\n"

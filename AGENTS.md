@@ -131,6 +131,41 @@ For every user-visible Bubble Tea surface:
 - use `github.com/charmbracelet/x/exp/teatest/v2`
 - keep golden regression coverage for the final rendered view where that view's layout/styling matters
 - add or update golden fixtures whenever a TUI layout or style change is intentional
+- user-visible Bubble Tea goldens only cover Valv-owned screens; attached external CLIs like Codex also need terminal-integration coverage that exercises the real subprocess path
+- keep `Justfile` recipes for TUI regression coverage aligned with the actual test packages; do not claim a golden test workflow that the repo cannot run
+
+## 9.1) Containerized Codex Runtime Rules
+
+For interactive `valv codex` runs:
+
+- do not run Codex inside a Valv Bubble Tea wrapper
+- launch Codex as an attached subprocess through Docker with the real terminal attached
+- ensure the container has a coherent in-container user and `HOME`; do not rely on the host absolute profile path doubling as the Linux home directory
+- preserve Codex auth/session/memory by mounting the selected Valv profile home, but normalize the in-container mount target so the CLI behaves like a normal Linux home layout
+- if Valv generates container-only config overlays, keep auth/session files durable while making the runtime config container-safe
+
+## 9.2) MCP Translation Rules
+
+Host Codex config cannot be reused blindly inside Linux containers.
+
+Required behavior for containerized Codex runs:
+
+- inspect the selected profile-level Codex config plus project-level Codex config when present
+- generate a container-safe runtime overlay instead of executing host-only MCP entries unchanged
+- translate host-loopback MCP URLs such as `127.0.0.1` and `localhost` to `host.docker.internal` where the target is intended to be the macOS host
+- do not hardcode user-specific MCP server names or paths
+- treat stdio MCP entries generically:
+  - if the command exists inside the image, it may run in-container
+  - if it depends on a host-only path or host-only binary, expose it through a Valv-managed host bridge instead of trying to execute the macOS binary inside Linux
+- preserve project-level precedence over profile-level MCP entries when merging overlays
+
+## 9.3) Auth UX Rules
+
+For containerized interactive Codex auth:
+
+- support the device-code flow cleanly for isolated container profiles
+- do not assume browser localhost callbacks will work from inside Docker without explicit port publishing/relay support
+- keep help text and error guidance explicit about which auth flows are expected to work in disposable containerized profiles versus host-bound `~/.codex` reuse
 
 CLI alias policy:
 

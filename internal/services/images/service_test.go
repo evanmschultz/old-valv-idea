@@ -31,12 +31,16 @@ func TestServiceBuildAddsVersionAndUsesDefaultImageInfo(t *testing.T) {
 	t.Parallel()
 
 	runner := &runnerRecorder{}
+	uid := os.Getuid()
+	gid := os.Getgid()
 	svc, err := New(Options{
 		Runner:     runner,
 		Repository: "ghcr.io/valv/codex",
 		ContextDir: "/tmp/codex-image",
 		Dockerfile: "Dockerfile",
 		DefaultTag: "dev",
+		UserID:     uid,
+		GroupID:    gid,
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -53,7 +57,7 @@ func TestServiceBuildAddsVersionAndUsesDefaultImageInfo(t *testing.T) {
 	if len(runner.calls) != 1 {
 		t.Fatalf("runner call count = %d, want 1", len(runner.calls))
 	}
-	want := []string{"buildx", "build", "--load", "-f", "/tmp/codex-image/Dockerfile", "-t", "ghcr.io/valv/codex:dev", "--build-arg", "CODEX_VERSION=0.116.0", "--label", "io.valv.managed=true", "--label", "io.valv.provider=codex", "--label", "io.valv.scope=image", "--label", "io.valv.version=0.116.0", "/tmp/codex-image"}
+	want := []string{"buildx", "build", "--load", "-f", "/tmp/codex-image/Dockerfile", "-t", "ghcr.io/valv/codex:dev", "--build-arg", "CODEX_VERSION=0.116.0", "--build-arg", fmt.Sprintf("VALV_GID=%d", gid), "--build-arg", fmt.Sprintf("VALV_UID=%d", uid), "--label", "io.valv.managed=true", "--label", "io.valv.provider=codex", "--label", "io.valv.scope=image", "--label", "io.valv.version=0.116.0", "/tmp/codex-image"}
 	if !reflect.DeepEqual(runner.calls[0], want) {
 		t.Fatalf("Build() args = %#v, want %#v", runner.calls[0], want)
 	}
@@ -139,7 +143,9 @@ func TestBuildIncludesExtraTags(t *testing.T) {
 	t.Parallel()
 
 	runner := &runnerRecorder{}
-	svc, err := New(Options{Runner: runner, Repository: "ghcr.io/valv/codex", ContextDir: "/tmp/codex-image"})
+	uid := os.Getuid()
+	gid := os.Getgid()
+	svc, err := New(Options{Runner: runner, Repository: "ghcr.io/valv/codex", ContextDir: "/tmp/codex-image", UserID: uid, GroupID: gid})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -156,7 +162,7 @@ func TestBuildIncludesExtraTags(t *testing.T) {
 	if len(result.Tags) != 2 {
 		t.Fatalf("result tags len = %d, want 2", len(result.Tags))
 	}
-	if !reflect.DeepEqual(runner.calls[0], []string{"buildx", "build", "--load", "-f", "/tmp/codex-image/Dockerfile", "-t", "ghcr.io/valv/codex:dev", "-t", "ghcr.io/valv/codex:0-116-0", "--build-arg", "CODEX_VERSION=0.116.0", "--label", "io.valv.managed=true", "--label", "io.valv.provider=codex", "--label", "io.valv.scope=image", "--label", "io.valv.version=0.116.0", "/tmp/codex-image"}) {
+	if !reflect.DeepEqual(runner.calls[0], []string{"buildx", "build", "--load", "-f", "/tmp/codex-image/Dockerfile", "-t", "ghcr.io/valv/codex:dev", "-t", "ghcr.io/valv/codex:0-116-0", "--build-arg", "CODEX_VERSION=0.116.0", "--build-arg", fmt.Sprintf("VALV_GID=%d", gid), "--build-arg", fmt.Sprintf("VALV_UID=%d", uid), "--label", "io.valv.managed=true", "--label", "io.valv.provider=codex", "--label", "io.valv.scope=image", "--label", "io.valv.version=0.116.0", "/tmp/codex-image"}) {
 		t.Fatalf("Build() args = %#v", runner.calls[0])
 	}
 }
@@ -164,9 +170,12 @@ func TestBuildIncludesExtraTags(t *testing.T) {
 func TestServiceBuildFallsBackToLegacyBuildWhenBuildxUnavailable(t *testing.T) {
 	t.Parallel()
 
+	uid := os.Getuid()
+	gid := os.Getgid()
+	firstCall := strings.Join([]string{"buildx", "build", "--load", "-f", "/tmp/codex-image/Dockerfile", "-t", "ghcr.io/valv/codex:dev", "--build-arg", "CODEX_VERSION=0.116.0", "--build-arg", fmt.Sprintf("VALV_GID=%d", gid), "--build-arg", fmt.Sprintf("VALV_UID=%d", uid), "--label", "io.valv.managed=true", "--label", "io.valv.provider=codex", "--label", "io.valv.scope=image", "--label", "io.valv.version=0.116.0", "/tmp/codex-image"}, " ")
 	runner := &runnerRecorder{
 		errs: map[string]error{
-			"buildx build --load -f /tmp/codex-image/Dockerfile -t ghcr.io/valv/codex:dev --build-arg CODEX_VERSION=0.116.0 --label io.valv.managed=true --label io.valv.provider=codex --label io.valv.scope=image --label io.valv.version=0.116.0 /tmp/codex-image": fmt.Errorf("docker buildx is required but unavailable"),
+			firstCall: fmt.Errorf("docker buildx is required but unavailable"),
 		},
 	}
 	svc, err := New(Options{
@@ -175,6 +184,8 @@ func TestServiceBuildFallsBackToLegacyBuildWhenBuildxUnavailable(t *testing.T) {
 		ContextDir: "/tmp/codex-image",
 		Dockerfile: "Dockerfile",
 		DefaultTag: "dev",
+		UserID:     uid,
+		GroupID:    gid,
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -187,7 +198,7 @@ func TestServiceBuildFallsBackToLegacyBuildWhenBuildxUnavailable(t *testing.T) {
 	if len(runner.calls) != 2 {
 		t.Fatalf("runner call count = %d, want 2", len(runner.calls))
 	}
-	if got, want := runner.calls[1], []string{"build", "-f", "/tmp/codex-image/Dockerfile", "-t", "ghcr.io/valv/codex:dev", "--build-arg", "CODEX_VERSION=0.116.0", "--label", "io.valv.managed=true", "--label", "io.valv.provider=codex", "--label", "io.valv.scope=image", "--label", "io.valv.version=0.116.0", "/tmp/codex-image"}; !reflect.DeepEqual(got, want) {
+	if got, want := runner.calls[1], []string{"build", "-f", "/tmp/codex-image/Dockerfile", "-t", "ghcr.io/valv/codex:dev", "--build-arg", "CODEX_VERSION=0.116.0", "--build-arg", fmt.Sprintf("VALV_GID=%d", gid), "--build-arg", fmt.Sprintf("VALV_UID=%d", uid), "--label", "io.valv.managed=true", "--label", "io.valv.provider=codex", "--label", "io.valv.scope=image", "--label", "io.valv.version=0.116.0", "/tmp/codex-image"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("fallback args = %#v, want %#v", got, want)
 	}
 }

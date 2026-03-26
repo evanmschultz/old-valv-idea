@@ -85,8 +85,14 @@ fmt-check:
 test:
   @GOFLAGS="${GOFLAGS:+$GOFLAGS }-buildvcs=false" go test -count=1 ./...
 
+test-golden:
+  @GOFLAGS="${GOFLAGS:+$GOFLAGS }-buildvcs=false" go test -count=1 ./internal/tui/manage
+
+test-golden-update:
+  @GOFLAGS="${GOFLAGS:+$GOFLAGS }-buildvcs=false" go test -count=1 ./internal/tui/manage -args -update
+
 integration:
-  @GOFLAGS="${GOFLAGS:+$GOFLAGS }-buildvcs=false" go test -tags=integration -count=1 -run '^TestCodexCommandRunsFixtureImageEndToEnd$' ./internal/cli
+  @GOFLAGS="${GOFLAGS:+$GOFLAGS }-buildvcs=false" go test -tags=integration -count=1 ./internal/cli
 
 race:
   @GOFLAGS="${GOFLAGS:+$GOFLAGS }-buildvcs=false" go test -race -count=1 ./...
@@ -106,6 +112,6 @@ coverage:
     } \
     END {exit bad}' "$tmp"
 
-check: verify-bootstrap fmt-check test race coverage
+check: verify-bootstrap fmt-check test-golden test race coverage
 
 ci: check

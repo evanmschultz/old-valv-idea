@@ -5,20 +5,23 @@ result_dir="$PWD/.valv-fixture"
 mkdir -p "$result_dir"
 result_file="$result_dir/codex-run.txt"
 all_args="$*"
+stdin_tty="false"
+stdout_tty="false"
+
+if [ -t 0 ]; then
+  stdin_tty="true"
+fi
+if [ -t 1 ]; then
+  stdout_tty="true"
+fi
 
 {
   printf 'pwd=%s\n' "$(pwd)"
   printf 'codex_home=%s\n' "${CODEX_HOME:-}"
-  if [ -t 0 ]; then
-    printf 'stdin_tty=true\n'
-  else
-    printf 'stdin_tty=false\n'
-  fi
-  if [ -t 1 ]; then
-    printf 'stdout_tty=true\n'
-  else
-    printf 'stdout_tty=false\n'
-  fi
+  printf 'home=%s\n' "${HOME:-}"
+  printf 'user=%s\n' "${USER:-}"
+  printf 'stdin_tty=%s\n' "$stdin_tty"
+  printf 'stdout_tty=%s\n' "$stdout_tty"
   printf 'arg_count=%s\n' "$#"
   index=0
   for arg in "$@"; do

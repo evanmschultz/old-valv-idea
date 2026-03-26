@@ -74,6 +74,8 @@ func newImagesService(cmd *cobra.Command, paths config.Paths) (imagesservice.Ser
 		ContextDir: contextDir,
 		Dockerfile: "Dockerfile",
 		DefaultTag: codexImageTag(),
+		UserID:     os.Getuid(),
+		GroupID:    os.Getgid(),
 		Logger:     LoggerFromContext(cmd.Context()),
 	})
 }
@@ -94,7 +96,6 @@ func newOpenAIAPIService(cmd *cobra.Command, paths config.Paths, projectPath str
 		Store:           store,
 		Executor:        dockeradapter.NewExecutor(dockeradapter.NewQuietRunner("docker", LoggerFromContext(cmd.Context()))),
 		Image:           codexImageRef(),
-		User:            fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
 		TempRoot:        paths.TempCacheDir,
 		StartPath:       projectPath,
 		WorkspaceAccess: workspaceAccess,

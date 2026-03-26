@@ -285,7 +285,13 @@ Current validation follow-ups to preserve:
 - mounted host Codex homes can preserve auth and resume state, but host-oriented MCP config cannot be reused blindly inside Linux containers
 - containerized Codex needs a Valv-managed MCP overlay or translation layer for host-specific entries such as macOS absolute binary paths and host-loopback URLs
 - host-loopback MCP URLs used from inside Docker Desktop containers should be translated to `host.docker.internal` where appropriate
-- local stdio MCP tools that should work in containerized Codex sessions need Linux-native installation inside the image, or a network-accessible host bridge instead of direct reuse of macOS binaries
+- local stdio MCP tools must not be hardcoded provider-by-provider; Valv should classify them generically and either run them in-container when the command is available there, or expose them through a Valv-managed host bridge when they depend on host-only binaries or absolute host paths
+- containerized interactive Codex needs a coherent in-container user and `HOME`; do not rely on the host absolute profile path doubling as the Linux home directory
+- the selected profile home should remain the durable Codex state source, but Valv should mount it into a normalized in-container home path and generate a container-safe config overlay for each run
+- container-safe overlays should merge profile-level and project-level Codex config with project-level precedence
+- attached interactive Codex runs need terminal-integration coverage in addition to Bubble Tea golden tests, because TeaTest only covers Valv-owned TUI screens and cannot prove the attached `docker run` TTY behavior
+- the repo must expose explicit local recipes for golden/TUI regression coverage rather than relying on ad hoc package test commands
+- containerized auth UX should prefer device-code login for isolated profiles unless Valv explicitly publishes or relays the localhost callback port used by browser-based login
 
 ## Account Switching Research
 

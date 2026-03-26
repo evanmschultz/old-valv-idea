@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -12,6 +14,7 @@ import (
 	"github.com/charmbracelet/log"
 
 	"github.com/evanmschultz/valv/internal/adapters/docker"
+	codexruntime "github.com/evanmschultz/valv/internal/adapters/providers/codex"
 	"github.com/evanmschultz/valv/internal/domain"
 	"github.com/evanmschultz/valv/internal/pathutil"
 	projectdetect "github.com/evanmschultz/valv/internal/project"
@@ -37,8 +40,10 @@ type Options struct {
 	User     string
 	TTY      bool
 	Stdin    bool
+	TempRoot string
 	Now      func() time.Time
 	Logger   *log.Logger
+	Notices  io.Writer
 }
 
 type Service struct {
@@ -49,8 +54,10 @@ type Service struct {
 	user     string
 	tty      bool
 	stdin    bool
+	tempRoot string
 	now      func() time.Time
 	logger   *log.Logger
+	notices  io.Writer
 }
 
 func New(options Options) (Service, error) {
@@ -72,6 +79,10 @@ func New(options Options) (Service, error) {
 	if now == nil {
 		now = func() time.Time { return time.Now().UTC() }
 	}
+	tempRoot := strings.TrimSpace(options.TempRoot)
+	if tempRoot == "" {
+		tempRoot = os.TempDir()
+	}
 
 	return Service{
 		store:    options.Store,
@@ -81,8 +92,10 @@ func New(options Options) (Service, error) {
 		user:     strings.TrimSpace(options.User),
 		tty:      options.TTY,
 		stdin:    options.Stdin,
+		tempRoot: tempRoot,
 		now:      now,
 		logger:   options.Logger,
+		notices:  options.Notices,
 	}, nil
 }
 
@@ -128,7 +141,19 @@ func (s Service) Run(ctx context.Context, cwd string, codexArgs []string) error 
 		return fmt.Errorf("run codex launch service: profile provider %q: expected %q", profile.Provider, domain.ProviderCodex)
 	}
 
-	request, err := s.buildRequest(workingDir, projectRecord, profile, codexArgs)
+	prepared, err := codexruntime.PrepareRuntime(ctx, codexruntime.PrepareRequest{
+		ProfileHome: profile.HomePath,
+		ProjectRoot: projectRecord.Root,
+		TempRoot:    s.tempRoot,
+		Logger:      s.logger,
+	})
+	if err != nil {
+		return fmt.Errorf("run codex launch service: prepare runtime: %w", err)
+	}
+	defer prepared.Close()
+	s.emitNotices(prepared.Warnings, codexArgs)
+
+	request, err := s.buildRequest(workingDir, projectRecord, profile, prepared, codexArgs)
 	if err != nil {
 		return fmt.Errorf("run codex launch service: build docker request: %w", err)
 	}
@@ -140,7 +165,7 @@ func (s Service) Run(ctx context.Context, cwd string, codexArgs []string) error 
 	return nil
 }
 
-func (s Service) buildRequest(workingDir string, project domain.Project, profile domain.Profile, codexArgs []string) (docker.ContainerRunRequest, error) {
+func (s Service) buildRequest(workingDir string, project domain.Project, profile domain.Profile, prepared codexruntime.PreparedRuntime, codexArgs []string) (docker.ContainerRunRequest, error) {
 	withinRoot, err := withinProjectRoot(project.Root, workingDir)
 	if err != nil {
 		return docker.ContainerRunRequest{}, err
@@ -153,9 +178,7 @@ func (s Service) buildRequest(workingDir string, project domain.Project, profile
 		Name:       s.containerName(project),
 		Image:      s.image,
 		WorkingDir: workingDir,
-		Env: map[string]string{
-			"CODEX_HOME": profile.HomePath,
-		},
+		Env:        prepared.Env,
 		Labels: map[string]string{
 			"io.valv.managed":    "true",
 			"io.valv.provider":   "codex",
@@ -163,10 +186,7 @@ func (s Service) buildRequest(workingDir string, project domain.Project, profile
 			"io.valv.project_id": project.ID,
 			"io.valv.profile_id": profile.ID,
 		},
-		Mounts: []docker.MountSpec{
-			docker.NewMountSpec(project.Root, project.Root, false),
-			docker.NewMountSpec(profile.HomePath, profile.HomePath, false),
-		},
+		Mounts:      append([]docker.MountSpec{docker.NewMountSpec(project.Root, project.Root, false)}, prepared.Mounts...),
 		Args:        append([]string(nil), codexArgs...),
 		Interactive: s.stdin,
 		TTY:         s.tty,
@@ -195,6 +215,18 @@ func (s Service) debug(msg string, keyvals ...any) {
 		return
 	}
 	s.logger.Debug(msg, keyvals...)
+}
+
+func (s Service) emitNotices(warnings, codexArgs []string) {
+	if s.notices != nil && (len(codexArgs) == 0 || codexArgs[0] == "login") {
+		_, _ = fmt.Fprintln(s.notices, "Containerized Codex auth: if browser sign-in redirects to localhost and stalls, press Esc and choose Device Code.")
+	}
+	if s.notices == nil {
+		return
+	}
+	for _, warning := range warnings {
+		_, _ = fmt.Fprintf(s.notices, "Valv MCP note: %s\n", warning)
+	}
 }
 
 func (s Service) containerName(project domain.Project) string {

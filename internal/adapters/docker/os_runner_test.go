@@ -8,6 +8,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/creack/pty/v2"
 )
 
 func TestSystemRunnerRun(t *testing.T) {
@@ -79,5 +81,24 @@ func TestQuietRunnerReturnsHelpfulBuildxFailure(t *testing.T) {
 	err := runner.Run(context.Background(), []string{"buildx", "version"})
 	if err == nil || !strings.Contains(err.Error(), "docker buildx is required but unavailable") {
 		t.Fatalf("Run() error = %v, want buildx guidance", err)
+	}
+}
+
+func TestSharedTTYFileDetectsSharedPTY(t *testing.T) {
+	t.Parallel()
+
+	master, slave, err := pty.Open()
+	if err != nil {
+		t.Fatalf("pty.Open() error = %v", err)
+	}
+	defer master.Close()
+	defer slave.Close()
+
+	file, ok := sharedTTYFile(slave, slave, slave)
+	if !ok {
+		t.Fatal("sharedTTYFile() = not ok, want shared PTY detection")
+	}
+	if file != slave {
+		t.Fatalf("sharedTTYFile() file = %v, want slave", file)
 	}
 }
