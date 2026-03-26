@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/charmbracelet/x/term"
@@ -15,6 +16,8 @@ import (
 )
 
 type codexRunFunc func(*cobra.Command, []string) error
+
+var findDockerBinary = exec.LookPath
 
 func newCodexCommand(paths config.Paths, run codexRunFunc) *cobra.Command {
 	if run == nil {
@@ -84,6 +87,9 @@ func runCodexCommand(cmd *cobra.Command, paths config.Paths, args []string) erro
 func ensureCodexImageAvailable(ctx context.Context, runner interface {
 	Run(context.Context, []string) error
 }, image dockeradapter.ImageRef) error {
+	if _, err := findDockerBinary("docker"); err != nil {
+		return nil
+	}
 	if err := runner.Run(ctx, []string{"image", "inspect", image.String()}); err != nil {
 		if dockerImageMissingError(err) {
 			return fmt.Errorf("codex image %q is not built locally; run `valv manage update` first", image.String())

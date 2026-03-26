@@ -116,7 +116,9 @@ func TestCodexImageRefParsesOverrideWithTag(t *testing.T) {
 }
 
 func TestEnsureCodexImageAvailableReturnsActionableMessageWhenMissing(t *testing.T) {
-	t.Parallel()
+	oldFindDockerBinary := findDockerBinary
+	findDockerBinary = func(string) (string, error) { return "/usr/bin/docker", nil }
+	t.Cleanup(func() { findDockerBinary = oldFindDockerBinary })
 
 	err := ensureCodexImageAvailable(context.Background(), stubDockerRunner{
 		err: errors.New("run docker image inspect valv-codex-dev:dev: exit status 1: Error response from daemon: No such image: valv-codex-dev:dev"),
@@ -132,7 +134,9 @@ func TestEnsureCodexImageAvailableReturnsActionableMessageWhenMissing(t *testing
 }
 
 func TestEnsureCodexImageAvailableWrapsUnexpectedInspectErrors(t *testing.T) {
-	t.Parallel()
+	oldFindDockerBinary := findDockerBinary
+	findDockerBinary = func(string) (string, error) { return "/usr/bin/docker", nil }
+	t.Cleanup(func() { findDockerBinary = oldFindDockerBinary })
 
 	err := ensureCodexImageAvailable(context.Background(), stubDockerRunner{
 		err: errors.New("run docker image inspect valv-codex:dev: permission denied"),
@@ -144,6 +148,18 @@ func TestEnsureCodexImageAvailableWrapsUnexpectedInspectErrors(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("ensureCodexImageAvailable() error = %q, want substring %q", err.Error(), want)
 		}
+	}
+}
+
+func TestEnsureCodexImageAvailableSkipsWhenDockerIsUnavailable(t *testing.T) {
+	oldFindDockerBinary := findDockerBinary
+	findDockerBinary = func(string) (string, error) { return "", errors.New("not found") }
+	t.Cleanup(func() { findDockerBinary = oldFindDockerBinary })
+
+	if err := ensureCodexImageAvailable(context.Background(), stubDockerRunner{
+		err: errors.New("should not be called"),
+	}, dockeradapter.NewImageRef("valv-codex", "dev")); err != nil {
+		t.Fatalf("ensureCodexImageAvailable() error = %v, want nil when docker is unavailable", err)
 	}
 }
 
