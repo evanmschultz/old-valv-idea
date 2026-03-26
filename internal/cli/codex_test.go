@@ -115,6 +115,32 @@ func TestCodexImageRefParsesOverrideWithTag(t *testing.T) {
 	}
 }
 
+func TestCodexArgsSkipProjectBinding(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "empty", args: nil, want: false},
+		{name: "help flag", args: []string{"--help"}, want: true},
+		{name: "help subcommand", args: []string{"help"}, want: true},
+		{name: "nested help flag", args: []string{"resume", "--help"}, want: true},
+		{name: "version flag", args: []string{"--version"}, want: true},
+		{name: "interactive no args", args: []string{"resume", "session-123"}, want: false},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := codexArgsSkipProjectBinding(tc.args); got != tc.want {
+				t.Fatalf("codexArgsSkipProjectBinding(%v) = %t, want %t", tc.args, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestEnsureCodexImageAvailableReturnsActionableMessageWhenMissing(t *testing.T) {
 	oldFindDockerBinary := findDockerBinary
 	findDockerBinary = func(string) (string, error) { return "/usr/bin/docker", nil }

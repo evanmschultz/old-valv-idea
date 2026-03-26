@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/x/term"
 	"github.com/spf13/cobra"
@@ -50,6 +51,10 @@ valv codex exec "summarize the latest diff"
 }
 
 func runCodexCommand(cmd *cobra.Command, paths config.Paths, args []string) error {
+	if codexArgsSkipProjectBinding(args) {
+		return runCodexImageOnlyCommand(cmd, args)
+	}
+
 	store, err := openStore(paths)
 	if err != nil {
 		return fmt.Errorf("run codex command: %w", err)
@@ -82,6 +87,53 @@ func runCodexCommand(cmd *cobra.Command, paths config.Paths, args []string) erro
 		return fmt.Errorf("run codex command: %w", err)
 	}
 	return nil
+}
+
+func runCodexImageOnlyCommand(cmd *cobra.Command, args []string) error {
+	image := codexImageRef()
+	if err := ensureCodexImageAvailable(cmd.Context(), dockeradapter.NewQuietRunner("docker", LoggerFromContext(cmd.Context())), image); err != nil {
+		return fmt.Errorf("run codex command: %w", err)
+	}
+
+	executor := dockeradapter.NewExecutor(dockeradapter.NewSystemRunner("docker", cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr()))
+	request := dockeradapter.ContainerRunRequest{
+		Name:  fmt.Sprintf("valv-codex-info-%d", timeNowUnixNano()),
+		Image: image,
+		Labels: map[string]string{
+			"io.valv.managed":  "true",
+			"io.valv.provider": "codex",
+			"io.valv.scope":    "info",
+		},
+		Args:        append([]string(nil), args...),
+		Interactive: commandHasTTY(cmd.InOrStdin()),
+		TTY:         commandHasTTY(cmd.InOrStdin()) && commandHasTTY(cmd.OutOrStdout()),
+		Remove:      true,
+		User:        fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
+	}
+	if err := executor.Run(cmd.Context(), request); err != nil {
+		return fmt.Errorf("run codex command: execute codex image-only request: %w", err)
+	}
+	return nil
+}
+
+var timeNowUnixNano = func() int64 { return time.Now().UTC().UnixNano() }
+
+func codexArgsSkipProjectBinding(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	for _, arg := range args {
+		if arg == "--help" || arg == "-h" {
+			return true
+		}
+	}
+	if len(args) == 1 {
+		switch args[0] {
+		case "--version", "-V":
+			return true
+		}
+	}
+	return args[0] == "help"
 }
 
 func ensureCodexImageAvailable(ctx context.Context, runner interface {
