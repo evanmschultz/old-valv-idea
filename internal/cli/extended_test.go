@@ -57,6 +57,34 @@ func TestManageProfileListOutputsStoredProfiles(t *testing.T) {
 	}
 }
 
+func TestManageProfileListShowsEmptyState(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	output := runManage(t, paths, []string{"profile", "list", "codex"})
+	for _, want := range []string{"codex profiles", "(none)"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("unexpected empty profile list output %q missing %q", output, want)
+		}
+	}
+}
+
+func TestRunManageBindInteractiveShowsGuidanceWhenNoProfilesExist(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	cmd.SetIn(bytes.NewBuffer(nil))
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+
+	err := runManageBindInteractive(cmd, paths, &rootOptions{})
+	if err == nil || !strings.Contains(err.Error(), "run `valv manage profile add codex <name>` first") {
+		t.Fatalf("runManageBindInteractive() error = %v, want profile guidance", err)
+	}
+}
+
 func TestManageUpdateUsesFakeDockerAndWritesBuildContext(t *testing.T) {
 	paths := testCodexPaths(t)
 	logPath := installFakeDocker(t)
@@ -83,6 +111,31 @@ func TestManageUpdateUsesFakeDockerAndWritesBuildContext(t *testing.T) {
 
 	logContent := mustReadFile(t, logPath)
 	for _, want := range []string{"build", "--build-arg CODEX_VERSION=0.116.0", "-t valv-codex:dev", "-t valv-codex:0-116-0"} {
+		if !strings.Contains(logContent, want) {
+			t.Fatalf("unexpected docker log %q missing %q", logContent, want)
+		}
+	}
+}
+
+func TestManageUpdateUsesOverrideImageRepository(t *testing.T) {
+	paths := testCodexPaths(t)
+	logPath := installFakeDocker(t)
+	t.Setenv("VALV_CODEX_IMAGE", "valv-codex-dev:dev")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd := newManageCommand(paths, &rootOptions{})
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"update"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v\nstderr=%s", err, stderr.String())
+	}
+
+	logContent := mustReadFile(t, logPath)
+	for _, want := range []string{"-t valv-codex-dev:dev", "-t valv-codex-dev:0-116-0"} {
 		if !strings.Contains(logContent, want) {
 			t.Fatalf("unexpected docker log %q missing %q", logContent, want)
 		}

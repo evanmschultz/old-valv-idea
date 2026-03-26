@@ -58,3 +58,26 @@ func TestSystemRunnerHelperProcess(t *testing.T) {
 	}
 	os.Exit(0)
 }
+
+func TestQuietRunnerSuppressesSuccessOutput(t *testing.T) {
+	t.Parallel()
+
+	runner := NewQuietRunner(os.Args[0], nil)
+	runner.Env = []string{"GO_WANT_HELPER_PROCESS=1"}
+
+	if err := runner.Run(context.Background(), []string{"-test.run=TestSystemRunnerHelperProcess", "--", "hello", "world"}); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+}
+
+func TestQuietRunnerReturnsHelpfulBuildxFailure(t *testing.T) {
+	t.Parallel()
+
+	runner := NewQuietRunner(os.Args[0], nil)
+	runner.Env = []string{"GO_WANT_HELPER_PROCESS=1", "GO_HELPER_FAIL=1"}
+
+	err := runner.Run(context.Background(), []string{"buildx", "version"})
+	if err == nil || !strings.Contains(err.Error(), "docker buildx is required but unavailable") {
+		t.Fatalf("Run() error = %v, want buildx guidance", err)
+	}
+}

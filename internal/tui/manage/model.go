@@ -52,7 +52,7 @@ func NewWithItems(items []Item) Model {
 	menu.SetShowStatusBar(true)
 	menu.SetShowPagination(false)
 	menu.SetShowHelp(true)
-	menu.SetFilteringEnabled(true)
+	menu.SetFilteringEnabled(false)
 	menu.SetStatusBarItemName("action", "actions")
 
 	return Model{

@@ -104,21 +104,35 @@ func (s Service) Build(ctx context.Context, request BuildRequest) (BuildResult, 
 		tags = append(tags, extra)
 	}
 
-	args, err := docker.BuildImageArgs(docker.ImageBuildRequest{
+	buildRequest := docker.ImageBuildRequest{
 		ContextDir: s.contextDir,
 		Dockerfile: filepath.Join(s.contextDir, s.dockerfile),
 		Tags:       tags,
+		Builder:    "auto",
 		BuildArgs: map[string]string{
 			"CODEX_VERSION": version,
 		},
 		Pull:    request.Pull,
 		NoCache: request.NoCache,
-	})
+	}
+	args, err := docker.BuildImageArgs(buildRequest)
 	if err != nil {
 		return BuildResult{}, fmt.Errorf("build image: %w", err)
 	}
 	if err := s.runner.Run(ctx, args); err != nil {
-		return BuildResult{}, fmt.Errorf("build image: %w", err)
+		if isBuildxUnavailable(err) {
+			s.debug("docker buildx unavailable, falling back to legacy docker build", "context_dir", s.contextDir)
+			buildRequest.Builder = "legacy"
+			fallbackArgs, fallbackErr := docker.BuildImageArgs(buildRequest)
+			if fallbackErr != nil {
+				return BuildResult{}, fmt.Errorf("build image fallback: %w", fallbackErr)
+			}
+			if err := s.runner.Run(ctx, fallbackArgs); err != nil {
+				return BuildResult{}, fmt.Errorf("build image fallback: %w", err)
+			}
+		} else {
+			return BuildResult{}, fmt.Errorf("build image: %w", err)
+		}
 	}
 
 	result := BuildResult{
@@ -178,6 +192,10 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates git \
     && rm -rf /var/lib/apt/lists/*
 
+ENV NPM_CONFIG_UPDATE_NOTIFIER=false \
+    NPM_CONFIG_FUND=false \
+    NPM_CONFIG_AUDIT=false
+
 ARG CODEX_VERSION
 RUN npm install --global "@openai/codex@${CODEX_VERSION}"
 
@@ -191,4 +209,13 @@ func (s Service) debug(msg string, keyvals ...any) {
 		return
 	}
 	s.logger.Debug(msg, keyvals...)
+}
+
+func isBuildxUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "docker buildx is required but unavailable") ||
+		strings.Contains(message, "docker buildx is required")
 }

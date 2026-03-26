@@ -2,6 +2,7 @@ package images
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -13,10 +14,16 @@ import (
 
 type runnerRecorder struct {
 	calls [][]string
+	errs  map[string]error
 }
 
 func (r *runnerRecorder) Run(_ context.Context, args []string) error {
 	r.calls = append(r.calls, append([]string(nil), args...))
+	if r.errs != nil {
+		if err := r.errs[strings.Join(args, " ")]; err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -46,7 +53,7 @@ func TestServiceBuildAddsVersionAndUsesDefaultImageInfo(t *testing.T) {
 	if len(runner.calls) != 1 {
 		t.Fatalf("runner call count = %d, want 1", len(runner.calls))
 	}
-	want := []string{"build", "-f", "/tmp/codex-image/Dockerfile", "-t", "ghcr.io/valv/codex:dev", "--build-arg", "CODEX_VERSION=0.116.0", "/tmp/codex-image"}
+	want := []string{"buildx", "build", "--load", "-f", "/tmp/codex-image/Dockerfile", "-t", "ghcr.io/valv/codex:dev", "--build-arg", "CODEX_VERSION=0.116.0", "/tmp/codex-image"}
 	if !reflect.DeepEqual(runner.calls[0], want) {
 		t.Fatalf("Build() args = %#v, want %#v", runner.calls[0], want)
 	}
@@ -114,6 +121,15 @@ func TestWriteDefaultCodexContextWritesDockerfile(t *testing.T) {
 	if !strings.Contains(string(content), `@openai/codex@${CODEX_VERSION}`) {
 		t.Fatalf("dockerfile missing package install: %q", string(content))
 	}
+	for _, want := range []string{
+		"NPM_CONFIG_UPDATE_NOTIFIER=false",
+		"NPM_CONFIG_FUND=false",
+		"NPM_CONFIG_AUDIT=false",
+	} {
+		if !strings.Contains(string(content), want) {
+			t.Fatalf("dockerfile missing %q: %q", want, string(content))
+		}
+	}
 	if filepath.Base(dockerfilePath) != "Dockerfile" {
 		t.Fatalf("dockerfile base = %q, want Dockerfile", filepath.Base(dockerfilePath))
 	}
@@ -140,7 +156,38 @@ func TestBuildIncludesExtraTags(t *testing.T) {
 	if len(result.Tags) != 2 {
 		t.Fatalf("result tags len = %d, want 2", len(result.Tags))
 	}
-	if !reflect.DeepEqual(runner.calls[0], []string{"build", "-f", "/tmp/codex-image/Dockerfile", "-t", "ghcr.io/valv/codex:dev", "-t", "ghcr.io/valv/codex:0-116-0", "--build-arg", "CODEX_VERSION=0.116.0", "/tmp/codex-image"}) {
+	if !reflect.DeepEqual(runner.calls[0], []string{"buildx", "build", "--load", "-f", "/tmp/codex-image/Dockerfile", "-t", "ghcr.io/valv/codex:dev", "-t", "ghcr.io/valv/codex:0-116-0", "--build-arg", "CODEX_VERSION=0.116.0", "/tmp/codex-image"}) {
 		t.Fatalf("Build() args = %#v", runner.calls[0])
+	}
+}
+
+func TestServiceBuildFallsBackToLegacyBuildWhenBuildxUnavailable(t *testing.T) {
+	t.Parallel()
+
+	runner := &runnerRecorder{
+		errs: map[string]error{
+			"buildx build --load -f /tmp/codex-image/Dockerfile -t ghcr.io/valv/codex:dev --build-arg CODEX_VERSION=0.116.0 /tmp/codex-image": fmt.Errorf("docker buildx is required but unavailable"),
+		},
+	}
+	svc, err := New(Options{
+		Runner:     runner,
+		Repository: "ghcr.io/valv/codex",
+		ContextDir: "/tmp/codex-image",
+		Dockerfile: "Dockerfile",
+		DefaultTag: "dev",
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	_, err = svc.Build(context.Background(), BuildRequest{Version: "0.116.0"})
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if len(runner.calls) != 2 {
+		t.Fatalf("runner call count = %d, want 2", len(runner.calls))
+	}
+	if got, want := runner.calls[1], []string{"build", "-f", "/tmp/codex-image/Dockerfile", "-t", "ghcr.io/valv/codex:dev", "--build-arg", "CODEX_VERSION=0.116.0", "/tmp/codex-image"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("fallback args = %#v, want %#v", got, want)
 	}
 }

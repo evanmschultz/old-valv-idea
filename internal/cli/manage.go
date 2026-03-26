@@ -233,7 +233,7 @@ func runManageUpdate(cmd *cobra.Command, paths config.Paths, opts *rootOptions, 
 	if err != nil {
 		return fmt.Errorf("manage update: initialize image service: %w", err)
 	}
-	result, err := service.Update(cmd.Context(), imagesservice.UpdateRequest{BuildRequest: imagesservice.BuildRequest{Version: imagesservice.DefaultCodexVersion, ExtraTags: []dockeradapter.ImageRef{dockeradapter.NewImageRef("valv-codex", strings.ReplaceAll(imagesservice.DefaultCodexVersion, ".", "-"))}}})
+	result, err := service.Update(cmd.Context(), imagesservice.UpdateRequest{BuildRequest: imagesservice.BuildRequest{Version: imagesservice.DefaultCodexVersion, ExtraTags: []dockeradapter.ImageRef{codexImageVersionRef(imagesservice.DefaultCodexVersion)}}})
 	if err != nil {
 		return fmt.Errorf("manage update: %w", err)
 	}

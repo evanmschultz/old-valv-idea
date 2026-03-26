@@ -70,7 +70,7 @@ func ResolveMode(out io.Writer, policy Policy) Mode {
 
 func WriteRecord(out io.Writer, mode Mode, heading string, fields []Field) error {
 	if mode.Format == domain.OutputFormatJSON {
-		payload := map[string]any{"heading": heading}
+		payload := make(map[string]any, len(fields))
 		for _, field := range fields {
 			payload[strings.ReplaceAll(strings.ToLower(field.Label), " ", "_")] = field.Value
 		}
@@ -87,6 +87,9 @@ func WriteRecord(out io.Writer, mode Mode, heading string, fields []Field) error
 		if _, err := fmt.Fprintf(out, "%s\n", heading); err != nil {
 			return fmt.Errorf("write plain heading: %w", err)
 		}
+		if len(fields) == 0 {
+			return writeEmptyState(out, mode)
+		}
 		for _, field := range fields {
 			if _, err := fmt.Fprintf(out, "%s=%s\n", strings.ReplaceAll(strings.ToLower(field.Label), " ", "_"), field.Value); err != nil {
 				return fmt.Errorf("write plain field: %w", err)
@@ -99,6 +102,9 @@ func WriteRecord(out io.Writer, mode Mode, heading string, fields []Field) error
 	if _, err := fmt.Fprintln(out, theme.heading.Render(heading)); err != nil {
 		return fmt.Errorf("write human heading: %w", err)
 	}
+	if len(fields) == 0 {
+		return writeEmptyState(out, mode)
+	}
 	for _, field := range fields {
 		if _, err := fmt.Fprintf(out, "  %s %s\n", theme.label.Render(field.Label+":"), renderFieldValue(theme, field)); err != nil {
 			return fmt.Errorf("write human field: %w", err)
@@ -109,7 +115,11 @@ func WriteRecord(out io.Writer, mode Mode, heading string, fields []Field) error
 
 func WriteList(out io.Writer, mode Mode, heading string, items []ListItem) error {
 	if mode.Format == domain.OutputFormatJSON {
-		payload := map[string]any{"heading": heading, "items": items}
+		payload := struct {
+			Items []ListItem `json:"items"`
+		}{
+			Items: items,
+		}
 		encoder := json.NewEncoder(out)
 		encoder.SetEscapeHTML(false)
 		encoder.SetIndent("", "  ")
@@ -122,6 +132,9 @@ func WriteList(out io.Writer, mode Mode, heading string, items []ListItem) error
 	if mode.Format == domain.OutputFormatPlain {
 		if _, err := fmt.Fprintf(out, "%s\n", heading); err != nil {
 			return fmt.Errorf("write plain list heading: %w", err)
+		}
+		if len(items) == 0 {
+			return writeEmptyState(out, mode)
 		}
 		for _, item := range items {
 			if _, err := fmt.Fprintf(out, "- %s\n", item.Title); err != nil {
@@ -141,6 +154,9 @@ func WriteList(out io.Writer, mode Mode, heading string, items []ListItem) error
 	if _, err := fmt.Fprintln(out, theme.heading.Render(heading)); err != nil {
 		return fmt.Errorf("write human list heading: %w", err)
 	}
+	if len(items) == 0 {
+		return writeEmptyState(out, mode)
+	}
 	for _, item := range items {
 		title := item.Title
 		if strings.TrimSpace(item.Badge) != "" {
@@ -156,6 +172,24 @@ func WriteList(out io.Writer, mode Mode, heading string, items []ListItem) error
 		}
 	}
 	return nil
+}
+
+func writeEmptyState(out io.Writer, mode Mode) error {
+	switch mode.Format {
+	case domain.OutputFormatPlain:
+		if _, err := fmt.Fprintln(out, "  (none)"); err != nil {
+			return fmt.Errorf("write plain empty state: %w", err)
+		}
+		return nil
+	case domain.OutputFormatHuman:
+		theme := newTheme(mode)
+		if _, err := fmt.Fprintln(out, "  "+theme.muted.Render("(none)")); err != nil {
+			return fmt.Errorf("write human empty state: %w", err)
+		}
+		return nil
+	default:
+		return nil
+	}
 }
 
 type theme struct {

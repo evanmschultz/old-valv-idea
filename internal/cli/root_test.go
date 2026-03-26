@@ -51,6 +51,66 @@ func TestVersionCommandJSON(t *testing.T) {
 	}
 }
 
+func TestHelpAliasDisplaysRootHelp(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	cmd, err := NewRootCommand(context.Background(), &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("NewRootCommand() error = %v", err)
+	}
+	cmd.SetArgs([]string{"h"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	for _, want := range []string{"Usage:", "help", "manage"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("unexpected help output %q missing %q", stdout.String(), want)
+		}
+	}
+}
+
+func TestManageAliasWorks(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	cmd, err := NewRootCommand(context.Background(), &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("NewRootCommand() error = %v", err)
+	}
+	cmd.SetArgs([]string{"m"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	for _, want := range []string{"Operator workflows", "profile", "cleanup"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("unexpected manage alias output %q missing %q", stdout.String(), want)
+		}
+	}
+}
+
+func TestGlobalAliasWorks(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	cmd, err := NewRootCommand(context.Background(), &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("NewRootCommand() error = %v", err)
+	}
+	cmd.SetArgs([]string{"g"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	for _, want := range []string{"Host-global convenience commands", "switch"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("unexpected global alias output %q missing %q", stdout.String(), want)
+		}
+	}
+}
+
 func TestOutputFlagsConflict(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	var stdout bytes.Buffer

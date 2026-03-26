@@ -63,7 +63,7 @@ type ActionSelectedMsg struct {
 func DefaultItems() []Item {
 	return []Item{
 		NewItem(ActionStatus, "Status", "Inspect the current project binding and runtime state."),
-		NewItem(ActionProfiles, "Profiles", "Select and bind an existing provider profile."),
+		NewItem(ActionProfiles, "Bind profile", "Select an existing provider profile and bind the current project."),
 		NewItem(ActionUpdate, "Update", "Rebuild provider client images and rotate runtimes."),
 		NewItem(ActionCleanup, "Cleanup", "Prune stale containers, caches, and local state."),
 		NewItem(ActionGlobalSwitch, "Global switch", "Convenience host-global auth switcher."),

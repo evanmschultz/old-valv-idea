@@ -38,6 +38,9 @@ func TestWriteRecordJSON(t *testing.T) {
 	if !strings.Contains(buf.String(), `"database": "/tmp/db.sqlite"`) {
 		t.Fatalf("unexpected json output: %q", buf.String())
 	}
+	if strings.Contains(buf.String(), `"heading"`) {
+		t.Fatalf("unexpected heading in json output: %q", buf.String())
+	}
 }
 
 func TestResolveModeForcedHumanStyle(t *testing.T) {
@@ -96,10 +99,13 @@ func TestWriteListJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WriteList() error = %v", err)
 	}
-	for _, want := range []string{`"heading": "Profiles"`, `"title": "dev"`, `"badge": "active"`} {
+	for _, want := range []string{`"title": "dev"`, `"badge": "active"`} {
 		if !strings.Contains(buf.String(), want) {
 			t.Fatalf("unexpected json list output %q missing %q", buf.String(), want)
 		}
+	}
+	if strings.Contains(buf.String(), `"heading"`) {
+		t.Fatalf("unexpected heading in json list output: %q", buf.String())
 	}
 }
 
@@ -121,6 +127,48 @@ func TestWriteListHumanUsesFields(t *testing.T) {
 	for _, want := range []string{"Profiles", "- dev [ACTIVE]", "provider: codex", "home: /tmp/dev"} {
 		if !strings.Contains(buf.String(), want) {
 			t.Fatalf("unexpected human list output %q missing %q", buf.String(), want)
+		}
+	}
+}
+
+func TestWriteRecordHumanEmptyState(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	if err := WriteRecord(&buf, Mode{Format: domain.OutputFormatHuman, Styled: false}, "Valv status", nil); err != nil {
+		t.Fatalf("WriteRecord() error = %v", err)
+	}
+	for _, want := range []string{"Valv status", "(none)"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Fatalf("unexpected human empty record output %q missing %q", buf.String(), want)
+		}
+	}
+}
+
+func TestWriteListHumanEmptyState(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	if err := WriteList(&buf, Mode{Format: domain.OutputFormatHuman, Styled: false}, "Profiles", nil); err != nil {
+		t.Fatalf("WriteList() error = %v", err)
+	}
+	for _, want := range []string{"Profiles", "(none)"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Fatalf("unexpected human empty list output %q missing %q", buf.String(), want)
+		}
+	}
+}
+
+func TestWriteListPlainEmptyState(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	if err := WriteList(&buf, Mode{Format: domain.OutputFormatPlain}, "Profiles", nil); err != nil {
+		t.Fatalf("WriteList() error = %v", err)
+	}
+	for _, want := range []string{"Profiles", "(none)"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Fatalf("unexpected plain empty list output %q missing %q", buf.String(), want)
 		}
 	}
 }

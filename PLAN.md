@@ -143,6 +143,30 @@ Practical consequence:
 - interactive attached launches should pick up the new image on the next run after update
 - API warm containers must be replaced or restarted before they will use the updated client version
 
+Build implementation preference:
+
+- prefer `docker buildx build --load` for local image availability
+- do not keep relying on the legacy builder path when a modern buildx path is available
+- suppress avoidable npm update-notifier and similar package-manager chatter inside the provider image build where practical
+
+## API Compatibility Surfaces
+
+Valv should keep protocol compatibility separated from provider/runtime execution.
+
+Rules:
+
+- OpenAI-compatible request/response flows should live behind the OpenAI compatibility surface
+- Anthropic-compatible request/response flows should live behind a separate Anthropic compatibility surface
+- the underlying runtime manager may still route both surfaces to the same provider/runtime adapter when appropriate
+
+Implication for future providers:
+
+- Codex uses the OpenAI-compatible surface first
+- Gemini should also use the OpenAI-compatible surface when Valv is exposing Gemini through an OpenAI-compatible API contract
+- Claude and other Anthropic-compatible clients should use a separate Anthropic handler surface when that compatibility layer is added
+
+Do not conflate provider identity with protocol compatibility. The handler should match the compatibility contract being served, not the marketing name of the backing provider.
+
 ## Modes
 
 Valv should keep the mode vocabulary from the architecture notes:
@@ -204,6 +228,41 @@ Operationally, that means:
 - if Codex fails, Valv should surface the Codex failure cleanly with Valv's output/logging conventions
 - Valv should avoid leaking raw Docker noise to the user unless Docker itself is the real root cause
 - `valv codex ...` should not stop to open a Valv picker or management flow; if required setup is missing, it should fail clearly and direct the user to `valv manage`
+
+## CLI Alias Policy
+
+Valv should support selective short command aliases, not blanket abbreviation of every command.
+
+Recommended aliases:
+
+- `valv h` for help
+- `valv m` for manage
+- `valv g` for global
+
+Do not auto-generate one-letter aliases for every command. The command tree already has natural conflicts like `serve`, `status`, and `switch`, and blanket abbreviation would make the CLI less predictable.
+
+## Dev Mode Versus Release Mode
+
+Valv should support a clean development workflow that does not force developers to write profile/config/log/database state into their real home directory.
+
+Current development policy:
+
+- dev-mode commands should run with a temp-home root
+- dev-mode provider homes should live under that temp-home root unless explicitly overridden
+- dev-mode local filesystem state should be disposable in one cleanup step
+- dev-mode should still preserve access to the host Docker CLI configuration/plugins so modern Docker features like `buildx` keep working
+
+Important limitation to preserve and address:
+
+- Docker images live in the host Docker daemon, not inside the temp home
+- a true clean dev/release split therefore also needs separate dev image naming so dev cleanup can remove only dev-tagged images
+
+Development command direction:
+
+- keep normal `build` for the default local binary
+- provide a dev wrapper path that runs `./valv` with a temp-home root and a dev-specific image override
+- provide a dev cleanup path that removes the temp-home state and the dev-tagged image set
+- default developer validation should prefer the disposable `just dev ...` path over writing into the real home directory
 
 ## Account Switching Research
 

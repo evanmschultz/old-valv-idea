@@ -85,6 +85,15 @@ Use the direct runtime commands for provider execution and the management surfac
 	cmd.SetContext(ctx)
 	cmd.SetOut(stdout)
 	cmd.SetErr(stderr)
+	cmd.SetHelpCommand(&cobra.Command{
+		Use:     "help [command]",
+		Aliases: []string{"h"},
+		Short:   "Help about any command",
+		Args:    cobra.ArbitraryArgs,
+		Run: func(_ *cobra.Command, args []string) {
+			cmd.HelpFunc()(cmd, args)
+		},
+	})
 	cmd.AddGroup(
 		&cobra.Group{ID: "inspect", Title: "Inspect Commands"},
 		&cobra.Group{ID: "runtime", Title: "Runtime Commands"},

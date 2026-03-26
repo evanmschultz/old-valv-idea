@@ -65,18 +65,18 @@ func newImagesService(cmd *cobra.Command, paths config.Paths) (imagesservice.Ser
 		return imagesservice.Service{}, err
 	}
 	return imagesservice.New(imagesservice.Options{
-		Runner:     dockeradapter.NewSystemRunner("docker", cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr()),
-		Repository: "valv-codex",
+		Runner:     dockeradapter.NewQuietRunner("docker", LoggerFromContext(cmd.Context())),
+		Repository: codexImageRepository(),
 		ContextDir: contextDir,
 		Dockerfile: "Dockerfile",
-		DefaultTag: "dev",
+		DefaultTag: codexImageTag(),
 		Logger:     LoggerFromContext(cmd.Context()),
 	})
 }
 
 func newCleanupService(cmd *cobra.Command, paths config.Paths) (cleanupservice.Service, error) {
 	return cleanupservice.New(cleanupservice.Options{
-		Runner: dockeradapter.NewSystemRunner("docker", cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr()),
+		Runner: dockeradapter.NewQuietRunner("docker", LoggerFromContext(cmd.Context())),
 		Logger: LoggerFromContext(cmd.Context()),
 	})
 }
@@ -139,7 +139,7 @@ func runManageHome(cmd *cobra.Command, paths config.Paths, opts *rootOptions) er
 
 func pickProfile(cmd *cobra.Command, provider domain.Provider, profiles []domain.Profile) (string, error) {
 	if len(profiles) == 0 {
-		return "", fmt.Errorf("no %s profiles found", provider)
+		return "", fmt.Errorf("no %s profiles found; run `valv manage profile add %s <name>` first", provider, provider)
 	}
 	if !commandHasTTY(cmd.InOrStdin()) || !commandHasTTY(cmd.OutOrStdout()) {
 		return "", fmt.Errorf("profile is required when not running in a TTY")

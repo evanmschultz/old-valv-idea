@@ -26,7 +26,9 @@ func TestBuildImageArgs(t *testing.T) {
 	}
 
 	want := []string{
+		"buildx",
 		"build",
+		"--load",
 		"--pull",
 		"--no-cache",
 		"-f", "Dockerfile.dev",
@@ -110,7 +112,7 @@ func TestExecutorBuildForwardsArgs(t *testing.T) {
 		t.Fatalf("Build() error = %v", err)
 	}
 
-	want := []string{"build", "-t", "ghcr.io/valv/codex:dev", "/tmp/context"}
+	want := []string{"buildx", "build", "--load", "-t", "ghcr.io/valv/codex:dev", "/tmp/context"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Build() args = %#v, want %#v", got, want)
 	}

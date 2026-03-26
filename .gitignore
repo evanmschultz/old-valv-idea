@@ -23,6 +23,7 @@ Thumbs.db
 !.env.example
 
 # Build outputs
+valv
 bin/
 dist/
 build/

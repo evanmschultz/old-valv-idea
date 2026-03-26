@@ -58,6 +58,12 @@ For `valv codex`:
 - avoid replacing Codex session/resume logic with Valv-specific logic
 - let Valv provide runtime isolation, project/profile resolution, and logging
 
+For API compatibility surfaces:
+
+- route OpenAI-compatible providers through the OpenAI-compatible handler surface
+- route Anthropic-compatible providers through a separate Anthropic-compatible handler surface
+- do not conflate provider identity with protocol compatibility
+
 ## 5) Go Standards
 
 Use clear, idiomatic Go.
@@ -119,6 +125,21 @@ Do not use:
 
 The direct CLI path should stay clean and predictable. The management surface may use Bubble Tea selectors and views.
 Use `.tmp/blick` as the implementation reference for Fang v2 command structure, output policy, renderer separation, and consistent human/plain/json behavior.
+
+CLI alias policy:
+
+- support selective aliases only
+- preferred short aliases are `h`, `m`, and `g`
+- do not invent blanket one-letter aliases for every command
+- avoid alias schemes that create ambiguity across commands like `status`, `serve`, and `switch`
+
+Output policy:
+
+- follow `blick` output patterns as closely as practical
+- prefer deterministic, minimal human output
+- prefer explicit empty states over silent emptiness
+- prefer slim machine-readable JSON payloads over human-style wrapper envelopes
+- reduce raw subprocess noise unless that subprocess output is the actual user-facing payload
 
 ## 9) Context7 First
 
@@ -186,7 +207,16 @@ Testing standards:
 - prefer a clean repo layout with minimal root clutter
 - use `Justfile` as the command source of truth when present
 - keep CI and local command recipes aligned
+- keep a clean dev-mode path that does not dirty the developer's real home directory during normal local checks
+- prefer `just dev ...` flows for disposable local validation and `just build` for normal binary creation
+- when using disposable dev-mode home directories, preserve access to the host Docker CLI configuration/plugins so Docker Desktop features such as `buildx` keep working
 - after every push, run `gh run watch` for the triggered workflow and confirm the result before considering the push complete
+
+Docker build standards:
+
+- prefer modern `docker buildx build --load` behavior over legacy builder paths
+- keep dev and default image tags separable when local development needs to avoid dirtying normal runtime state
+- suppress avoidable package-manager noise in Docker image builds where practical, including npm update-notifier chatter
 
 ## 13) Sandbox And Go Tooling
 

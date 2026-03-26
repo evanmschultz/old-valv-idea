@@ -10,6 +10,7 @@ type ImageBuildRequest struct {
 	ContextDir string
 	Dockerfile string
 	Tags       []ImageRef
+	Builder    string
 	BuildArgs  map[string]string
 	Labels     map[string]string
 	Target     string
@@ -39,7 +40,21 @@ func BuildImageArgs(request ImageBuildRequest) ([]string, error) {
 		return nil, err
 	}
 
-	args := []string{"build"}
+	builder := strings.ToLower(strings.TrimSpace(request.Builder))
+	if builder == "" || builder == "auto" {
+		builder = "buildx"
+	}
+
+	args := []string{}
+	switch builder {
+	case "buildx":
+		args = append(args, "buildx", "build", "--load")
+	case "build", "legacy":
+		args = append(args, "build")
+	default:
+		return nil, fmt.Errorf("build image args: unsupported builder %q", request.Builder)
+	}
+
 	if request.Pull {
 		args = append(args, "--pull")
 	}

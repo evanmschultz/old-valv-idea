@@ -84,3 +84,20 @@ func codexImageRef() dockeradapter.ImageRef {
 	}
 	return dockeradapter.NewImageRef(value, "")
 }
+
+func codexImageRepository() string {
+	ref := codexImageRef()
+	return ref.Repository
+}
+
+func codexImageTag() string {
+	ref := codexImageRef()
+	if strings.TrimSpace(ref.Tag) == "" {
+		return "dev"
+	}
+	return ref.Tag
+}
+
+func codexImageVersionRef(version string) dockeradapter.ImageRef {
+	return dockeradapter.NewImageRef(codexImageRepository(), strings.ReplaceAll(strings.TrimSpace(version), ".", "-"))
+}

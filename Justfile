@@ -1,4 +1,8 @@
 set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
+dev_home_file := ".tmp/dev-home.path"
+dev_image_repo := "valv-codex-dev"
+dev_image_tag := "dev"
+dev_image := dev_image_repo + ":" + dev_image_tag
 
 [private]
 verify-bootstrap:
@@ -13,6 +17,47 @@ fmt:
   else \
     find . -type f -name '*.go' -not -path './.git/*' -not -path './.tmp/*' -not -path './.worklog/*' -print0 | xargs -0 gofmt -w; \
   fi
+
+build:
+  @GOFLAGS="${GOFLAGS:+$GOFLAGS }-buildvcs=false" go build -o ./valv ./cmd/valv
+
+[private]
+ensure-dev-home:
+  @mkdir -p .tmp
+  @if [ ! -f {{dev_home_file}} ]; then \
+    mktemp -d "${TMPDIR:-/tmp}/valv-dev.XXXXXX" > {{dev_home_file}}; \
+  fi; \
+  dev_home="$(cat {{dev_home_file}})"; \
+  mkdir -p "$dev_home"
+
+dev-home: ensure-dev-home
+  @printf "dev_home=%s\n" "$(cat {{dev_home_file}})"
+
+dev-reset:
+  @mkdir -p .tmp
+  @if [ -f {{dev_home_file}} ]; then \
+    old_home="$(cat {{dev_home_file}})"; \
+    rm -rf "$old_home"; \
+    rm -f {{dev_home_file}}; \
+  fi
+  @mktemp -d "${TMPDIR:-/tmp}/valv-dev.XXXXXX" > {{dev_home_file}}
+  @printf "dev_home=%s\n" "$(cat {{dev_home_file}})"
+
+dev-clean:
+  @if [ -f {{dev_home_file}} ]; then \
+    dev_home="$(cat {{dev_home_file}})"; \
+    rm -rf "$dev_home"; \
+    rm -f {{dev_home_file}}; \
+  fi
+  @images="$(docker image ls {{dev_image_repo}} --format '{{"{{.Repository}}:{{.Tag}}"}}')"; \
+  if [ -n "$images" ]; then \
+    docker image rm --force $images >/dev/null; \
+  fi
+
+dev *ARGS: build ensure-dev-home
+  @dev_home="$(cat {{dev_home_file}})"; \
+  host_home="$(cd ~ && pwd)"; \
+  HOME="$dev_home" DOCKER_CONFIG="$host_home/.docker" VALV_CODEX_IMAGE="{{dev_image}}" ./valv {{ARGS}}
 
 [private]
 fmt-check:
