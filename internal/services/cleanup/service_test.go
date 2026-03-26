@@ -23,6 +23,21 @@ func (r *cleanupRunnerRecorder) Run(_ context.Context, args []string) error {
 	return r.err
 }
 
+type cleanupRunnerSequence struct {
+	calls  [][]string
+	errors []error
+}
+
+func (r *cleanupRunnerSequence) Run(_ context.Context, args []string) error {
+	r.calls = append(r.calls, append([]string(nil), args...))
+	if len(r.errors) == 0 {
+		return nil
+	}
+	err := r.errors[0]
+	r.errors = r.errors[1:]
+	return err
+}
+
 func TestNewRejectsNilRunner(t *testing.T) {
 	t.Parallel()
 
@@ -233,6 +248,36 @@ func TestCleanDockerPropagatesRunnerError(t *testing.T) {
 
 	if _, err := svc.CleanDocker(context.Background(), DockerCleanupRequest{PruneBuilder: true}); err == nil {
 		t.Fatal("CleanDocker() error = nil, want failure")
+	}
+}
+
+func TestCleanDockerIgnoresMissingImageErrors(t *testing.T) {
+	t.Parallel()
+
+	runner := &cleanupRunnerSequence{
+		errors: []error{
+			errors.New("run docker image rm --force valv-codex:dev: No such image: valv-codex:dev"),
+			nil,
+		},
+	}
+	svc, err := New(Options{Runner: runner})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	result, err := svc.CleanDocker(context.Background(), DockerCleanupRequest{
+		ImageRefs:    []docker.ImageRef{docker.NewImageRef("valv-codex", "dev")},
+		PruneBuilder: true,
+		Force:        true,
+	})
+	if err != nil {
+		t.Fatalf("CleanDocker() error = %v, want ignored missing-image failure", err)
+	}
+	if len(result.Commands) != 2 {
+		t.Fatalf("commands len = %d, want 2", len(result.Commands))
+	}
+	if got, want := runner.calls[1], []string{"builder", "prune", "--force"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("builder prune args = %#v, want %#v", got, want)
 	}
 }
 

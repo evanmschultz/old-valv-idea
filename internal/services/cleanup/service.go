@@ -135,7 +135,11 @@ func (s Service) CleanDocker(ctx context.Context, request DockerCleanupRequest) 
 			return DockerCleanupResult{}, fmt.Errorf("clean docker images: %w", err)
 		}
 		if err := s.runner.Run(ctx, args); err != nil {
-			return DockerCleanupResult{}, fmt.Errorf("clean docker images: %w", err)
+			if isMissingImageError(err) {
+				s.debug("ignored missing docker images during cleanup", "count", len(request.ImageRefs))
+			} else {
+				return DockerCleanupResult{}, fmt.Errorf("clean docker images: %w", err)
+			}
 		}
 		commands = append(commands, args)
 		s.debug("removed docker images", "count", len(request.ImageRefs))
@@ -157,6 +161,15 @@ func (s Service) CleanDocker(ctx context.Context, request DockerCleanupRequest) 
 	}
 
 	return DockerCleanupResult{Commands: commands}, nil
+}
+
+func isMissingImageError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "no such image") ||
+		strings.Contains(message, "image not known")
 }
 
 func (s Service) Clean(ctx context.Context, local LocalCleanupRequest, dockerRequest DockerCleanupRequest) (LocalCleanupResult, DockerCleanupResult, error) {

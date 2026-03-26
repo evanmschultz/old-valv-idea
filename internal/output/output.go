@@ -114,11 +114,13 @@ func WriteRecord(out io.Writer, mode Mode, heading string, fields []Field) error
 }
 
 func WriteList(out io.Writer, mode Mode, heading string, items []ListItem) error {
+	return WriteListWithKey(out, mode, heading, "", items)
+}
+
+func WriteListWithKey(out io.Writer, mode Mode, heading string, jsonKey string, items []ListItem) error {
 	if mode.Format == domain.OutputFormatJSON {
-		payload := struct {
-			Items []ListItem `json:"items"`
-		}{
-			Items: items,
+		payload := map[string]any{
+			listJSONKey(jsonKey): items,
 		}
 		encoder := json.NewEncoder(out)
 		encoder.SetEscapeHTML(false)
@@ -237,4 +239,11 @@ func renderBadge(theme theme, value string) string {
 		return "[" + trimmed + "]"
 	}
 	return theme.badge.Render(trimmed)
+}
+
+func listJSONKey(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "items"
+	}
+	return strings.TrimSpace(value)
 }

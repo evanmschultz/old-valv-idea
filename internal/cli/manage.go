@@ -102,7 +102,7 @@ func newManageProfileListCommand(paths config.Paths, opts *rootOptions) *cobra.C
 			if err != nil {
 				return fmt.Errorf("manage profile list: %w", err)
 			}
-			return output.WriteList(cmd.OutOrStdout(), mode, fmt.Sprintf("%s profiles", provider), listItemsForProfiles(result.Profiles))
+			return output.WriteListWithKey(cmd.OutOrStdout(), mode, fmt.Sprintf("%s profiles", provider), "profiles", listItemsForProfiles(result.Profiles))
 		},
 	}
 	return cmd
@@ -242,7 +242,7 @@ func runManageUpdate(cmd *cobra.Command, paths config.Paths, opts *rootOptions, 
 
 func newManageCleanupCommand(paths config.Paths, opts *rootOptions) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "cleanup [state|docker|all]",
+		Use:   "cleanup [state|images|docker|all]",
 		Short: "Prune local Valv caches and Docker build state",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -266,7 +266,8 @@ func runManageCleanup(cmd *cobra.Command, paths config.Paths, opts *rootOptions,
 		return fmt.Errorf("manage cleanup: initialize cleanup service: %w", err)
 	}
 	local := cleanupservice.LocalCleanupRequest{Paths: cleanupservice.DefaultLocalTargets(paths)}
-	dockerRequest := cleanupservice.DockerCleanupRequest{PruneBuilder: true, PruneBuilderAll: true}
+	imageRefs := providerCleanupImageRefs()
+	dockerRequest := cleanupservice.DockerCleanupRequest{ImageRefs: imageRefs, PruneBuilder: true, PruneBuilderAll: true, Force: true}
 
 	var summary []output.Field
 	switch scope {
@@ -276,20 +277,33 @@ func runManageCleanup(cmd *cobra.Command, paths config.Paths, opts *rootOptions,
 			return fmt.Errorf("manage cleanup: %w", err)
 		}
 		summary = []output.Field{{Label: "scope", Value: "state", Badge: true}, {Label: "removed", Value: fmt.Sprintf("%d paths", len(result.Removed)), Identifier: true}}
+	case "images":
+		result, err := service.CleanDocker(cmd.Context(), cleanupservice.DockerCleanupRequest{ImageRefs: imageRefs, Force: true})
+		if err != nil {
+			return fmt.Errorf("manage cleanup: %w", err)
+		}
+		summary = []output.Field{{Label: "scope", Value: "images", Badge: true}, {Label: "images", Value: fmt.Sprintf("%d refs", len(imageRefs)), Identifier: true}, {Label: "commands", Value: fmt.Sprintf("%d commands", len(result.Commands)), Identifier: true}}
 	case "docker":
 		result, err := service.CleanDocker(cmd.Context(), dockerRequest)
 		if err != nil {
 			return fmt.Errorf("manage cleanup: %w", err)
 		}
-		summary = []output.Field{{Label: "scope", Value: "docker", Badge: true}, {Label: "commands", Value: fmt.Sprintf("%d commands", len(result.Commands)), Identifier: true}}
+		summary = []output.Field{{Label: "scope", Value: "docker", Badge: true}, {Label: "images", Value: fmt.Sprintf("%d refs", len(imageRefs)), Identifier: true}, {Label: "commands", Value: fmt.Sprintf("%d commands", len(result.Commands)), Identifier: true}}
 	case "all":
 		localResult, dockerResult, err := service.Clean(cmd.Context(), local, dockerRequest)
 		if err != nil {
 			return fmt.Errorf("manage cleanup: %w", err)
 		}
-		summary = []output.Field{{Label: "scope", Value: "all", Badge: true}, {Label: "removed", Value: fmt.Sprintf("%d paths", len(localResult.Removed)), Identifier: true}, {Label: "docker commands", Value: fmt.Sprintf("%d commands", len(dockerResult.Commands)), Identifier: true}}
+		summary = []output.Field{{Label: "scope", Value: "all", Badge: true}, {Label: "removed", Value: fmt.Sprintf("%d paths", len(localResult.Removed)), Identifier: true}, {Label: "images", Value: fmt.Sprintf("%d refs", len(imageRefs)), Identifier: true}, {Label: "docker commands", Value: fmt.Sprintf("%d commands", len(dockerResult.Commands)), Identifier: true}}
 	default:
 		return fmt.Errorf("manage cleanup: unsupported scope %q", scope)
 	}
 	return output.WriteRecord(cmd.OutOrStdout(), mode, "Cleanup completed", summary)
+}
+
+func providerCleanupImageRefs() []dockeradapter.ImageRef {
+	return []dockeradapter.ImageRef{
+		codexImageRef(),
+		codexImageVersionRef(imagesservice.DefaultCodexVersion),
+	}
 }

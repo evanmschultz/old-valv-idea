@@ -139,6 +139,7 @@ Output policy:
 - prefer deterministic, minimal human output
 - prefer explicit empty states over silent emptiness
 - prefer slim machine-readable JSON payloads over human-style wrapper envelopes
+- keep machine-readable JSON keys command-owned and stable; do not derive API-like keys from human heading copy
 - reduce raw subprocess noise unless that subprocess output is the actual user-facing payload
 
 ## 9) Context7 First

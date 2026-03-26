@@ -57,6 +57,36 @@ func TestManageProfileListOutputsStoredProfiles(t *testing.T) {
 	}
 }
 
+func TestManageProfileListJSONUsesCommandKey(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	profileHome := filepath.Join(paths.ProviderRoot, "codex", "profiles", "alpha")
+	runManage(t, paths, []string{"profile", "add", "codex", "alpha", "--home", profileHome})
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	opts := &rootOptions{format: "json"}
+	cmd := newManageCommand(paths, opts)
+	cmd.PersistentFlags().StringVar(&opts.format, "format", "json", "output format: auto, human, plain, json")
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--format", "json", "profile", "list", "codex"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v\nstderr=%s", err, stderr.String())
+	}
+	output := stdout.String()
+	wantHome, err := filepath.EvalSymlinks(profileHome)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q) error = %v", profileHome, err)
+	}
+	want := fmt.Sprintf("{\n  \"profiles\": [\n    {\n      \"title\": \"alpha\",\n      \"fields\": [\n        {\n          \"label\": \"provider\",\n          \"value\": \"codex\",\n          \"muted\": true\n        },\n        {\n          \"label\": \"home\",\n          \"value\": %q,\n          \"identifier\": true\n        }\n      ]\n    }\n  ]\n}\n", wantHome)
+	if output != want {
+		t.Fatalf("unexpected profile list json output:\n got: %q\nwant: %q", output, want)
+	}
+}
+
 func TestManageProfileListShowsEmptyState(t *testing.T) {
 	t.Parallel()
 
@@ -176,6 +206,11 @@ func TestManageCleanupAllRemovesLocalStateAndInvokesDocker(t *testing.T) {
 	if !strings.Contains(stdout.String(), "Cleanup completed") {
 		t.Fatalf("unexpected cleanup output: %q", stdout.String())
 	}
+	for _, want := range []string{"scope=all", "images=2 refs", "docker_commands=2 commands"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("unexpected cleanup summary %q missing %q", stdout.String(), want)
+		}
+	}
 	for _, path := range cleanupPaths(paths) {
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Fatalf("Stat(%q) error = %v, want not exist", path, err)
@@ -183,8 +218,42 @@ func TestManageCleanupAllRemovesLocalStateAndInvokesDocker(t *testing.T) {
 	}
 
 	logContent := mustReadFile(t, logPath)
+	if !strings.Contains(logContent, "image rm --force valv-codex:dev valv-codex:0-116-0") {
+		t.Fatalf("unexpected docker cleanup log: %q", logContent)
+	}
 	if !strings.Contains(logContent, "builder prune --force --all") {
 		t.Fatalf("unexpected docker cleanup log: %q", logContent)
+	}
+}
+
+func TestManageCleanupImagesRemovesProviderImagesOnly(t *testing.T) {
+	paths := testCodexPaths(t)
+	logPath := installFakeDocker(t)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd := newManageCommand(paths, &rootOptions{})
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"cleanup", "images"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v\nstderr=%s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "scope=images") {
+		t.Fatalf("unexpected cleanup output: %q", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "images=2 refs") {
+		t.Fatalf("unexpected cleanup output: %q", stdout.String())
+	}
+
+	logContent := mustReadFile(t, logPath)
+	if !strings.Contains(logContent, "image rm --force valv-codex:dev valv-codex:0-116-0") {
+		t.Fatalf("unexpected docker cleanup log: %q", logContent)
+	}
+	if strings.Contains(logContent, "builder prune") {
+		t.Fatalf("unexpected builder prune in images-only cleanup log: %q", logContent)
 	}
 }
 

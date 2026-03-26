@@ -2,7 +2,6 @@ package output
 
 import (
 	"bytes"
-	"strings"
 	"testing"
 
 	"github.com/evanmschultz/valv/internal/domain"
@@ -23,8 +22,8 @@ func TestWriteRecordPlain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WriteRecord() error = %v", err)
 	}
-	if !strings.Contains(buf.String(), "database=/tmp/db.sqlite") {
-		t.Fatalf("unexpected output: %q", buf.String())
+	if got, want := buf.String(), "Valv paths\ndatabase=/tmp/db.sqlite\n"; got != want {
+		t.Fatalf("WriteRecord() output = %q, want %q", got, want)
 	}
 }
 
@@ -35,11 +34,8 @@ func TestWriteRecordJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WriteRecord() error = %v", err)
 	}
-	if !strings.Contains(buf.String(), `"database": "/tmp/db.sqlite"`) {
-		t.Fatalf("unexpected json output: %q", buf.String())
-	}
-	if strings.Contains(buf.String(), `"heading"`) {
-		t.Fatalf("unexpected heading in json output: %q", buf.String())
+	if got, want := buf.String(), "{\n  \"database\": \"/tmp/db.sqlite\"\n}\n"; got != want {
+		t.Fatalf("WriteRecord() output = %q, want %q", got, want)
 	}
 }
 
@@ -63,8 +59,8 @@ func TestWriteRecordHuman(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WriteRecord() error = %v", err)
 	}
-	if !strings.Contains(buf.String(), "version: dev") {
-		t.Fatalf("unexpected human output: %q", buf.String())
+	if got, want := buf.String(), "Valv version\n  version: dev\n"; got != want {
+		t.Fatalf("WriteRecord() output = %q, want %q", got, want)
 	}
 }
 
@@ -81,10 +77,8 @@ func TestWriteListPlain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WriteList() error = %v", err)
 	}
-	for _, want := range []string{"Profiles", "- dev", "home=/tmp/dev"} {
-		if !strings.Contains(buf.String(), want) {
-			t.Fatalf("unexpected plain list output %q missing %q", buf.String(), want)
-		}
+	if got, want := buf.String(), "Profiles\n- dev\n  home=/tmp/dev\n"; got != want {
+		t.Fatalf("WriteList() output = %q, want %q", got, want)
 	}
 }
 
@@ -99,13 +93,24 @@ func TestWriteListJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WriteList() error = %v", err)
 	}
-	for _, want := range []string{`"title": "dev"`, `"badge": "active"`} {
-		if !strings.Contains(buf.String(), want) {
-			t.Fatalf("unexpected json list output %q missing %q", buf.String(), want)
-		}
+	if got, want := buf.String(), "{\n  \"items\": [\n    {\n      \"title\": \"dev\",\n      \"badge\": \"active\"\n    }\n  ]\n}\n"; got != want {
+		t.Fatalf("WriteList() output = %q, want %q", got, want)
 	}
-	if strings.Contains(buf.String(), `"heading"`) {
-		t.Fatalf("unexpected heading in json list output: %q", buf.String())
+}
+
+func TestWriteListWithKeyJSON(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	err := WriteListWithKey(&buf, Mode{Format: domain.OutputFormatJSON}, "Profiles", "profiles", []ListItem{{
+		Title: "dev",
+		Badge: "active",
+	}})
+	if err != nil {
+		t.Fatalf("WriteListWithKey() error = %v", err)
+	}
+	if got, want := buf.String(), "{\n  \"profiles\": [\n    {\n      \"title\": \"dev\",\n      \"badge\": \"active\"\n    }\n  ]\n}\n"; got != want {
+		t.Fatalf("WriteListWithKey() output = %q, want %q", got, want)
 	}
 }
 
@@ -124,10 +129,8 @@ func TestWriteListHumanUsesFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WriteList() error = %v", err)
 	}
-	for _, want := range []string{"Profiles", "- dev [ACTIVE]", "provider: codex", "home: /tmp/dev"} {
-		if !strings.Contains(buf.String(), want) {
-			t.Fatalf("unexpected human list output %q missing %q", buf.String(), want)
-		}
+	if got, want := buf.String(), "Profiles\n- dev [ACTIVE]\n  provider: codex\n  home: /tmp/dev\n"; got != want {
+		t.Fatalf("WriteList() output = %q, want %q", got, want)
 	}
 }
 
@@ -138,10 +141,8 @@ func TestWriteRecordHumanEmptyState(t *testing.T) {
 	if err := WriteRecord(&buf, Mode{Format: domain.OutputFormatHuman, Styled: false}, "Valv status", nil); err != nil {
 		t.Fatalf("WriteRecord() error = %v", err)
 	}
-	for _, want := range []string{"Valv status", "(none)"} {
-		if !strings.Contains(buf.String(), want) {
-			t.Fatalf("unexpected human empty record output %q missing %q", buf.String(), want)
-		}
+	if got, want := buf.String(), "Valv status\n  (none)\n"; got != want {
+		t.Fatalf("WriteRecord() output = %q, want %q", got, want)
 	}
 }
 
@@ -152,10 +153,8 @@ func TestWriteListHumanEmptyState(t *testing.T) {
 	if err := WriteList(&buf, Mode{Format: domain.OutputFormatHuman, Styled: false}, "Profiles", nil); err != nil {
 		t.Fatalf("WriteList() error = %v", err)
 	}
-	for _, want := range []string{"Profiles", "(none)"} {
-		if !strings.Contains(buf.String(), want) {
-			t.Fatalf("unexpected human empty list output %q missing %q", buf.String(), want)
-		}
+	if got, want := buf.String(), "Profiles\n  (none)\n"; got != want {
+		t.Fatalf("WriteList() output = %q, want %q", got, want)
 	}
 }
 
@@ -166,9 +165,18 @@ func TestWriteListPlainEmptyState(t *testing.T) {
 	if err := WriteList(&buf, Mode{Format: domain.OutputFormatPlain}, "Profiles", nil); err != nil {
 		t.Fatalf("WriteList() error = %v", err)
 	}
-	for _, want := range []string{"Profiles", "(none)"} {
-		if !strings.Contains(buf.String(), want) {
-			t.Fatalf("unexpected plain empty list output %q missing %q", buf.String(), want)
-		}
+	if got, want := buf.String(), "Profiles\n  (none)\n"; got != want {
+		t.Fatalf("WriteList() output = %q, want %q", got, want)
+	}
+}
+
+func TestListJSONKey(t *testing.T) {
+	t.Parallel()
+
+	if got, want := listJSONKey("profiles"), "profiles"; got != want {
+		t.Fatalf("listJSONKey() = %q, want %q", got, want)
+	}
+	if got, want := listJSONKey(""), "items"; got != want {
+		t.Fatalf("listJSONKey(\"\") = %q, want %q", got, want)
 	}
 }

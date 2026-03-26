@@ -442,6 +442,7 @@ The key `blick` patterns to copy are:
 - deterministic plain/json rendering
 - styled human output only when appropriate
 - config-driven output defaults
+- stable machine-readable JSON keys chosen by the command surface, not inferred from human-facing headings
 
 The TUI should be used for:
 
@@ -449,6 +450,15 @@ The TUI should be used for:
 - profile switching
 - runtime inspection and stop/start actions
 - provider image update actions
+
+Operator cleanup should support distinct scopes for:
+
+- local state only
+- provider images only
+- docker/build state
+- full cleanup combining all of the above
+
+Cleanup should be idempotent in normal operator use. Missing cache paths or already-removed provider images should not turn cleanup into a failure mode.
 
 The TUI does not need to be the terminal isolation mechanism. It is the control surface above the Docker runtime.
 
