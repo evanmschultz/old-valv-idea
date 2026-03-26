@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -60,5 +61,23 @@ func TestRealMainReturnsFailureCode(t *testing.T) {
 	}
 	if count := strings.Count(stderr.String(), "unsupported value"); count != 1 {
 		t.Fatalf("stderr occurrence count = %d, want 1; stderr=%q", count, stderr.String())
+	}
+}
+
+func TestRunUsesTestHomeOverride(t *testing.T) {
+	argv := os.Args
+	defer func() { os.Args = argv }()
+	os.Args = []string{"valv", "paths", "--format", "plain"}
+	home := t.TempDir()
+	t.Setenv("VALV_TEST_HOME_DIR", home)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	if err := run(context.Background(), &stdout, &stderr); err != nil {
+		t.Fatalf("run() error = %v", err)
+	}
+	if !strings.Contains(stdout.String(), "database="+filepath.Join(home, "Library", "Application Support", "valv", "db", "valv.sqlite3")) {
+		t.Fatalf("stdout = %q, want override database path", stdout.String())
 	}
 }

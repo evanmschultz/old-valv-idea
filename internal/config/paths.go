@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
-	"strings"
 
 	"github.com/evanmschultz/valv/internal/domain"
 )
@@ -30,11 +29,6 @@ type Paths struct {
 }
 
 func ResolvePaths(homeDir string) (Paths, error) {
-	if homeDir == "" {
-		if value := strings.TrimSpace(os.Getenv("VALV_TEST_HOME_DIR")); value != "" {
-			homeDir = value
-		}
-	}
 	if runtime.GOOS != "darwin" && homeDir == "" {
 		return Paths{}, fmt.Errorf("resolve valv paths: %w", domain.ErrUnsupportedOS)
 	}

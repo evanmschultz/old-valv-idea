@@ -144,6 +144,7 @@ func TestCodexCommandRunsFixtureImageWithTTYEndToEnd(t *testing.T) {
 	runCmd.Dir = workDir
 	runCmd.Env = append(os.Environ(),
 		"HOME="+paths.HomeDir,
+		"VALV_TEST_HOME_DIR="+paths.HomeDir,
 		"VALV_CODEX_IMAGE="+imageRef,
 	)
 

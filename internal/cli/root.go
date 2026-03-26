@@ -36,6 +36,10 @@ func NewRootCommand(ctx context.Context, stdout, stderr io.Writer) (*cobra.Comma
 	return newRootCommandWithPaths(ctx, stdout, stderr, paths)
 }
 
+func NewRootCommandWithPaths(ctx context.Context, stdout, stderr io.Writer, paths config.Paths) (*cobra.Command, error) {
+	return newRootCommandWithPaths(ctx, stdout, stderr, paths)
+}
+
 func newRootCommandWithPaths(ctx context.Context, stdout, stderr io.Writer, paths config.Paths) (*cobra.Command, error) {
 	opts := &rootOptions{}
 	cmd := &cobra.Command{

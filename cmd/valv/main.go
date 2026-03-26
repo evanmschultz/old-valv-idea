@@ -9,6 +9,8 @@ import (
 
 	"charm.land/fang/v2"
 	"github.com/evanmschultz/valv/internal/cli"
+	"github.com/evanmschultz/valv/internal/config"
+	"github.com/spf13/cobra"
 )
 
 func main() {
@@ -23,7 +25,7 @@ func realMain(ctx context.Context, stdout, stderr io.Writer) int {
 }
 
 func run(ctx context.Context, stdout, stderr io.Writer) error {
-	cmd, err := cli.NewRootCommand(ctx, stdout, stderr)
+	cmd, err := buildRootCommand(ctx, stdout, stderr)
 	if err != nil {
 		return err
 	}
@@ -38,6 +40,17 @@ func run(ctx context.Context, stdout, stderr io.Writer) error {
 		return err
 	}
 	return nil
+}
+
+func buildRootCommand(ctx context.Context, stdout, stderr io.Writer) (*cobra.Command, error) {
+	if homeDir := strings.TrimSpace(os.Getenv("VALV_TEST_HOME_DIR")); homeDir != "" {
+		paths, err := config.ResolvePaths(homeDir)
+		if err != nil {
+			return nil, fmt.Errorf("resolve test override paths: %w", err)
+		}
+		return cli.NewRootCommandWithPaths(ctx, stdout, stderr, paths)
+	}
+	return cli.NewRootCommand(ctx, stdout, stderr)
 }
 
 func renderFangError(w io.Writer, styles fang.Styles, err error) {
