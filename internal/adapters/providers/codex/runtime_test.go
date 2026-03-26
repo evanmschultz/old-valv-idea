@@ -111,6 +111,60 @@ url = "http://localhost:4242/mcp"
 	}
 }
 
+func TestPrepareRuntimeOmitsBrokenHostCommandBridgeEntries(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	profileHome := filepath.Join(root, "profile")
+	projectRoot := filepath.Join(root, "project")
+	tempRoot := filepath.Join(root, "tmp")
+	if err := os.MkdirAll(filepath.Join(projectRoot, ".codex"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(project config dir) error = %v", err)
+	}
+	if err := os.MkdirAll(profileHome, 0o755); err != nil {
+		t.Fatalf("MkdirAll(profileHome) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(profileHome, "config.toml"), []byte(strings.TrimSpace(`
+[mcp_servers.good]
+url = "http://127.0.0.1:7389/mcp"
+
+[mcp_servers.bad]
+command = "/path/that/does/not/exist"
+`)+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(profile config) error = %v", err)
+	}
+
+	prepared, err := PrepareRuntime(context.Background(), PrepareRequest{
+		ProfileHome: profileHome,
+		ProjectRoot: projectRoot,
+		TempRoot:    tempRoot,
+	})
+	if err != nil {
+		t.Fatalf("PrepareRuntime() error = %v", err)
+	}
+	defer func() {
+		if err := prepared.Close(); err != nil {
+			t.Fatalf("prepared.Close() error = %v", err)
+		}
+	}()
+
+	profileOverlay := findMountTarget(t, prepared.Mounts, filepath.Join(ContainerCodexDir, "config.toml"))
+	profileContent, err := os.ReadFile(profileOverlay.Source)
+	if err != nil {
+		t.Fatalf("ReadFile(profile overlay) error = %v", err)
+	}
+	profileText := string(profileContent)
+	if strings.Contains(profileText, "[mcp_servers.bad]") {
+		t.Fatalf("profile overlay kept broken bridged server: %s", profileText)
+	}
+	if !strings.Contains(profileText, "[mcp_servers.good]") {
+		t.Fatalf("profile overlay removed working server unexpectedly: %s", profileText)
+	}
+	if len(prepared.Warnings) == 0 || !strings.Contains(strings.Join(prepared.Warnings, "\n"), "bad:") {
+		t.Fatalf("prepared.Warnings = %#v, want broken bridge warning", prepared.Warnings)
+	}
+}
+
 func newProfileMount(profileHome string) dockeradapter.MountSpec {
 	return dockeradapter.MountSpec{
 		Source:   profileHome,

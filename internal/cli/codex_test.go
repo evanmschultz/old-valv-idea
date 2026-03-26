@@ -189,6 +189,67 @@ func TestEnsureCodexImageAvailableSkipsWhenDockerIsUnavailable(t *testing.T) {
 	}
 }
 
+func TestRunCodexImageOnlyCommandPassesThroughArgs(t *testing.T) {
+	t.Setenv("VALV_CODEX_IMAGE", "valv-codex-dev:dev")
+
+	binDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "docker-run.txt")
+	scriptPath := filepath.Join(binDir, "docker")
+	script := "#!/bin/sh\n" +
+		"set -eu\n" +
+		"case \"$1 $2\" in\n" +
+		"  \"image inspect\") exit 0 ;;\n" +
+		"  \"run --rm\") printf '%s\\n' \"$@\" > " + shellQuote(logPath) + "; exit 0 ;;\n" +
+		"esac\n" +
+		"printf '%s\\n' \"$@\" > " + shellQuote(logPath) + "\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile(docker) error = %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd := newCodexCommand(testCodexPaths(t), nil)
+	cmd.SetContext(context.Background())
+	cmd.SetIn(bytes.NewBuffer(nil))
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+
+	if err := runCodexImageOnlyCommand(cmd, []string{"resume", "--help"}); err != nil {
+		t.Fatalf("runCodexImageOnlyCommand() error = %v", err)
+	}
+
+	content, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile(logPath) error = %v", err)
+	}
+	got := string(content)
+	for _, want := range []string{
+		"run",
+		"--rm",
+		"--name",
+		"valv-codex-info-",
+		"-e",
+		"CODEX_HOME=/home/valv/.codex",
+		"HOME=/home/valv",
+		"USER=valv",
+		"--label",
+		"io.valv.scope=info",
+		"valv-codex-dev:dev",
+		"resume",
+		"--help",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("docker run args missing %q in %q", want, got)
+		}
+	}
+}
+
+func shellQuote(value string) string {
+	replacer := strings.NewReplacer("'", "'\"'\"'")
+	return "'" + replacer.Replace(value) + "'"
+}
+
 type stubDockerRunner struct {
 	err error
 }

@@ -50,3 +50,16 @@ func TestResolvePathsUsesProvidedHome(t *testing.T) {
 		t.Fatalf("ResolvePaths().HomeDir = %q, want %q", paths.HomeDir, home)
 	}
 }
+
+func TestResolvePathsUsesTestHomeOverride(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("VALV_TEST_HOME_DIR", home)
+
+	paths, err := ResolvePaths("")
+	if err != nil {
+		t.Fatalf("ResolvePaths() error = %v", err)
+	}
+	if paths.HomeDir != home {
+		t.Fatalf("ResolvePaths().HomeDir = %q, want %q", paths.HomeDir, home)
+	}
+}

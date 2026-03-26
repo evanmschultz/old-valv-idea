@@ -20,6 +20,8 @@ import (
 
 type bridgeManager struct {
 	logger   *log.Logger
+	ctx      context.Context
+	cancel   context.CancelFunc
 	listener net.Listener
 	server   *http.Server
 	baseURL  string
@@ -37,8 +39,10 @@ type commandSpec struct {
 }
 
 func newBridgeManager(ctx context.Context, logger *log.Logger) (*bridgeManager, error) {
+	lifecycleCtx, cancel := context.WithCancel(context.Background())
 	listener, err := net.Listen("tcp", "0.0.0.0:0")
 	if err != nil {
+		cancel()
 		return nil, fmt.Errorf("listen for MCP bridge: %w", err)
 	}
 	mux := http.NewServeMux()
@@ -48,6 +52,8 @@ func newBridgeManager(ctx context.Context, logger *log.Logger) (*bridgeManager, 
 	}
 	manager := &bridgeManager{
 		logger:   logger,
+		ctx:      lifecycleCtx,
+		cancel:   cancel,
 		listener: listener,
 		server:   server,
 		baseURL:  fmt.Sprintf("http://host.docker.internal:%d", listener.Addr().(*net.TCPAddr).Port),
@@ -66,7 +72,7 @@ func (m *bridgeManager) BridgeCommand(ctx context.Context, name string, spec com
 	if err != nil {
 		return "", "", err
 	}
-	command := exec.CommandContext(ctx, resolvedCommand.Command, resolvedCommand.Args...)
+	command := exec.CommandContext(m.ctx, resolvedCommand.Command, resolvedCommand.Args...)
 	command.Dir = resolvedCommand.Cwd
 	command.Env = append(os.Environ(), resolvedCommand.Env...)
 
@@ -113,6 +119,9 @@ func (m *bridgeManager) Close() error {
 		if err := bridge.Close(); err != nil {
 			errs = append(errs, err)
 		}
+	}
+	if m.cancel != nil {
+		m.cancel()
 	}
 	if m.server != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)

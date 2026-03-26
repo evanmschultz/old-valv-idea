@@ -217,10 +217,6 @@ func translateMCPServers(ctx context.Context, cfg map[string]any, projectRoot, s
 			})
 			if err != nil {
 				warnings = append(warnings, fmt.Sprintf("%s: %v", name, err))
-				delete(copied, "command")
-				delete(copied, "args")
-				delete(copied, "env")
-				out[name] = copied
 				changed = true
 				continue
 			}

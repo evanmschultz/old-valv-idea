@@ -372,13 +372,20 @@ func (s Service) startRuntime(ctx context.Context, resolved resolvedBinding, now
 		_ = prepared.Close()
 		return domain.RuntimeRecord{}, fmt.Errorf("start runtime for project %q: launch runtime container: %w", resolved.project.Root, err)
 	}
-	s.storeArtifacts(record.ContainerID, prepared)
 	record.Status = "running"
 	record.UpdatedAt = s.now()
-	record, err = s.store.UpsertRuntime(ctx, record)
+	updatedRecord, err := s.store.UpsertRuntime(ctx, record)
 	if err != nil {
+		if removeErr := s.executor.RemoveContainer(ctx, dockeradapter.ContainerRemoveRequest{IDs: []string{record.ContainerID}, Force: true}); removeErr != nil {
+			s.debug("failed to remove runtime after status update error", "container", record.ContainerID, "error", removeErr)
+		}
+		if closeErr := prepared.Close(); closeErr != nil {
+			s.debug("failed to close prepared runtime after status update error", "container", record.ContainerID, "error", closeErr)
+		}
 		return domain.RuntimeRecord{}, fmt.Errorf("start runtime for project %q: update runtime status: %w", resolved.project.Root, err)
 	}
+	record = updatedRecord
+	s.storeArtifacts(record.ContainerID, prepared)
 	s.debug("started warm runtime", "runtime", record.ID, "container", record.ContainerID, "workspace_access", s.workspaceAccess)
 	return record, nil
 }

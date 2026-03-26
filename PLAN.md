@@ -289,6 +289,9 @@ Current validation follow-ups to preserve:
 - containerized interactive Codex needs a coherent in-container user and `HOME`; do not rely on the host absolute profile path doubling as the Linux home directory
 - the selected profile home should remain the durable Codex state source, but Valv should mount it into a normalized in-container home path and generate a container-safe config overlay for each run
 - container-safe overlays should merge profile-level and project-level Codex config with project-level precedence
+- Valv MCP host bridges must have their own lifecycle and remain alive for the life of the prepared runtime; they must not be tied to a single API request context when the runtime is warm and reusable
+- if a host stdio MCP bridge cannot be created, Valv should omit that translated MCP entry from the container overlay and emit a clear warning instead of writing a malformed server entry
+- if a warm runtime container starts successfully but Valv fails to persist the final running status, Valv must best-effort remove that container and close its prepared runtime artifacts before returning the error
 - attached interactive Codex runs need terminal-integration coverage in addition to Bubble Tea golden tests, because TeaTest only covers Valv-owned TUI screens and cannot prove the attached `docker run` TTY behavior
 - the repo must expose explicit local recipes for golden/TUI regression coverage rather than relying on ad hoc package test commands
 - containerized auth UX should prefer device-code login for isolated profiles unless Valv explicitly publishes or relays the localhost callback port used by browser-based login

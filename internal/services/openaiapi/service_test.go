@@ -360,6 +360,49 @@ func TestPruneExpiredRuntimesStopsOnlyExpiredWarmContainers(t *testing.T) {
 	}
 }
 
+func TestCompleteCleansUpRuntimeWhenStatusPersistFails(t *testing.T) {
+	t.Parallel()
+
+	baseStore, _, _ := seededOpenAIStore(t, "/tmp/project", "/tmp/profile")
+	store := &failSecondRuntimeUpsertStore{Store: baseStore}
+	executor := &recordingExecutor{content: "fixture response"}
+	service, err := New(Options{
+		Store:     store,
+		Executor:  executor,
+		Image:     dockeradapter.NewImageRef("valv-codex", "dev"),
+		TempRoot:  t.TempDir(),
+		StartPath: "/tmp/project",
+		IdleTTL:   time.Minute,
+		Now:       func() time.Time { return time.Date(2026, 3, 25, 15, 0, 0, 0, time.UTC) },
+		Detect: func(string) (projectdetect.Result, error) {
+			return projectdetect.Result{Root: "/tmp/project"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	_, err = service.Complete(context.Background(), openaiapi.Request{
+		Model:    "gpt-5.2",
+		Messages: []openaiapi.Message{{Role: openaiapi.RoleUser, Content: "hello"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "update runtime status") {
+		t.Fatalf("Complete() error = %v, want runtime status update failure", err)
+	}
+	if len(executor.runRequests) != 1 {
+		t.Fatalf("runRequests len = %d, want 1", len(executor.runRequests))
+	}
+	if len(executor.removedRequests) != 1 {
+		t.Fatalf("removedRequests len = %d, want 1", len(executor.removedRequests))
+	}
+	if got := executor.removedRequests[0].IDs; !reflect.DeepEqual(got, []string{executor.runRequests[0].Name}) {
+		t.Fatalf("removed IDs = %#v, want %#v", got, []string{executor.runRequests[0].Name})
+	}
+	if _, ok := service.lookupArtifacts(executor.runRequests[0].Name); ok {
+		t.Fatal("expected no prepared runtime artifacts after failed status persist")
+	}
+}
+
 type recordingExecutor struct {
 	runRequests     []dockeradapter.ContainerRunRequest
 	execRequests    []dockeradapter.ContainerExecRequest
@@ -450,4 +493,17 @@ func mustOpenAIProfile(t *testing.T, name, home string) domain.Profile {
 		t.Fatalf("NewProfile() error = %v", err)
 	}
 	return profile
+}
+
+type failSecondRuntimeUpsertStore struct {
+	*sqliteadapter.Store
+	runtimeUpserts int
+}
+
+func (s *failSecondRuntimeUpsertStore) UpsertRuntime(ctx context.Context, record domain.RuntimeRecord) (domain.RuntimeRecord, error) {
+	s.runtimeUpserts++
+	if s.runtimeUpserts == 2 {
+		return domain.RuntimeRecord{}, errors.New("persist running runtime failed")
+	}
+	return s.Store.UpsertRuntime(ctx, record)
 }

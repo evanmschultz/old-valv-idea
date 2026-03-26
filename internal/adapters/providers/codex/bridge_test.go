@@ -134,6 +134,54 @@ func TestBridgeManagerBridgesStdioServers(t *testing.T) {
 	}
 }
 
+func TestBridgeManagerKeepsBridgeAliveAfterRequestContextCancellation(t *testing.T) {
+	t.Parallel()
+
+	manager, err := newBridgeManager(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("newBridgeManager() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := manager.Close(); err != nil {
+			t.Fatalf("manager.Close() error = %v", err)
+		}
+	})
+
+	requestCtx, cancel := context.WithCancel(context.Background())
+	url, _, err := manager.BridgeCommand(requestCtx, "helper", commandSpec{
+		Command: os.Args[0],
+		Args:    []string{"-test.run=TestBridgeHelperProcess"},
+		Env: map[string]string{
+			helperEnv: "1",
+		},
+		Cwd: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("BridgeCommand() error = %v", err)
+	}
+	cancel()
+
+	url = strings.Replace(url, "host.docker.internal", "127.0.0.1", 1)
+	client := mcp.NewClient(&mcp.Implementation{Name: "bridge-test-client", Version: "v0.0.1"}, nil)
+	session, err := client.Connect(context.Background(), &mcp.StreamableClientTransport{Endpoint: url}, nil)
+	if err != nil {
+		t.Fatalf("client.Connect() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := session.Close(); err != nil {
+			t.Fatalf("session.Close() error = %v", err)
+		}
+	})
+
+	tools, err := session.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("ListTools() error = %v", err)
+	}
+	if len(tools.Tools) != 1 || tools.Tools[0].Name != "echo" {
+		t.Fatalf("ListTools() = %+v, want single echo tool", tools.Tools)
+	}
+}
+
 func TestRewriteLoopbackURL(t *testing.T) {
 	t.Parallel()
 

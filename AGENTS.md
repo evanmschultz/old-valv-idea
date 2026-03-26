@@ -154,6 +154,8 @@ Required behavior for containerized Codex runs:
 - generate a container-safe runtime overlay instead of executing host-only MCP entries unchanged
 - translate host-loopback MCP URLs such as `127.0.0.1` and `localhost` to `host.docker.internal` where the target is intended to be the macOS host
 - do not hardcode user-specific MCP server names or paths
+- keep host-bridge subprocess lifetime bound to the prepared runtime lifecycle, not to a single API request context
+- if a host-side stdio MCP bridge cannot be created, omit that translated entry from the overlay and emit a warning; do not write malformed MCP server stanzas
 - treat stdio MCP entries generically:
   - if the command exists inside the image, it may run in-container
   - if it depends on a host-only path or host-only binary, expose it through a Valv-managed host bridge instead of trying to execute the macOS binary inside Linux

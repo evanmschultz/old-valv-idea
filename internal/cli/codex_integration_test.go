@@ -279,6 +279,7 @@ func runValvBinaryCommand(t *testing.T, binaryPath, homeDir, workingDir, imageRe
 	command.Dir = workingDir
 	command.Env = append(os.Environ(),
 		"HOME="+homeDir,
+		"VALV_TEST_HOME_DIR="+homeDir,
 		"VALV_CODEX_IMAGE="+imageRef,
 	)
 	output, err := command.CombinedOutput()
