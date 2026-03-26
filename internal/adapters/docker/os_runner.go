@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/charmbracelet/log"
+	"github.com/charmbracelet/x/term"
 )
 
 type commandFactory func(context.Context, string, ...string) *exec.Cmd
@@ -172,13 +173,31 @@ func sharedTTYFile(stdin io.Reader, stdout, stderr io.Writer) (*os.File, bool) {
 	if !ok {
 		return nil, false
 	}
+	if !term.IsTerminal(in.Fd()) {
+		return nil, false
+	}
 	out, ok := stdout.(*os.File)
-	if !ok || out != in {
+	if !ok || !term.IsTerminal(out.Fd()) {
 		return nil, false
 	}
 	errFile, ok := stderr.(*os.File)
-	if !ok || errFile != in {
+	if !ok || !term.IsTerminal(errFile.Fd()) {
+		return nil, false
+	}
+	if !sameTerminalFile(in, out) || !sameTerminalFile(in, errFile) {
 		return nil, false
 	}
 	return in, true
+}
+
+func sameTerminalFile(left, right *os.File) bool {
+	leftInfo, err := left.Stat()
+	if err != nil {
+		return false
+	}
+	rightInfo, err := right.Stat()
+	if err != nil {
+		return false
+	}
+	return os.SameFile(leftInfo, rightInfo)
 }

@@ -361,15 +361,18 @@ func (s Service) startRuntime(ctx context.Context, resolved resolvedBinding, now
 		Logger:      s.logger,
 	})
 	if err != nil {
+		s.markRuntimeFailed(ctx, record)
 		return domain.RuntimeRecord{}, fmt.Errorf("start runtime for project %q: prepare runtime: %w", resolved.project.Root, err)
 	}
 	request, err := s.buildRuntimeRequest(record, resolved.project, resolved.profile, prepared)
 	if err != nil {
 		_ = prepared.Close()
+		s.markRuntimeFailed(ctx, record)
 		return domain.RuntimeRecord{}, fmt.Errorf("start runtime for project %q: build docker run request: %w", resolved.project.Root, err)
 	}
 	if err := s.executor.Run(ctx, request); err != nil {
 		_ = prepared.Close()
+		s.markRuntimeFailed(ctx, record)
 		return domain.RuntimeRecord{}, fmt.Errorf("start runtime for project %q: launch runtime container: %w", resolved.project.Root, err)
 	}
 	record.Status = "running"
@@ -388,6 +391,14 @@ func (s Service) startRuntime(ctx context.Context, resolved resolvedBinding, now
 	s.storeArtifacts(record.ContainerID, prepared)
 	s.debug("started warm runtime", "runtime", record.ID, "container", record.ContainerID, "workspace_access", s.workspaceAccess)
 	return record, nil
+}
+
+func (s Service) markRuntimeFailed(ctx context.Context, record domain.RuntimeRecord) {
+	record.Status = "failed"
+	record.UpdatedAt = s.now()
+	if _, err := s.store.UpsertRuntime(ctx, record); err != nil {
+		s.debug("failed to mark runtime as failed", "runtime", record.ID, "container", record.ContainerID, "error", err)
+	}
 }
 
 func (s Service) stopRuntime(ctx context.Context, record domain.RuntimeRecord, status string) error {

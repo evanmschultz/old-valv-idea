@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/creack/pty/v2"
@@ -94,7 +95,20 @@ func TestSharedTTYFileDetectsSharedPTY(t *testing.T) {
 	defer master.Close()
 	defer slave.Close()
 
-	file, ok := sharedTTYFile(slave, slave, slave)
+	stdoutFD, err := syscall.Dup(int(slave.Fd()))
+	if err != nil {
+		t.Fatalf("syscall.Dup(stdout) error = %v", err)
+	}
+	stderrFD, err := syscall.Dup(int(slave.Fd()))
+	if err != nil {
+		t.Fatalf("syscall.Dup(stderr) error = %v", err)
+	}
+	stdoutFile := os.NewFile(uintptr(stdoutFD), "stdout-tty")
+	stderrFile := os.NewFile(uintptr(stderrFD), "stderr-tty")
+	defer stdoutFile.Close()
+	defer stderrFile.Close()
+
+	file, ok := sharedTTYFile(slave, stdoutFile, stderrFile)
 	if !ok {
 		t.Fatal("sharedTTYFile() = not ok, want shared PTY detection")
 	}

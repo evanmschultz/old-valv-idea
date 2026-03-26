@@ -143,6 +143,7 @@ For interactive `valv codex` runs:
 - ensure the container has a coherent in-container user and `HOME`; do not rely on the host absolute profile path doubling as the Linux home directory
 - preserve Codex auth/session/memory by mounting the selected Valv profile home, but normalize the in-container mount target so the CLI behaves like a normal Linux home layout
 - if Valv generates container-only config overlays, keep auth/session files durable while making the runtime config container-safe
+- attached Docker subprocesses must treat real terminal stdin/stdout/stderr as the same controlling TTY when they refer to the same terminal device, even if they are separate file descriptors
 
 ## 9.2) MCP Translation Rules
 
@@ -160,6 +161,7 @@ Required behavior for containerized Codex runs:
   - if the command exists inside the image, it may run in-container
   - if it depends on a host-only path or host-only binary, expose it through a Valv-managed host bridge instead of trying to execute the macOS binary inside Linux
 - preserve project-level precedence over profile-level MCP entries when merging overlays
+- if a warm runtime record is persisted in `starting` state and startup later fails, mark that record failed or otherwise clean it up; do not leave orphan `starting` rows behind
 
 ## 9.3) Auth UX Rules
 

@@ -293,6 +293,7 @@ Current validation follow-ups to preserve:
 - if a host stdio MCP bridge cannot be created, Valv should omit that translated MCP entry from the container overlay and emit a clear warning instead of writing a malformed server entry
 - if a warm runtime container starts successfully but Valv fails to persist the final running status, Valv must best-effort remove that container and close its prepared runtime artifacts before returning the error
 - attached interactive Codex runs need terminal-integration coverage in addition to Bubble Tea golden tests, because TeaTest only covers Valv-owned TUI screens and cannot prove the attached `docker run` TTY behavior
+- attached `docker run` TTY handling must work with real terminal stdin/stdout/stderr descriptors even when they are distinct file descriptors for the same terminal device; do not restrict the controlling-TTY path to the exact same `*os.File` object
 - the repo must expose explicit local recipes for golden/TUI regression coverage rather than relying on ad hoc package test commands
 - containerized auth UX should prefer device-code login for isolated profiles unless Valv explicitly publishes or relays the localhost callback port used by browser-based login
 

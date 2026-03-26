@@ -403,18 +403,113 @@ func TestCompleteCleansUpRuntimeWhenStatusPersistFails(t *testing.T) {
 	}
 }
 
+func TestCompleteMarksRuntimeFailedWhenPrepareRuntimeFails(t *testing.T) {
+	t.Parallel()
+
+	store, project, profile := seededOpenAIStore(t, "/tmp/project", "/tmp/profile")
+	blockingFile := filepath.Join(t.TempDir(), "blocking")
+	if err := os.WriteFile(blockingFile, []byte("not a dir"), 0o644); err != nil {
+		t.Fatalf("WriteFile(blockingFile) error = %v", err)
+	}
+	service, err := New(Options{
+		Store:     store,
+		Executor:  &recordingExecutor{content: "fixture response"},
+		Image:     dockeradapter.NewImageRef("valv-codex", "dev"),
+		TempRoot:  blockingFile,
+		StartPath: "/tmp/project",
+		IdleTTL:   time.Minute,
+		Now:       func() time.Time { return time.Date(2026, 3, 25, 15, 0, 0, 0, time.UTC) },
+		Detect: func(string) (projectdetect.Result, error) {
+			return projectdetect.Result{Root: "/tmp/project"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	_, err = service.Complete(context.Background(), openaiapi.Request{
+		Model:    "gpt-5.2",
+		Messages: []openaiapi.Message{{Role: openaiapi.RoleUser, Content: "hello"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "prepare runtime") {
+		t.Fatalf("Complete() error = %v, want prepare runtime failure", err)
+	}
+
+	records, err := store.ListRuntimesByProjectID(context.Background(), project.ID)
+	if err != nil {
+		t.Fatalf("ListRuntimesByProjectID() error = %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("runtime record count = %d, want 1", len(records))
+	}
+	if records[0].ProfileID != profile.ID {
+		t.Fatalf("runtime profile id = %q, want %q", records[0].ProfileID, profile.ID)
+	}
+	if records[0].Status != "failed" {
+		t.Fatalf("runtime status = %q, want failed", records[0].Status)
+	}
+}
+
+func TestCompleteMarksRuntimeFailedWhenContainerLaunchFails(t *testing.T) {
+	t.Parallel()
+
+	store, project, profile := seededOpenAIStore(t, "/tmp/project", "/tmp/profile")
+	executor := &recordingExecutor{content: "fixture response", runErr: errors.New("docker run failed")}
+	service, err := New(Options{
+		Store:     store,
+		Executor:  executor,
+		Image:     dockeradapter.NewImageRef("valv-codex", "dev"),
+		TempRoot:  t.TempDir(),
+		StartPath: "/tmp/project",
+		IdleTTL:   time.Minute,
+		Now:       func() time.Time { return time.Date(2026, 3, 25, 15, 0, 0, 0, time.UTC) },
+		Detect: func(string) (projectdetect.Result, error) {
+			return projectdetect.Result{Root: "/tmp/project"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	_, err = service.Complete(context.Background(), openaiapi.Request{
+		Model:    "gpt-5.2",
+		Messages: []openaiapi.Message{{Role: openaiapi.RoleUser, Content: "hello"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "launch runtime container") {
+		t.Fatalf("Complete() error = %v, want launch failure", err)
+	}
+	if len(executor.removedRequests) != 0 {
+		t.Fatalf("removedRequests len = %d, want 0 because launch never succeeded", len(executor.removedRequests))
+	}
+
+	records, err := store.ListRuntimesByProjectID(context.Background(), project.ID)
+	if err != nil {
+		t.Fatalf("ListRuntimesByProjectID() error = %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("runtime record count = %d, want 1", len(records))
+	}
+	if records[0].ProfileID != profile.ID {
+		t.Fatalf("runtime profile id = %q, want %q", records[0].ProfileID, profile.ID)
+	}
+	if records[0].Status != "failed" {
+		t.Fatalf("runtime status = %q, want failed", records[0].Status)
+	}
+}
+
 type recordingExecutor struct {
 	runRequests     []dockeradapter.ContainerRunRequest
 	execRequests    []dockeradapter.ContainerExecRequest
 	removedRequests []dockeradapter.ContainerRemoveRequest
 	inspectCalls    []string
 	content         string
+	runErr          error
 	inspectErr      error
 }
 
 func (e *recordingExecutor) Run(_ context.Context, request dockeradapter.ContainerRunRequest) error {
 	e.runRequests = append(e.runRequests, request)
-	return nil
+	return e.runErr
 }
 
 func (e *recordingExecutor) Exec(_ context.Context, request dockeradapter.ContainerExecRequest) error {
