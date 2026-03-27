@@ -26,6 +26,7 @@ import (
 )
 
 var errSelectionCanceled = errors.New("selection canceled")
+var codexVersionResolverFactory = imagesservice.NewCodexVersionResolver
 
 func openManageService(cmd *cobra.Command, paths config.Paths) (manageservice.Service, func(), error) {
 	store, err := openStore(paths)
@@ -63,13 +64,20 @@ func openGlobalSwitchService(cmd *cobra.Command, paths config.Paths) (globalswit
 	return service, func() { _ = store.Close() }, nil
 }
 
-func newImagesService(cmd *cobra.Command, paths config.Paths) (imagesservice.Service, error) {
+func openImagesService(cmd *cobra.Command, paths config.Paths) (imagesservice.Service, func(), error) {
+	store, err := openStore(paths)
+	if err != nil {
+		return imagesservice.Service{}, nil, err
+	}
 	contextDir := filepath.Join(paths.BuildCacheDir, string(domain.ProviderCodex))
 	if _, err := imagesservice.WriteDefaultCodexContext(contextDir); err != nil {
-		return imagesservice.Service{}, err
+		_ = store.Close()
+		return imagesservice.Service{}, nil, err
 	}
-	return imagesservice.New(imagesservice.Options{
+	service, err := imagesservice.New(imagesservice.Options{
 		Runner:     dockeradapter.NewQuietRunner("docker", LoggerFromContext(cmd.Context())),
+		StateStore: store,
+		Resolver:   codexVersionResolverFactory(nil),
 		Repository: codexImageRepository(),
 		ContextDir: contextDir,
 		Dockerfile: "Dockerfile",
@@ -78,6 +86,11 @@ func newImagesService(cmd *cobra.Command, paths config.Paths) (imagesservice.Ser
 		GroupID:    os.Getgid(),
 		Logger:     LoggerFromContext(cmd.Context()),
 	})
+	if err != nil {
+		_ = store.Close()
+		return imagesservice.Service{}, nil, err
+	}
+	return service, func() { _ = store.Close() }, nil
 }
 
 func newCleanupService(cmd *cobra.Command, paths config.Paths) (cleanupservice.Service, error) {

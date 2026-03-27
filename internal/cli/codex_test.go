@@ -115,6 +115,13 @@ func TestCodexImageRefParsesOverrideWithTag(t *testing.T) {
 	}
 }
 
+func TestCodexImageVersionRefUsesRepositoryAndDashedVersionTag(t *testing.T) {
+	t.Setenv("VALV_CODEX_IMAGE", "ghcr.io/example/codex:test-fixture")
+	if got := codexImageVersionRef("0.117.0").String(); got != "ghcr.io/example/codex:0-117-0" {
+		t.Fatalf("codexImageVersionRef() = %q, want dashed version tag", got)
+	}
+}
+
 func TestCodexArgsSkipProjectBinding(t *testing.T) {
 	t.Parallel()
 
@@ -215,7 +222,7 @@ func TestRunCodexImageOnlyCommandPassesThroughArgs(t *testing.T) {
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
 
-	if err := runCodexImageOnlyCommand(cmd, []string{"resume", "--help"}); err != nil {
+	if err := runCodexImageOnlyCommand(cmd, testCodexPaths(t), []string{"resume", "--help"}); err != nil {
 		t.Fatalf("runCodexImageOnlyCommand() error = %v", err)
 	}
 

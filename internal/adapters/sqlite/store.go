@@ -78,6 +78,15 @@ func (s *Store) Bootstrap(ctx context.Context) error {
 			FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_runtimes_project_id ON runtimes(project_id);`,
+		`CREATE TABLE IF NOT EXISTS provider_images (
+			provider TEXT PRIMARY KEY,
+			latest_version TEXT NOT NULL,
+			latest_checked_at TEXT NOT NULL,
+			installed_version TEXT NOT NULL,
+			installed_image_ref TEXT NOT NULL,
+			installed_version_tag TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);`,
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -340,6 +349,70 @@ func (s *Store) ListRuntimesByProjectID(ctx context.Context, projectID string) (
 		return nil, fmt.Errorf("list runtimes by project id %q: %w", projectID, err)
 	}
 	return records, nil
+}
+
+func (s *Store) ProviderImageState(ctx context.Context, provider domain.Provider) (domain.ProviderImageState, error) {
+	row := s.db.QueryRowContext(
+		ctx,
+		`SELECT provider, latest_version, latest_checked_at, installed_version, installed_image_ref, installed_version_tag, updated_at
+		 FROM provider_images WHERE provider = ?`,
+		string(provider),
+	)
+	var state domain.ProviderImageState
+	var providerValue string
+	var latestCheckedAt string
+	var updatedAt string
+	if err := row.Scan(
+		&providerValue,
+		&state.LatestVersion,
+		&latestCheckedAt,
+		&state.InstalledVersion,
+		&state.InstalledImageRef,
+		&state.InstalledVersionTag,
+		&updatedAt,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.ProviderImageState{}, fmt.Errorf("provider image state %q: %w", provider, domain.ErrNotFound)
+		}
+		return domain.ProviderImageState{}, fmt.Errorf("provider image state %q: %w", provider, err)
+	}
+	parsedLatestCheckedAt, err := parseTime("provider image state", "latest_checked_at", latestCheckedAt)
+	if err != nil {
+		return domain.ProviderImageState{}, err
+	}
+	parsedUpdatedAt, err := parseTime("provider image state", "updated_at", updatedAt)
+	if err != nil {
+		return domain.ProviderImageState{}, err
+	}
+	state.Provider = domain.Provider(providerValue)
+	state.LatestCheckedAt = parsedLatestCheckedAt
+	state.UpdatedAt = parsedUpdatedAt
+	return state, nil
+}
+
+func (s *Store) UpsertProviderImageState(ctx context.Context, state domain.ProviderImageState) (domain.ProviderImageState, error) {
+	if _, err := s.db.ExecContext(
+		ctx,
+		`INSERT INTO provider_images (provider, latest_version, latest_checked_at, installed_version, installed_image_ref, installed_version_tag, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(provider) DO UPDATE SET
+		   latest_version = excluded.latest_version,
+		   latest_checked_at = excluded.latest_checked_at,
+		   installed_version = excluded.installed_version,
+		   installed_image_ref = excluded.installed_image_ref,
+		   installed_version_tag = excluded.installed_version_tag,
+		   updated_at = excluded.updated_at`,
+		string(state.Provider),
+		state.LatestVersion,
+		formatTime(state.LatestCheckedAt),
+		state.InstalledVersion,
+		state.InstalledImageRef,
+		state.InstalledVersionTag,
+		formatTime(state.UpdatedAt),
+	); err != nil {
+		return domain.ProviderImageState{}, fmt.Errorf("upsert provider image state %q: %w", state.Provider, err)
+	}
+	return state, nil
 }
 
 type runtimeScanner interface {

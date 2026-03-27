@@ -47,6 +47,16 @@ type RuntimeRecord struct {
 	UpdatedAt   time.Time
 }
 
+type ProviderImageState struct {
+	Provider            Provider
+	LatestVersion       string
+	LatestCheckedAt     time.Time
+	InstalledVersion    string
+	InstalledImageRef   string
+	InstalledVersionTag string
+	UpdatedAt           time.Time
+}
+
 func NewProject(root string) (Project, error) {
 	normalizedRoot, err := pathutil.Normalize(root)
 	if err != nil {
@@ -132,6 +142,22 @@ func NewRuntimeRecord(provider Provider, projectID string, profileID string, mod
 		Status:      strings.TrimSpace(status),
 		CreatedAt:   now,
 		UpdatedAt:   now,
+	}, nil
+}
+
+func NewProviderImageState(provider Provider, latestVersion, installedVersion, installedImageRef, installedVersionTag string) (ProviderImageState, error) {
+	if strings.TrimSpace(string(provider)) == "" {
+		return ProviderImageState{}, fmt.Errorf("new provider image state: provider is required")
+	}
+	now := time.Now().UTC()
+	return ProviderImageState{
+		Provider:            provider,
+		LatestVersion:       strings.TrimSpace(latestVersion),
+		LatestCheckedAt:     now,
+		InstalledVersion:    strings.TrimSpace(installedVersion),
+		InstalledImageRef:   strings.TrimSpace(installedImageRef),
+		InstalledVersionTag: strings.TrimSpace(installedVersionTag),
+		UpdatedAt:           now,
 	}, nil
 }
 

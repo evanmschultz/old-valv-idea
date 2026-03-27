@@ -213,6 +213,35 @@ func TestCleanDockerDiscoversManagedContainersByLabel(t *testing.T) {
 	}
 }
 
+func TestCleanDockerDiscoversManagedImagesByLabel(t *testing.T) {
+	t.Parallel()
+
+	runner := &cleanupRunnerRecorder{out: "valv-codex:dev\nvalv-codex:0-117-0\n<none>:<none>\n"}
+	svc, err := New(Options{Runner: runner})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	result, err := svc.CleanDocker(context.Background(), DockerCleanupRequest{
+		ImageFilters: map[string]string{
+			"label": "io.valv.managed=true",
+		},
+		Force: true,
+	})
+	if err != nil {
+		t.Fatalf("CleanDocker() error = %v", err)
+	}
+	if got, want := runner.calls[0], []string{"image", "ls", "--format", "{{.Repository}}:{{.Tag}}", "--filter", "label=io.valv.managed=true"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("image ls args = %#v, want %#v", got, want)
+	}
+	if got, want := runner.calls[1], []string{"image", "rm", "--force", "valv-codex:dev", "valv-codex:0-117-0"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("image rm args = %#v, want %#v", got, want)
+	}
+	if got, want := len(result.RemovedImages), 2; got != want {
+		t.Fatalf("removed images len = %d, want %d", got, want)
+	}
+}
+
 func TestCleanDockerSupportsFiltersAndVolumes(t *testing.T) {
 	t.Parallel()
 
@@ -317,6 +346,33 @@ func TestCleanDockerIgnoresMissingImageErrors(t *testing.T) {
 	}
 	if got, want := runner.calls[1], []string{"builder", "prune", "--force"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("builder prune args = %#v, want %#v", got, want)
+	}
+}
+
+func TestCleanDockerIgnoresMissingContainerErrors(t *testing.T) {
+	t.Parallel()
+
+	runner := &cleanupRunnerSequence{
+		errors: []error{
+			errors.New("run docker rm --force abc123: No such container: abc123"),
+			nil,
+		},
+	}
+	svc, err := New(Options{Runner: runner})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	result, err := svc.CleanDocker(context.Background(), DockerCleanupRequest{
+		ContainerIDs: []string{"abc123"},
+		PruneBuilder: true,
+		Force:        true,
+	})
+	if err != nil {
+		t.Fatalf("CleanDocker() error = %v, want ignored missing-container failure", err)
+	}
+	if len(result.Commands) != 2 {
+		t.Fatalf("commands len = %d, want 2", len(result.Commands))
 	}
 }
 

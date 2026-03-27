@@ -66,11 +66,51 @@ func TestNewRuntimeRecord(t *testing.T) {
 	}
 }
 
+func TestNewProviderImageState(t *testing.T) {
+	t.Parallel()
+
+	state, err := NewProviderImageState(ProviderCodex, "0.117.0", "0.117.0", "valv-codex:dev", "valv-codex:0-117-0")
+	if err != nil {
+		t.Fatalf("NewProviderImageState() error = %v", err)
+	}
+	if got, want := state.Provider, ProviderCodex; got != want {
+		t.Fatalf("Provider = %q, want %q", got, want)
+	}
+	if got, want := state.InstalledVersionTag, "valv-codex:0-117-0"; got != want {
+		t.Fatalf("InstalledVersionTag = %q, want %q", got, want)
+	}
+}
+
 func TestNewProjectRejectsEmptyRoot(t *testing.T) {
 	t.Parallel()
 
 	if _, err := NewProject(""); err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+func TestNewProjectBindingRejectsEmptyIDs(t *testing.T) {
+	t.Parallel()
+
+	if _, err := NewProjectBinding("", "profile-id", ProviderCodex); err == nil {
+		t.Fatal("NewProjectBinding() error = nil, want project-id failure")
+	}
+	if _, err := NewProjectBinding("project-id", "", ProviderCodex); err == nil {
+		t.Fatal("NewProjectBinding() error = nil, want profile-id failure")
+	}
+}
+
+func TestNewRuntimeRecordRejectsMissingRequiredFields(t *testing.T) {
+	t.Parallel()
+
+	if _, err := NewRuntimeRecord(ProviderCodex, "", "profile-id", ModeFresh, "container-1", "img:1", "running"); err == nil {
+		t.Fatal("NewRuntimeRecord() error = nil, want project-id failure")
+	}
+	if _, err := NewRuntimeRecord(ProviderCodex, "project-id", "profile-id", ModeFresh, "", "img:1", "running"); err == nil {
+		t.Fatal("NewRuntimeRecord() error = nil, want container-id failure")
+	}
+	if _, err := NewRuntimeRecord(ProviderCodex, "project-id", "profile-id", ModeFresh, "container-1", "", "running"); err == nil {
+		t.Fatal("NewRuntimeRecord() error = nil, want image-ref failure")
 	}
 }
 

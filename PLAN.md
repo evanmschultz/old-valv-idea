@@ -104,7 +104,7 @@ Valv should treat provider client binaries inside Docker images as Valv-managed 
 
 Current Codex observation from the local machine:
 
-- `codex --version` reports `codex-cli 0.116.0`
+- the upstream Codex CLI can report its own npm-style update prompt from inside the runtime
 - the current local CLI help does not expose a dedicated `codex update` subcommand
 
 Design implication:
@@ -115,15 +115,15 @@ Design implication:
 Recommended update model:
 
 - each provider image has a Valv-owned client install recipe in the Docker build
-- provider images should use explicit pinned client versions by default
-- Valv stores built image version metadata in SQLite
-- `valv manage update` and `valv m update` rebuild provider images for the clients the user has configured
+- `valv manage update` and `valv m update` should resolve the latest upstream client version, rebuild only when the local image is missing or stale, and persist the installed/latest version metadata in SQLite
+- direct runtime commands like `valv codex` should run the same latest-version preflight automatically and rebuild only when needed
+- Valv stores provider image state in SQLite, including latest checked version, installed version, and the installed image refs/tags
 - the management TUI should expose the same update action
 
 Recommended user experience:
 
-- if a running client reports that it is outdated, Valv should not try to mutate that running session in place
-- Valv should detect that failure pattern where practical, log it, and after the process exits show a clear action like `valv manage update`
+- if a running client reports that it is outdated, Valv should not rely on the in-session self-update flow as the primary fix path
+- Valv should check upstream before launch where practical so the containerized client normally starts already current
 - API workers should be refreshed by rebuilding the image and then letting old warm workers age out or be restarted cleanly
 
 Do not make users manually edit Dockerfiles just to update a client version.
@@ -133,15 +133,15 @@ Important update policy details:
 - using `latest` in the Docker build does not update existing images
 - Valv should not rely on a floating `latest` channel as the default update strategy
 - if Valv wants newer client bits, Valv still needs to rebuild the image and restart or replace affected containers
-- rebuilding on every `valv codex` launch would be slow, network-heavy, and brittle
-- the right default is managed rebuilds, not implicit rebuild-on-run
+- the right default is managed update checks on launch, with rebuilds only when the installed image is missing or stale
+- if the upstream latest-version check fails but a usable local image exists, Valv may continue with that local image and log the stale-check failure
 
 Practical consequence:
 
-- `valv codex ...` should run against an already-built local image
-- `valv manage update` should rebuild provider images and safely roll warm API workers forward
-- interactive attached launches should pick up the new image on the next run after update
-- API warm containers must be replaced or restarted before they will use the updated client version
+- `valv codex ...` should check whether a newer managed image is required before launch and rebuild only when necessary
+- `valv manage update` should perform the same latest-version check explicitly and safely roll warm API workers forward when the image changes
+- interactive attached launches should pick up the new image automatically on the next run
+- API warm containers must be replaced or restarted before they will use an updated client version
 
 Build implementation preference:
 

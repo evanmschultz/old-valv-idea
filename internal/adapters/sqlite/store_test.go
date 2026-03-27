@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/evanmschultz/valv/internal/domain"
 )
@@ -130,6 +131,37 @@ func TestStoreRuntimeLifecycle(t *testing.T) {
 	}
 }
 
+func TestStoreProviderImageStateLifecycle(t *testing.T) {
+	t.Parallel()
+
+	store := newBootstrappedStore(t)
+	state, err := domain.NewProviderImageState(domain.ProviderCodex, "0.117.0", "0.117.0", "valv-codex:dev", "valv-codex:0-117-0")
+	if err != nil {
+		t.Fatalf("NewProviderImageState() error = %v", err)
+	}
+	if _, err := store.UpsertProviderImageState(context.Background(), state); err != nil {
+		t.Fatalf("UpsertProviderImageState() error = %v", err)
+	}
+
+	state.InstalledVersion = "0.118.0"
+	state.InstalledVersionTag = "valv-codex:0-118-0"
+	state.UpdatedAt = state.UpdatedAt.Add(time.Minute)
+	if _, err := store.UpsertProviderImageState(context.Background(), state); err != nil {
+		t.Fatalf("UpsertProviderImageState() update error = %v", err)
+	}
+
+	fetched, err := store.ProviderImageState(context.Background(), domain.ProviderCodex)
+	if err != nil {
+		t.Fatalf("ProviderImageState() error = %v", err)
+	}
+	if got, want := fetched.InstalledVersion, "0.118.0"; got != want {
+		t.Fatalf("ProviderImageState().InstalledVersion = %q, want %q", got, want)
+	}
+	if got, want := fetched.InstalledVersionTag, "valv-codex:0-118-0"; got != want {
+		t.Fatalf("ProviderImageState().InstalledVersionTag = %q, want %q", got, want)
+	}
+}
+
 func TestStoreNotFoundErrors(t *testing.T) {
 	t.Parallel()
 
@@ -148,6 +180,9 @@ func TestStoreNotFoundErrors(t *testing.T) {
 	}
 	if _, err := store.RuntimeByID(context.Background(), "missing"); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("RuntimeByID() error = %v, want domain.ErrNotFound", err)
+	}
+	if _, err := store.ProviderImageState(context.Background(), domain.ProviderCodex); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("ProviderImageState() error = %v, want domain.ErrNotFound", err)
 	}
 }
 

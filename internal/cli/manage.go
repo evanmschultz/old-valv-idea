@@ -7,10 +7,10 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
-	dockeradapter "github.com/evanmschultz/valv/internal/adapters/docker"
 	"github.com/evanmschultz/valv/internal/config"
 	"github.com/evanmschultz/valv/internal/domain"
 	"github.com/evanmschultz/valv/internal/output"
@@ -453,10 +453,11 @@ func newManageUpdateCommand(paths config.Paths, opts *rootOptions) *cobra.Comman
 Rebuild the provider client image Valv uses for containerized runtime launches.
 
 Output fields:
-- provider: provider whose runtime image was rebuilt
+- provider: provider whose runtime image was checked
 - image: default image tag Valv will run next
-- tags: all image tags refreshed by the rebuild
-- version: pinned client version installed into the image
+- tags: all image tags Valv expects for the current installed client
+- version: latest client version Valv resolved and installed
+- checked at: latest upstream version check timestamp
 - context: generated Docker build context under the Valv cache root
 `),
 		Example: strings.TrimSpace(`
@@ -483,11 +484,12 @@ func runManageUpdate(cmd *cobra.Command, paths config.Paths, opts *rootOptions, 
 	if err != nil {
 		return fmt.Errorf("resolve output policy: %w", err)
 	}
-	service, err := newImagesService(cmd, paths)
+	service, closeImages, err := openImagesService(cmd, paths)
 	if err != nil {
 		return fmt.Errorf("manage update: initialize image service: %w", err)
 	}
-	result, err := service.Update(cmd.Context(), imagesservice.UpdateRequest{BuildRequest: imagesservice.BuildRequest{Version: imagesservice.DefaultCodexVersion, ExtraTags: []dockeradapter.ImageRef{codexImageVersionRef(imagesservice.DefaultCodexVersion)}}})
+	defer closeImages()
+	result, err := service.EnsureLatest(cmd.Context(), imagesservice.EnsureRequest{})
 	if err != nil {
 		return fmt.Errorf("manage update: %w", err)
 	}
@@ -495,7 +497,11 @@ func runManageUpdate(cmd *cobra.Command, paths config.Paths, opts *rootOptions, 
 	for _, tag := range result.Tags {
 		tagValues = append(tagValues, tag.String())
 	}
-	return output.WriteRecord(cmd.OutOrStdout(), mode, "Provider image rebuilt", []output.Field{{Label: "provider", Value: string(provider), Muted: true}, {Label: "image", Value: result.Image.String(), Identifier: true}, {Label: "tags", Value: strings.Join(tagValues, ", "), Muted: true}, {Label: "version", Value: result.Version, Identifier: true}, {Label: "context", Value: result.ContextDir, Muted: true}})
+	heading := "Provider image updated"
+	if result.Action == imagesservice.EnsureActionUpToDate {
+		heading = "Provider image up to date"
+	}
+	return output.WriteRecord(cmd.OutOrStdout(), mode, heading, []output.Field{{Label: "provider", Value: string(provider), Muted: true}, {Label: "image", Value: result.Image.String(), Identifier: true}, {Label: "tags", Value: strings.Join(tagValues, ", "), Muted: true}, {Label: "version", Value: result.Version, Identifier: true}, {Label: "checked at", Value: result.LatestCheckedAt.Format(time.RFC3339), Muted: true}, {Label: "context", Value: result.ContextDir, Muted: true}})
 }
 
 func newManageCleanupCommand(paths config.Paths, opts *rootOptions) *cobra.Command {
@@ -539,13 +545,12 @@ func runManageCleanup(cmd *cobra.Command, paths config.Paths, opts *rootOptions,
 		return fmt.Errorf("manage cleanup: initialize cleanup service: %w", err)
 	}
 	local := cleanupservice.LocalCleanupRequest{Paths: cleanupservice.DefaultLocalTargets(paths)}
-	imageRefs := providerCleanupImageRefs()
 	dockerRequest := cleanupservice.DockerCleanupRequest{
 		ContainerLabels: map[string]string{
 			"label": "io.valv.managed=true",
 		},
-		ImageRefs: imageRefs,
-		Force:     true,
+		ImageFilters: providerCleanupImageFilters(),
+		Force:        true,
 	}
 
 	var summary []output.Field
@@ -557,31 +562,31 @@ func runManageCleanup(cmd *cobra.Command, paths config.Paths, opts *rootOptions,
 		}
 		summary = []output.Field{{Label: "scope", Value: "state", Badge: true}, {Label: "removed", Value: fmt.Sprintf("%d paths", len(result.Removed)), Identifier: true}}
 	case "images":
-		if _, err := service.CleanDocker(cmd.Context(), cleanupservice.DockerCleanupRequest{ImageRefs: imageRefs, Force: true}); err != nil {
+		result, err := service.CleanDocker(cmd.Context(), cleanupservice.DockerCleanupRequest{ImageFilters: providerCleanupImageFilters(), Force: true})
+		if err != nil {
 			return fmt.Errorf("manage cleanup: %w", err)
 		}
-		summary = []output.Field{{Label: "scope", Value: "images", Badge: true}, {Label: "images", Value: fmt.Sprintf("%d refs", len(imageRefs)), Identifier: true}}
+		summary = []output.Field{{Label: "scope", Value: "images", Badge: true}, {Label: "images", Value: fmt.Sprintf("%d refs", len(result.RemovedImages)), Identifier: true}}
 	case "docker":
 		result, err := service.CleanDocker(cmd.Context(), dockerRequest)
 		if err != nil {
 			return fmt.Errorf("manage cleanup: %w", err)
 		}
-		summary = []output.Field{{Label: "scope", Value: "docker", Badge: true}, {Label: "containers", Value: fmt.Sprintf("%d removed", len(result.RemovedContainers)), Identifier: true}, {Label: "images", Value: fmt.Sprintf("%d refs", len(imageRefs)), Identifier: true}}
+		summary = []output.Field{{Label: "scope", Value: "docker", Badge: true}, {Label: "containers", Value: fmt.Sprintf("%d removed", len(result.RemovedContainers)), Identifier: true}, {Label: "images", Value: fmt.Sprintf("%d refs", len(result.RemovedImages)), Identifier: true}}
 	case "all":
 		localResult, dockerResult, err := service.Clean(cmd.Context(), local, dockerRequest)
 		if err != nil {
 			return fmt.Errorf("manage cleanup: %w", err)
 		}
-		summary = []output.Field{{Label: "scope", Value: "all", Badge: true}, {Label: "removed", Value: fmt.Sprintf("%d paths", len(localResult.Removed)), Identifier: true}, {Label: "containers", Value: fmt.Sprintf("%d removed", len(dockerResult.RemovedContainers)), Identifier: true}, {Label: "images", Value: fmt.Sprintf("%d refs", len(imageRefs)), Identifier: true}}
+		summary = []output.Field{{Label: "scope", Value: "all", Badge: true}, {Label: "removed", Value: fmt.Sprintf("%d paths", len(localResult.Removed)), Identifier: true}, {Label: "containers", Value: fmt.Sprintf("%d removed", len(dockerResult.RemovedContainers)), Identifier: true}, {Label: "images", Value: fmt.Sprintf("%d refs", len(dockerResult.RemovedImages)), Identifier: true}}
 	default:
 		return fmt.Errorf("manage cleanup: unsupported scope %q", scope)
 	}
 	return output.WriteRecord(cmd.OutOrStdout(), mode, "Cleanup completed", summary)
 }
 
-func providerCleanupImageRefs() []dockeradapter.ImageRef {
-	return []dockeradapter.ImageRef{
-		codexImageRef(),
-		codexImageVersionRef(imagesservice.DefaultCodexVersion),
+func providerCleanupImageFilters() map[string]string {
+	return map[string]string{
+		"label": "io.valv.managed=true",
 	}
 }

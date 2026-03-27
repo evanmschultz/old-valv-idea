@@ -15,6 +15,7 @@ import (
 	codexprovider "github.com/evanmschultz/valv/internal/adapters/providers/codex"
 	"github.com/evanmschultz/valv/internal/config"
 	codexservice "github.com/evanmschultz/valv/internal/services/codex"
+	imagesservice "github.com/evanmschultz/valv/internal/services/images"
 )
 
 type codexRunFunc func(*cobra.Command, []string) error
@@ -36,7 +37,7 @@ Run the Codex CLI inside a Valv-managed Docker runtime for the current bound pro
 
 Everything after ` + "`valv codex`" + ` is passed through to Codex as directly as possible. Use the management surface to create profiles and bind projects before launching Codex.
 
-If the Valv-managed Codex image has not been built yet, run ` + "`valv manage update`" + ` first.
+Valv checks for a newer Codex release before launch and rebuilds the runtime image only when needed.
 `),
 		Example: strings.TrimSpace(`
 valv codex
@@ -53,7 +54,7 @@ valv codex exec "summarize the latest diff"
 
 func runCodexCommand(cmd *cobra.Command, paths config.Paths, args []string) error {
 	if codexArgsSkipProjectBinding(args) {
-		return runCodexImageOnlyCommand(cmd, args)
+		return runCodexImageOnlyCommand(cmd, paths, args)
 	}
 
 	store, err := openStore(paths)
@@ -84,7 +85,7 @@ func runCodexCommand(cmd *cobra.Command, paths config.Paths, args []string) erro
 	if err := service.ValidateBinding(cmd.Context(), workingDir); err != nil {
 		return fmt.Errorf("run codex command: %w", err)
 	}
-	if err := ensureCodexImageAvailable(cmd.Context(), dockeradapter.NewQuietRunner("docker", LoggerFromContext(cmd.Context())), codexImageRef()); err != nil {
+	if err := ensureCodexImageCurrent(cmd, paths); err != nil {
 		return fmt.Errorf("run codex command: %w", err)
 	}
 
@@ -94,11 +95,11 @@ func runCodexCommand(cmd *cobra.Command, paths config.Paths, args []string) erro
 	return nil
 }
 
-func runCodexImageOnlyCommand(cmd *cobra.Command, args []string) error {
-	image := codexImageRef()
-	if err := ensureCodexImageAvailable(cmd.Context(), dockeradapter.NewQuietRunner("docker", LoggerFromContext(cmd.Context())), image); err != nil {
+func runCodexImageOnlyCommand(cmd *cobra.Command, paths config.Paths, args []string) error {
+	if err := ensureCodexImageCurrent(cmd, paths); err != nil {
 		return fmt.Errorf("run codex command: %w", err)
 	}
+	image := codexImageRef()
 
 	executor := dockeradapter.NewExecutor(dockeradapter.NewSystemRunner("docker", cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr()))
 	request := dockeradapter.ContainerRunRequest{
@@ -158,6 +159,25 @@ func ensureCodexImageAvailable(ctx context.Context, runner interface {
 			return fmt.Errorf("codex image %q is not built locally; run `valv manage update` first", image.String())
 		}
 		return fmt.Errorf("inspect codex image %q: %w", image.String(), err)
+	}
+	return nil
+}
+
+func ensureCodexImageCurrent(cmd *cobra.Command, paths config.Paths) error {
+	if strings.TrimSpace(os.Getenv("VALV_CODEX_IMAGE")) != "" {
+		return ensureCodexImageAvailable(cmd.Context(), dockeradapter.NewQuietRunner("docker", LoggerFromContext(cmd.Context())), codexImageRef())
+	}
+	service, closeImages, err := openImagesService(cmd, paths)
+	if err != nil {
+		return fmt.Errorf("initialize image updater: %w", err)
+	}
+	defer closeImages()
+	result, err := service.EnsureLatest(cmd.Context(), imagesservice.EnsureRequest{AllowExistingOnCheckFail: true})
+	if err != nil {
+		return err
+	}
+	if result.Action == imagesservice.EnsureActionUsingExistingImage {
+		LoggerFromContext(cmd.Context()).Debug("using existing codex image after latest-version check failed", "image", result.Image.String(), "version", result.Version)
 	}
 	return nil
 }

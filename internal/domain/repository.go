@@ -24,3 +24,8 @@ type RuntimeRepository interface {
 	RuntimeByID(context.Context, string) (RuntimeRecord, error)
 	ListRuntimesByProjectID(context.Context, string) ([]RuntimeRecord, error)
 }
+
+type ProviderImageRepository interface {
+	ProviderImageState(context.Context, Provider) (ProviderImageState, error)
+	UpsertProviderImageState(context.Context, ProviderImageState) (ProviderImageState, error)
+}

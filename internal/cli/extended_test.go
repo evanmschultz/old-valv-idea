@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,7 +16,44 @@ import (
 
 	"github.com/evanmschultz/valv/internal/config"
 	"github.com/evanmschultz/valv/internal/domain"
+	imagesservice "github.com/evanmschultz/valv/internal/services/images"
+	manageservice "github.com/evanmschultz/valv/internal/services/manage"
 )
+
+type staticCLIResolver string
+
+func (r staticCLIResolver) LatestVersion(context.Context) (string, error) {
+	return string(r), nil
+}
+
+func stubCodexVersionResolver(t *testing.T, version string) {
+	t.Helper()
+	previous := codexVersionResolverFactory
+	codexVersionResolverFactory = func(*http.Client) imagesservice.VersionResolver {
+		return staticCLIResolver(version)
+	}
+	t.Cleanup(func() {
+		codexVersionResolverFactory = previous
+	})
+}
+
+type statusStubService struct {
+	status manageservice.StatusResult
+	err    error
+}
+
+func (s statusStubService) Status(context.Context, string) (manageservice.StatusResult, error) {
+	return s.status, s.err
+}
+
+type pruneRecorder struct {
+	calls int
+}
+
+func (p *pruneRecorder) PruneExpiredRuntimes(context.Context) (int, error) {
+	p.calls++
+	return 1, nil
+}
 
 func TestManageCommandWithoutTTYShowsHelp(t *testing.T) {
 	t.Parallel()
@@ -37,6 +75,25 @@ func TestManageCommandWithoutTTYShowsHelp(t *testing.T) {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("unexpected manage help output %q missing %q", stdout.String(), want)
 		}
+	}
+}
+
+func TestRunManageHomeWithoutTTYShowsHelp(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	var stdout bytes.Buffer
+	cmd := newManageCommand(paths, &rootOptions{})
+	cmd.SetContext(context.Background())
+	cmd.SetIn(bytes.NewBuffer(nil))
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&bytes.Buffer{})
+
+	if err := runManageHome(cmd, paths, &rootOptions{}); err != nil {
+		t.Fatalf("runManageHome() error = %v", err)
+	}
+	if !strings.Contains(stdout.String(), "Operator workflows") {
+		t.Fatalf("unexpected manage home help output: %q", stdout.String())
 	}
 }
 
@@ -157,9 +214,25 @@ func TestRunManageBindInteractiveShowsGuidanceWhenNoProfilesExist(t *testing.T) 
 	}
 }
 
+func TestPickProfileWithoutTTYRequiresExplicitProfile(t *testing.T) {
+	t.Parallel()
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	cmd.SetIn(bytes.NewBuffer(nil))
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+
+	_, err := pickProfile(cmd, domain.ProviderCodex, []domain.Profile{{Name: "profile-name", Provider: domain.ProviderCodex}})
+	if err == nil || !strings.Contains(err.Error(), "profile is required when not running in a TTY") {
+		t.Fatalf("pickProfile() error = %v, want non-tty guidance", err)
+	}
+}
+
 func TestManageUpdateUsesFakeDockerAndWritesBuildContext(t *testing.T) {
 	paths := testCodexPaths(t)
 	logPath := installFakeDocker(t)
+	stubCodexVersionResolver(t, "0.117.0")
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -172,7 +245,7 @@ func TestManageUpdateUsesFakeDockerAndWritesBuildContext(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v\nstderr=%s", err, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "Provider image rebuilt") {
+	if !strings.Contains(stdout.String(), "Provider image updated") {
 		t.Fatalf("unexpected update output: %q", stdout.String())
 	}
 
@@ -182,12 +255,12 @@ func TestManageUpdateUsesFakeDockerAndWritesBuildContext(t *testing.T) {
 	}
 
 	logContent := mustReadFile(t, logPath)
-	for _, want := range []string{"build", "--build-arg CODEX_VERSION=0.116.0", "-t valv-codex:dev", "-t valv-codex:0-116-0"} {
+	for _, want := range []string{"build", "--build-arg CODEX_VERSION=0.117.0", "-t valv-codex:dev", "-t valv-codex:0-117-0"} {
 		if !strings.Contains(logContent, want) {
 			t.Fatalf("unexpected docker log %q missing %q", logContent, want)
 		}
 	}
-	for _, want := range []string{"--label io.valv.managed=true", "--label io.valv.provider=codex", "--label io.valv.scope=image", "--label io.valv.version=0.116.0"} {
+	for _, want := range []string{"--label io.valv.managed=true", "--label io.valv.provider=codex", "--label io.valv.scope=image", "--label io.valv.version=0.117.0"} {
 		if !strings.Contains(logContent, want) {
 			t.Fatalf("unexpected docker log %q missing %q", logContent, want)
 		}
@@ -197,6 +270,7 @@ func TestManageUpdateUsesFakeDockerAndWritesBuildContext(t *testing.T) {
 func TestManageUpdateUsesOverrideImageRepository(t *testing.T) {
 	paths := testCodexPaths(t)
 	logPath := installFakeDocker(t)
+	stubCodexVersionResolver(t, "0.117.0")
 	t.Setenv("VALV_CODEX_IMAGE", "valv-codex-dev:dev")
 
 	var stdout bytes.Buffer
@@ -212,10 +286,27 @@ func TestManageUpdateUsesOverrideImageRepository(t *testing.T) {
 	}
 
 	logContent := mustReadFile(t, logPath)
-	for _, want := range []string{"-t valv-codex-dev:dev", "-t valv-codex-dev:0-116-0"} {
+	for _, want := range []string{"-t valv-codex-dev:dev", "-t valv-codex-dev:0-117-0"} {
 		if !strings.Contains(logContent, want) {
 			t.Fatalf("unexpected docker log %q missing %q", logContent, want)
 		}
+	}
+}
+
+func TestManageUpdateSecondRunReportsUpToDate(t *testing.T) {
+	paths := testCodexPaths(t)
+	logPath := installFakeDocker(t)
+	stubCodexVersionResolver(t, "0.117.0")
+
+	runManage(t, paths, []string{"update"})
+	output := runManage(t, paths, []string{"update"})
+	if !strings.Contains(output, "Provider image up to date") {
+		t.Fatalf("unexpected second update output: %q", output)
+	}
+
+	logContent := mustReadFile(t, logPath)
+	if got, want := strings.Count(logContent, "buildx build --load"), 1; got != want {
+		t.Fatalf("build count = %d, want %d in log %q", got, want, logContent)
 	}
 }
 
@@ -223,6 +314,7 @@ func TestManageCleanupAllRemovesLocalStateAndInvokesDocker(t *testing.T) {
 	paths := testCodexPaths(t)
 	logPath := installFakeDocker(t)
 	t.Setenv("VALV_DOCKER_PS_OUTPUT", "valv-api-1\nvalv-api-2\n")
+	t.Setenv("VALV_DOCKER_IMAGE_LS_OUTPUT", "valv-codex:dev\nvalv-codex:0-117-0\n")
 	for _, path := range []string{
 		paths.LogsDir,
 		paths.BuildCacheDir,
@@ -278,7 +370,10 @@ func TestManageCleanupAllRemovesLocalStateAndInvokesDocker(t *testing.T) {
 	if strings.Contains(logContent, "--volumes") {
 		t.Fatalf("unexpected destructive volume cleanup log: %q", logContent)
 	}
-	if !strings.Contains(logContent, "image rm --force valv-codex:dev valv-codex:0-116-0") {
+	if !strings.Contains(logContent, "image ls --format {{.Repository}}:{{.Tag}} --filter label=io.valv.managed=true") {
+		t.Fatalf("unexpected docker cleanup log: %q", logContent)
+	}
+	if !strings.Contains(logContent, "image rm --force valv-codex:dev valv-codex:0-117-0") {
 		t.Fatalf("unexpected docker cleanup log: %q", logContent)
 	}
 }
@@ -286,6 +381,7 @@ func TestManageCleanupAllRemovesLocalStateAndInvokesDocker(t *testing.T) {
 func TestManageCleanupImagesRemovesProviderImagesOnly(t *testing.T) {
 	paths := testCodexPaths(t)
 	logPath := installFakeDocker(t)
+	t.Setenv("VALV_DOCKER_IMAGE_LS_OUTPUT", "valv-codex:dev\nvalv-codex:0-117-0\n")
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -306,7 +402,7 @@ func TestManageCleanupImagesRemovesProviderImagesOnly(t *testing.T) {
 	}
 
 	logContent := mustReadFile(t, logPath)
-	if !strings.Contains(logContent, "image rm --force valv-codex:dev valv-codex:0-116-0") {
+	if !strings.Contains(logContent, "image rm --force valv-codex:dev valv-codex:0-117-0") {
 		t.Fatalf("unexpected docker cleanup log: %q", logContent)
 	}
 	if strings.Contains(logContent, "builder prune") {
@@ -346,6 +442,104 @@ func TestGlobalSwitchCreatesHostSymlink(t *testing.T) {
 	}
 	if linkTarget != wantTarget {
 		t.Fatalf("Readlink(%q) = %q, want %q", target, linkTarget, wantTarget)
+	}
+}
+
+func TestEnsureCodexImageCurrentAutoUpdatesWhenNoOverrideIsSet(t *testing.T) {
+	paths := testCodexPaths(t)
+	logPath := installFakeDocker(t)
+	stubCodexVersionResolver(t, "0.117.0")
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	cmd.SetIn(bytes.NewBuffer(nil))
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+
+	if err := ensureCodexImageCurrent(cmd, paths); err != nil {
+		t.Fatalf("ensureCodexImageCurrent() error = %v", err)
+	}
+
+	logContent := mustReadFile(t, logPath)
+	for _, want := range []string{"image inspect valv-codex:dev", "buildx build --load", "--build-arg CODEX_VERSION=0.117.0"} {
+		if !strings.Contains(logContent, want) {
+			t.Fatalf("unexpected docker log %q missing %q", logContent, want)
+		}
+	}
+}
+
+func TestWriteNoOpRecordOutputsReason(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	effective, err := config.Default().Effective()
+	if err != nil {
+		t.Fatalf("Default().Effective() error = %v", err)
+	}
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.WithValue(context.Background(), effectiveConfigKey{}, effective))
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&bytes.Buffer{})
+
+	if err := writeNoOpRecord(cmd, &rootOptions{}, "No profile switch made", "no profile selected"); err != nil {
+		t.Fatalf("writeNoOpRecord() error = %v", err)
+	}
+	for _, want := range []string{"No profile switch made", "reason=no profile selected"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("unexpected no-op output %q missing %q", stdout.String(), want)
+		}
+	}
+}
+
+func TestResolveProfileSwitchTargetUsesCurrentProviderFallback(t *testing.T) {
+	t.Parallel()
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	provider, profile, err := resolveProfileSwitchTarget(cmd, statusStubService{
+		status: manageservice.StatusResult{
+			Binding: domain.ProjectBinding{Provider: domain.ProviderCodex},
+		},
+	}, "/tmp/project", []string{"alternate-profile"})
+	if err != nil {
+		t.Fatalf("resolveProfileSwitchTarget() error = %v", err)
+	}
+	if got, want := provider, domain.ProviderCodex; got != want {
+		t.Fatalf("provider = %q, want %q", got, want)
+	}
+	if got, want := profile, "alternate-profile"; got != want {
+		t.Fatalf("profile = %q, want %q", got, want)
+	}
+}
+
+func TestNewRootCommandWithPathsReturnsCommand(t *testing.T) {
+	t.Parallel()
+
+	cmd, err := NewRootCommandWithPaths(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, testCodexPaths(t))
+	if err != nil {
+		t.Fatalf("NewRootCommandWithPaths() error = %v", err)
+	}
+	if got, want := cmd.Use, "valv"; got != want {
+		t.Fatalf("cmd.Use = %q, want %q", got, want)
+	}
+}
+
+func TestRunAPIRuntimeSweeperPrunesUntilContextCancel(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	recorder := &pruneRecorder{}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runAPIRuntimeSweeper(ctx, nil, recorder, 10*time.Millisecond)
+	}()
+	time.Sleep(25 * time.Millisecond)
+	cancel()
+	<-done
+
+	if recorder.calls == 0 {
+		t.Fatal("runAPIRuntimeSweeper() did not call PruneExpiredRuntimes")
 	}
 }
 
@@ -562,7 +756,7 @@ func installFakeDocker(t *testing.T) string {
 	binDir := t.TempDir()
 	logPath := filepath.Join(binDir, "docker.log")
 	scriptPath := filepath.Join(binDir, "docker")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$VALV_DOCKER_LOG\"\nif [ \"$1\" = \"ps\" ]; then\n  printf '%s' \"$VALV_DOCKER_PS_OUTPUT\"\nfi\n"
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$VALV_DOCKER_LOG\"\nif [ \"$1\" = \"ps\" ]; then\n  printf '%s' \"$VALV_DOCKER_PS_OUTPUT\"\nfi\nif [ \"$1\" = \"image\" ] && [ \"$2\" = \"ls\" ]; then\n  printf '%s' \"$VALV_DOCKER_IMAGE_LS_OUTPUT\"\nfi\n"
 	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
 		t.Fatalf("WriteFile(%q) error = %v", scriptPath, err)
 	}

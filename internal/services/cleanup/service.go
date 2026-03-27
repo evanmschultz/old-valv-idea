@@ -46,6 +46,7 @@ type DockerCleanupRequest struct {
 	ContainerNamePrefixes []string
 	ContainerLabels       map[string]string
 	ImageRefs             []docker.ImageRef
+	ImageFilters          map[string]string
 	PruneBuilder          bool
 	PruneBuilderAll       bool
 	BuilderFilters        map[string]string
@@ -142,10 +143,14 @@ func (s Service) CleanDocker(ctx context.Context, request DockerCleanupRequest) 
 		s.debug("removed docker containers", "count", len(containerIDs))
 	}
 
-	removedImages := make([]docker.ImageRef, 0, len(request.ImageRefs))
-	if len(request.ImageRefs) > 0 {
+	imageRefs, err := s.resolveImageRefs(ctx, request.ImageRefs, request.ImageFilters)
+	if err != nil {
+		return DockerCleanupResult{}, fmt.Errorf("clean docker images: %w", err)
+	}
+	removedImages := make([]docker.ImageRef, 0, len(imageRefs))
+	if len(imageRefs) > 0 {
 		args, err := docker.BuildImageRemoveArgs(docker.ImageRemoveRequest{
-			Refs:  request.ImageRefs,
+			Refs:  imageRefs,
 			Force: request.Force,
 		})
 		if err != nil {
@@ -153,15 +158,15 @@ func (s Service) CleanDocker(ctx context.Context, request DockerCleanupRequest) 
 		}
 		if err := s.runner.Run(ctx, args); err != nil {
 			if isMissingImageError(err) {
-				s.debug("ignored missing docker images during cleanup", "count", len(request.ImageRefs))
+				s.debug("ignored missing docker images during cleanup", "count", len(imageRefs))
 			} else {
 				return DockerCleanupResult{}, fmt.Errorf("clean docker images: %w", err)
 			}
 		} else {
-			removedImages = append(removedImages, request.ImageRefs...)
+			removedImages = append(removedImages, imageRefs...)
 		}
 		commands = append(commands, args)
-		s.debug("removed docker images", "count", len(request.ImageRefs))
+		s.debug("removed docker images", "count", len(imageRefs))
 	}
 
 	if request.PruneBuilder {
@@ -257,6 +262,58 @@ func (s Service) resolveContainerIDs(ctx context.Context, explicitIDs []string, 
 		}
 	}
 	return ids, nil
+}
+
+func (s Service) resolveImageRefs(ctx context.Context, explicitRefs []docker.ImageRef, filters map[string]string) ([]docker.ImageRef, error) {
+	seen := make(map[string]struct{}, len(explicitRefs))
+	refs := make([]docker.ImageRef, 0, len(explicitRefs))
+	for _, ref := range explicitRefs {
+		value := strings.TrimSpace(ref.String())
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		refs = append(refs, ref)
+	}
+	if len(filters) == 0 {
+		return refs, nil
+	}
+	queryRunner, ok := s.runner.(outputRunner)
+	if !ok {
+		return nil, fmt.Errorf("runner does not support listing image refs")
+	}
+	args, err := docker.BuildImageListArgs(docker.ImageListRequest{
+		Format:  "{{.Repository}}:{{.Tag}}",
+		Filters: cloneMap(filters),
+	})
+	if err != nil {
+		return nil, err
+	}
+	output, err := queryRunner.Output(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	for _, line := range strings.Split(output, "\n") {
+		value := strings.TrimSpace(line)
+		if value == "" || strings.Contains(value, "<none>") {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		lastSlash := strings.LastIndex(value, "/")
+		lastColon := strings.LastIndex(value, ":")
+		if lastColon <= lastSlash {
+			continue
+		}
+		ref := docker.NewImageRef(value[:lastColon], value[lastColon+1:])
+		seen[value] = struct{}{}
+		refs = append(refs, ref)
+	}
+	return refs, nil
 }
 
 func (s Service) Clean(ctx context.Context, local LocalCleanupRequest, dockerRequest DockerCleanupRequest) (LocalCleanupResult, DockerCleanupResult, error) {

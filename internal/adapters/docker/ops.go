@@ -217,3 +217,26 @@ func BuildBuilderPruneArgs(request BuilderPruneRequest) ([]string, error) {
 	}
 	return args, nil
 }
+
+type ImageListRequest struct {
+	Filters map[string]string
+	Format  string
+}
+
+func BuildImageListArgs(request ImageListRequest) ([]string, error) {
+	args := []string{"image", "ls"}
+	if strings.TrimSpace(request.Format) != "" {
+		args = append(args, "--format", strings.TrimSpace(request.Format))
+	}
+	if len(request.Filters) > 0 {
+		keys := make([]string, 0, len(request.Filters))
+		for key := range request.Filters {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			args = append(args, "--filter", fmt.Sprintf("%s=%s", key, request.Filters[key]))
+		}
+	}
+	return args, nil
+}
