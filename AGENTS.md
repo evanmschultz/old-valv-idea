@@ -265,6 +265,8 @@ Testing standards:
 - keep CI and local command recipes aligned
 - keep a clean dev-mode path that does not dirty the developer's real home directory during normal local checks
 - prefer `just dev ...` flows for disposable local validation and `just build` for normal binary creation
+- keep `just ci` separate from `just build`; `just ci` is the test/coverage/integration gate, while `just build` is the final local binary creation check
+- after local `just ci` passes and after the pushed GitHub run passes, run `just build` before handing local CLI testing back to the user
 - when using disposable dev-mode home directories, preserve access to the host Docker CLI configuration/plugins so Docker Desktop features such as `buildx` keep working
 - after every push, run `gh run watch` for the triggered workflow and confirm the result before considering the push complete
 
