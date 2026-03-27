@@ -182,6 +182,41 @@ func TestBridgeManagerKeepsBridgeAliveAfterRequestContextCancellation(t *testing
 	}
 }
 
+func TestBridgeManagerCloseSucceedsWithActiveStreamableClient(t *testing.T) {
+	t.Parallel()
+
+	manager, err := newBridgeManager(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("newBridgeManager() error = %v", err)
+	}
+
+	url, _, err := manager.BridgeCommand(context.Background(), "helper", commandSpec{
+		Command: os.Args[0],
+		Args:    []string{"-test.run=TestBridgeHelperProcess"},
+		Env: map[string]string{
+			helperEnv: "1",
+		},
+		Cwd: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("BridgeCommand() error = %v", err)
+	}
+
+	url = strings.Replace(url, "host.docker.internal", "127.0.0.1", 1)
+	client := mcp.NewClient(&mcp.Implementation{Name: "bridge-test-client", Version: "v0.0.1"}, nil)
+	session, err := client.Connect(context.Background(), &mcp.StreamableClientTransport{Endpoint: url}, nil)
+	if err != nil {
+		t.Fatalf("client.Connect() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = session.Close()
+	})
+
+	if err := manager.Close(); err != nil {
+		t.Fatalf("manager.Close() error = %v", err)
+	}
+}
+
 func TestRewriteLoopbackURL(t *testing.T) {
 	t.Parallel()
 

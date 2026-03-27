@@ -115,6 +115,11 @@ func (m *bridgeManager) Close() error {
 	m.mu.Unlock()
 
 	var errs []error
+	if m.server != nil {
+		if err := m.server.Close(); err != nil && err != http.ErrServerClosed {
+			errs = append(errs, err)
+		}
+	}
 	for _, bridge := range bridges {
 		if err := bridge.Close(); err != nil {
 			errs = append(errs, err)
@@ -122,13 +127,6 @@ func (m *bridgeManager) Close() error {
 	}
 	if m.cancel != nil {
 		m.cancel()
-	}
-	if m.server != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		if err := m.server.Shutdown(ctx); err != nil && err != http.ErrServerClosed {
-			errs = append(errs, err)
-		}
 	}
 	return errorsJoin(errs...)
 }
