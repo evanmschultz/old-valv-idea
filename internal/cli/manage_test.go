@@ -14,11 +14,20 @@ import (
 	"github.com/evanmschultz/valv/internal/pathutil"
 )
 
-func TestManageProfileAddCreatesProfileAndHome(t *testing.T) {
+func TestManageProfileAddCreatesIsolatedNamedProfileAndBindsProject(t *testing.T) {
 	t.Parallel()
 
 	paths := testCodexPaths(t)
-	profileHome := filepath.Join(paths.ProviderRoot, "codex", "profiles", "dev")
+	projectRoot := filepath.Join(t.TempDir(), "project")
+	workDir := filepath.Join(projectRoot, "nested")
+	if err := os.MkdirAll(filepath.Join(projectRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git) error = %v", err)
+	}
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(workDir) error = %v", err)
+	}
+
+	profileHome := filepath.Join(paths.ProviderRoot, "codex", "profiles", "profile-name")
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
@@ -26,12 +35,12 @@ func TestManageProfileAddCreatesProfileAndHome(t *testing.T) {
 	cmd.SetContext(context.Background())
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
-	cmd.SetArgs([]string{"profile", "add", "codex", "dev", "--home", profileHome})
+	cmd.SetArgs([]string{"profile", "add", "codex", "profile-name", "--project", workDir})
 
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	if !strings.Contains(stdout.String(), "name=dev") {
+	if !strings.Contains(stdout.String(), "profile=profile-name") {
 		t.Fatalf("unexpected output: %q", stdout.String())
 	}
 	if _, err := os.Stat(profileHome); err != nil {
@@ -44,7 +53,7 @@ func TestManageProfileAddCreatesProfileAndHome(t *testing.T) {
 	}
 	defer store.Close()
 
-	profile, err := store.ProfileByName(context.Background(), domain.ProviderCodex, "dev")
+	profile, err := store.ProfileByName(context.Background(), domain.ProviderCodex, "profile-name")
 	if err != nil {
 		t.Fatalf("ProfileByName() error = %v", err)
 	}
@@ -54,6 +63,59 @@ func TestManageProfileAddCreatesProfileAndHome(t *testing.T) {
 	}
 	if profile.HomePath != wantHome {
 		t.Fatalf("profile home = %q, want %q", profile.HomePath, wantHome)
+	}
+
+	normalizedProjectRoot, err := pathutil.Normalize(projectRoot)
+	if err != nil {
+		t.Fatalf("Normalize(projectRoot) error = %v", err)
+	}
+	project, err := store.ProjectByRoot(context.Background(), normalizedProjectRoot)
+	if err != nil {
+		t.Fatalf("ProjectByRoot() error = %v", err)
+	}
+	binding, err := store.BindingByProjectID(context.Background(), project.ID)
+	if err != nil {
+		t.Fatalf("BindingByProjectID() error = %v", err)
+	}
+	if binding.ProfileID != profile.ID {
+		t.Fatalf("binding profile id = %q, want %q", binding.ProfileID, profile.ID)
+	}
+}
+
+func TestManageProfileAddWithoutNameUsesDefaultHostProfileAndBindsProject(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	projectRoot := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(filepath.Join(projectRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git) error = %v", err)
+	}
+
+	output := runManage(t, paths, []string{"profile", "add", "codex", "--project", projectRoot})
+	wantHome, err := pathutil.Normalize(filepath.Join(paths.HomeDir, ".codex"))
+	if err != nil {
+		t.Fatalf("Normalize(default home) error = %v", err)
+	}
+	for _, want := range []string{"Profile ready and project bound", "profile=default", "home=" + wantHome} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("unexpected output %q missing %q", output, want)
+		}
+	}
+}
+
+func TestManageProfileAddNoBindSkipsProjectBinding(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	output := runManage(t, paths, []string{"profile", "add", "codex", "--no-bind"})
+	wantHome, err := pathutil.Normalize(filepath.Join(paths.HomeDir, ".codex"))
+	if err != nil {
+		t.Fatalf("Normalize(default home) error = %v", err)
+	}
+	for _, want := range []string{"Profile ready", "name=default", "home=" + wantHome} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("unexpected no-bind output %q missing %q", output, want)
+		}
 	}
 }
 
@@ -71,7 +133,7 @@ func TestManageBindAndStatusUseRealStoreAndProjectDetection(t *testing.T) {
 	}
 
 	profileHome := filepath.Join(paths.ProviderRoot, "codex", "profiles", "dev")
-	runManage(t, paths, []string{"profile", "add", "codex", "dev", "--home", profileHome})
+	runManage(t, paths, []string{"profile", "add", "codex", "dev", "--home", profileHome, "--no-bind"})
 	runManage(t, paths, []string{"bind", "codex", "dev", "--project", workDir})
 
 	statusOut := runManage(t, paths, []string{"status", "--project", workDir})

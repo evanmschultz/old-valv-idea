@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -57,6 +58,17 @@ func runCodexCommand(cmd *cobra.Command, paths config.Paths, args []string) erro
 		return runCodexImageOnlyCommand(cmd, paths, args)
 	}
 
+	workingDir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("run codex command: resolve working directory: %w", err)
+	}
+	if err := ensureCodexBindingReady(cmd, paths, workingDir); err != nil {
+		if errors.Is(err, errCodexSetupCanceled) {
+			return nil
+		}
+		return fmt.Errorf("run codex command: %w", err)
+	}
+
 	store, err := openStore(paths)
 	if err != nil {
 		return fmt.Errorf("run codex command: %w", err)
@@ -71,22 +83,18 @@ func runCodexCommand(cmd *cobra.Command, paths config.Paths, args []string) erro
 		TTY:      commandHasTTY(cmd.InOrStdin()) && commandHasTTY(cmd.OutOrStdout()),
 		Stdin:    commandHasTTY(cmd.InOrStdin()),
 		TempRoot: paths.TempCacheDir,
+		RealHome: realHomeDir(),
 		Logger:   LoggerFromContext(cmd.Context()),
 		Notices:  cmd.ErrOrStderr(),
 	})
 	if err != nil {
 		return fmt.Errorf("run codex command: initialize launcher: %w", err)
 	}
-
-	workingDir, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("run codex command: resolve working directory: %w", err)
-	}
-	if err := service.ValidateBinding(cmd.Context(), workingDir); err != nil {
-		return fmt.Errorf("run codex command: %w", err)
-	}
 	if err := ensureCodexImageCurrent(cmd, paths); err != nil {
 		return fmt.Errorf("run codex command: %w", err)
+	}
+	if err := service.ValidateBinding(cmd.Context(), workingDir); err != nil {
+		return fmt.Errorf("run codex command: validate binding: %w", err)
 	}
 
 	if err := service.Run(cmd.Context(), workingDir, args); err != nil {

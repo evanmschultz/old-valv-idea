@@ -32,8 +32,8 @@ Use the management surface to create provider profiles, bind projects, rebuild p
 This surface owns setup and repair flows. The direct ` + "`valv codex ...`" + ` path stays a Codex pass-through launcher.
 `),
 		Example: strings.TrimSpace(`
+valv manage profile add codex
 valv manage profile add codex profile-name
-valv manage bind codex profile-name
 valv manage status
 valv manage update
 valv manage cleanup all
@@ -65,6 +65,7 @@ Provider profiles define the home directory Valv mounts into containerized provi
 For Codex, that home path becomes ` + "`CODEX_HOME`" + ` inside the container.
 `),
 		Example: strings.TrimSpace(`
+valv manage profile add codex
 valv manage profile add codex profile-name
 valv manage profile switch
 valv manage profile switch alternate-profile
@@ -84,44 +85,48 @@ valv manage profile list codex
 
 func newManageProfileAddCommand(paths config.Paths, opts *rootOptions) *cobra.Command {
 	var homePath string
+	var noBind bool
+	var projectPath string
 	cmd := &cobra.Command{
-		Use:   "add <provider> <name>",
-		Short: "Create a Valv-managed provider profile",
+		Use:   "add <provider> [name]",
+		Short: "Create a provider profile and bind it by default",
 		Long: strings.TrimSpace(`
-Create one provider profile and ensure its home directory exists.
+Create one provider profile and, by default, bind the current project to it.
+
+Semantics:
+- ` + "`valv manage profile add codex`" + ` creates or reuses the inferred host-backed default profile for Codex
+- ` + "`valv manage profile add codex profile-name`" + ` creates or reuses an isolated named profile under Valv's provider root
+- ` + "`--no-bind`" + ` keeps the profile ready without changing the current project's binding
+- ` + "`--home`" + ` is an expert override for custom host paths
 
 Output fields:
+- project: bound project root when Valv also updated the current project binding
 - provider: provider family for the profile
 - name: Valv profile name
 - home: host path mounted into provider runtimes as that profile's home
 `),
 		Example: strings.TrimSpace(`
+valv manage profile add codex
 valv manage profile add codex profile-name
-valv manage profile add codex host-codex --home "$HOME/.codex"
+valv manage profile add codex --no-bind
+valv manage profile add codex profile-name --home /absolute/path/to/custom-home --no-bind
 `),
-		Args: cobra.ExactArgs(2),
+		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			mode, err := commandOutputMode(cmd, opts)
-			if err != nil {
-				return fmt.Errorf("resolve output policy: %w", err)
-			}
 			provider, err := domain.ParseProvider(args[0])
 			if err != nil {
 				return err
 			}
-			service, closeStore, err := openManageService(cmd, paths)
-			if err != nil {
-				return fmt.Errorf("manage profile add: %w", err)
+			name := ""
+			if len(args) == 2 {
+				name = args[1]
 			}
-			defer closeStore()
-			profile, err := service.CreateProfile(cmd.Context(), provider, args[1], homePath)
-			if err != nil {
-				return fmt.Errorf("manage profile add: %w", err)
-			}
-			return output.WriteRecord(cmd.OutOrStdout(), mode, "Profile ready", []output.Field{{Label: "provider", Value: string(profile.Provider), Muted: true}, {Label: "name", Value: profile.Name, Identifier: true}, {Label: "home", Value: profile.HomePath}})
+			return runManageProfileAdd(cmd, paths, opts, provider, name, homePath, !noBind, projectPath)
 		},
 	}
 	cmd.Flags().StringVar(&homePath, "home", "", "explicit provider profile home path")
+	cmd.Flags().BoolVar(&noBind, "no-bind", false, "create or reuse the profile without binding the current project")
+	cmd.Flags().StringVar(&projectPath, "project", "", "explicit project path to bind instead of the current working directory")
 	return cmd
 }
 
@@ -236,6 +241,64 @@ func runManageBindInteractive(cmd *cobra.Command, paths config.Paths, opts *root
 		return fmt.Errorf("manage bind: %w", err)
 	}
 	return runManageBind(cmd, paths, opts, domain.ProviderCodex, selected, "")
+}
+
+func runManageProfileAdd(cmd *cobra.Command, paths config.Paths, opts *rootOptions, provider domain.Provider, name string, homePath string, bind bool, projectPath string) error {
+	mode, err := commandOutputMode(cmd, opts)
+	if err != nil {
+		return fmt.Errorf("resolve output policy: %w", err)
+	}
+	service, closeStore, err := openManageService(cmd, paths)
+	if err != nil {
+		return fmt.Errorf("manage profile add: %w", err)
+	}
+	defer closeStore()
+
+	name = strings.TrimSpace(name)
+	homePath = strings.TrimSpace(homePath)
+
+	var profile domain.Profile
+	var hostSpec manageservice.HostProfileSpec
+	if name == "" {
+		hostSpec, err = service.DefaultHostProfile(provider)
+		if err != nil {
+			return fmt.Errorf("manage profile add: %w", err)
+		}
+		if homePath == "" {
+			homePath = hostSpec.HomePath
+		}
+		profile, err = service.CreateProfile(cmd.Context(), provider, hostSpec.Name, homePath)
+	} else {
+		profile, err = service.CreateProfile(cmd.Context(), provider, name, homePath)
+	}
+	if err != nil {
+		return fmt.Errorf("manage profile add: %w", err)
+	}
+	if !bind {
+		return output.WriteRecord(cmd.OutOrStdout(), mode, "Profile ready", []output.Field{
+			{Label: "provider", Value: string(profile.Provider), Muted: true},
+			{Label: "name", Value: profile.Name, Identifier: true},
+			{Label: "home", Value: profile.HomePath},
+		})
+	}
+
+	startPath := strings.TrimSpace(projectPath)
+	if startPath == "" {
+		startPath, err = os.Getwd()
+		if err != nil {
+			return fmt.Errorf("manage profile add: resolve working directory: %w", err)
+		}
+	}
+	result, err := service.BindProject(cmd.Context(), provider, profile.Name, startPath)
+	if err != nil {
+		return fmt.Errorf("manage profile add: bind project: %w", err)
+	}
+	return output.WriteRecord(cmd.OutOrStdout(), mode, "Profile ready and project bound", []output.Field{
+		{Label: "project", Value: result.Project.Root, Identifier: true},
+		{Label: "provider", Value: string(result.Profile.Provider), Muted: true},
+		{Label: "profile", Value: result.Profile.Name, Identifier: true},
+		{Label: "home", Value: result.Profile.HomePath},
+	})
 }
 
 func runManageBind(cmd *cobra.Command, paths config.Paths, opts *rootOptions, provider domain.Provider, profileName string, projectPath string) error {

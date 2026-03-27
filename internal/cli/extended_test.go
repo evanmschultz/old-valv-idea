@@ -209,7 +209,7 @@ func TestRunManageBindInteractiveShowsGuidanceWhenNoProfilesExist(t *testing.T) 
 	cmd.SetErr(&bytes.Buffer{})
 
 	err := runManageBindInteractive(cmd, paths, &rootOptions{})
-	if err == nil || !strings.Contains(err.Error(), "run `valv manage profile add codex <name>` first") {
+	if err == nil || !strings.Contains(err.Error(), "run `valv manage profile add codex` for the default host-backed profile") {
 		t.Fatalf("runManageBindInteractive() error = %v, want profile guidance", err)
 	}
 }

@@ -10,6 +10,7 @@ import (
 
 	"github.com/charmbracelet/log"
 
+	codexprovider "github.com/evanmschultz/valv/internal/adapters/providers/codex"
 	"github.com/evanmschultz/valv/internal/domain"
 	projectdetect "github.com/evanmschultz/valv/internal/project"
 )
@@ -25,6 +26,7 @@ type DetectFunc func(string) (projectdetect.Result, error)
 type Options struct {
 	Store        Store
 	ProviderRoot string
+	HomeDir      string
 	Detect       DetectFunc
 	Logger       *log.Logger
 }
@@ -32,6 +34,7 @@ type Options struct {
 type Service struct {
 	store        Store
 	providerRoot string
+	homeDir      string
 	detect       DetectFunc
 	logger       *log.Logger
 }
@@ -54,6 +57,12 @@ type ProfileListResult struct {
 	Profiles []domain.Profile
 }
 
+type HostProfileSpec struct {
+	Provider domain.Provider
+	Name     string
+	HomePath string
+}
+
 func New(options Options) (Service, error) {
 	if options.Store == nil {
 		return Service{}, fmt.Errorf("new manage service: store is required")
@@ -70,6 +79,7 @@ func New(options Options) (Service, error) {
 	return Service{
 		store:        options.Store,
 		providerRoot: strings.TrimSpace(options.ProviderRoot),
+		homeDir:      strings.TrimSpace(options.HomeDir),
 		detect:       detect,
 		logger:       options.Logger,
 	}, nil
@@ -102,6 +112,27 @@ func (s Service) CreateProfile(ctx context.Context, provider domain.Provider, na
 	}
 	s.debug("created provider profile", "provider", created.Provider, "name", created.Name, "home", created.HomePath)
 	return created, nil
+}
+
+func (s Service) DefaultHostProfile(provider domain.Provider) (HostProfileSpec, error) {
+	switch provider {
+	case domain.ProviderCodex:
+		name, homePath, err := codexprovider.DefaultHostProfile(s.homeDir)
+		if err != nil {
+			return HostProfileSpec{}, fmt.Errorf("resolve default host profile for provider %q: %w", provider, err)
+		}
+		return HostProfileSpec{Provider: provider, Name: name, HomePath: homePath}, nil
+	default:
+		return HostProfileSpec{}, fmt.Errorf("resolve default host profile for provider %q: unsupported provider", provider)
+	}
+}
+
+func (s Service) CreateDefaultHostProfile(ctx context.Context, provider domain.Provider) (domain.Profile, error) {
+	spec, err := s.DefaultHostProfile(provider)
+	if err != nil {
+		return domain.Profile{}, err
+	}
+	return s.CreateProfile(ctx, spec.Provider, spec.Name, spec.HomePath)
 }
 
 func (s Service) BindProject(ctx context.Context, provider domain.Provider, profileName, startPath string) (BindResult, error) {

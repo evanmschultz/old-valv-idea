@@ -281,7 +281,11 @@ Current validation follow-ups to preserve:
 - API startup output must only announce a listening address after a real successful bind, and non-positive runtime TTL values should fail clearly instead of being silently coerced
 - API runtime sweeps should use the server lifecycle context and quiet Docker execution so shutdown is clean and HTTP-facing stdout/stderr stay stable
 - Codex profile-home mounting and Codex-native resume/session behavior need explicit validation on macOS Docker Desktop so the containerized runtime preserves Codex's own `.codex` state model rather than introducing Valv-owned session semantics
-- using the literal host `~/.codex` path should remain an explicit profile choice, not an implicit default; default Valv profiles should preserve Codex-native state within the selected profile home
+- the raw `--home` path should be an expert override, not the normal way to use host-backed profiles
+- the common host-reuse path should infer the provider's conventional host home automatically, without requiring users to type `--home "$HOME/.codex"` or similar raw paths
+- automatic host-home inference should be provider-owned behavior so the same UX works for future providers without hardcoding generic CLI assumptions in the wrong layer
+- named profile creation must not silently turn multiple profile names into fake aliases for the same host account; the common host-backed setup path should therefore be distinct from explicitly creating additional isolated named profiles
+- profile creation should support add-and-bind by default for the common case; advanced users can opt out with `--no-bind`
 - mounted host Codex homes can preserve auth and resume state, but host-oriented MCP config cannot be reused blindly inside Linux containers
 - containerized Codex needs a Valv-managed MCP overlay or translation layer for host-specific entries such as macOS absolute binary paths and host-loopback URLs
 - host-loopback MCP URLs used from inside Docker Desktop containers should be translated to `host.docker.internal` where appropriate
@@ -565,17 +569,28 @@ That matches the reality that these CLIs expect their own file/config layouts.
 Desired behavior:
 
 - auto-detect the project from CWD whenever possible
-- if no project binding exists yet, `valv codex ...` should fail clearly and direct the user to `valv manage`
+- if no project binding exists yet, `valv codex ...` should offer a guided first-run setup path instead of only failing
 - allow explicit non-interactive selection by flag
-- keep setup, binding, and repair flows in `valv manage`, not in the direct Codex pass-through path
+- keep setup, binding, and repair flows owned by Valv rather than Codex itself, but allow the direct `valv codex` path to trigger the guided first-run setup when the project is unbound
 
 Recommended flow:
 
 1. detect git root or Valv project marker
 2. look up project binding in SQLite
 3. if found, use it
-4. if missing, return a clear actionable error that points to `valv manage`
-5. `valv manage` owns the interactive binding and selection flows
+4. if missing, offer a guided choice to:
+   - bind an existing isolated profile
+   - create a new isolated profile and bind it
+   - create or reuse the provider's inferred host-backed default profile and bind it
+5. continue into the attached Codex launch after the setup choice succeeds
+6. keep explicit management commands for repair, inspection, and non-interactive scripting
+
+Recommended command-shape direction:
+
+- `valv manage profile add <provider>` should create or reuse the provider's inferred host-backed default profile and bind it to the current project
+- `valv manage profile add <provider> <profile-name>` should create a new isolated named profile and bind it to the current project
+- `valv manage profile add ... --no-bind` should preserve the old operator-style behavior for advanced users and scripts
+- `valv manage profile add ... --home <path>` should remain available as an expert override
 
 ## Proposed MVP Shape
 

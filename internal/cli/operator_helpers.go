@@ -36,6 +36,7 @@ func openManageService(cmd *cobra.Command, paths config.Paths) (manageservice.Se
 	service, err := manageservice.New(manageservice.Options{
 		Store:        store,
 		ProviderRoot: paths.ProviderRoot,
+		HomeDir:      paths.HomeDir,
 		Logger:       LoggerFromContext(cmd.Context()),
 	})
 	if err != nil {
@@ -158,7 +159,7 @@ func runManageHome(cmd *cobra.Command, paths config.Paths, opts *rootOptions) er
 
 func pickProfile(cmd *cobra.Command, provider domain.Provider, profiles []domain.Profile) (string, error) {
 	if len(profiles) == 0 {
-		return "", fmt.Errorf("no %s profiles found; run `valv manage profile add %s <name>` first", provider, provider)
+		return "", fmt.Errorf("no %s profiles found; run `valv manage profile add %s` for the default host-backed profile or `valv manage profile add %s profile-name` for an isolated profile first", provider, provider, provider)
 	}
 	if !commandHasTTY(cmd.InOrStdin()) || !commandHasTTY(cmd.OutOrStdout()) {
 		return "", fmt.Errorf("profile is required when not running in a TTY")

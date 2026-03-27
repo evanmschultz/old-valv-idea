@@ -325,3 +325,33 @@ func TestRunRejectsSiblingPathThatSharesProjectPrefix(t *testing.T) {
 		t.Fatalf("Run() error = %v, want sibling path rejection", err)
 	}
 }
+
+func TestShouldEmitAuthNoticeSuppressesRealHostProfile(t *testing.T) {
+	t.Parallel()
+
+	service := Service{realHome: "/Users/example"}
+	profile := domain.Profile{HomePath: "/Users/example/.codex"}
+	if service.shouldEmitAuthNotice(profile, nil) {
+		t.Fatal("shouldEmitAuthNotice() = true, want false for real host profile")
+	}
+}
+
+func TestShouldEmitAuthNoticeKeepsNoticeForIsolatedProfile(t *testing.T) {
+	t.Parallel()
+
+	service := Service{realHome: "/Users/example"}
+	profile := domain.Profile{HomePath: "/Users/example/Library/Application Support/valv/providers/codex/profiles/work"}
+	if !service.shouldEmitAuthNotice(profile, nil) {
+		t.Fatal("shouldEmitAuthNotice() = false, want true for isolated profile")
+	}
+}
+
+func TestShouldEmitAuthNoticeSkipsNonLoginSubcommands(t *testing.T) {
+	t.Parallel()
+
+	service := Service{realHome: "/Users/example"}
+	profile := domain.Profile{HomePath: "/tmp/isolated"}
+	if service.shouldEmitAuthNotice(profile, []string{"exec", "status"}) {
+		t.Fatal("shouldEmitAuthNotice() = true, want false for non-login/non-interactive args")
+	}
+}

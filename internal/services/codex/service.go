@@ -42,6 +42,7 @@ type Options struct {
 	Stdin    bool
 	TempRoot string
 	Now      func() time.Time
+	RealHome string
 	Logger   *log.Logger
 	Notices  io.Writer
 }
@@ -56,6 +57,7 @@ type Service struct {
 	stdin    bool
 	tempRoot string
 	now      func() time.Time
+	realHome string
 	logger   *log.Logger
 	notices  io.Writer
 }
@@ -94,6 +96,7 @@ func New(options Options) (Service, error) {
 		stdin:    options.Stdin,
 		tempRoot: tempRoot,
 		now:      now,
+		realHome: strings.TrimSpace(options.RealHome),
 		logger:   options.Logger,
 		notices:  options.Notices,
 	}, nil
@@ -115,7 +118,7 @@ func (s Service) Run(ctx context.Context, cwd string, codexArgs []string) error 
 		return fmt.Errorf("run codex launch service: prepare runtime: %w", err)
 	}
 	defer prepared.Close()
-	s.emitNotices(prepared.Warnings, codexArgs)
+	s.emitNotices(resolved.profile, prepared.Warnings, codexArgs)
 
 	request, err := s.buildRequest(resolved.workingDir, resolved.project, resolved.profile, prepared, codexArgs)
 	if err != nil {
@@ -242,8 +245,8 @@ func (s Service) debug(msg string, keyvals ...any) {
 	s.logger.Debug(msg, keyvals...)
 }
 
-func (s Service) emitNotices(warnings, codexArgs []string) {
-	if s.notices != nil && (len(codexArgs) == 0 || codexArgs[0] == "login") {
+func (s Service) emitNotices(profile domain.Profile, warnings, codexArgs []string) {
+	if s.notices != nil && s.shouldEmitAuthNotice(profile, codexArgs) {
 		_, _ = fmt.Fprintln(s.notices, "Containerized Codex auth: if browser sign-in redirects to localhost and stalls, press Esc and choose Device Code.")
 	}
 	if s.notices == nil {
@@ -252,6 +255,16 @@ func (s Service) emitNotices(warnings, codexArgs []string) {
 	for _, warning := range warnings {
 		_, _ = fmt.Fprintf(s.notices, "Valv MCP note: %s\n", warning)
 	}
+}
+
+func (s Service) shouldEmitAuthNotice(profile domain.Profile, codexArgs []string) bool {
+	if len(codexArgs) != 0 && codexArgs[0] != "login" {
+		return false
+	}
+	if codexruntime.IsDefaultHostHome(profile.HomePath, s.realHome) {
+		return false
+	}
+	return true
 }
 
 func (s Service) containerName(project domain.Project) string {

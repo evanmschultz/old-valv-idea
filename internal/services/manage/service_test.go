@@ -97,6 +97,56 @@ func TestNewRequiresStoreAndProviderRoot(t *testing.T) {
 	}
 }
 
+func TestDefaultHostProfileUsesConfiguredHomeDir(t *testing.T) {
+	t.Parallel()
+
+	store, providerRoot := testStore(t)
+	service, err := New(Options{Store: store, ProviderRoot: providerRoot, HomeDir: "/tmp/example-home"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	spec, err := service.DefaultHostProfile(domain.ProviderCodex)
+	if err != nil {
+		t.Fatalf("DefaultHostProfile() error = %v", err)
+	}
+	if spec.Name != "default" {
+		t.Fatalf("DefaultHostProfile().Name = %q, want default", spec.Name)
+	}
+	wantHome, err := pathutil.Normalize("/tmp/example-home/.codex")
+	if err != nil {
+		t.Fatalf("Normalize(wantHome) error = %v", err)
+	}
+	if spec.HomePath != wantHome {
+		t.Fatalf("DefaultHostProfile().HomePath = %q, want %q", spec.HomePath, wantHome)
+	}
+}
+
+func TestCreateDefaultHostProfileUsesProviderDefaultNameAndHome(t *testing.T) {
+	t.Parallel()
+
+	store, providerRoot := testStore(t)
+	service, err := New(Options{Store: store, ProviderRoot: providerRoot, HomeDir: "/tmp/example-home"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	profile, err := service.CreateDefaultHostProfile(context.Background(), domain.ProviderCodex)
+	if err != nil {
+		t.Fatalf("CreateDefaultHostProfile() error = %v", err)
+	}
+	if profile.Name != "default" {
+		t.Fatalf("CreateDefaultHostProfile().Name = %q, want default", profile.Name)
+	}
+	wantHome, err := pathutil.Normalize("/tmp/example-home/.codex")
+	if err != nil {
+		t.Fatalf("Normalize(wantHome) error = %v", err)
+	}
+	if profile.HomePath != wantHome {
+		t.Fatalf("CreateDefaultHostProfile().HomePath = %q, want %q", profile.HomePath, wantHome)
+	}
+}
+
 func TestBindProjectCreatesMissingProjectAndBinding(t *testing.T) {
 	t.Parallel()
 

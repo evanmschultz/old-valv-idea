@@ -52,8 +52,8 @@ Use the direct runtime commands for provider execution and the management surfac
 		Example: strings.TrimSpace(`
 valv paths
 valv manage update
+valv manage profile add codex
 valv manage profile add codex profile-name
-valv manage bind codex profile-name
 valv codex --help
 valv api serve --runtime-ttl 2m
 `),

@@ -481,7 +481,7 @@ ARG VALV_UID=1000
 ARG VALV_GID=1000
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates git \
+    && apt-get install -y --no-install-recommends bubblewrap ca-certificates git \
     && rm -rf /var/lib/apt/lists/*
 
 RUN getent group "${VALV_GID}" >/dev/null || groupadd -g "${VALV_GID}" valv \

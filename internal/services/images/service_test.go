@@ -298,6 +298,7 @@ func TestWriteDefaultCodexContextWritesDockerfile(t *testing.T) {
 		"NPM_CONFIG_AUDIT=false",
 		`ARG VALV_UID=1000`,
 		`ARG VALV_GID=1000`,
+		`apt-get install -y --no-install-recommends bubblewrap ca-certificates git`,
 		`getent group "${VALV_GID}" >/dev/null || groupadd -g "${VALV_GID}" valv`,
 		`useradd -o -m -u "${VALV_UID}" -g "${VALV_GID}" -s /bin/sh valv`,
 		`chown -R "${VALV_UID}:${VALV_GID}" /home/valv /workspace`,
