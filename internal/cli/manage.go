@@ -118,7 +118,7 @@ valv manage profile add codex host-codex --home "$HOME/.codex"
 			if err != nil {
 				return fmt.Errorf("manage profile add: %w", err)
 			}
-			return output.WriteRecord(cmd.OutOrStdout(), mode, "Profile created", []output.Field{{Label: "provider", Value: string(profile.Provider), Muted: true}, {Label: "name", Value: profile.Name, Identifier: true}, {Label: "home", Value: profile.HomePath}})
+			return output.WriteRecord(cmd.OutOrStdout(), mode, "Profile ready", []output.Field{{Label: "provider", Value: string(profile.Provider), Muted: true}, {Label: "name", Value: profile.Name, Identifier: true}, {Label: "home", Value: profile.HomePath}})
 		},
 	}
 	cmd.Flags().StringVar(&homePath, "home", "", "explicit provider profile home path")

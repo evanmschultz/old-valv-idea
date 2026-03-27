@@ -198,50 +198,60 @@ func buildProxyServer(ctx context.Context, session *mcp.ClientSession) (*mcp.Ser
 		},
 	})
 
-	for tool, err := range session.Tools(ctx, nil) {
-		if err != nil {
-			return nil, err
-		}
-		current := *tool
-		server.AddTool(&current, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			var arguments any
-			if len(req.Params.Arguments) > 0 {
-				if err := json.Unmarshal(req.Params.Arguments, &arguments); err != nil {
-					return nil, fmt.Errorf("decode tool arguments for %q: %w", current.Name, err)
-				}
+	var capabilities *mcp.ServerCapabilities
+	if initResult := session.InitializeResult(); initResult != nil {
+		capabilities = initResult.Capabilities
+	}
+	if capabilities == nil || capabilities.Tools != nil {
+		for tool, err := range session.Tools(ctx, nil) {
+			if err != nil {
+				return nil, err
 			}
-			return session.CallTool(ctx, &mcp.CallToolParams{Name: current.Name, Arguments: arguments})
-		})
+			current := *tool
+			server.AddTool(&current, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+				var arguments any
+				if len(req.Params.Arguments) > 0 {
+					if err := json.Unmarshal(req.Params.Arguments, &arguments); err != nil {
+						return nil, fmt.Errorf("decode tool arguments for %q: %w", current.Name, err)
+					}
+				}
+				return session.CallTool(ctx, &mcp.CallToolParams{Name: current.Name, Arguments: arguments})
+			})
+		}
 	}
 
-	for prompt, err := range session.Prompts(ctx, nil) {
-		if err != nil {
-			return nil, err
+	if capabilities != nil && capabilities.Prompts != nil {
+		for prompt, err := range session.Prompts(ctx, nil) {
+			if err != nil {
+				return nil, err
+			}
+			current := *prompt
+			server.AddPrompt(&current, func(ctx context.Context, req *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+				return session.GetPrompt(ctx, &mcp.GetPromptParams{Name: current.Name, Arguments: req.Params.Arguments})
+			})
 		}
-		current := *prompt
-		server.AddPrompt(&current, func(ctx context.Context, req *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
-			return session.GetPrompt(ctx, &mcp.GetPromptParams{Name: current.Name, Arguments: req.Params.Arguments})
-		})
 	}
 
-	for resource, err := range session.Resources(ctx, nil) {
-		if err != nil {
-			return nil, err
+	if capabilities != nil && capabilities.Resources != nil {
+		for resource, err := range session.Resources(ctx, nil) {
+			if err != nil {
+				return nil, err
+			}
+			current := *resource
+			server.AddResource(&current, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+				return session.ReadResource(ctx, &mcp.ReadResourceParams{URI: req.Params.URI})
+			})
 		}
-		current := *resource
-		server.AddResource(&current, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
-			return session.ReadResource(ctx, &mcp.ReadResourceParams{URI: req.Params.URI})
-		})
-	}
 
-	for resourceTemplate, err := range session.ResourceTemplates(ctx, nil) {
-		if err != nil {
-			return nil, err
+		for resourceTemplate, err := range session.ResourceTemplates(ctx, nil) {
+			if err != nil {
+				return nil, err
+			}
+			current := *resourceTemplate
+			server.AddResourceTemplate(&current, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+				return session.ReadResource(ctx, &mcp.ReadResourceParams{URI: req.Params.URI})
+			})
 		}
-		current := *resourceTemplate
-		server.AddResourceTemplate(&current, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
-			return session.ReadResource(ctx, &mcp.ReadResourceParams{URI: req.Params.URI})
-		})
 	}
 	return server, nil
 }

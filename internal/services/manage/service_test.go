@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	sqliteadapter "github.com/evanmschultz/valv/internal/adapters/sqlite"
@@ -40,6 +41,46 @@ func TestCreateProfileUsesDefaultHomeAndPersists(t *testing.T) {
 	}
 	if stored.ID != profile.ID {
 		t.Fatalf("stored profile id = %q, want %q", stored.ID, profile.ID)
+	}
+}
+
+func TestCreateProfileReturnsExistingProfileForSameNameAndHome(t *testing.T) {
+	t.Parallel()
+
+	store, providerRoot := testStore(t)
+	service, err := New(Options{Store: store, ProviderRoot: providerRoot})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	first, err := service.CreateProfile(context.Background(), domain.ProviderCodex, "host-codex", "/tmp/example/host")
+	if err != nil {
+		t.Fatalf("CreateProfile(first) error = %v", err)
+	}
+	second, err := service.CreateProfile(context.Background(), domain.ProviderCodex, "host-codex", "/tmp/example/host")
+	if err != nil {
+		t.Fatalf("CreateProfile(second) error = %v", err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("CreateProfile(second).ID = %q, want %q", second.ID, first.ID)
+	}
+}
+
+func TestCreateProfileReturnsClearErrorForDifferentExistingHome(t *testing.T) {
+	t.Parallel()
+
+	store, providerRoot := testStore(t)
+	service, err := New(Options{Store: store, ProviderRoot: providerRoot})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := service.CreateProfile(context.Background(), domain.ProviderCodex, "host-codex", "/tmp/example/host-a"); err != nil {
+		t.Fatalf("CreateProfile(first) error = %v", err)
+	}
+	_, err = service.CreateProfile(context.Background(), domain.ProviderCodex, "host-codex", "/tmp/example/host-b")
+	if err == nil || !strings.Contains(err.Error(), "profile already exists with home") {
+		t.Fatalf("CreateProfile(second) error = %v, want clear existing-home message", err)
 	}
 }
 

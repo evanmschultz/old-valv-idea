@@ -12,7 +12,7 @@ import (
 )
 
 func TestPrepareRuntimeNormalizesEnvAndTranslatesConfig(t *testing.T) {
-	t.Parallel()
+	t.Setenv("CONTEXT7_API_KEY", "test-key")
 
 	root := t.TempDir()
 	profileHome := filepath.Join(root, "profile")
@@ -28,6 +28,12 @@ func TestPrepareRuntimeNormalizesEnvAndTranslatesConfig(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(profileHome, "config.toml"), []byte(strings.TrimSpace(`
 [mcp_servers.loopback]
 url = "http://127.0.0.1:7389/mcp"
+
+[mcp_servers.context7]
+url = "https://mcp.context7.com/mcp"
+
+[mcp_servers.context7.env_http_headers]
+CONTEXT7_API_KEY = "CONTEXT7_API_KEY"
 
 [mcp_servers.bridge]
 command = "`+os.Args[0]+`"
@@ -68,6 +74,9 @@ url = "http://localhost:4242/mcp"
 	if got := prepared.Env["USER"]; got != "valv" {
 		t.Fatalf("USER = %q, want valv", got)
 	}
+	if !containsString(prepared.EnvPassthrough, "CONTEXT7_API_KEY") {
+		t.Fatalf("EnvPassthrough = %#v, want CONTEXT7_API_KEY", prepared.EnvPassthrough)
+	}
 
 	if len(prepared.Mounts) != 3 {
 		t.Fatalf("mount count = %d, want 3", len(prepared.Mounts))
@@ -94,6 +103,9 @@ url = "http://localhost:4242/mcp"
 	profileText := string(profileContent)
 	if !strings.Contains(profileText, "http://host.docker.internal:7389/mcp") {
 		t.Fatalf("profile overlay missing loopback rewrite: %s", profileText)
+	}
+	if !strings.Contains(profileText, "[mcp_servers.context7.env_http_headers]") {
+		t.Fatalf("profile overlay missing env_http_headers table: %s", profileText)
 	}
 	if !strings.Contains(profileText, `url = "http://host.docker.internal:`) {
 		t.Fatalf("profile overlay missing bridge URL: %s", profileText)
@@ -165,6 +177,51 @@ command = "/path/that/does/not/exist"
 	}
 }
 
+func TestPrepareRuntimePassesThroughRemoteMCPHeaderEnvWithoutOverlay(t *testing.T) {
+	t.Setenv("CONTEXT7_API_KEY", "test-key")
+
+	root := t.TempDir()
+	profileHome := filepath.Join(root, "profile")
+	projectRoot := filepath.Join(root, "project")
+	tempRoot := filepath.Join(root, "tmp")
+	if err := os.MkdirAll(profileHome, 0o755); err != nil {
+		t.Fatalf("MkdirAll(profileHome) error = %v", err)
+	}
+	if err := os.MkdirAll(projectRoot, 0o755); err != nil {
+		t.Fatalf("MkdirAll(projectRoot) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(profileHome, "config.toml"), []byte(strings.TrimSpace(`
+[mcp_servers.context7]
+url = "https://mcp.context7.com/mcp"
+
+[mcp_servers.context7.env_http_headers]
+CONTEXT7_API_KEY = "CONTEXT7_API_KEY"
+`)+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(profile config) error = %v", err)
+	}
+
+	prepared, err := PrepareRuntime(context.Background(), PrepareRequest{
+		ProfileHome: profileHome,
+		ProjectRoot: projectRoot,
+		TempRoot:    tempRoot,
+	})
+	if err != nil {
+		t.Fatalf("PrepareRuntime() error = %v", err)
+	}
+	defer func() {
+		if err := prepared.Close(); err != nil {
+			t.Fatalf("prepared.Close() error = %v", err)
+		}
+	}()
+
+	if len(prepared.Mounts) != 1 {
+		t.Fatalf("mount count = %d, want 1 profile mount only", len(prepared.Mounts))
+	}
+	if !containsString(prepared.EnvPassthrough, "CONTEXT7_API_KEY") {
+		t.Fatalf("EnvPassthrough = %#v, want CONTEXT7_API_KEY", prepared.EnvPassthrough)
+	}
+}
+
 func newProfileMount(profileHome string) dockeradapter.MountSpec {
 	return dockeradapter.MountSpec{
 		Source:   profileHome,
@@ -182,4 +239,13 @@ func findMountTarget(t *testing.T, mounts []dockeradapter.MountSpec, target stri
 	}
 	t.Fatalf("target %q not found in mounts: %+v", target, mounts)
 	return dockeradapter.MountSpec{}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }

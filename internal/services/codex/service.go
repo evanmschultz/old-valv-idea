@@ -199,10 +199,11 @@ func (s Service) buildRequest(workingDir string, project domain.Project, profile
 	}
 
 	request := docker.ContainerRunRequest{
-		Name:       s.containerName(project),
-		Image:      s.image,
-		WorkingDir: workingDir,
-		Env:        prepared.Env,
+		Name:           s.containerName(project),
+		Image:          s.image,
+		WorkingDir:     workingDir,
+		Env:            prepared.Env,
+		EnvPassthrough: prepared.EnvPassthrough,
 		Labels: map[string]string{
 			"io.valv.managed":    "true",
 			"io.valv.provider":   "codex",

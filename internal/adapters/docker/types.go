@@ -38,30 +38,32 @@ func NewMountSpec(source, target string, readOnly bool) MountSpec {
 }
 
 type ContainerRunRequest struct {
-	Name        string
-	Image       ImageRef
-	WorkingDir  string
-	Env         map[string]string
-	Labels      map[string]string
-	Mounts      []MountSpec
-	Args        []string
-	Detached    bool
-	Interactive bool
-	TTY         bool
-	Remove      bool
-	User        string
-	Network     string
-	Extra       []string
+	Name           string
+	Image          ImageRef
+	WorkingDir     string
+	Env            map[string]string
+	EnvPassthrough []string
+	Labels         map[string]string
+	Mounts         []MountSpec
+	Args           []string
+	Detached       bool
+	Interactive    bool
+	TTY            bool
+	Remove         bool
+	User           string
+	Network        string
+	Extra          []string
 }
 
 type ContainerExecRequest struct {
-	ContainerID string
-	WorkingDir  string
-	Env         map[string]string
-	Args        []string
-	Interactive bool
-	TTY         bool
-	User        string
+	ContainerID    string
+	WorkingDir     string
+	Env            map[string]string
+	EnvPassthrough []string
+	Args           []string
+	Interactive    bool
+	TTY            bool
+	User           string
 }
 
 func (r ContainerExecRequest) Valid() error {
@@ -139,6 +141,20 @@ func BuildRunArgs(request ContainerRunRequest) ([]string, error) {
 			args = append(args, "-e", fmt.Sprintf("%s=%s", key, request.Env[key]))
 		}
 	}
+	if len(request.EnvPassthrough) > 0 {
+		keys := append([]string(nil), request.EnvPassthrough...)
+		sort.Strings(keys)
+		for _, key := range keys {
+			key = strings.TrimSpace(key)
+			if key == "" {
+				continue
+			}
+			if _, exists := request.Env[key]; exists {
+				continue
+			}
+			args = append(args, "-e", key)
+		}
+	}
 	if len(request.Labels) > 0 {
 		keys := make([]string, 0, len(request.Labels))
 		for key := range request.Labels {
@@ -188,6 +204,20 @@ func BuildExecArgs(request ContainerExecRequest) ([]string, error) {
 		sort.Strings(keys)
 		for _, key := range keys {
 			args = append(args, "-e", fmt.Sprintf("%s=%s", key, request.Env[key]))
+		}
+	}
+	if len(request.EnvPassthrough) > 0 {
+		keys := append([]string(nil), request.EnvPassthrough...)
+		sort.Strings(keys)
+		for _, key := range keys {
+			key = strings.TrimSpace(key)
+			if key == "" {
+				continue
+			}
+			if _, exists := request.Env[key]; exists {
+				continue
+			}
+			args = append(args, "-e", key)
 		}
 	}
 	args = append(args, strings.TrimSpace(request.ContainerID))

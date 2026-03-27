@@ -32,20 +32,21 @@ func TestBuildRunArgs(t *testing.T) {
 	t.Parallel()
 
 	req := ContainerRunRequest{
-		Name:        "valv-codex-test",
-		Image:       NewImageRef("ghcr.io/valv/codex", "0.1.0"),
-		WorkingDir:  "/Users/alice/project",
-		Env:         map[string]string{"B": "2", "A": "1"},
-		Labels:      map[string]string{"io.valv.scope": "interactive", "io.valv.managed": "true"},
-		Mounts:      []MountSpec{NewMountSpec("/host/project", "/workspace", true)},
-		Args:        []string{"version"},
-		Detached:    true,
-		Interactive: true,
-		TTY:         true,
-		Remove:      true,
-		User:        "501:20",
-		Network:     "none",
-		Extra:       []string{"--pull=never"},
+		Name:           "valv-codex-test",
+		Image:          NewImageRef("ghcr.io/valv/codex", "0.1.0"),
+		WorkingDir:     "/Users/alice/project",
+		Env:            map[string]string{"B": "2", "A": "1"},
+		EnvPassthrough: []string{"TOKEN", "A"},
+		Labels:         map[string]string{"io.valv.scope": "interactive", "io.valv.managed": "true"},
+		Mounts:         []MountSpec{NewMountSpec("/host/project", "/workspace", true)},
+		Args:           []string{"version"},
+		Detached:       true,
+		Interactive:    true,
+		TTY:            true,
+		Remove:         true,
+		User:           "501:20",
+		Network:        "none",
+		Extra:          []string{"--pull=never"},
 	}
 
 	got, err := BuildRunArgs(req)
@@ -65,6 +66,7 @@ func TestBuildRunArgs(t *testing.T) {
 		"--network", "none",
 		"-e", "A=1",
 		"-e", "B=2",
+		"-e", "TOKEN",
 		"--label", "io.valv.managed=true",
 		"--label", "io.valv.scope=interactive",
 		"--mount", "type=bind,source=/host/project,target=/workspace,readonly",
@@ -104,13 +106,14 @@ func TestBuildExecArgs(t *testing.T) {
 	t.Parallel()
 
 	got, err := BuildExecArgs(ContainerExecRequest{
-		ContainerID: "valv-api-runtime",
-		WorkingDir:  "/workspace/project",
-		Env:         map[string]string{"B": "2", "A": "1"},
-		Args:        []string{"codex", "exec", "--json"},
-		Interactive: true,
-		TTY:         true,
-		User:        "501:20",
+		ContainerID:    "valv-api-runtime",
+		WorkingDir:     "/workspace/project",
+		Env:            map[string]string{"B": "2", "A": "1"},
+		EnvPassthrough: []string{"TOKEN", "A"},
+		Args:           []string{"codex", "exec", "--json"},
+		Interactive:    true,
+		TTY:            true,
+		User:           "501:20",
 	})
 	if err != nil {
 		t.Fatalf("BuildExecArgs() error = %v", err)
@@ -124,6 +127,7 @@ func TestBuildExecArgs(t *testing.T) {
 		"--user", "501:20",
 		"-e", "A=1",
 		"-e", "B=2",
+		"-e", "TOKEN",
 		"valv-api-runtime",
 		"codex", "exec", "--json",
 	}

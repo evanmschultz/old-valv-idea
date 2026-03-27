@@ -88,11 +88,20 @@ func (s Service) CreateProfile(ctx context.Context, provider domain.Provider, na
 	if err != nil {
 		return domain.Profile{}, fmt.Errorf("create profile %q: %w", name, err)
 	}
-	if _, err := s.store.CreateProfile(ctx, profile); err != nil {
+	created, err := s.store.CreateProfile(ctx, profile)
+	if err != nil {
+		existing, lookupErr := s.store.ProfileByName(ctx, provider, profile.Name)
+		if lookupErr == nil {
+			if existing.HomePath != profile.HomePath {
+				return domain.Profile{}, fmt.Errorf("create profile %q: profile already exists with home %q", profile.Name, existing.HomePath)
+			}
+			s.debug("provider profile already exists", "provider", existing.Provider, "name", existing.Name, "home", existing.HomePath)
+			return existing, nil
+		}
 		return domain.Profile{}, fmt.Errorf("create profile %q: persist profile: %w", profile.Name, err)
 	}
-	s.debug("created provider profile", "provider", profile.Provider, "name", profile.Name, "home", profile.HomePath)
-	return profile, nil
+	s.debug("created provider profile", "provider", created.Provider, "name", created.Name, "home", created.HomePath)
+	return created, nil
 }
 
 func (s Service) BindProject(ctx context.Context, provider domain.Provider, profileName, startPath string) (BindResult, error) {

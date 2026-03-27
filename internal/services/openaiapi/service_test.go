@@ -75,6 +75,9 @@ func TestBuildRuntimeRequestOmitsWorkspaceByDefault(t *testing.T) {
 	if got := request.Labels["io.valv.workspace_access"]; got != "false" {
 		t.Fatalf("workspace_access label = %q, want false", got)
 	}
+	if !reflect.DeepEqual(request.EnvPassthrough, []string{"CONTEXT7_API_KEY"}) {
+		t.Fatalf("EnvPassthrough = %#v, want CONTEXT7_API_KEY passthrough", request.EnvPassthrough)
+	}
 }
 
 func TestBuildRuntimeRequestIncludesWorkspaceWhenEnabled(t *testing.T) {
@@ -154,6 +157,7 @@ func preparedRuntimeForTests(projectRoot string) codexruntime.PreparedRuntime {
 			"LOGNAME":    "valv",
 			"USER":       "valv",
 		},
+		EnvPassthrough: []string{"CONTEXT7_API_KEY"},
 		Mounts: []dockeradapter.MountSpec{
 			dockeradapter.NewMountSpec("/tmp/profile", codexruntime.ContainerCodexDir, false),
 			dockeradapter.NewMountSpec("/tmp/profile-overlay.toml", filepath.Join(codexruntime.ContainerCodexDir, "config.toml"), true),

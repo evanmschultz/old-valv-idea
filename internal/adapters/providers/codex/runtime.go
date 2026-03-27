@@ -28,11 +28,12 @@ type PrepareRequest struct {
 }
 
 type PreparedRuntime struct {
-	ContainerHome string
-	Env           map[string]string
-	Mounts        []dockeradapter.MountSpec
-	Warnings      []string
-	cleanup       func() error
+	ContainerHome  string
+	Env            map[string]string
+	EnvPassthrough []string
+	Mounts         []dockeradapter.MountSpec
+	Warnings       []string
+	cleanup        func() error
 }
 
 func (p PreparedRuntime) Close() error {
@@ -105,6 +106,7 @@ func PrepareRuntime(ctx context.Context, request PrepareRequest) (PreparedRuntim
 		return PreparedRuntime{}, fmt.Errorf("prepare codex runtime: translate profile config: %w", err)
 	}
 	warnings = append(warnings, profileResult.Warnings...)
+	envPassthrough := append([]string(nil), profileResult.EnvPassthrough...)
 	if profileResult.HasOverlay {
 		mounts = append(mounts, dockeradapter.NewMountSpec(profileOverlayPath, filepath.Join(ContainerCodexDir, "config.toml"), true))
 	}
@@ -124,16 +126,18 @@ func PrepareRuntime(ctx context.Context, request PrepareRequest) (PreparedRuntim
 		return PreparedRuntime{}, fmt.Errorf("prepare codex runtime: translate project config: %w", err)
 	}
 	warnings = append(warnings, projectResult.Warnings...)
+	envPassthrough = appendUniqueStrings(envPassthrough, projectResult.EnvPassthrough...)
 	if projectResult.HasOverlay {
 		mounts = append(mounts, dockeradapter.NewMountSpec(projectOverlayPath, projectConfigPath, true))
 	}
 
 	return PreparedRuntime{
-		ContainerHome: ContainerHomeDir,
-		Env:           env,
-		Mounts:        mounts,
-		Warnings:      warnings,
-		cleanup:       cleanup,
+		ContainerHome:  ContainerHomeDir,
+		Env:            env,
+		EnvPassthrough: envPassthrough,
+		Mounts:         mounts,
+		Warnings:       warnings,
+		cleanup:        cleanup,
 	}, nil
 }
 
@@ -147,8 +151,9 @@ type translateRequest struct {
 }
 
 type translateResult struct {
-	HasOverlay bool
-	Warnings   []string
+	HasOverlay     bool
+	Warnings       []string
+	EnvPassthrough []string
 }
 
 func translateConfigFile(ctx context.Context, request translateRequest) (translateResult, error) {
@@ -165,12 +170,12 @@ func translateConfigFile(ctx context.Context, request translateRequest) (transla
 		return translateResult{}, fmt.Errorf("decode config %q: %w", request.ConfigPath, err)
 	}
 
-	servers, changed, warnings, err := translateMCPServers(ctx, cfg, request.ProjectRoot, request.ScopeRoot, request.BridgeManager)
+	servers, changed, warnings, envPassthrough, err := translateMCPServers(ctx, cfg, request.ProjectRoot, request.ScopeRoot, request.BridgeManager)
 	if err != nil {
 		return translateResult{}, fmt.Errorf("translate MCP servers for %q: %w", request.ConfigPath, err)
 	}
 	if !changed {
-		return translateResult{}, nil
+		return translateResult{EnvPassthrough: envPassthrough}, nil
 	}
 	cfg["mcp_servers"] = servers
 	if err := os.MkdirAll(filepath.Dir(request.OverlayOutputPath), 0o755); err != nil {
@@ -184,20 +189,21 @@ func translateConfigFile(ctx context.Context, request translateRequest) (transla
 	if err := toml.NewEncoder(file).Encode(cfg); err != nil {
 		return translateResult{}, fmt.Errorf("encode overlay %q: %w", request.OverlayOutputPath, err)
 	}
-	return translateResult{HasOverlay: true, Warnings: warnings}, nil
+	return translateResult{HasOverlay: true, Warnings: warnings, EnvPassthrough: envPassthrough}, nil
 }
 
-func translateMCPServers(ctx context.Context, cfg map[string]any, projectRoot, scopeRoot string, manager *bridgeManager) (map[string]any, bool, []string, error) {
+func translateMCPServers(ctx context.Context, cfg map[string]any, projectRoot, scopeRoot string, manager *bridgeManager) (map[string]any, bool, []string, []string, error) {
 	raw, ok := cfg["mcp_servers"]
 	if !ok {
-		return nil, false, nil, nil
+		return nil, false, nil, nil, nil
 	}
 	serverMap, ok := raw.(map[string]any)
 	if !ok {
-		return nil, false, nil, fmt.Errorf("mcp_servers is %T, want table", raw)
+		return nil, false, nil, nil, fmt.Errorf("mcp_servers is %T, want table", raw)
 	}
 	changed := false
 	warnings := []string{}
+	envPassthrough := []string{}
 	out := make(map[string]any, len(serverMap))
 	for name, value := range serverMap {
 		entry, ok := value.(map[string]any)
@@ -206,6 +212,7 @@ func translateMCPServers(ctx context.Context, cfg map[string]any, projectRoot, s
 			continue
 		}
 		copied := cloneMap(entry)
+		envPassthrough = appendUniqueStrings(envPassthrough, passthroughEnvFromEntry(copied)...)
 		switch {
 		case stringValue(copied["command"]) != "":
 			targetURL, warning, err := manager.BridgeCommand(ctx, name, commandSpec{
@@ -233,7 +240,7 @@ func translateMCPServers(ctx context.Context, cfg map[string]any, projectRoot, s
 			rawURL := stringValue(copied["url"])
 			rewritten, didRewrite, err := rewriteLoopbackURL(rawURL)
 			if err != nil {
-				return nil, false, nil, fmt.Errorf("rewrite URL for %q: %w", name, err)
+				return nil, false, nil, nil, fmt.Errorf("rewrite URL for %q: %w", name, err)
 			}
 			if didRewrite {
 				copied["url"] = rewritten
@@ -244,7 +251,7 @@ func translateMCPServers(ctx context.Context, cfg map[string]any, projectRoot, s
 			out[name] = copied
 		}
 	}
-	return out, changed, warnings, nil
+	return out, changed, warnings, envPassthrough, nil
 }
 
 func cloneMap(value map[string]any) map[string]any {
@@ -309,6 +316,54 @@ func stringMap(value any) map[string]string {
 	default:
 		return nil
 	}
+}
+
+func passthroughEnvFromEntry(entry map[string]any) []string {
+	headers, ok := entry["env_http_headers"]
+	if !ok {
+		return nil
+	}
+	table, ok := headers.(map[string]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(table))
+	for _, raw := range table {
+		name, ok := raw.(string)
+		if !ok {
+			continue
+		}
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if _, exists := os.LookupEnv(name); exists {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+func appendUniqueStrings(dst []string, values ...string) []string {
+	if len(values) == 0 {
+		return dst
+	}
+	seen := make(map[string]struct{}, len(dst))
+	for _, value := range dst {
+		seen[value] = struct{}{}
+	}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		dst = append(dst, value)
+		seen[value] = struct{}{}
+	}
+	return dst
 }
 
 func errorsJoin(errs ...error) error {

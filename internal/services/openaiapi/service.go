@@ -244,10 +244,11 @@ func (s Service) buildRuntimeRequest(runtimeRecord domain.RuntimeRecord, project
 		workingDir = project.Root
 	}
 	return dockeradapter.ContainerRunRequest{
-		Name:       runtimeRecord.ContainerID,
-		Image:      s.image,
-		WorkingDir: workingDir,
-		Env:        prepared.Env,
+		Name:           runtimeRecord.ContainerID,
+		Image:          s.image,
+		WorkingDir:     workingDir,
+		Env:            prepared.Env,
+		EnvPassthrough: prepared.EnvPassthrough,
 		Labels: map[string]string{
 			"io.valv.managed":          "true",
 			"io.valv.provider":         "codex",
