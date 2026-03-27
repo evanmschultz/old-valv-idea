@@ -91,7 +91,6 @@ func New(options Options) (Service, error) {
 	if groupID == 0 {
 		groupID = os.Getgid()
 	}
-
 	return Service{
 		runner:     options.Runner,
 		repository: strings.TrimSpace(options.Repository),
@@ -217,10 +216,10 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates git \
     && rm -rf /var/lib/apt/lists/*
 
-RUN groupadd -g "${VALV_GID}" valv \
-    && useradd -m -u "${VALV_UID}" -g "${VALV_GID}" -s /bin/sh valv \
+RUN getent group "${VALV_GID}" >/dev/null || groupadd -g "${VALV_GID}" valv \
+    && useradd -o -m -u "${VALV_UID}" -g "${VALV_GID}" -s /bin/sh valv \
     && mkdir -p /home/valv/.codex /workspace \
-    && chown -R valv:valv /home/valv /workspace
+    && chown -R "${VALV_UID}:${VALV_GID}" /home/valv /workspace
 
 ENV NPM_CONFIG_UPDATE_NOTIFIER=false \
     NPM_CONFIG_FUND=false \
