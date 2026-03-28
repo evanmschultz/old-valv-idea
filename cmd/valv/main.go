@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"charm.land/fang/v2"
 	"github.com/evanmschultz/valv/internal/cli"
@@ -13,8 +15,16 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var signalNotifyContext = signal.NotifyContext
+
 func main() {
-	os.Exit(realMain(context.Background(), os.Stdout, os.Stderr))
+	ctx, stop := newMainContext()
+	defer stop()
+	os.Exit(realMain(ctx, os.Stdout, os.Stderr))
+}
+
+func newMainContext() (context.Context, context.CancelFunc) {
+	return signalNotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 }
 
 func realMain(ctx context.Context, stdout, stderr io.Writer) int {

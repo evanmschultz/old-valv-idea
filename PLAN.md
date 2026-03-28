@@ -649,7 +649,7 @@ Shipped and working:
 - provider image freshness now notices Docker recipe drift, not only upstream client-version drift
 - `valv manage update` rebuilds when the local image recipe is stale, even when the upstream Codex version has not changed
 - `valv api serve` has now been validated end to end through a real `/v1/chat/completions` request
-- `valv api serve` now stops its bound warm API runtime containers on shutdown instead of leaving `valv-api-*` containers running after `Ctrl-C`
+- `valv api serve` now stops its bound warm API runtime containers on shutdown instead of leaving `valv-api-*` containers running after `Ctrl-C`, with the main process using a signal-aware command context so shutdown hooks actually run on interrupt
 
 Known remaining gaps:
 

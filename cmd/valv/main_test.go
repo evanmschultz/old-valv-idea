@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -79,5 +80,32 @@ func TestRunUsesTestHomeOverride(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "database="+filepath.Join(home, "Library", "Application Support", "valv", "db", "valv.sqlite3")) {
 		t.Fatalf("stdout = %q, want override database path", stdout.String())
+	}
+}
+
+func TestNewMainContextUsesSignalNotifyContext(t *testing.T) {
+	called := false
+	var received []os.Signal
+	previous := signalNotifyContext
+	signalNotifyContext = func(parent context.Context, signals ...os.Signal) (context.Context, context.CancelFunc) {
+		called = true
+		received = append([]os.Signal(nil), signals...)
+		return parent, func() {}
+	}
+	t.Cleanup(func() {
+		signalNotifyContext = previous
+	})
+
+	ctx, stop := newMainContext()
+	defer stop()
+
+	if ctx == nil {
+		t.Fatal("newMainContext() returned nil context")
+	}
+	if !called {
+		t.Fatal("newMainContext() did not invoke signalNotifyContext")
+	}
+	if len(received) != 2 || received[0] != os.Interrupt || received[1] != syscall.SIGTERM {
+		t.Fatalf("newMainContext() signals = %#v, want [os.Interrupt syscall.SIGTERM]", received)
 	}
 }

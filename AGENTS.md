@@ -212,6 +212,7 @@ Output policy:
 - normal cleanup flows must not remove anonymous Docker volumes or unrelated unlabeled containers unless the user explicitly asks for destructive host cleanup
 - long-running commands such as `api serve` must not announce success before the real runtime boundary is established, and user-visible flag values must not silently disagree with internal effective values
 - long-running commands that own warm provider runtimes, such as `api serve`, must stop their Valv-managed containers on shutdown instead of leaving cleanup to TTL expiry alone
+- the main process entrypoint must use a signal-aware root context so command shutdown hooks run on `Ctrl-C` and `SIGTERM`
 
 ## 9) Context7 First
 
