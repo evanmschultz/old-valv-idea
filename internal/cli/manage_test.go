@@ -35,12 +35,13 @@ func TestManageProfileAddCreatesIsolatedNamedProfileAndBindsProject(t *testing.T
 	cmd.SetContext(context.Background())
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
-	cmd.SetArgs([]string{"profile", "add", "codex", "profile-name", "--project", workDir})
+	cmd.SetArgs([]string{"account", "add", "codex", "profile-name", "--project", workDir})
+	installStubCodexAccountAuth(t, cmd, true)
 
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	if !strings.Contains(stdout.String(), "profile=profile-name") {
+	if !strings.Contains(stdout.String(), "account=profile-name") {
 		t.Fatalf("unexpected output: %q", stdout.String())
 	}
 	if _, err := os.Stat(profileHome); err != nil {
@@ -91,12 +92,12 @@ func TestManageProfileAddWithoutNameUsesDefaultHostProfileAndBindsProject(t *tes
 		t.Fatalf("MkdirAll(.git) error = %v", err)
 	}
 
-	output := runManage(t, paths, []string{"profile", "add", "codex", "--project", projectRoot})
+	output := runManage(t, paths, []string{"account", "add", "codex", "--project", projectRoot})
 	wantHome, err := pathutil.Normalize(filepath.Join(paths.HomeDir, ".codex"))
 	if err != nil {
 		t.Fatalf("Normalize(default home) error = %v", err)
 	}
-	for _, want := range []string{"Profile ready and project bound", "profile=default", "home=" + wantHome} {
+	for _, want := range []string{"Account ready and project bound", "account=default", "home=" + wantHome} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("unexpected output %q missing %q", output, want)
 		}
@@ -107,12 +108,12 @@ func TestManageProfileAddNoBindSkipsProjectBinding(t *testing.T) {
 	t.Parallel()
 
 	paths := testCodexPaths(t)
-	output := runManage(t, paths, []string{"profile", "add", "codex", "--no-bind"})
+	output := runManage(t, paths, []string{"account", "add", "codex", "--no-bind"})
 	wantHome, err := pathutil.Normalize(filepath.Join(paths.HomeDir, ".codex"))
 	if err != nil {
 		t.Fatalf("Normalize(default home) error = %v", err)
 	}
-	for _, want := range []string{"Profile ready", "name=default", "home=" + wantHome} {
+	for _, want := range []string{"Account ready", "account=default", "home=" + wantHome} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("unexpected no-bind output %q missing %q", output, want)
 		}
@@ -133,11 +134,11 @@ func TestManageBindAndStatusUseRealStoreAndProjectDetection(t *testing.T) {
 	}
 
 	profileHome := filepath.Join(paths.ProviderRoot, "codex", "profiles", "dev")
-	runManage(t, paths, []string{"profile", "add", "codex", "dev", "--home", profileHome, "--no-bind"})
+	runManage(t, paths, []string{"account", "add", "codex", "dev", "--home", profileHome, "--skip-login", "--no-bind"})
 	runManage(t, paths, []string{"bind", "codex", "dev", "--project", workDir})
 
 	statusOut := runManage(t, paths, []string{"status", "--project", workDir})
-	if !strings.Contains(statusOut, "profile=dev") {
+	if !strings.Contains(statusOut, "account=dev") {
 		t.Fatalf("unexpected status output: %q", statusOut)
 	}
 	if !strings.Contains(statusOut, "provider=codex") {
@@ -156,14 +157,37 @@ func TestManageProfileHelpSubcommandWorks(t *testing.T) {
 	cmd.SetContext(context.Background())
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"account", "help"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	for _, want := range []string{"Manage Valv provider accounts", "add", "list"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("unexpected profile help output %q missing %q", stdout.String(), want)
+		}
+	}
+}
+
+func TestManageProfileAliasStillWorks(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	cmd := newManageCommand(paths, &rootOptions{})
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
 	cmd.SetArgs([]string{"profile", "help"})
 
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	for _, want := range []string{"Manage Valv provider profiles", "add", "list"} {
+	for _, want := range []string{"Manage Valv provider accounts", "add", "switch"} {
 		if !strings.Contains(stdout.String(), want) {
-			t.Fatalf("unexpected profile help output %q missing %q", stdout.String(), want)
+			t.Fatalf("unexpected profile alias help output %q missing %q", stdout.String(), want)
 		}
 	}
 }
@@ -178,6 +202,7 @@ func runManage(t *testing.T, paths config.Paths, args []string) string {
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
 	cmd.SetArgs(args)
+	installStubCodexAccountAuth(t, cmd, true)
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute(%v) error = %v\nstderr=%s", args, err, stderr.String())
 	}

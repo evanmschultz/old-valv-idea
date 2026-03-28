@@ -107,7 +107,7 @@ func TestManageAliasWorks(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	for _, want := range []string{"Operator workflows", "profile", "cleanup"} {
+	for _, want := range []string{"Operator workflows", "account", "cleanup"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("unexpected manage alias output %q missing %q", stdout.String(), want)
 		}

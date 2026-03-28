@@ -36,7 +36,9 @@ func newCodexCommand(paths config.Paths, run codexRunFunc) *cobra.Command {
 		Long: strings.TrimSpace(`
 Run the Codex CLI inside a Valv-managed Docker runtime for the current bound project.
 
-Everything after ` + "`valv codex`" + ` is passed through to Codex as directly as possible. Use the management surface to create profiles and bind projects before launching Codex.
+Everything after ` + "`valv codex`" + ` is passed through to Codex as directly as possible. Use the management surface to create accounts and bind projects before launching Codex.
+
+Before launch, Valv ensures the bound account is authenticated on the host so browser-based Codex login happens outside Docker when needed.
 
 Valv checks for a newer Codex release before launch and rebuilds the runtime image only when needed.
 `),
@@ -66,6 +68,9 @@ func runCodexCommand(cmd *cobra.Command, paths config.Paths, args []string) erro
 		if errors.Is(err, errCodexSetupCanceled) {
 			return nil
 		}
+		return fmt.Errorf("run codex command: %w", err)
+	}
+	if err := ensureBoundCodexAccountReady(cmd, paths, workingDir, args); err != nil {
 		return fmt.Errorf("run codex command: %w", err)
 	}
 
@@ -154,6 +159,37 @@ func codexArgsSkipProjectBinding(args []string) bool {
 		}
 	}
 	return args[0] == "help"
+}
+
+func codexArgsSkipAccountReady(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	switch args[0] {
+	case "help", "login", "logout":
+		return true
+	default:
+		return false
+	}
+}
+
+func ensureBoundCodexAccountReady(cmd *cobra.Command, paths config.Paths, workingDir string, args []string) error {
+	if codexArgsSkipAccountReady(args) {
+		return nil
+	}
+	service, closeStore, err := openManageService(cmd, paths)
+	if err != nil {
+		return fmt.Errorf("initialize account service: %w", err)
+	}
+	defer closeStore()
+	status, err := service.Status(cmd.Context(), workingDir)
+	if err != nil {
+		return fmt.Errorf("resolve bound account: %w", err)
+	}
+	if err := ensureManagedAccountReady(cmd, status.Profile.Provider, status.Profile, accountAuthOptions{}); err != nil {
+		return fmt.Errorf("ensure bound account %q is ready: %w", status.Profile.Name, err)
+	}
+	return nil
 }
 
 func ensureCodexImageAvailable(ctx context.Context, runner interface {

@@ -44,7 +44,7 @@ func TestCodexCommandRunsFixtureImageEndToEnd(t *testing.T) {
 	}
 	imageRef := buildFixtureImage(t)
 	t.Setenv("VALV_CODEX_IMAGE", imageRef)
-	runManageForIntegration(t, paths, projectRoot, []string{"profile", "add", "codex", "profile-name", "--home", profileHome})
+	runManageForIntegration(t, paths, projectRoot, []string{"account", "add", "codex", "profile-name", "--home", profileHome, "--skip-login"})
 	runManageForIntegration(t, paths, workDir, []string{"bind", "codex", "profile-name"})
 
 	prevWD, err := os.Getwd()
@@ -137,7 +137,7 @@ func TestCodexCommandRunsFixtureImageWithTTYEndToEnd(t *testing.T) {
 
 	imageRef := buildFixtureImage(t)
 	t.Setenv("VALV_CODEX_IMAGE", imageRef)
-	runValvBinaryCommand(t, binaryPath, paths.HomeDir, projectRoot, imageRef, "manage", "profile", "add", "codex", "profile-name", "--home", profileHome)
+	runValvBinaryCommand(t, binaryPath, paths.HomeDir, projectRoot, imageRef, "manage", "account", "add", "codex", "profile-name", "--home", profileHome, "--skip-login")
 	runValvBinaryCommand(t, binaryPath, paths.HomeDir, workDir, imageRef, "manage", "bind", "codex", "profile-name")
 
 	runCmd := exec.Command(binaryPath, "codex", "resume", "session-tty")
@@ -146,6 +146,7 @@ func TestCodexCommandRunsFixtureImageWithTTYEndToEnd(t *testing.T) {
 		"HOME="+paths.HomeDir,
 		"VALV_TEST_HOME_DIR="+paths.HomeDir,
 		"VALV_CODEX_IMAGE="+imageRef,
+		valvTestSkipHostCodexLoginEnv+"=1",
 	)
 
 	master, err := pty.StartWithSize(runCmd, &pty.Winsize{Rows: 24, Cols: 100})
@@ -212,6 +213,8 @@ func buildFixtureImage(t *testing.T) string {
 
 func runManageForIntegration(t *testing.T, paths config.Paths, workingDir string, args []string) {
 	t.Helper()
+
+	t.Setenv(valvTestSkipHostCodexLoginEnv, "1")
 
 	prevWD, err := os.Getwd()
 	if err != nil {
@@ -282,6 +285,7 @@ func runValvBinaryCommand(t *testing.T, binaryPath, homeDir, workingDir, imageRe
 		"HOME="+homeDir,
 		"VALV_TEST_HOME_DIR="+homeDir,
 		"VALV_CODEX_IMAGE="+imageRef,
+		valvTestSkipHostCodexLoginEnv+"=1",
 	)
 	output, err := command.CombinedOutput()
 	if err != nil {

@@ -23,7 +23,7 @@ Host-global convenience commands.
 Use host-global commands when you intentionally want to manipulate the machine-level provider state instead of the normal Valv-isolated runtime path.
 `),
 		Example: strings.TrimSpace(`
-valv global switch codex profile-name
+valv global switch codex work
 valv g switch codex
 `),
 		Args: cobra.NoArgs,
@@ -38,15 +38,15 @@ valv g switch codex
 
 func newGlobalSwitchCommand(paths config.Paths, opts *rootOptions) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "switch <provider> [profile]",
-		Short: "Switch the host-global provider profile",
+		Use:   "switch <provider> [account]",
+		Short: "Switch the host-global provider account",
 		Long: strings.TrimSpace(`
-Switch the host-global provider profile as a convenience flow.
+Switch the host-global provider account as a convenience flow.
 
 For Codex, this updates the host-side ` + "`~/.codex`" + ` path target rather than launching a containerized runtime.
 `),
 		Example: strings.TrimSpace(`
-valv global switch codex profile-name
+valv global switch codex work
 valv g switch codex
 `),
 		Args: cobra.RangeArgs(1, 2),
@@ -84,12 +84,12 @@ func runGlobalSwitch(cmd *cobra.Command, paths config.Paths, opts *rootOptions, 
 		profiles, err := manageService.ListProfiles(cmd.Context(), provider)
 		closeManageStore()
 		if err != nil {
-			return fmt.Errorf("global switch: list profiles: %w", err)
+			return fmt.Errorf("global switch: list accounts: %w", err)
 		}
 		selected, err = pickProfile(cmd, provider, profiles.Profiles)
 		if err != nil {
 			if errors.Is(err, errSelectionCanceled) {
-				return writeNoOpRecord(cmd, opts, "No global switch made", "no profile selected")
+				return writeNoOpRecord(cmd, opts, "No global switch made", "no account selected")
 			}
 			return fmt.Errorf("global switch: %w", err)
 		}
@@ -98,6 +98,6 @@ func runGlobalSwitch(cmd *cobra.Command, paths config.Paths, opts *rootOptions, 
 	if err != nil {
 		return fmt.Errorf("global switch: %w", err)
 	}
-	fields := []output.Field{{Label: "provider", Value: string(result.Provider), Muted: true}, {Label: "profile", Value: result.ProfileName, Identifier: true}, {Label: "target", Value: result.TargetPath, Identifier: true}, {Label: "source", Value: result.ProfileHome}, {Label: "backup", Value: result.BackupPath, Muted: true}}
-	return output.WriteRecord(cmd.OutOrStdout(), mode, "Global profile switched", fields)
+	fields := []output.Field{{Label: "provider", Value: string(result.Provider), Muted: true}, {Label: "account", Value: result.ProfileName, Identifier: true}, {Label: "target", Value: result.TargetPath, Identifier: true}, {Label: "source", Value: result.ProfileHome}, {Label: "backup", Value: result.BackupPath, Muted: true}}
+	return output.WriteRecord(cmd.OutOrStdout(), mode, "Global account switched", fields)
 }

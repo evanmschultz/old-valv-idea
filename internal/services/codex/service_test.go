@@ -326,32 +326,24 @@ func TestRunRejectsSiblingPathThatSharesProjectPrefix(t *testing.T) {
 	}
 }
 
-func TestShouldEmitAuthNoticeSuppressesRealHostProfile(t *testing.T) {
+func TestEmitNoticesSuppressesWarningsOnTTY(t *testing.T) {
 	t.Parallel()
 
-	service := Service{realHome: "/Users/example"}
-	profile := domain.Profile{HomePath: "/Users/example/.codex"}
-	if service.shouldEmitAuthNotice(profile, nil) {
-		t.Fatal("shouldEmitAuthNotice() = true, want false for real host profile")
+	var notices strings.Builder
+	service := Service{tty: true, notices: &notices}
+	service.emitNotices(domain.Profile{}, []string{"bridge warning"}, nil)
+	if notices.String() != "" {
+		t.Fatalf("emitNotices() wrote %q, want no interactive notices", notices.String())
 	}
 }
 
-func TestShouldEmitAuthNoticeKeepsNoticeForIsolatedProfile(t *testing.T) {
+func TestEmitNoticesWritesWarningsWithoutTTY(t *testing.T) {
 	t.Parallel()
 
-	service := Service{realHome: "/Users/example"}
-	profile := domain.Profile{HomePath: "/Users/example/Library/Application Support/valv/providers/codex/profiles/work"}
-	if !service.shouldEmitAuthNotice(profile, nil) {
-		t.Fatal("shouldEmitAuthNotice() = false, want true for isolated profile")
-	}
-}
-
-func TestShouldEmitAuthNoticeSkipsNonLoginSubcommands(t *testing.T) {
-	t.Parallel()
-
-	service := Service{realHome: "/Users/example"}
-	profile := domain.Profile{HomePath: "/tmp/isolated"}
-	if service.shouldEmitAuthNotice(profile, []string{"exec", "status"}) {
-		t.Fatal("shouldEmitAuthNotice() = true, want false for non-login/non-interactive args")
+	var notices strings.Builder
+	service := Service{notices: &notices}
+	service.emitNotices(domain.Profile{}, []string{"bridge warning"}, nil)
+	if !strings.Contains(notices.String(), "Valv MCP note: bridge warning") {
+		t.Fatalf("emitNotices() output = %q, want warning text", notices.String())
 	}
 }

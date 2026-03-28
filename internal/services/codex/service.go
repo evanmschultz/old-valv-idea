@@ -245,26 +245,19 @@ func (s Service) debug(msg string, keyvals ...any) {
 	s.logger.Debug(msg, keyvals...)
 }
 
-func (s Service) emitNotices(profile domain.Profile, warnings, codexArgs []string) {
-	if s.notices != nil && s.shouldEmitAuthNotice(profile, codexArgs) {
-		_, _ = fmt.Fprintln(s.notices, "Containerized Codex auth: if browser sign-in redirects to localhost and stalls, press Esc and choose Device Code.")
+func (s Service) emitNotices(_ domain.Profile, warnings, _ []string) {
+	if len(warnings) == 0 {
+		return
 	}
-	if s.notices == nil {
+	for _, warning := range warnings {
+		s.debug("codex runtime warning", "warning", warning)
+	}
+	if s.notices == nil || s.tty {
 		return
 	}
 	for _, warning := range warnings {
 		_, _ = fmt.Fprintf(s.notices, "Valv MCP note: %s\n", warning)
 	}
-}
-
-func (s Service) shouldEmitAuthNotice(profile domain.Profile, codexArgs []string) bool {
-	if len(codexArgs) != 0 && codexArgs[0] != "login" {
-		return false
-	}
-	if codexruntime.IsDefaultHostHome(profile.HomePath, s.realHome) {
-		return false
-	}
-	return true
 }
 
 func (s Service) containerName(project domain.Project) string {

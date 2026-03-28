@@ -20,7 +20,7 @@ func TestDefaultItems(t *testing.T) {
 		items[3].Title(),
 		items[4].Title(),
 	}
-	wantTitles := []string{"Status", "Bind profile", "Update", "Cleanup", "Global switch"}
+	wantTitles := []string{"Status", "Switch account", "Update", "Cleanup", "Global switch"}
 	for i := range wantTitles {
 		if gotTitles[i] != wantTitles[i] {
 			t.Fatalf("DefaultItems()[%d].Title() = %q, want %q", i, gotTitles[i], wantTitles[i])
@@ -100,7 +100,7 @@ func TestUpdateMovesSelectionBeforeEntering(t *testing.T) {
 	if selected, ok := updated.Selected(); !ok || selected != ActionProfiles {
 		t.Fatalf("Selected() = %q, %t; want %q, true", selected, ok, ActionProfiles)
 	}
-	if updated.Notice() != "bind profile selected" {
-		t.Fatalf("Notice() = %q, want %q", updated.Notice(), "bind profile selected")
+	if updated.Notice() != "switch account selected" {
+		t.Fatalf("Notice() = %q, want %q", updated.Notice(), "switch account selected")
 	}
 }

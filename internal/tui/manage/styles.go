@@ -39,7 +39,7 @@ func (s Styles) header() string {
 	return lipgloss.JoinVertical(
 		lipgloss.Left,
 		s.Title.Render("Valv Manage"),
-		s.Subtitle.Render("Operator surface for project, profile, runtime, and cleanup actions."),
+		s.Subtitle.Render("Operator surface for project, account, runtime, and cleanup actions."),
 	)
 }
 

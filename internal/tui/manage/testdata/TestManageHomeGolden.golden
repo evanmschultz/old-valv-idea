@@ -1,5 +1,5 @@
 [1;38;2;234;246;255mValv Manage[m                                                              
-[38;2;147;168;183mOperator surface for project, profile, runtime, and cleanup actions.[m     
+[38;2;147;168;183mOperator surface for project, account, runtime, and cleanup actions.[m     
 [38;2;77;114;138m╭───────────────────────────────────────────────────────────────────────╮[m
 [38;2;77;114;138m│[m                                                                       [38;2;77;114;138m│[m
 [38;2;77;114;138m│[m    [48;5;62m [m[38;5;230;48;5;62mActions[m[48;5;62m [m                                                          [38;2;77;114;138m│[m
@@ -9,8 +9,8 @@
 [38;2;77;114;138m│[m  [38;2;157;220;255m│[m [38;2;157;220;255mStatus[m                                                             [38;2;77;114;138m│[m
 [38;2;77;114;138m│[m  [38;2;173;88;180m│[m [38;2;207;239;255mInspect the current project binding and runtime state.[m             [38;2;77;114;138m│[m
 [38;2;77;114;138m│[m                                                                       [38;2;77;114;138m│[m
-[38;2;77;114;138m│[m    [38;2;234;246;255mBind profile[m                                                       [38;2;77;114;138m│[m
-[38;2;77;114;138m│[m    [38;2;147;168;183mSelect an existing provider profile and bind the current project.[m  [38;2;77;114;138m│[m
+[38;2;77;114;138m│[m    [38;2;234;246;255mSwitch account[m                                                     [38;2;77;114;138m│[m
+[38;2;77;114;138m│[m    [38;2;147;168;183mSelect an existing provider account and bind the current project.[m  [38;2;77;114;138m│[m
 [38;2;77;114;138m│[m                                                                       [38;2;77;114;138m│[m
 [38;2;77;114;138m│[m                                                                       [38;2;77;114;138m│[m
 [38;2;77;114;138m│[m                                                                       [38;2;77;114;138m│[m

@@ -87,7 +87,7 @@ Use:
 
 Wrapper behavior:
 - Resolve current project from CWD.
-- Load bound profile.
+- Load the bound account/profile home.
 - Export provider-specific env before launching CLI:
   - Codex: `CODEX_HOME=<profile_home>`
   - Claude: `CLAUDE_CONFIG_DIR=<profile_home>` (plus policy vars as needed)
@@ -103,18 +103,21 @@ Optional mode:
 
 ## 4) Login UX
 
-- `valv profile login codex <profile>`
-  - run `codex login` with `CODEX_HOME` set to profile home
-  - enforce `cli_auth_credentials_store="file"` when strict per-project isolation is required
-- `valv profile login claude <profile>`
-  - run Claude login flow in profile-scoped environment
-  - on Linux/Windows this maps cleanly to file-based credentials
+User-facing, these should be accounts rather than low-level profiles.
 
-Switching project account:
-- `valv project set-profile --provider codex --profile work`
-- `valv project set-profile --provider claude --profile personal`
+- `valv manage account add codex`
+  - create or reuse the inferred host-backed Codex account
+  - run host `codex login` with `CODEX_HOME` set to that account home when needed
+  - bind the current project by default
+- `valv manage account add codex work`
+  - create or reuse an isolated named Codex account
+  - run host `codex login` against that isolated account home when needed
+  - bind the current project by default
+- `valv manage account switch work`
+  - ensure the selected account is logged in
+  - rebind the current project
 
-No credential copy required; just change binding.
+No credential copy is required; Valv changes the binding and launches the provider against the selected account home.
 
 ## 5) macOS caveat (Claude)
 
@@ -135,7 +138,7 @@ Mitigations:
 1. Implement Valv profile/project binding model (no runtime changes yet).
 2. Implement wrapper launchers for `codex` and `claude` with env scoping.
 3. Add shell hook for automatic project-context activation on `cd`.
-4. Add `valv profile login` and `valv project set-profile` commands.
+4. Add account-first management commands that collapse create/login/bind into one primary flow and keep lower-level profile controls as compatibility/advanced surfaces.
 5. Add containerized fallback path for strict Claude isolation on macOS.
 
 ## What To Reuse vs Avoid From ccswitch-account

@@ -71,7 +71,7 @@ func TestManageCommandWithoutTTYShowsHelp(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	for _, want := range []string{"Operator workflows", "profile", "cleanup"} {
+	for _, want := range []string{"Operator workflows", "account", "cleanup"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("unexpected manage help output %q missing %q", stdout.String(), want)
 		}
@@ -97,45 +97,45 @@ func TestRunManageHomeWithoutTTYShowsHelp(t *testing.T) {
 	}
 }
 
-func TestManageProfileListOutputsStoredProfiles(t *testing.T) {
+func TestManageAccountListOutputsStoredAccounts(t *testing.T) {
 	t.Parallel()
 
 	paths := testCodexPaths(t)
 	profileHomeA := filepath.Join(paths.ProviderRoot, "codex", "profiles", "alpha")
 	profileHomeB := filepath.Join(paths.ProviderRoot, "codex", "profiles", "beta")
 
-	runManage(t, paths, []string{"profile", "add", "codex", "alpha", "--home", profileHomeA})
-	runManage(t, paths, []string{"profile", "add", "codex", "beta", "--home", profileHomeB})
+	runManage(t, paths, []string{"account", "add", "codex", "alpha", "--home", profileHomeA})
+	runManage(t, paths, []string{"account", "add", "codex", "beta", "--home", profileHomeB})
 
-	output := runManage(t, paths, []string{"profile", "list", "codex"})
-	for _, want := range []string{"codex profiles", "- alpha", "- beta", "home="} {
+	output := runManage(t, paths, []string{"account", "list", "codex"})
+	for _, want := range []string{"codex accounts", "- alpha", "- beta", "home="} {
 		if !strings.Contains(output, want) {
-			t.Fatalf("unexpected profile list output %q missing %q", output, want)
+			t.Fatalf("unexpected account list output %q missing %q", output, want)
 		}
 	}
 }
 
-func TestManageProfileListWithoutProviderGroupsByProvider(t *testing.T) {
+func TestManageAccountListWithoutProviderGroupsByProvider(t *testing.T) {
 	t.Parallel()
 
 	paths := testCodexPaths(t)
 	profileHome := filepath.Join(paths.ProviderRoot, "codex", "profiles", "alpha")
-	runManage(t, paths, []string{"profile", "add", "codex", "alpha", "--home", profileHome})
+	runManage(t, paths, []string{"account", "add", "codex", "alpha", "--home", profileHome})
 
-	output := runManage(t, paths, []string{"profile", "list"})
-	for _, want := range []string{"codex profiles", "- alpha", "home="} {
+	output := runManage(t, paths, []string{"account", "list"})
+	for _, want := range []string{"codex accounts", "- alpha", "home="} {
 		if !strings.Contains(output, want) {
-			t.Fatalf("unexpected grouped profile list output %q missing %q", output, want)
+			t.Fatalf("unexpected grouped account list output %q missing %q", output, want)
 		}
 	}
 }
 
-func TestManageProfileListJSONUsesCommandKey(t *testing.T) {
+func TestManageAccountListJSONUsesCommandKey(t *testing.T) {
 	t.Parallel()
 
 	paths := testCodexPaths(t)
 	profileHome := filepath.Join(paths.ProviderRoot, "codex", "profiles", "alpha")
-	runManage(t, paths, []string{"profile", "add", "codex", "alpha", "--home", profileHome})
+	runManage(t, paths, []string{"account", "add", "codex", "alpha", "--home", profileHome})
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -145,7 +145,7 @@ func TestManageProfileListJSONUsesCommandKey(t *testing.T) {
 	cmd.SetContext(context.Background())
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
-	cmd.SetArgs([]string{"--format", "json", "profile", "list", "codex"})
+	cmd.SetArgs([]string{"--format", "json", "account", "list", "codex"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v\nstderr=%s", err, stderr.String())
 	}
@@ -154,25 +154,25 @@ func TestManageProfileListJSONUsesCommandKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EvalSymlinks(%q) error = %v", profileHome, err)
 	}
-	want := fmt.Sprintf("{\n  \"profiles\": [\n    {\n      \"title\": \"alpha\",\n      \"fields\": [\n        {\n          \"label\": \"provider\",\n          \"value\": \"codex\",\n          \"muted\": true\n        },\n        {\n          \"label\": \"home\",\n          \"value\": %q,\n          \"identifier\": true\n        }\n      ]\n    }\n  ]\n}\n", wantHome)
+	want := fmt.Sprintf("{\n  \"accounts\": [\n    {\n      \"title\": \"alpha\",\n      \"fields\": [\n        {\n          \"label\": \"provider\",\n          \"value\": \"codex\",\n          \"muted\": true\n        },\n        {\n          \"label\": \"home\",\n          \"value\": %q,\n          \"identifier\": true\n        }\n      ]\n    }\n  ]\n}\n", wantHome)
 	if output != want {
-		t.Fatalf("unexpected profile list json output:\n got: %q\nwant: %q", output, want)
+		t.Fatalf("unexpected account list json output:\n got: %q\nwant: %q", output, want)
 	}
 }
 
-func TestManageProfileListShowsEmptyState(t *testing.T) {
+func TestManageAccountListShowsEmptyState(t *testing.T) {
 	t.Parallel()
 
 	paths := testCodexPaths(t)
-	output := runManage(t, paths, []string{"profile", "list", "codex"})
-	for _, want := range []string{"codex profiles", "(none)"} {
+	output := runManage(t, paths, []string{"account", "list", "codex"})
+	for _, want := range []string{"codex accounts", "(none)"} {
 		if !strings.Contains(output, want) {
-			t.Fatalf("unexpected empty profile list output %q missing %q", output, want)
+			t.Fatalf("unexpected empty account list output %q missing %q", output, want)
 		}
 	}
 }
 
-func TestManageProfileSwitchRebindsCurrentProject(t *testing.T) {
+func TestManageAccountSwitchRebindsCurrentProject(t *testing.T) {
 	t.Parallel()
 
 	paths := testCodexPaths(t)
@@ -183,22 +183,22 @@ func TestManageProfileSwitchRebindsCurrentProject(t *testing.T) {
 
 	alphaHome := filepath.Join(paths.ProviderRoot, "codex", "profiles", "alpha")
 	betaHome := filepath.Join(paths.ProviderRoot, "codex", "profiles", "beta")
-	runManage(t, paths, []string{"profile", "add", "codex", "alpha", "--home", alphaHome})
-	runManage(t, paths, []string{"profile", "add", "codex", "beta", "--home", betaHome})
+	runManage(t, paths, []string{"account", "add", "codex", "alpha", "--home", alphaHome})
+	runManage(t, paths, []string{"account", "add", "codex", "beta", "--home", betaHome})
 	runManage(t, paths, []string{"bind", "codex", "alpha", "--project", projectRoot})
 
-	output := runManage(t, paths, []string{"profile", "switch", "beta", "--project", projectRoot})
-	if !strings.Contains(output, "profile=beta") {
-		t.Fatalf("unexpected profile switch output: %q", output)
+	output := runManage(t, paths, []string{"account", "switch", "beta", "--project", projectRoot})
+	if !strings.Contains(output, "account=beta") {
+		t.Fatalf("unexpected account switch output: %q", output)
 	}
 
 	status := runManage(t, paths, []string{"status", "--project", projectRoot})
-	if !strings.Contains(status, "profile=beta") {
-		t.Fatalf("unexpected status after profile switch: %q", status)
+	if !strings.Contains(status, "account=beta") {
+		t.Fatalf("unexpected status after account switch: %q", status)
 	}
 }
 
-func TestRunManageBindInteractiveShowsGuidanceWhenNoProfilesExist(t *testing.T) {
+func TestRunManageBindInteractiveShowsGuidanceWhenNoAccountsExist(t *testing.T) {
 	t.Parallel()
 
 	paths := testCodexPaths(t)
@@ -209,12 +209,12 @@ func TestRunManageBindInteractiveShowsGuidanceWhenNoProfilesExist(t *testing.T) 
 	cmd.SetErr(&bytes.Buffer{})
 
 	err := runManageBindInteractive(cmd, paths, &rootOptions{})
-	if err == nil || !strings.Contains(err.Error(), "run `valv manage profile add codex` for the default host-backed profile") {
-		t.Fatalf("runManageBindInteractive() error = %v, want profile guidance", err)
+	if err == nil || !strings.Contains(err.Error(), "run `valv manage account add codex` for the default host-backed account") {
+		t.Fatalf("runManageBindInteractive() error = %v, want account guidance", err)
 	}
 }
 
-func TestPickProfileWithoutTTYRequiresExplicitProfile(t *testing.T) {
+func TestPickProfileWithoutTTYRequiresExplicitAccount(t *testing.T) {
 	t.Parallel()
 
 	cmd := &cobra.Command{}
@@ -223,8 +223,8 @@ func TestPickProfileWithoutTTYRequiresExplicitProfile(t *testing.T) {
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
 
-	_, err := pickProfile(cmd, domain.ProviderCodex, []domain.Profile{{Name: "profile-name", Provider: domain.ProviderCodex}})
-	if err == nil || !strings.Contains(err.Error(), "profile is required when not running in a TTY") {
+	_, err := pickProfile(cmd, domain.ProviderCodex, []domain.Profile{{Name: "account-name", Provider: domain.ProviderCodex}})
+	if err == nil || !strings.Contains(err.Error(), "account is required when not running in a TTY") {
 		t.Fatalf("pickProfile() error = %v, want non-tty guidance", err)
 	}
 }
@@ -413,7 +413,7 @@ func TestManageCleanupImagesRemovesProviderImagesOnly(t *testing.T) {
 func TestGlobalSwitchCreatesHostSymlink(t *testing.T) {
 	paths := testCodexPaths(t)
 	profileHome := filepath.Join(paths.ProviderRoot, "codex", "profiles", "dev")
-	runManage(t, paths, []string{"profile", "add", "codex", "dev", "--home", profileHome})
+	runManage(t, paths, []string{"account", "add", "codex", "dev", "--home", profileHome})
 	installFakePgrep(t, 1)
 
 	var stdout bytes.Buffer
@@ -427,7 +427,7 @@ func TestGlobalSwitchCreatesHostSymlink(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v\nstderr=%s", err, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "Global profile switched") {
+	if !strings.Contains(stdout.String(), "Global account switched") {
 		t.Fatalf("unexpected global switch output: %q", stdout.String())
 	}
 
@@ -481,10 +481,10 @@ func TestWriteNoOpRecordOutputsReason(t *testing.T) {
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&bytes.Buffer{})
 
-	if err := writeNoOpRecord(cmd, &rootOptions{}, "No profile switch made", "no profile selected"); err != nil {
+	if err := writeNoOpRecord(cmd, &rootOptions{}, "No account switch made", "no account selected"); err != nil {
 		t.Fatalf("writeNoOpRecord() error = %v", err)
 	}
-	for _, want := range []string{"No profile switch made", "reason=no profile selected"} {
+	for _, want := range []string{"No account switch made", "reason=no account selected"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("unexpected no-op output %q missing %q", stdout.String(), want)
 		}
@@ -594,10 +594,10 @@ func TestRunGlobalSwitchWithoutProfileRequiresTTY(t *testing.T) {
 	}
 }
 
-func TestListItemsForProfilesIncludesHomeAndProvider(t *testing.T) {
+func TestListItemsForAccountsIncludesHomeAndProvider(t *testing.T) {
 	t.Parallel()
 
-	items := listItemsForProfiles([]domain.Profile{{Provider: domain.ProviderCodex, Name: "dev", HomePath: "/tmp/dev"}})
+	items := listItemsForAccounts([]domain.Profile{{Provider: domain.ProviderCodex, Name: "dev", HomePath: "/tmp/dev"}})
 	if len(items) != 1 {
 		t.Fatalf("len(items) = %d, want 1", len(items))
 	}

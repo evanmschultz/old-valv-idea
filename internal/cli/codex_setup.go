@@ -36,7 +36,7 @@ func ensureCodexBindingReady(cmd *cobra.Command, paths config.Paths, workingDir 
 		return fmt.Errorf("validate binding: detect project from %q: %w", workingDir, err)
 	}
 	if !commandHasTTY(cmd.InOrStdin()) || !commandHasTTY(cmd.OutOrStdout()) {
-		return fmt.Errorf("validate binding: project %q: %w; run `valv manage profile add codex` for the default host-backed profile or `valv manage profile add codex profile-name` for an isolated profile", project.Root, domain.ErrUnboundProject)
+		return fmt.Errorf("validate binding: project %q: %w; run `valv manage account add codex` for the default host-backed account or `valv manage account add codex account-name` for an isolated account", project.Root, domain.ErrUnboundProject)
 	}
 	if err := runCodexFirstRunSetup(cmd, service, project.Root); err != nil {
 		return fmt.Errorf("validate binding: %w", err)
@@ -59,48 +59,48 @@ func runCodexFirstRunSetup(cmd *cobra.Command, service manageservice.Service, pr
 		case "1", "":
 			profile, err := service.CreateDefaultHostProfile(cmd.Context(), domain.ProviderCodex)
 			if err != nil {
-				return fmt.Errorf("prepare default host-backed profile: %w", err)
+				return fmt.Errorf("prepare default host-backed account: %w", err)
 			}
-			return bindAndReportCodexSetup(cmd, service, projectRoot, profile)
+			return loginBindAndReportCodexSetup(cmd, service, projectRoot, profile)
 		case "2":
 			profiles, err := service.ListProfiles(cmd.Context(), domain.ProviderCodex)
 			if err != nil {
-				return fmt.Errorf("list existing profiles: %w", err)
+				return fmt.Errorf("list existing accounts: %w", err)
 			}
 			selected, err := pickProfile(cmd, domain.ProviderCodex, profiles.Profiles)
 			if err != nil {
 				if errors.Is(err, errSelectionCanceled) {
 					return errCodexSetupCanceled
 				}
-				if strings.Contains(err.Error(), "no codex profiles found") {
-					_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "No existing Codex profiles are available yet.")
+				if strings.Contains(err.Error(), "no codex accounts found") {
+					_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "No existing Codex accounts are available yet.")
 					continue
 				}
-				return fmt.Errorf("select existing profile: %w", err)
+				return fmt.Errorf("select existing account: %w", err)
 			}
-			result, bindErr := service.BindProject(cmd.Context(), domain.ProviderCodex, selected, projectRoot)
-			if bindErr != nil {
-				return fmt.Errorf("bind existing profile %q: %w", selected, bindErr)
+			account, err := service.ProfileByName(cmd.Context(), domain.ProviderCodex, selected)
+			if err != nil {
+				return fmt.Errorf("resolve existing account %q: %w", selected, err)
 			}
-			return writeCodexSetupResult(cmd.ErrOrStderr(), "Project binding updated", result.Project.Root, result.Profile)
+			return loginBindAndReportCodexSetup(cmd, service, projectRoot, account)
 		case "3":
-			name, err := readPrompt(reader, cmd.ErrOrStderr(), "New isolated profile name: ")
+			name, err := readPrompt(reader, cmd.ErrOrStderr(), "New isolated account name: ")
 			if err != nil {
 				if errors.Is(err, io.EOF) {
 					return errCodexSetupCanceled
 				}
-				return fmt.Errorf("read isolated profile name: %w", err)
+				return fmt.Errorf("read isolated account name: %w", err)
 			}
 			name = strings.TrimSpace(name)
 			if name == "" {
-				_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "Profile name cannot be empty.")
+				_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "Account name cannot be empty.")
 				continue
 			}
 			profile, err := service.CreateProfile(cmd.Context(), domain.ProviderCodex, name, "")
 			if err != nil {
-				return fmt.Errorf("create isolated profile %q: %w", name, err)
+				return fmt.Errorf("create isolated account %q: %w", name, err)
 			}
-			return bindAndReportCodexSetup(cmd, service, projectRoot, profile)
+			return loginBindAndReportCodexSetup(cmd, service, projectRoot, profile)
 		case "4", "q", "quit", "cancel", "esc":
 			return errCodexSetupCanceled
 		default:
@@ -109,20 +109,23 @@ func runCodexFirstRunSetup(cmd *cobra.Command, service manageservice.Service, pr
 	}
 }
 
-func bindAndReportCodexSetup(cmd *cobra.Command, service manageservice.Service, projectRoot string, profile domain.Profile) error {
+func loginBindAndReportCodexSetup(cmd *cobra.Command, service manageservice.Service, projectRoot string, profile domain.Profile) error {
+	if err := ensureManagedAccountReady(cmd, profile.Provider, profile, accountAuthOptions{}); err != nil {
+		return fmt.Errorf("prepare account %q: %w", profile.Name, err)
+	}
 	result, err := service.BindProject(cmd.Context(), profile.Provider, profile.Name, projectRoot)
 	if err != nil {
-		return fmt.Errorf("bind project to profile %q: %w", profile.Name, err)
+		return fmt.Errorf("bind project to account %q: %w", profile.Name, err)
 	}
-	return writeCodexSetupResult(cmd.ErrOrStderr(), "Profile ready and project bound", result.Project.Root, result.Profile)
+	return writeCodexSetupResult(cmd.ErrOrStderr(), "Account ready and project bound", result.Project.Root, result.Profile)
 }
 
 func writeCodexSetupIntro(out io.Writer, projectRoot string) {
 	_, _ = fmt.Fprintln(out, "Valv setup needed")
 	_, _ = fmt.Fprintf(out, "  project: %s\n", projectRoot)
-	_, _ = fmt.Fprintln(out, "  1. Use the default Codex home for this environment and bind it")
-	_, _ = fmt.Fprintln(out, "  2. Choose an existing Valv profile")
-	_, _ = fmt.Fprintln(out, "  3. Create a new isolated Valv profile")
+	_, _ = fmt.Fprintln(out, "  1. Use the default Codex account for this environment and bind it")
+	_, _ = fmt.Fprintln(out, "  2. Choose an existing Valv account")
+	_, _ = fmt.Fprintln(out, "  3. Create a new isolated Valv account")
 	_, _ = fmt.Fprintln(out, "  4. Cancel")
 }
 
@@ -131,7 +134,7 @@ func writeCodexSetupResult(out io.Writer, heading string, projectRoot string, pr
 	return output.WriteRecord(out, mode, heading, []output.Field{
 		{Label: "project", Value: projectRoot, Identifier: true},
 		{Label: "provider", Value: string(profile.Provider), Muted: true},
-		{Label: "profile", Value: profile.Name, Identifier: true},
+		{Label: "account", Value: profile.Name, Identifier: true},
 		{Label: "home", Value: profile.HomePath},
 	})
 }

@@ -28,6 +28,7 @@ func TestRunCodexFirstRunSetupUsesDefaultHostProfile(t *testing.T) {
 	cmd.SetIn(bytes.NewBufferString("1\n"))
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
+	installStubCodexAccountAuth(t, cmd, true)
 
 	service, closeStore, err := openManageService(cmd, paths)
 	if err != nil {
@@ -87,6 +88,7 @@ func TestRunCodexFirstRunSetupCreatesIsolatedProfile(t *testing.T) {
 	cmd.SetIn(bytes.NewBufferString("3\nprofile-name\n"))
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
+	installStubCodexAccountAuth(t, cmd, true)
 
 	service, closeStore, err := openManageService(cmd, paths)
 	if err != nil {
@@ -139,7 +141,7 @@ func TestEnsureCodexBindingReadyReturnsActionableGuidanceWithoutTTY(t *testing.T
 	if !errors.Is(err, domain.ErrUnboundProject) {
 		t.Fatalf("ensureCodexBindingReady() error = %v, want domain.ErrUnboundProject", err)
 	}
-	for _, want := range []string{"valv manage profile add codex", "isolated profile"} {
+	for _, want := range []string{"valv manage account add codex", "isolated account"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("ensureCodexBindingReady() error = %q, want substring %q", err.Error(), want)
 		}

@@ -159,10 +159,10 @@ func runManageHome(cmd *cobra.Command, paths config.Paths, opts *rootOptions) er
 
 func pickProfile(cmd *cobra.Command, provider domain.Provider, profiles []domain.Profile) (string, error) {
 	if len(profiles) == 0 {
-		return "", fmt.Errorf("no %s profiles found; run `valv manage profile add %s` for the default host-backed profile or `valv manage profile add %s profile-name` for an isolated profile first", provider, provider, provider)
+		return "", fmt.Errorf("no %s accounts found; run `valv manage account add %s` for the default host-backed account or `valv manage account add %s account-name` for an isolated account first", provider, provider, provider)
 	}
 	if !commandHasTTY(cmd.InOrStdin()) || !commandHasTTY(cmd.OutOrStdout()) {
-		return "", fmt.Errorf("profile is required when not running in a TTY")
+		return "", fmt.Errorf("account is required when not running in a TTY")
 	}
 	sorted := append([]domain.Profile(nil), profiles...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
@@ -182,7 +182,7 @@ func pickProfile(cmd *cobra.Command, provider domain.Provider, profiles []domain
 	return selected, nil
 }
 
-func listItemsForProfiles(profiles []domain.Profile) []output.ListItem {
+func listItemsForAccounts(profiles []domain.Profile) []output.ListItem {
 	items := make([]output.ListItem, 0, len(profiles))
 	for _, profile := range profiles {
 		items = append(items, output.ListItem{

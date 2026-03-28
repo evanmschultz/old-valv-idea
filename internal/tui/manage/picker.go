@@ -45,12 +45,12 @@ func NewProfilePicker(provider domain.Provider, profiles []domain.Profile) Profi
 		max(1, defaultWidth-styles.Frame.GetHorizontalFrameSize()),
 		max(1, defaultHeight-layoutMargin-styles.Frame.GetVerticalFrameSize()),
 	)
-	menu.Title = fmt.Sprintf("%s profiles", provider)
+	menu.Title = fmt.Sprintf("%s accounts", provider)
 	menu.SetShowFilter(false)
 	menu.SetShowPagination(false)
 	menu.SetShowStatusBar(true)
 	menu.SetShowHelp(true)
-	menu.SetStatusBarItemName("profile", "profiles")
+	menu.SetStatusBarItemName("account", "accounts")
 
 	return ProfilePickerModel{list: menu, provider: provider, styles: styles}
 }
@@ -84,11 +84,11 @@ func (m ProfilePickerModel) View() tea.View {
 		lipgloss.Left,
 		m.styles.header(),
 		m.styles.Frame.Render(m.list.View()),
-		m.styles.footer("Select a profile and press enter, or press esc to leave without changing anything."),
+		m.styles.footer("Select an account and press enter, or press esc to leave without changing anything."),
 	)
 	view := tea.NewView(content)
 	view.AltScreen = true
-	view.WindowTitle = "Valv Profile Picker"
+	view.WindowTitle = "Valv Account Picker"
 	return view
 }
 

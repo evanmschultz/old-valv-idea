@@ -46,14 +46,14 @@ func newRootCommandWithPaths(ctx context.Context, stdout, stderr io.Writer, path
 		Use:   "valv",
 		Short: "Valv control plane for containerized AI CLIs",
 		Long: strings.TrimSpace(`
-Valv manages provider profiles, Docker runtimes, and API execution for local AI CLIs.
+Valv manages provider accounts, Docker runtimes, and API execution for local AI CLIs.
 Use the direct runtime commands for provider execution and the management surface for setup and operator workflows.
 `),
 		Example: strings.TrimSpace(`
 valv paths
 valv manage update
-valv manage profile add codex
-valv manage profile add codex profile-name
+valv manage account add codex
+valv manage account add codex work
 valv codex --help
 valv api serve --runtime-ttl 2m
 `),

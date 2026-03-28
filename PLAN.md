@@ -270,7 +270,7 @@ Current validation follow-ups to preserve:
 - dev-mode output should make it obvious which paths are disposable, which images are dev-only, and how to clean them up
 - help menus should grow more explanatory as the command tree gets deeper
 - help menus should include realistic examples, and output-producing commands should explain the meaning of their key output fields
-- help/examples should prefer unambiguous placeholder profile names like `profile-name` or `alternate-profile`; avoid example names like `dev` that can be confused with environment modes
+- help/examples should prefer clear account-style names like `personal`, `work`, `alternate-account`, or `host-codex`; avoid ambiguous example names like `dev` that can be confused with environment modes
 - the CLI should support `<command> help` and `<command> h` where that is unambiguous and does not collide with real subcommands
 - the CLI should not reinterpret trailing help-like args on leaf/pass-through commands such as `valv codex`
 - output paths and record/list rendering should stay DRY and closer to the `blick` reference shape
@@ -281,11 +281,11 @@ Current validation follow-ups to preserve:
 - API startup output must only announce a listening address after a real successful bind, and non-positive runtime TTL values should fail clearly instead of being silently coerced
 - API runtime sweeps should use the server lifecycle context and quiet Docker execution so shutdown is clean and HTTP-facing stdout/stderr stay stable
 - Codex profile-home mounting and Codex-native resume/session behavior need explicit validation on macOS Docker Desktop so the containerized runtime preserves Codex's own `.codex` state model rather than introducing Valv-owned session semantics
-- the raw `--home` path should be an expert override, not the normal way to use host-backed profiles
+- the raw `--home` path should be an expert override, not the normal way to use host-backed accounts
 - the common host-reuse path should infer the provider's conventional host home automatically, without requiring users to type `--home "$HOME/.codex"` or similar raw paths
 - automatic host-home inference should be provider-owned behavior so the same UX works for future providers without hardcoding generic CLI assumptions in the wrong layer
-- named profile creation must not silently turn multiple profile names into fake aliases for the same host account; the common host-backed setup path should therefore be distinct from explicitly creating additional isolated named profiles
-- profile creation should support add-and-bind by default for the common case; advanced users can opt out with `--no-bind`
+- named account creation must not silently turn multiple account names into fake aliases for the same host account; the common host-backed setup path should therefore be distinct from explicitly creating additional isolated named accounts
+- account creation should support add-login-bind by default for the common case; advanced users can opt out with `--skip-login` and `--no-bind`
 - mounted host Codex homes can preserve auth and resume state, but host-oriented MCP config cannot be reused blindly inside Linux containers
 - containerized Codex needs a Valv-managed MCP overlay or translation layer for host-specific entries such as macOS absolute binary paths and host-loopback URLs
 - host-loopback MCP URLs used from inside Docker Desktop containers should be translated to `host.docker.internal` where appropriate
@@ -299,7 +299,8 @@ Current validation follow-ups to preserve:
 - attached interactive Codex runs need terminal-integration coverage in addition to Bubble Tea golden tests, because TeaTest only covers Valv-owned TUI screens and cannot prove the attached `docker run` TTY behavior
 - attached `docker run -it` Codex launches should rely on direct stdio attachment and PTY-backed integration tests, not unsupported controlling-terminal syscalls on the Docker CLI process itself
 - the repo must expose explicit local recipes for golden/TUI regression coverage rather than relying on ad hoc package test commands
-- containerized auth UX should prefer device-code login for isolated profiles unless Valv explicitly publishes or relays the localhost callback port used by browser-based login
+- containerized auth UX should prefer host-side account login before container launch so normal browser-based Codex login completes on macOS without Docker callback issues; device code remains the documented fallback when a host-side browser flow is not available
+- interactive `valv codex` launches should stay quiet before handing control to Codex; setup/auth guidance belongs in account flows and explicit failures, not in the steady-state interactive handoff
 
 ## Account Switching Research
 
@@ -354,12 +355,12 @@ Recommended command direction:
 - `valv codex` launches the default project-bound attached Codex runtime in Docker
 - `valv global switch` or `valv g switch` manages host-global provider auth as a convenience flow
 - global switching should support both interactive list selection and explicit CLI arguments
-- `valv global switch codex <profile-name>` is a Valv-owned operator command, not Codex pass-through
+- `valv global switch codex <account-name>` is a Valv-owned operator command, not Codex pass-through
 
 Global switch syntax direction:
 
-- `valv g switch codex <profile-name>`
-- `valv global switch codex <profile-name>`
+- `valv g switch codex <account-name>`
+- `valv global switch codex <account-name>`
 
 This is the one place where Valv intentionally does not behave like pure provider pass-through.
 
@@ -483,8 +484,8 @@ The key `blick` patterns to copy are:
 
 The TUI should be used for:
 
-- project/profile binding and repair flows
-- profile switching
+- project/account binding and repair flows
+- account switching
 - runtime inspection and stop/start actions
 - provider image update actions
 
@@ -579,18 +580,20 @@ Recommended flow:
 2. look up project binding in SQLite
 3. if found, use it
 4. if missing, offer a guided choice to:
-   - bind an existing isolated profile
-   - create a new isolated profile and bind it
-   - create or reuse the provider's inferred host-backed default profile and bind it
+   - bind an existing isolated account
+   - create a new isolated account, complete host-side login if needed, and bind it
+   - create or reuse the provider's inferred host-backed default account, complete host-side login if needed, and bind it
 5. continue into the attached Codex launch after the setup choice succeeds
 6. keep explicit management commands for repair, inspection, and non-interactive scripting
 
 Recommended command-shape direction:
 
-- `valv manage profile add <provider>` should create or reuse the provider's inferred host-backed default profile and bind it to the current project
-- `valv manage profile add <provider> <profile-name>` should create a new isolated named profile and bind it to the current project
-- `valv manage profile add ... --no-bind` should preserve the old operator-style behavior for advanced users and scripts
-- `valv manage profile add ... --home <path>` should remain available as an expert override
+- `valv manage account add <provider>` should create or reuse the provider's inferred host-backed default account, complete host-side login if needed, and bind it to the current project
+- `valv manage account add <provider> <account-name>` should create a new isolated named account, complete host-side login if needed, and bind it to the current project
+- `valv manage account add ... --skip-login` and `--no-bind` should preserve advanced operator/script behavior
+- `valv manage account add ... --home <path>` should remain available as an expert override
+- `valv manage account switch [provider] [account-name]` should ensure the selected account is logged in before rebinding the current project
+- `profile` remains a compatibility alias for operators and scripts, but `account` is the primary user-facing term
 
 ## Proposed MVP Shape
 
@@ -728,7 +731,7 @@ Recommended component responsibilities:
   - Bubble Tea operator screens
   - project binding flows
   - runtime inspection
-  - profile switching
+  - account switching
   - update actions
   - use Bubble Tea, Bubbles, and Lipgloss directly with Charm v2 modules only
 - `internal/api/openai/`

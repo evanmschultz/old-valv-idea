@@ -135,6 +135,14 @@ func (s Service) CreateDefaultHostProfile(ctx context.Context, provider domain.P
 	return s.CreateProfile(ctx, spec.Provider, spec.Name, spec.HomePath)
 }
 
+func (s Service) ProfileByName(ctx context.Context, provider domain.Provider, name string) (domain.Profile, error) {
+	profile, err := s.store.ProfileByName(ctx, provider, strings.TrimSpace(name))
+	if err != nil {
+		return domain.Profile{}, fmt.Errorf("lookup profile %q/%q: %w", provider, name, err)
+	}
+	return profile, nil
+}
+
 func (s Service) BindProject(ctx context.Context, provider domain.Provider, profileName, startPath string) (BindResult, error) {
 	projectResult, err := s.detect(startPath)
 	if err != nil {
@@ -210,7 +218,7 @@ func (s Service) ListProfiles(ctx context.Context, provider domain.Provider) (Pr
 	if err != nil {
 		return ProfileListResult{}, fmt.Errorf("list profiles for provider %q: %w", provider, err)
 	}
-	s.debug("listed provider profiles", "provider", provider, "count", len(profiles))
+	s.debug("listed provider accounts", "provider", provider, "count", len(profiles))
 	return ProfileListResult{
 		Provider: provider,
 		Profiles: profiles,

@@ -148,6 +148,86 @@ func TestCodexArgsSkipProjectBinding(t *testing.T) {
 	}
 }
 
+func TestCodexArgsSkipAccountReady(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "empty", args: nil, want: false},
+		{name: "help", args: []string{"help"}, want: true},
+		{name: "login", args: []string{"login"}, want: true},
+		{name: "logout", args: []string{"logout"}, want: true},
+		{name: "resume", args: []string{"resume", "--last"}, want: false},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := codexArgsSkipAccountReady(tc.args); got != tc.want {
+				t.Fatalf("codexArgsSkipAccountReady(%v) = %t, want %t", tc.args, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestEnsureBoundCodexAccountReadyUsesBoundAccount(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	projectRoot := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(filepath.Join(projectRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git) error = %v", err)
+	}
+
+	runManage(t, paths, []string{"account", "add", "codex", "work", "--project", projectRoot})
+
+	cmd := newCodexCommand(paths, nil)
+	cmd.SetContext(context.Background())
+	cmd.SetIn(bytes.NewBuffer(nil))
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	stub := installStubCodexAccountAuth(t, cmd, true)
+
+	if err := ensureBoundCodexAccountReady(cmd, paths, projectRoot, []string{"resume", "--last"}); err != nil {
+		t.Fatalf("ensureBoundCodexAccountReady() error = %v", err)
+	}
+	if stub.statusHits == 0 {
+		t.Fatal("LoginStatus() hits = 0, want account readiness check")
+	}
+	if got := stub.homePaths[0]; !strings.Contains(got, "profiles/work") {
+		t.Fatalf("LoginStatus() home path = %q, want isolated work profile home", got)
+	}
+}
+
+func TestEnsureBoundCodexAccountReadySkipsAccountCheckForLoginCommand(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	projectRoot := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(filepath.Join(projectRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git) error = %v", err)
+	}
+
+	runManage(t, paths, []string{"account", "add", "codex", "--project", projectRoot})
+
+	cmd := newCodexCommand(paths, nil)
+	cmd.SetContext(context.Background())
+	cmd.SetIn(bytes.NewBuffer(nil))
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	stub := installStubCodexAccountAuth(t, cmd, true)
+
+	if err := ensureBoundCodexAccountReady(cmd, paths, projectRoot, []string{"login"}); err != nil {
+		t.Fatalf("ensureBoundCodexAccountReady() error = %v", err)
+	}
+	if stub.statusHits != 0 {
+		t.Fatalf("LoginStatus() hits = %d, want 0 for login passthrough", stub.statusHits)
+	}
+}
+
 func TestEnsureCodexImageAvailableReturnsActionableMessageWhenMissing(t *testing.T) {
 	oldFindDockerBinary := findDockerBinary
 	findDockerBinary = func(string) (string, error) { return "/usr/bin/docker", nil }

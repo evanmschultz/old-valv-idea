@@ -170,6 +170,15 @@ For containerized interactive Codex auth:
 - support the device-code flow cleanly for isolated container profiles
 - do not assume browser localhost callbacks will work from inside Docker without explicit port publishing/relay support
 - keep help text and error guidance explicit about which auth flows are expected to work in disposable containerized profiles versus host-bound `~/.codex` reuse
+- prefer host-side Codex login for Valv-managed accounts before launching the container so normal browser login completes on macOS without Docker callback issues
+- keep steady-state interactive `valv codex` launches quiet; pre-launch notices should move to explicit setup, login, or failure paths instead of cluttering attached Codex TTY handoff
+
+User-facing account terminology:
+
+- user-facing management/help/output should prefer `account` over `profile`
+- `profile` may remain the internal storage term and a CLI compatibility alias, but the primary command/help surface should be `valv manage account ...`
+- `account add` should be the one-command default flow: create or reuse the account home, ensure host-side login when needed, and bind the current project unless `--no-bind` is explicitly requested
+- raw `--home` and `--skip-login` are expert overrides, not the primary UX
 
 CLI alias policy:
 
@@ -186,7 +195,7 @@ Output policy:
 - treat `Short`, `Long`, and `Example` as mandatory for every visible command
 - help screens should become more explanatory deeper in the command tree
 - help for output-producing commands should explain the meaning of key output fields and show realistic examples
-- prefer clear placeholder names such as `profile-name`, `alternate-profile`, or `host-codex` in help/examples; avoid ambiguous example names like `dev` that read like environment modes instead of profile identifiers
+- prefer clear placeholder names such as `personal`, `work`, `alternate-account`, or `host-codex` in help/examples; avoid ambiguous example names like `dev` that read like environment modes instead of account identifiers
 - prefer deterministic, minimal human output
 - prefer explicit empty states over silent emptiness
 - prefer slim machine-readable JSON payloads over human-style wrapper envelopes
