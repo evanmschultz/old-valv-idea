@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -98,6 +99,20 @@ func (s Service) CreateProfile(ctx context.Context, provider domain.Provider, na
 	if err != nil {
 		return domain.Profile{}, fmt.Errorf("create profile %q: %w", name, err)
 	}
+	existingByHome, err := s.profileByHome(ctx, provider, profile.HomePath)
+	if err == nil {
+		if existingByHome.Name == profile.Name {
+			s.debug("provider profile already exists", "provider", existingByHome.Provider, "name", existingByHome.Name, "home", existingByHome.HomePath)
+			if err := s.seedProfileConfig(existingByHome); err != nil {
+				return domain.Profile{}, fmt.Errorf("create profile %q: %w", existingByHome.Name, err)
+			}
+			return existingByHome, nil
+		}
+		return domain.Profile{}, fmt.Errorf("create profile %q: home %q already belongs to account %q", profile.Name, existingByHome.HomePath, existingByHome.Name)
+	}
+	if err != nil && !errors.Is(err, domain.ErrNotFound) {
+		return domain.Profile{}, fmt.Errorf("create profile %q: lookup existing home %q: %w", profile.Name, profile.HomePath, err)
+	}
 	created, err := s.store.CreateProfile(ctx, profile)
 	if err != nil {
 		existing, lookupErr := s.store.ProfileByName(ctx, provider, profile.Name)
@@ -106,11 +121,17 @@ func (s Service) CreateProfile(ctx context.Context, provider domain.Provider, na
 				return domain.Profile{}, fmt.Errorf("create profile %q: profile already exists with home %q", profile.Name, existing.HomePath)
 			}
 			s.debug("provider profile already exists", "provider", existing.Provider, "name", existing.Name, "home", existing.HomePath)
+			if err := s.seedProfileConfig(existing); err != nil {
+				return domain.Profile{}, fmt.Errorf("create profile %q: %w", existing.Name, err)
+			}
 			return existing, nil
 		}
 		return domain.Profile{}, fmt.Errorf("create profile %q: persist profile: %w", profile.Name, err)
 	}
 	s.debug("created provider profile", "provider", created.Provider, "name", created.Name, "home", created.HomePath)
+	if err := s.seedProfileConfig(created); err != nil {
+		return domain.Profile{}, fmt.Errorf("create profile %q: %w", created.Name, err)
+	}
 	return created, nil
 }
 
@@ -130,6 +151,13 @@ func (s Service) DefaultHostProfile(provider domain.Provider) (HostProfileSpec, 
 func (s Service) CreateDefaultHostProfile(ctx context.Context, provider domain.Provider) (domain.Profile, error) {
 	spec, err := s.DefaultHostProfile(provider)
 	if err != nil {
+		return domain.Profile{}, err
+	}
+	existing, err := s.defaultHostProfileCandidate(ctx, spec)
+	if err == nil {
+		return existing, nil
+	}
+	if !errors.Is(err, domain.ErrNotFound) {
 		return domain.Profile{}, err
 	}
 	return s.CreateProfile(ctx, spec.Provider, spec.Name, spec.HomePath)
@@ -230,4 +258,90 @@ func (s Service) debug(msg string, keyvals ...any) {
 		return
 	}
 	s.logger.Debug(msg, keyvals...)
+}
+
+func (s Service) profileByHome(ctx context.Context, provider domain.Provider, homePath string) (domain.Profile, error) {
+	profiles, err := s.store.ListProfilesByProvider(ctx, provider)
+	if err != nil {
+		return domain.Profile{}, fmt.Errorf("list profiles for provider %q: %w", provider, err)
+	}
+	homePath = strings.TrimSpace(homePath)
+	for _, profile := range profiles {
+		if profile.HomePath == homePath {
+			return profile, nil
+		}
+	}
+	return domain.Profile{}, domain.ErrNotFound
+}
+
+func (s Service) defaultHostProfileCandidate(ctx context.Context, spec HostProfileSpec) (domain.Profile, error) {
+	profiles, err := s.store.ListProfilesByProvider(ctx, spec.Provider)
+	if err != nil {
+		return domain.Profile{}, fmt.Errorf("list profiles for provider %q: %w", spec.Provider, err)
+	}
+	var sameHome []domain.Profile
+	for _, profile := range profiles {
+		if profile.HomePath == spec.HomePath {
+			sameHome = append(sameHome, profile)
+		}
+	}
+	if len(sameHome) == 0 {
+		return domain.Profile{}, domain.ErrNotFound
+	}
+	for _, profile := range sameHome {
+		if profile.Name == spec.Name {
+			return profile, nil
+		}
+	}
+	return sameHome[0], nil
+}
+
+func (s Service) seedProfileConfig(profile domain.Profile) error {
+	spec, err := s.DefaultHostProfile(profile.Provider)
+	if err != nil {
+		return nil
+	}
+	if profile.HomePath == spec.HomePath {
+		return nil
+	}
+
+	sourcePath := filepath.Join(spec.HomePath, "config.toml")
+	targetPath := filepath.Join(profile.HomePath, "config.toml")
+	if _, err := os.Stat(targetPath); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("check existing config %q: %w", targetPath, err)
+	}
+	info, err := os.Stat(sourcePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("stat default host config %q: %w", sourcePath, err)
+	}
+	if err := copyFile(sourcePath, targetPath, info.Mode().Perm()); err != nil {
+		return fmt.Errorf("seed config from %q to %q: %w", sourcePath, targetPath, err)
+	}
+	s.debug("seeded provider profile config from default host home", "provider", profile.Provider, "name", profile.Name, "source", sourcePath, "target", targetPath)
+	return nil
+}
+
+func copyFile(sourcePath, targetPath string, mode os.FileMode) error {
+	source, err := os.Open(sourcePath)
+	if err != nil {
+		return err
+	}
+	defer source.Close()
+
+	target, err := os.OpenFile(targetPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = target.Close()
+	}()
+	if _, err := io.Copy(target, source); err != nil {
+		return err
+	}
+	return target.Close()
 }

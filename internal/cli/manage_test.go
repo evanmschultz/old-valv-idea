@@ -104,6 +104,30 @@ func TestManageProfileAddWithoutNameUsesDefaultHostProfileAndBindsProject(t *tes
 	}
 }
 
+func TestManageProfileAddWithoutNameReusesExistingSameHomeAccount(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	projectRoot := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(filepath.Join(projectRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git) error = %v", err)
+	}
+
+	existingHome := filepath.Join(paths.HomeDir, ".codex")
+	runManage(t, paths, []string{"account", "add", "codex", "host-codex", "--home", existingHome, "--skip-login", "--no-bind"})
+
+	output := runManage(t, paths, []string{"account", "add", "codex", "--project", projectRoot})
+	wantHome, err := pathutil.Normalize(existingHome)
+	if err != nil {
+		t.Fatalf("Normalize(existingHome) error = %v", err)
+	}
+	for _, want := range []string{"Account ready and project bound", "account=host-codex", "home=" + wantHome} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("unexpected output %q missing %q", output, want)
+		}
+	}
+}
+
 func TestManageProfileAddNoBindSkipsProjectBinding(t *testing.T) {
 	t.Parallel()
 

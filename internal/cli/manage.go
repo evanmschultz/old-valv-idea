@@ -98,6 +98,7 @@ Create one provider account, ensure it is logged in on the host, and, by default
 Semantics:
 - ` + "`valv manage account add codex`" + ` creates or reuses the inferred host-backed default account for Codex
 - ` + "`valv manage account add codex work`" + ` creates or reuses an isolated named account under Valv's provider root
+- isolated named accounts seed their initial ` + "`config.toml`" + ` from the default host Codex home when available so MCP/tool config carries across without sharing auth state
 - ` + "`--no-bind`" + ` keeps the account ready without changing the current project's binding
 - ` + "`--skip-login`" + ` skips the host-side Codex login step for advanced automation
 - ` + "`--home`" + ` is an expert override for custom host paths
@@ -264,16 +265,16 @@ func runManageAccountAdd(cmd *cobra.Command, paths config.Paths, opts *rootOptio
 	homePath = strings.TrimSpace(homePath)
 
 	var profile domain.Profile
-	var hostSpec manageservice.HostProfileSpec
 	if name == "" {
-		hostSpec, err = service.DefaultHostProfile(provider)
-		if err != nil {
-			return fmt.Errorf("manage account add: %w", err)
+		if homePath != "" {
+			spec, specErr := service.DefaultHostProfile(provider)
+			if specErr != nil {
+				return fmt.Errorf("manage account add: %w", specErr)
+			}
+			profile, err = service.CreateProfile(cmd.Context(), provider, spec.Name, homePath)
+		} else {
+			profile, err = service.CreateDefaultHostProfile(cmd.Context(), provider)
 		}
-		if homePath == "" {
-			homePath = hostSpec.HomePath
-		}
-		profile, err = service.CreateProfile(cmd.Context(), provider, hostSpec.Name, homePath)
 	} else {
 		profile, err = service.CreateProfile(cmd.Context(), provider, name, homePath)
 	}
@@ -368,6 +369,9 @@ func runManageAccountSwitch(cmd *cobra.Command, paths config.Paths, opts *rootOp
 	}
 	account, err := service.ProfileByName(cmd.Context(), provider, profileName)
 	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			return fmt.Errorf("manage account switch: account %q not found for provider %q; run `valv manage account add %s %s` or `valv manage account list %s`", profileName, provider, provider, profileName, provider)
+		}
 		return fmt.Errorf("manage account switch: resolve account %q: %w", profileName, err)
 	}
 	if err := ensureManagedAccountReady(cmd, provider, account, accountAuthOptions{SkipLogin: skipLogin}); err != nil {

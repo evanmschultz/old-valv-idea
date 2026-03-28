@@ -3,6 +3,7 @@ package manage
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -84,6 +85,24 @@ func TestCreateProfileReturnsClearErrorForDifferentExistingHome(t *testing.T) {
 	}
 }
 
+func TestCreateProfileReturnsClearErrorForDifferentExistingNameOnSameHome(t *testing.T) {
+	t.Parallel()
+
+	store, providerRoot := testStore(t)
+	service, err := New(Options{Store: store, ProviderRoot: providerRoot})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := service.CreateProfile(context.Background(), domain.ProviderCodex, "host", "/tmp/example/host"); err != nil {
+		t.Fatalf("CreateProfile(first) error = %v", err)
+	}
+	_, err = service.CreateProfile(context.Background(), domain.ProviderCodex, "default", "/tmp/example/host")
+	if err == nil || !strings.Contains(err.Error(), "already belongs to account") {
+		t.Fatalf("CreateProfile(second) error = %v, want same-home account guidance", err)
+	}
+}
+
 func TestNewRequiresStoreAndProviderRoot(t *testing.T) {
 	t.Parallel()
 
@@ -144,6 +163,102 @@ func TestCreateDefaultHostProfileUsesProviderDefaultNameAndHome(t *testing.T) {
 	}
 	if profile.HomePath != wantHome {
 		t.Fatalf("CreateDefaultHostProfile().HomePath = %q, want %q", profile.HomePath, wantHome)
+	}
+}
+
+func TestCreateDefaultHostProfileReusesExistingSameHomeAccount(t *testing.T) {
+	t.Parallel()
+
+	store, providerRoot := testStore(t)
+	service, err := New(Options{Store: store, ProviderRoot: providerRoot, HomeDir: "/tmp/example-home"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	existing, err := service.CreateProfile(context.Background(), domain.ProviderCodex, "host-codex", "/tmp/example-home/.codex")
+	if err != nil {
+		t.Fatalf("CreateProfile() error = %v", err)
+	}
+
+	profile, err := service.CreateDefaultHostProfile(context.Background(), domain.ProviderCodex)
+	if err != nil {
+		t.Fatalf("CreateDefaultHostProfile() error = %v", err)
+	}
+	if profile.ID != existing.ID {
+		t.Fatalf("CreateDefaultHostProfile().ID = %q, want %q", profile.ID, existing.ID)
+	}
+}
+
+func TestCreateProfileSeedsConfigFromDefaultHostHome(t *testing.T) {
+	t.Parallel()
+
+	store, providerRoot := testStore(t)
+	homeDir := t.TempDir()
+	hostCodexDir := filepath.Join(homeDir, ".codex")
+	if err := os.MkdirAll(hostCodexDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(hostCodexDir) error = %v", err)
+	}
+	hostConfig := []byte("model = \"gpt-5.4\"\n")
+	if err := os.WriteFile(filepath.Join(hostCodexDir, "config.toml"), hostConfig, 0o600); err != nil {
+		t.Fatalf("WriteFile(config.toml) error = %v", err)
+	}
+
+	service, err := New(Options{Store: store, ProviderRoot: providerRoot, HomeDir: homeDir})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	profile, err := service.CreateProfile(context.Background(), domain.ProviderCodex, "work", "")
+	if err != nil {
+		t.Fatalf("CreateProfile() error = %v", err)
+	}
+
+	content, err := os.ReadFile(filepath.Join(profile.HomePath, "config.toml"))
+	if err != nil {
+		t.Fatalf("ReadFile(seed config) error = %v", err)
+	}
+	if string(content) != string(hostConfig) {
+		t.Fatalf("seeded config = %q, want %q", string(content), string(hostConfig))
+	}
+}
+
+func TestCreateProfileDoesNotOverwriteExistingProfileConfig(t *testing.T) {
+	t.Parallel()
+
+	store, providerRoot := testStore(t)
+	homeDir := t.TempDir()
+	hostCodexDir := filepath.Join(homeDir, ".codex")
+	if err := os.MkdirAll(hostCodexDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(hostCodexDir) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(hostCodexDir, "config.toml"), []byte("model = \"gpt-5.4\"\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile(host config) error = %v", err)
+	}
+
+	service, err := New(Options{Store: store, ProviderRoot: providerRoot, HomeDir: homeDir})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	profileHome := filepath.Join(providerRoot, "codex", "profiles", "work")
+	if err := os.MkdirAll(profileHome, 0o755); err != nil {
+		t.Fatalf("MkdirAll(profileHome) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(profileHome, "config.toml"), []byte("model = \"custom\"\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile(profile config) error = %v", err)
+	}
+
+	profile, err := service.CreateProfile(context.Background(), domain.ProviderCodex, "work", "")
+	if err != nil {
+		t.Fatalf("CreateProfile() error = %v", err)
+	}
+
+	content, err := os.ReadFile(filepath.Join(profile.HomePath, "config.toml"))
+	if err != nil {
+		t.Fatalf("ReadFile(profile config) error = %v", err)
+	}
+	if string(content) != "model = \"custom\"\n" {
+		t.Fatalf("profile config = %q, want custom config preserved", string(content))
 	}
 }
 

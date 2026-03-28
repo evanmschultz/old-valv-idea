@@ -286,6 +286,7 @@ Current validation follow-ups to preserve:
 - automatic host-home inference should be provider-owned behavior so the same UX works for future providers without hardcoding generic CLI assumptions in the wrong layer
 - named account creation must not silently turn multiple account names into fake aliases for the same host account; the common host-backed setup path should therefore be distinct from explicitly creating additional isolated named accounts
 - account creation should support add-login-bind by default for the common case; advanced users can opt out with `--skip-login` and `--no-bind`
+- isolated named accounts should seed their initial provider config from the default host-backed account when available so MCP/tool configuration carries across even though auth/session state stays isolated
 - mounted host Codex homes can preserve auth and resume state, but host-oriented MCP config cannot be reused blindly inside Linux containers
 - containerized Codex needs a Valv-managed MCP overlay or translation layer for host-specific entries such as macOS absolute binary paths and host-loopback URLs
 - host-loopback MCP URLs used from inside Docker Desktop containers should be translated to `host.docker.internal` where appropriate

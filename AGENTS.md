@@ -170,6 +170,7 @@ For containerized interactive Codex auth:
 - support the device-code flow cleanly for isolated container profiles
 - do not assume browser localhost callbacks will work from inside Docker without explicit port publishing/relay support
 - keep help text and error guidance explicit about which auth flows are expected to work in disposable containerized profiles versus host-bound `~/.codex` reuse
+- when creating isolated provider accounts, seed baseline provider config from the default host-backed account when available so MCP/tool configuration is not silently dropped even though auth/session state remains isolated
 - prefer host-side Codex login for Valv-managed accounts before launching the container so normal browser login completes on macOS without Docker callback issues
 - keep steady-state interactive `valv codex` launches quiet; pre-launch notices should move to explicit setup, login, or failure paths instead of cluttering attached Codex TTY handoff
 

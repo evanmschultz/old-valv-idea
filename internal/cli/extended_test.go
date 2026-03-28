@@ -198,6 +198,33 @@ func TestManageAccountSwitchRebindsCurrentProject(t *testing.T) {
 	}
 }
 
+func TestManageAccountSwitchMissingAccountShowsActionableGuidance(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	projectRoot := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(filepath.Join(projectRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git) error = %v", err)
+	}
+
+	runManage(t, paths, []string{"account", "add", "codex", "--project", projectRoot})
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd := newManageCommand(paths, &rootOptions{})
+	cmd.SetContext(context.Background())
+	cmd.SetIn(bytes.NewBuffer(nil))
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"account", "switch", "work", "--project", projectRoot})
+	installStubCodexAccountAuth(t, cmd, true)
+
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "run `valv manage account add codex work`") {
+		t.Fatalf("Execute() error = %v, want missing-account guidance", err)
+	}
+}
+
 func TestRunManageBindInteractiveShowsGuidanceWhenNoAccountsExist(t *testing.T) {
 	t.Parallel()
 
