@@ -626,6 +626,65 @@ Also included from the start:
 - operator TUI for project/profile/session control
 - optional host-global switch helper for convenience
 
+## Current Implementation Status
+
+As of 2026-03-28, the Codex-first control-plane slice is mostly implemented.
+
+Shipped and working:
+
+- `valv codex` launches Codex inside a Valv-managed Docker runtime
+- account-first management UX exists:
+  - `valv manage account add codex`
+  - `valv manage account add codex <account-name>`
+  - `valv manage account switch ...`
+- host-backed default Codex account reuse works through `~/.codex`
+- isolated named Codex accounts work and can complete host-side login before container launch
+- project-local binding and switching work
+- MCP translation and bridging work for:
+  - host-loopback MCP URLs such as `127.0.0.1`
+  - host-only stdio MCP commands such as `gopls` and `tillsyn`
+- Bubble Tea management screens have TeaTest golden coverage
+- attached Codex launch paths have transcript-style external golden coverage
+- Docker-backed integration tests now clean up their Valv-managed fixture containers instead of leaving `valv-codex:test*` containers running on the host
+- provider image freshness now notices Docker recipe drift, not only upstream client-version drift
+- `valv manage update` rebuilds when the local image recipe is stale, even when the upstream Codex version has not changed
+
+Known remaining gaps:
+
+- direct interactive Codex TTY ownership still does not feel identical to direct host `codex` in all terminals
+- interactive `/mcp` presentation in containerized Codex is still not proven identical to direct host Codex for all entries, especially:
+  - `codex_apps`
+  - `context7-mcp`
+- these gaps are now treated as runtime/UI parity issues, not core control-plane blockers
+
+Non-goals for the current Codex-first MVP slice:
+
+- Claude support
+- Gemini support
+- Linux or Windows support
+
+## Next Steps To Codex-First MVP
+
+The next steps should now be execution and validation focused rather than architecture focused.
+
+Immediate next step:
+
+- run a real end-to-end `valv api serve` validation through the OpenAI-compatible `/v1/chat/completions` path
+
+Then:
+
+1. confirm the API worker path behaves correctly with a real request
+2. decide whether the remaining interactive Codex parity gaps are blockers for the Codex-first MVP or follow-up polish
+3. if the API path is clean, treat the Codex-first MVP as functionally complete and move the remaining work into polish and future-provider tracks
+
+What remains if the API validation passes:
+
+- optional polish on interactive TTY ownership and `/mcp` UI parity
+- optional cleanup/migration UX for stale historical account aliases
+- future provider work:
+  - Claude
+  - Gemini
+
 ## macOS Storage Layout
 
 Use standard macOS per-user locations, with one deliberate exception for short-lived runtime socket paths.
