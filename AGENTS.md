@@ -284,6 +284,7 @@ Testing standards:
 - after local `just ci` passes and after the pushed GitHub run passes, run `just build` before handing local CLI testing back to the user
 - when using disposable dev-mode home directories, preserve access to the host Docker CLI configuration/plugins so Docker Desktop features such as `buildx` keep working
 - after every push, run `gh run watch` for the triggered workflow and confirm the result before considering the push complete
+- use `gh run watch` directly; do not route GitHub run watching through repo-local `bin` helpers, wrapper scripts, or workaround commands when plain `gh run watch` is sufficient
 
 Docker build standards:
 
