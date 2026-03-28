@@ -3,6 +3,7 @@ package codex
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -140,7 +141,11 @@ func (b *stdioBridge) Close() error {
 	if b.session == nil {
 		return nil
 	}
-	return b.session.Close()
+	err := b.session.Close()
+	if shouldIgnoreBridgeCloseError(err) {
+		return nil
+	}
+	return err
 }
 
 type resolvedCommand struct {
@@ -306,4 +311,18 @@ func sanitizeBridgeName(value string) string {
 		return "server"
 	}
 	return out
+}
+
+func shouldIgnoreBridgeCloseError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return true
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "broken pipe") ||
+		strings.Contains(lower, "connection reset by peer") ||
+		strings.Contains(lower, "file already closed")
 }

@@ -3,6 +3,7 @@ package codex
 import (
 	"context"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -291,6 +292,17 @@ func TestRewriteLoopbackURL(t *testing.T) {
 				t.Fatalf("rewriteLoopbackURL() = (%q, %t), want (%q, %t)", got, changed, test.want, test.changed)
 			}
 		})
+	}
+}
+
+func TestShouldIgnoreBridgeCloseError(t *testing.T) {
+	t.Parallel()
+
+	if !shouldIgnoreBridgeCloseError(&exec.ExitError{}) {
+		t.Fatal("shouldIgnoreBridgeCloseError(exec.ExitError) = false, want true")
+	}
+	if shouldIgnoreBridgeCloseError(context.Canceled) {
+		t.Fatal("shouldIgnoreBridgeCloseError(context.Canceled) = true, want false")
 	}
 }
 
