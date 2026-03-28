@@ -34,5 +34,12 @@
     • Resources: (none)
     • Resource templates: (none)
 
+  • tillsyn
+    • Auth: Unsupported
+    • URL: http://host.docker.internal:<port>/mcp/tillsyn-<token>
+    • Tools: fixture-tool
+    • Resources: (none)
+    • Resource templates: (none)
+
 /quit
 › /quit

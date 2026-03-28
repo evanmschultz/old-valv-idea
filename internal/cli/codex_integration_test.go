@@ -200,6 +200,12 @@ func TestCodexInteractiveMCPGolden(t *testing.T) {
 	if err := os.MkdirAll(profileHome, 0o755); err != nil {
 		t.Fatalf("MkdirAll(profileHome) error = %v", err)
 	}
+	prevWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd() error = %v", err)
+	}
+	repoRoot := findGoModuleRoot(t, prevWD)
+	fakeMCPPath := buildFixtureMCPServer(t, repoRoot)
 	configText := strings.TrimSpace(`
 [mcp_servers.context7-mcp]
 url = "https://mcp.context7.com/mcp"
@@ -208,25 +214,17 @@ url = "https://mcp.context7.com/mcp"
 CONTEXT7_API_KEY = "CONTEXT7_API_KEY"
 
 [mcp_servers.gopls]
-command = "gopls"
-args = ["mcp"]
+command = "`+fakeMCPPath+`"
 
 [mcp_servers.hylla]
 url = "http://127.0.0.1:7389/mcp"
 
 [mcp_servers.tillsyn]
-command = "/Users/example/till"
-args = ["mcp"]
+command = "`+fakeMCPPath+`"
 `) + "\n"
 	if err := os.WriteFile(filepath.Join(profileHome, "config.toml"), []byte(configText), 0o600); err != nil {
 		t.Fatalf("WriteFile(profile config) error = %v", err)
 	}
-
-	prevWD, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Getwd() error = %v", err)
-	}
-	repoRoot := findGoModuleRoot(t, prevWD)
 	binaryPath := filepath.Join(t.TempDir(), "valv")
 	buildCmd := exec.Command("go", "build", "-o", binaryPath, "./cmd/valv")
 	buildCmd.Dir = repoRoot
@@ -273,6 +271,7 @@ args = ["mcp"]
 	}
 	waitForTranscript(t, &stream, "context7-mcp")
 	waitForTranscript(t, &stream, "gopls")
+	waitForTranscript(t, &stream, "tillsyn")
 	if _, err := master.Write([]byte("/quit\n")); err != nil {
 		t.Fatalf("Write(/quit) error = %v", err)
 	}
@@ -316,6 +315,18 @@ func buildFixtureImage(t *testing.T) string {
 	})
 
 	return repo + ":" + tag
+}
+
+func buildFixtureMCPServer(t *testing.T, repoRoot string) string {
+	t.Helper()
+
+	binaryPath := filepath.Join(t.TempDir(), "fixture-mcp")
+	buildCmd := exec.Command("go", "build", "-o", binaryPath, "./internal/cli/testdata/fake-mcp")
+	buildCmd.Dir = repoRoot
+	if output, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("go build fake mcp error = %v\n%s", err, output)
+	}
+	return binaryPath
 }
 
 func runManageForIntegration(t *testing.T, paths config.Paths, workingDir string, args []string) {
@@ -414,8 +425,8 @@ func waitForTranscript(t *testing.T, stream *bytes.Buffer, want string) {
 }
 
 var (
-	ansiPattern        = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
-	goplsBridgePattern = regexp.MustCompile(`http://host\.docker\.internal:\d+/mcp/gopls-\d+`)
+	ansiPattern      = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
+	bridgeURLPattern = regexp.MustCompile(`http://host\.docker\.internal:\d+/mcp/([a-z0-9-]+)-\d+`)
 )
 
 func normalizeTranscript(input []byte) []byte {
@@ -425,6 +436,6 @@ func normalizeTranscript(input []byte) []byte {
 	text = ansiPattern.ReplaceAllString(text, "")
 	text = strings.ReplaceAll(text, "\x1b]0;", "")
 	text = strings.ReplaceAll(text, "\x1b\\", "")
-	text = goplsBridgePattern.ReplaceAllString(text, "http://host.docker.internal:<port>/mcp/gopls-<token>")
+	text = bridgeURLPattern.ReplaceAllString(text, "http://host.docker.internal:<port>/mcp/$1-<token>")
 	return []byte(strings.TrimSpace(text) + "\n")
 }
