@@ -85,11 +85,25 @@ fmt-check:
 test:
   @GOFLAGS="${GOFLAGS:+$GOFLAGS }-buildvcs=false" go test -count=1 ./...
 
+test-golden-manage:
+  @GOFLAGS="${GOFLAGS:+$GOFLAGS }-buildvcs=false" go test -count=1 ./internal/tui/manage
+
+test-golden-external:
+  @GOFLAGS="${GOFLAGS:+$GOFLAGS }-buildvcs=false" go test -tags=integration -count=1 ./internal/cli -run TestCodexInteractiveMCPGolden
+
 test-golden:
   @GOFLAGS="${GOFLAGS:+$GOFLAGS }-buildvcs=false" go test -count=1 ./internal/tui/manage
+  @GOFLAGS="${GOFLAGS:+$GOFLAGS }-buildvcs=false" go test -tags=integration -count=1 ./internal/cli -run TestCodexInteractiveMCPGolden
+
+test-golden-manage-update:
+  @GOFLAGS="${GOFLAGS:+$GOFLAGS }-buildvcs=false" go test -count=1 ./internal/tui/manage -args -update
+
+test-golden-external-update:
+  @GOFLAGS="${GOFLAGS:+$GOFLAGS }-buildvcs=false" go test -tags=integration -count=1 ./internal/cli -run TestCodexInteractiveMCPGolden -args -update
 
 test-golden-update:
   @GOFLAGS="${GOFLAGS:+$GOFLAGS }-buildvcs=false" go test -count=1 ./internal/tui/manage -args -update
+  @GOFLAGS="${GOFLAGS:+$GOFLAGS }-buildvcs=false" go test -tags=integration -count=1 ./internal/cli -run TestCodexInteractiveMCPGolden -args -update
 
 integration:
   @GOFLAGS="${GOFLAGS:+$GOFLAGS }-buildvcs=false" go test -tags=integration -count=1 ./internal/cli

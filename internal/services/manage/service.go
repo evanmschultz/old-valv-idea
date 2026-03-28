@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/charmbracelet/log"
@@ -246,6 +247,7 @@ func (s Service) ListProfiles(ctx context.Context, provider domain.Provider) (Pr
 	if err != nil {
 		return ProfileListResult{}, fmt.Errorf("list profiles for provider %q: %w", provider, err)
 	}
+	profiles = s.presentableProfiles(provider, profiles)
 	s.debug("listed provider accounts", "provider", provider, "count", len(profiles))
 	return ProfileListResult{
 		Provider: provider,
@@ -324,6 +326,41 @@ func (s Service) seedProfileConfig(profile domain.Profile) error {
 	}
 	s.debug("seeded provider profile config from default host home", "provider", profile.Provider, "name", profile.Name, "source", sourcePath, "target", targetPath)
 	return nil
+}
+
+func (s Service) presentableProfiles(provider domain.Provider, profiles []domain.Profile) []domain.Profile {
+	if len(profiles) < 2 {
+		return profiles
+	}
+
+	var hostSpec HostProfileSpec
+	hostSpec, _ = s.DefaultHostProfile(provider)
+	canonicalByHome := make(map[string]domain.Profile, len(profiles))
+	for _, profile := range profiles {
+		current, ok := canonicalByHome[profile.HomePath]
+		if !ok || shouldPreferPresentableProfile(hostSpec, profile, current) {
+			canonicalByHome[profile.HomePath] = profile
+		}
+	}
+
+	out := make([]domain.Profile, 0, len(canonicalByHome))
+	for _, profile := range canonicalByHome {
+		out = append(out, profile)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+func shouldPreferPresentableProfile(hostSpec HostProfileSpec, candidate, current domain.Profile) bool {
+	if candidate.HomePath == hostSpec.HomePath || current.HomePath == hostSpec.HomePath {
+		switch {
+		case candidate.Name == hostSpec.Name && current.Name != hostSpec.Name:
+			return true
+		case current.Name == hostSpec.Name && candidate.Name != hostSpec.Name:
+			return false
+		}
+	}
+	return candidate.Name < current.Name
 }
 
 func copyFile(sourcePath, targetPath string, mode os.FileMode) error {

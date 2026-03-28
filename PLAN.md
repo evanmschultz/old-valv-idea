@@ -506,6 +506,8 @@ TUI testing policy:
 - use `github.com/charmbracelet/x/exp/teatest/v2` for Bubble Tea regression coverage
 - keep golden fixtures for user-visible layout/styling where frame sizing, borders, or list rendering can regress
 - TUI changes are not complete until the golden coverage is updated or explicitly shown to be unaffected
+- attached external `valv codex` visual regressions need transcript-style golden coverage through the real subprocess path; Bubble Tea goldens alone cannot prove interactive `/mcp` behavior or terminal handoff quality
+- keep explicit local recipes for both Bubble Tea goldens and external Codex transcript goldens, and keep CI running the external Codex golden on the Docker-backed integration path
 
 Recommended naming:
 

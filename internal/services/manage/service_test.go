@@ -440,6 +440,47 @@ func TestListProfilesReturnsPersistedProfiles(t *testing.T) {
 	}
 }
 
+func TestListProfilesCollapsesSameHomeAliasesForPresentation(t *testing.T) {
+	t.Parallel()
+
+	store, providerRoot := testStore(t)
+	homeRoot := t.TempDir()
+	service, err := New(Options{
+		Store:        store,
+		ProviderRoot: providerRoot,
+		HomeDir:      homeRoot,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	hostHome := filepath.Join(homeRoot, ".codex")
+	if _, err := service.CreateProfile(context.Background(), domain.ProviderCodex, "host-codex", hostHome); err != nil {
+		t.Fatalf("CreateProfile(host-codex) error = %v", err)
+	}
+	defaultProfile, err := domain.NewProfile(domain.ProviderCodex, "default", hostHome)
+	if err != nil {
+		t.Fatalf("NewProfile(default) error = %v", err)
+	}
+	if _, err := store.CreateProfile(context.Background(), defaultProfile); err != nil {
+		t.Fatalf("CreateProfile(default) error = %v", err)
+	}
+	if _, err := service.CreateProfile(context.Background(), domain.ProviderCodex, "work", filepath.Join(providerRoot, "codex", "profiles", "work")); err != nil {
+		t.Fatalf("CreateProfile(work) error = %v", err)
+	}
+
+	result, err := service.ListProfiles(context.Background(), domain.ProviderCodex)
+	if err != nil {
+		t.Fatalf("ListProfiles() error = %v", err)
+	}
+	if got, want := len(result.Profiles), 2; got != want {
+		t.Fatalf("profiles len = %d, want %d", got, want)
+	}
+	if result.Profiles[0].Name != "default" || result.Profiles[1].Name != "work" {
+		t.Fatalf("profiles order = [%s %s], want [default work]", result.Profiles[0].Name, result.Profiles[1].Name)
+	}
+}
+
 func testStore(t *testing.T) (*sqliteadapter.Store, string) {
 	t.Helper()
 

@@ -132,7 +132,9 @@ For every user-visible Bubble Tea surface:
 - keep golden regression coverage for the final rendered view where that view's layout/styling matters
 - add or update golden fixtures whenever a TUI layout or style change is intentional
 - user-visible Bubble Tea goldens only cover Valv-owned screens; attached external CLIs like Codex also need terminal-integration coverage that exercises the real subprocess path
-- keep `Justfile` recipes for TUI regression coverage aligned with the actual test packages; do not claim a golden test workflow that the repo cannot run
+- use transcript-style golden coverage for attached `valv codex` visual regressions, including the steady-state Codex screen and an interactive `/mcp` pass through the real subprocess path
+- keep `Justfile` recipes for Bubble Tea and external transcript goldens aligned with the actual test packages; do not claim a golden test workflow that the repo cannot run
+- when a change can affect visible Codex runtime behavior, run the external transcript golden path in addition to the Bubble Tea goldens
 
 ## 9.1) Containerized Codex Runtime Rules
 

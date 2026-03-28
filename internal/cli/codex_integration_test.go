@@ -9,10 +9,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/charmbracelet/x/exp/golden"
 	"github.com/creack/pty/v2"
 	testcontainers "github.com/testcontainers/testcontainers-go"
 
@@ -179,6 +182,110 @@ func TestCodexCommandRunsFixtureImageWithTTYEndToEnd(t *testing.T) {
 	}
 }
 
+func TestCodexInteractiveMCPGolden(t *testing.T) {
+	paths := testCodexPaths(t)
+	if err := paths.Ensure(); err != nil {
+		t.Fatalf("paths.Ensure() error = %v", err)
+	}
+	projectRoot := filepath.Join(t.TempDir(), "project")
+	workDir := filepath.Join(projectRoot, "subdir")
+	if err := os.MkdirAll(filepath.Join(projectRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git) error = %v", err)
+	}
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(workDir) error = %v", err)
+	}
+
+	profileHome := filepath.Join(paths.ProviderRoot, "codex", "profiles", "profile-name")
+	if err := os.MkdirAll(profileHome, 0o755); err != nil {
+		t.Fatalf("MkdirAll(profileHome) error = %v", err)
+	}
+	configText := strings.TrimSpace(`
+[mcp_servers.context7-mcp]
+url = "https://mcp.context7.com/mcp"
+
+[mcp_servers.context7-mcp.env_http_headers]
+CONTEXT7_API_KEY = "CONTEXT7_API_KEY"
+
+[mcp_servers.gopls]
+command = "gopls"
+args = ["mcp"]
+
+[mcp_servers.hylla]
+url = "http://127.0.0.1:7389/mcp"
+
+[mcp_servers.tillsyn]
+command = "/Users/example/till"
+args = ["mcp"]
+`) + "\n"
+	if err := os.WriteFile(filepath.Join(profileHome, "config.toml"), []byte(configText), 0o600); err != nil {
+		t.Fatalf("WriteFile(profile config) error = %v", err)
+	}
+
+	prevWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd() error = %v", err)
+	}
+	repoRoot := findGoModuleRoot(t, prevWD)
+	binaryPath := filepath.Join(t.TempDir(), "valv")
+	buildCmd := exec.Command("go", "build", "-o", binaryPath, "./cmd/valv")
+	buildCmd.Dir = repoRoot
+	if output, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("go build error = %v\n%s", err, output)
+	}
+
+	imageRef := buildFixtureImage(t)
+	t.Setenv("VALV_CODEX_IMAGE", imageRef)
+	runValvBinaryCommand(t, binaryPath, paths.HomeDir, workDir, imageRef, "manage", "account", "add", "codex", "profile-name", "--home", profileHome, "--skip-login")
+
+	runCmd := exec.Command(binaryPath, "codex", "--no-alt-screen")
+	runCmd.Dir = workDir
+	runCmd.Env = append(os.Environ(),
+		"HOME="+paths.HomeDir,
+		"VALV_TEST_HOME_DIR="+paths.HomeDir,
+		"VALV_CODEX_IMAGE="+imageRef,
+		valvTestSkipHostCodexLoginEnv+"=1",
+	)
+
+	master, err := pty.StartWithSize(runCmd, &pty.Winsize{Rows: 24, Cols: 100})
+	if err != nil {
+		t.Fatalf("pty.StartWithSize() error = %v", err)
+	}
+	defer func() { _ = master.Close() }()
+
+	var stream bytes.Buffer
+	done := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(&stream, master)
+		close(done)
+	}()
+
+	waitForTranscript(t, &stream, "Fixture ready.")
+	configSnapshot, err := os.ReadFile(filepath.Join(workDir, ".valv-fixture", "codex-config.toml"))
+	if err != nil {
+		t.Fatalf("ReadFile(codex-config.toml) error = %v", err)
+	}
+	if !strings.Contains(string(configSnapshot), "mcp_servers") {
+		t.Fatalf("fixture codex config missing mcp servers\n%s", configSnapshot)
+	}
+	if _, err := master.Write([]byte("/mcp\n")); err != nil {
+		t.Fatalf("Write(/mcp) error = %v", err)
+	}
+	waitForTranscript(t, &stream, "context7-mcp")
+	waitForTranscript(t, &stream, "gopls")
+	if _, err := master.Write([]byte("/quit\n")); err != nil {
+		t.Fatalf("Write(/quit) error = %v", err)
+	}
+
+	if err := runCmd.Wait(); err != nil {
+		t.Fatalf("valv codex --no-alt-screen error = %v\nstream=%s", err, stream.String())
+	}
+	_ = master.Close()
+	<-done
+
+	golden.RequireEqual(t, normalizeTranscript(stream.Bytes()))
+}
+
 func buildFixtureImage(t *testing.T) string {
 	t.Helper()
 
@@ -291,4 +398,33 @@ func runValvBinaryCommand(t *testing.T, binaryPath, homeDir, workingDir, imageRe
 	if err != nil {
 		t.Fatalf("valv binary %v error = %v\n%s", args, err, output)
 	}
+}
+
+func waitForTranscript(t *testing.T, stream *bytes.Buffer, want string) {
+	t.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(stream.String(), want) {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for transcript to contain %q\nstream=%s", want, stream.String())
+}
+
+var (
+	ansiPattern        = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
+	goplsBridgePattern = regexp.MustCompile(`http://host\.docker\.internal:\d+/mcp/gopls-\d+`)
+)
+
+func normalizeTranscript(input []byte) []byte {
+	text := string(input)
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	text = ansiPattern.ReplaceAllString(text, "")
+	text = strings.ReplaceAll(text, "\x1b]0;", "")
+	text = strings.ReplaceAll(text, "\x1b\\", "")
+	text = goplsBridgePattern.ReplaceAllString(text, "http://host.docker.internal:<port>/mcp/gopls-<token>")
+	return []byte(strings.TrimSpace(text) + "\n")
 }

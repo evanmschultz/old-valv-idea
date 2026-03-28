@@ -1,0 +1,38 @@
+╭──────────────────────────────────────────────╮
+│ >_ OpenAI Codex (fixture)                    │
+│                                              │
+│ model:     gpt-5.4 xhigh   /model to change  │
+│ directory: /workspace/fixture                │
+╰──────────────────────────────────────────────╯
+
+  Tip: Fixture ready.
+
+/mcp
+› /mcp
+
+🔌  MCP Tools
+
+  • context7-mcp
+    • Auth: Not logged in
+    • URL: https://mcp.context7.com/mcp
+    • Env HTTP headers: CONTEXT7_API_KEY=CONTEXT7_API_KEY
+    • Tools: (none)
+    • Resources: (none)
+    • Resource templates: (none)
+
+  • gopls
+    • Auth: Unsupported
+    • URL: http://host.docker.internal:<port>/mcp/gopls-<token>
+    • Tools: fixture-tool
+    • Resources: (none)
+    • Resource templates: (none)
+
+  • hylla
+    • Auth: Unsupported
+    • URL: http://host.docker.internal:7389/mcp
+    • Tools: fixture-tool
+    • Resources: (none)
+    • Resource templates: (none)
+
+/quit
+› /quit

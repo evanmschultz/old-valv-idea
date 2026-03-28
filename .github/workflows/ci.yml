@@ -27,7 +27,7 @@ jobs:
         run: just ci
 
   integration:
-    name: integration (ubuntu-latest)
+    name: integration + external goldens (ubuntu-latest)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -36,6 +36,6 @@ jobs:
           go-version-file: go.mod
           cache: true
       - uses: taiki-e/install-action@just
-      - name: Run Docker-backed integration tests
+      - name: Run Docker-backed integration and external golden tests
         shell: bash
         run: just integration
