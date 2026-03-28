@@ -648,6 +648,8 @@ Shipped and working:
 - Docker-backed integration tests now clean up their Valv-managed fixture containers instead of leaving `valv-codex:test*` containers running on the host
 - provider image freshness now notices Docker recipe drift, not only upstream client-version drift
 - `valv manage update` rebuilds when the local image recipe is stale, even when the upstream Codex version has not changed
+- `valv api serve` has now been validated end to end through a real `/v1/chat/completions` request
+- `valv api serve` now stops its bound warm API runtime containers on shutdown instead of leaving `valv-api-*` containers running after `Ctrl-C`
 
 Known remaining gaps:
 
@@ -667,17 +669,12 @@ Non-goals for the current Codex-first MVP slice:
 
 The next steps should now be execution and validation focused rather than architecture focused.
 
-Immediate next step:
+Immediate next steps:
 
-- run a real end-to-end `valv api serve` validation through the OpenAI-compatible `/v1/chat/completions` path
+1. decide whether the remaining interactive Codex parity gaps are blockers for the Codex-first MVP or follow-up polish
+2. if they are not blockers, treat the Codex-first MVP as functionally complete and move the remaining work into polish and future-provider tracks
 
-Then:
-
-1. confirm the API worker path behaves correctly with a real request
-2. decide whether the remaining interactive Codex parity gaps are blockers for the Codex-first MVP or follow-up polish
-3. if the API path is clean, treat the Codex-first MVP as functionally complete and move the remaining work into polish and future-provider tracks
-
-What remains if the API validation passes:
+What remains now that the API validation passes:
 
 - optional polish on interactive TTY ownership and `/mcp` UI parity
 - optional cleanup/migration UX for stale historical account aliases

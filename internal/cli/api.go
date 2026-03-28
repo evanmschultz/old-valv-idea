@@ -18,6 +18,17 @@ import (
 	"github.com/evanmschultz/valv/internal/output"
 )
 
+type openAIAPIService interface {
+	openaihandler.Executor
+	ValidateBinding(context.Context) error
+	PruneExpiredRuntimes(context.Context) (int, error)
+	Shutdown(context.Context) (int, error)
+}
+
+var openAIAPIServiceFactory = func(cmd *cobra.Command, paths config.Paths, projectPath string, workspaceAccess bool, runtimeTTL time.Duration) (openAIAPIService, func(), error) {
+	return newOpenAIAPIService(cmd, paths, projectPath, workspaceAccess, runtimeTTL)
+}
+
 func newAPICommand(paths config.Paths, opts *rootOptions) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "api",
@@ -93,7 +104,7 @@ func runAPIServe(cmd *cobra.Command, paths config.Paths, opts *rootOptions, list
 			return fmt.Errorf("api serve: resolve working directory: %w", err)
 		}
 	}
-	service, closeStore, err := newOpenAIAPIService(cmd, paths, startPath, workspaceAccess, runtimeTTL)
+	service, closeStore, err := openAIAPIServiceFactory(cmd, paths, startPath, workspaceAccess, runtimeTTL)
 	if err != nil {
 		return fmt.Errorf("api serve: %w", err)
 	}
@@ -134,6 +145,16 @@ func runAPIServe(cmd *cobra.Command, paths config.Paths, opts *rootOptions, list
 		return fmt.Errorf("api serve: listen: %w", serveErr)
 	}
 	<-shutdownDone
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	removed, err := service.Shutdown(shutdownCtx)
+	if err != nil {
+		return fmt.Errorf("api serve: shutdown warm runtimes: %w", err)
+	}
+	logger := LoggerFromContext(cmd.Context())
+	if removed > 0 && logger != nil {
+		logger.Debug("api serve stopped warm runtimes on shutdown", "count", removed)
+	}
 	return nil
 }
 

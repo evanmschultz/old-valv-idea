@@ -16,6 +16,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	openaiapi "github.com/evanmschultz/valv/internal/api/openai"
 	"github.com/evanmschultz/valv/internal/config"
 	"github.com/evanmschultz/valv/internal/domain"
 	imagesservice "github.com/evanmschultz/valv/internal/services/images"
@@ -55,6 +56,39 @@ type pruneRecorder struct {
 func (p *pruneRecorder) PruneExpiredRuntimes(context.Context) (int, error) {
 	p.calls++
 	return 1, nil
+}
+
+type apiServeStubService struct {
+	shutdownCalls int
+	shutdownErr   error
+}
+
+func (s *apiServeStubService) ValidateBinding(context.Context) error {
+	return nil
+}
+
+func (s *apiServeStubService) Complete(context.Context, openaiapi.Request) (openaiapi.Result, error) {
+	return openaiapi.Result{Model: "gpt-5.4", Content: "stub"}, nil
+}
+
+func (s *apiServeStubService) PruneExpiredRuntimes(context.Context) (int, error) {
+	return 0, nil
+}
+
+func (s *apiServeStubService) Shutdown(context.Context) (int, error) {
+	s.shutdownCalls++
+	return 1, s.shutdownErr
+}
+
+func installStubOpenAIAPIServiceFactory(t *testing.T, service openAIAPIService) {
+	t.Helper()
+	previous := openAIAPIServiceFactory
+	openAIAPIServiceFactory = func(_ *cobra.Command, _ config.Paths, _ string, _ bool, _ time.Duration) (openAIAPIService, func(), error) {
+		return service, func() {}, nil
+	}
+	t.Cleanup(func() {
+		openAIAPIServiceFactory = previous
+	})
 }
 
 func TestManageCommandWithoutTTYShowsHelp(t *testing.T) {
@@ -658,13 +692,10 @@ func TestParseOptionalProviderAndRequireProjectPath(t *testing.T) {
 }
 
 func TestRunAPIServeStartsAndStopsCleanly(t *testing.T) {
-	t.Parallel()
-
 	paths := testCodexPaths(t)
 	projectRoot := t.TempDir()
-	profileHome := filepath.Join(paths.ProviderRoot, "codex", "profiles", "dev")
-	runManage(t, paths, []string{"profile", "add", "codex", "dev", "--home", profileHome})
-	runManage(t, paths, []string{"bind", "codex", "dev", "--project", projectRoot})
+	service := &apiServeStubService{}
+	installStubOpenAIAPIServiceFactory(t, service)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -700,6 +731,45 @@ func TestRunAPIServeStartsAndStopsCleanly(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "runtime_ttl=1m0s") {
 		t.Fatalf("unexpected api output: %q", stdout.String())
+	}
+	if service.shutdownCalls != 1 {
+		t.Fatalf("Shutdown() calls = %d, want 1", service.shutdownCalls)
+	}
+}
+
+func TestRunAPIServeReturnsShutdownError(t *testing.T) {
+	paths := testCodexPaths(t)
+	projectRoot := t.TempDir()
+	service := &apiServeStubService{shutdownErr: fmt.Errorf("cleanup failed")}
+	installStubOpenAIAPIServiceFactory(t, service)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetContext(ctx)
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- runAPIServe(cmd, paths, &rootOptions{}, "127.0.0.1:0", projectRoot, false, time.Minute)
+	}()
+
+	time.Sleep(150 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "shutdown warm runtimes") {
+			t.Fatalf("runAPIServe() error = %v, want shutdown cleanup failure", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for api server shutdown error")
+	}
+	if service.shutdownCalls != 1 {
+		t.Fatalf("Shutdown() calls = %d, want 1", service.shutdownCalls)
 	}
 }
 
@@ -765,6 +835,24 @@ func TestRunAPIServeRejectsNonPositiveRuntimeTTL(t *testing.T) {
 	}
 	if stdout.Len() != 0 {
 		t.Fatalf("unexpected stdout on invalid ttl: %q", stdout.String())
+	}
+}
+
+func TestNewOpenAIAPIServiceCreatesService(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+
+	service, closeStore, err := newOpenAIAPIService(cmd, paths, t.TempDir(), true, time.Minute)
+	if err != nil {
+		t.Fatalf("newOpenAIAPIService() error = %v", err)
+	}
+	defer closeStore()
+
+	if err := service.ValidateBinding(context.Background()); err == nil {
+		t.Fatal("ValidateBinding() error = nil, want unbound project")
 	}
 }
 

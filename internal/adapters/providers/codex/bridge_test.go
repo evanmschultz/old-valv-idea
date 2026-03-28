@@ -6,11 +6,30 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 const helperEnv = "VALV_MCP_HELPER_PROCESS"
+
+func connectBridgeClient(ctx context.Context, t *testing.T, url string) *mcp.ClientSession {
+	t.Helper()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "bridge-test-client", Version: "v0.0.1"}, nil)
+	deadline := time.Now().Add(2 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		session, err := client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: url}, nil)
+		if err == nil {
+			return session
+		}
+		lastErr = err
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("client.Connect() error = %v", lastErr)
+	return nil
+}
 
 func TestBridgeManagerBridgesStdioServers(t *testing.T) {
 	t.Parallel()
@@ -42,11 +61,7 @@ func TestBridgeManagerBridgesStdioServers(t *testing.T) {
 	}
 	url = strings.Replace(url, "host.docker.internal", "127.0.0.1", 1)
 
-	client := mcp.NewClient(&mcp.Implementation{Name: "bridge-test-client", Version: "v0.0.1"}, nil)
-	session, err := client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: url}, nil)
-	if err != nil {
-		t.Fatalf("client.Connect() error = %v", err)
-	}
+	session := connectBridgeClient(ctx, t, url)
 	t.Cleanup(func() {
 		if err := session.Close(); err != nil {
 			t.Fatalf("session.Close() error = %v", err)
@@ -204,11 +219,7 @@ func TestBridgeManagerCloseSucceedsWithActiveStreamableClient(t *testing.T) {
 	}
 
 	url = strings.Replace(url, "host.docker.internal", "127.0.0.1", 1)
-	client := mcp.NewClient(&mcp.Implementation{Name: "bridge-test-client", Version: "v0.0.1"}, nil)
-	session, err := client.Connect(context.Background(), &mcp.StreamableClientTransport{Endpoint: url}, nil)
-	if err != nil {
-		t.Fatalf("client.Connect() error = %v", err)
-	}
+	session := connectBridgeClient(context.Background(), t, url)
 	t.Cleanup(func() {
 		_ = session.Close()
 	})
@@ -244,11 +255,7 @@ func TestBridgeManagerBridgesToolOnlyServers(t *testing.T) {
 	}
 
 	url = strings.Replace(url, "host.docker.internal", "127.0.0.1", 1)
-	client := mcp.NewClient(&mcp.Implementation{Name: "bridge-test-client", Version: "v0.0.1"}, nil)
-	session, err := client.Connect(context.Background(), &mcp.StreamableClientTransport{Endpoint: url}, nil)
-	if err != nil {
-		t.Fatalf("client.Connect() error = %v", err)
-	}
+	session := connectBridgeClient(context.Background(), t, url)
 	t.Cleanup(func() {
 		if err := session.Close(); err != nil {
 			t.Fatalf("session.Close() error = %v", err)

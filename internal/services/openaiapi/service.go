@@ -144,6 +144,33 @@ func (s Service) PruneExpiredRuntimes(ctx context.Context) (int, error) {
 	return removed, nil
 }
 
+func (s Service) Shutdown(ctx context.Context) (int, error) {
+	resolved, err := s.resolveBinding(ctx)
+	if err != nil {
+		return 0, err
+	}
+	records, err := s.store.ListRuntimesByProjectID(ctx, resolved.project.ID)
+	if err != nil {
+		return 0, fmt.Errorf("shutdown runtimes for project %q: list runtimes: %w", resolved.project.Root, err)
+	}
+	stopped := 0
+	var stopErr error
+	for _, record := range records {
+		if !s.shutdownCandidate(record, resolved.profile) {
+			continue
+		}
+		if err := s.stopRuntime(ctx, record, "stopped"); err != nil {
+			stopErr = errors.Join(stopErr, fmt.Errorf("stop runtime %q: %w", record.ID, err))
+			continue
+		}
+		stopped++
+	}
+	if stopErr != nil {
+		return stopped, fmt.Errorf("shutdown runtimes for project %q: %w", resolved.project.Root, stopErr)
+	}
+	return stopped, nil
+}
+
 func (s Service) Complete(ctx context.Context, request openaiapi.Request) (openaiapi.Result, error) {
 	resolved, err := s.resolveBinding(ctx)
 	if err != nil {
@@ -418,6 +445,17 @@ func (s Service) stopRuntime(ctx context.Context, record domain.RuntimeRecord, s
 }
 
 func (s Service) matchesRuntime(record domain.RuntimeRecord, profile domain.Profile) bool {
+	return s.matchesManagedRuntime(record, profile) && record.Status == "running"
+}
+
+func (s Service) shutdownCandidate(record domain.RuntimeRecord, profile domain.Profile) bool {
+	if !s.matchesManagedRuntime(record, profile) {
+		return false
+	}
+	return record.Status == "running" || record.Status == "starting"
+}
+
+func (s Service) matchesManagedRuntime(record domain.RuntimeRecord, profile domain.Profile) bool {
 	if record.Provider != domain.ProviderCodex {
 		return false
 	}
@@ -425,9 +463,6 @@ func (s Service) matchesRuntime(record domain.RuntimeRecord, profile domain.Prof
 		return false
 	}
 	if record.ImageRef != s.image.String() {
-		return false
-	}
-	if record.Status != "running" {
 		return false
 	}
 	return strings.HasPrefix(record.ContainerID, s.runtimeContainerPrefix())

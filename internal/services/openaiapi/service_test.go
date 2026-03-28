@@ -364,6 +364,82 @@ func TestPruneExpiredRuntimesStopsOnlyExpiredWarmContainers(t *testing.T) {
 	}
 }
 
+func TestShutdownStopsMatchingWarmRuntimes(t *testing.T) {
+	t.Parallel()
+
+	store, project, profile := seededOpenAIStore(t, "/tmp/project", "/tmp/profile")
+	now := time.Date(2026, 3, 25, 15, 0, 0, 0, time.UTC)
+	executor := &recordingExecutor{content: "fixture response"}
+	service, err := New(Options{
+		Store:     store,
+		Executor:  executor,
+		Image:     dockeradapter.NewImageRef("valv-codex", "dev"),
+		TempRoot:  t.TempDir(),
+		StartPath: "/tmp/project",
+		IdleTTL:   time.Minute,
+		Now:       func() time.Time { return now },
+		Detect: func(string) (projectdetect.Result, error) {
+			return projectdetect.Result{Root: "/tmp/project"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := service.Complete(context.Background(), openaiapi.Request{
+		Model:    "gpt-5.2",
+		Messages: []openaiapi.Message{{Role: openaiapi.RoleUser, Content: "hello"}},
+	}); err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+
+	otherProfile := mustOpenAIProfile(t, "other", "/tmp/other-profile")
+	if _, err := store.CreateProfile(context.Background(), otherProfile); err != nil {
+		t.Fatalf("CreateProfile(other) error = %v", err)
+	}
+
+	unrelated, err := domain.NewRuntimeRecord(domain.ProviderCodex, project.ID, otherProfile.ID, domain.ModeFresh, "valv-api-codex-nowork-other", "valv-codex:dev", "running")
+	if err != nil {
+		t.Fatalf("NewRuntimeRecord(unrelated) error = %v", err)
+	}
+	unrelated.CreatedAt = now
+	unrelated.UpdatedAt = now
+	if _, err := store.UpsertRuntime(context.Background(), unrelated); err != nil {
+		t.Fatalf("UpsertRuntime(unrelated) error = %v", err)
+	}
+
+	stopped, err := service.Shutdown(context.Background())
+	if err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
+	}
+	if got, want := stopped, 1; got != want {
+		t.Fatalf("Shutdown() stopped = %d, want %d", got, want)
+	}
+	if len(executor.removedRequests) != 1 {
+		t.Fatalf("removedRequests len = %d, want 1", len(executor.removedRequests))
+	}
+
+	records, err := store.ListRuntimesByProjectID(context.Background(), project.ID)
+	if err != nil {
+		t.Fatalf("ListRuntimesByProjectID() error = %v", err)
+	}
+	for _, record := range records {
+		switch record.ProfileID {
+		case profile.ID:
+			if record.Status != "stopped" {
+				t.Fatalf("bound runtime status = %q, want stopped", record.Status)
+			}
+		case otherProfile.ID:
+			if record.Status != "running" {
+				t.Fatalf("unrelated runtime status = %q, want running", record.Status)
+			}
+		}
+	}
+	if _, ok := service.lookupArtifacts(executor.runRequests[0].Name); ok {
+		t.Fatal("lookupArtifacts() = true after Shutdown(), want false")
+	}
+}
+
 func TestCompleteCleansUpRuntimeWhenStatusPersistFails(t *testing.T) {
 	t.Parallel()
 
