@@ -72,10 +72,8 @@ func PrepareRuntime(ctx context.Context, request PrepareRequest) (PreparedRuntim
 		"CODEX_HOME": ContainerCodexDir,
 		"HOME":       ContainerHomeDir,
 		"LOGNAME":    "valv",
+		"TERM":       normalizedContainerTERM(),
 		"USER":       "valv",
-	}
-	if _, ok := os.LookupEnv("TERM"); !ok {
-		env["TERM"] = "xterm-256color"
 	}
 
 	bridgeManager, err := newBridgeManager(ctx, request.Logger)
@@ -376,7 +374,6 @@ func errorsJoin(errs ...error) error {
 
 func terminalEnvPassthrough() []string {
 	names := []string{
-		"TERM",
 		"COLORTERM",
 		"TERM_PROGRAM",
 		"TERM_PROGRAM_VERSION",
@@ -390,4 +387,14 @@ func terminalEnvPassthrough() []string {
 		}
 	}
 	return out
+}
+
+func normalizedContainerTERM() string {
+	value := strings.TrimSpace(os.Getenv("TERM"))
+	switch value {
+	case "", "xterm-ghostty", "ghostty":
+		return "xterm-256color"
+	default:
+		return value
+	}
 }

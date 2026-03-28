@@ -49,6 +49,7 @@ type ContainerRunRequest struct {
 	Detached       bool
 	Interactive    bool
 	TTY            bool
+	Init           bool
 	Remove         bool
 	User           string
 	Network        string
@@ -118,6 +119,9 @@ func BuildRunArgs(request ContainerRunRequest) ([]string, error) {
 	}
 	if request.TTY {
 		args = append(args, "-t")
+	}
+	if request.Init {
+		args = append(args, "--init")
 	}
 	if request.Name != "" {
 		args = append(args, "--name", request.Name)

@@ -218,6 +218,7 @@ func (s Service) buildRequest(workingDir string, project domain.Project, profile
 		Args:        append([]string(nil), codexArgs...),
 		Interactive: s.stdin,
 		TTY:         s.tty,
+		Init:        s.tty || s.stdin,
 		Remove:      true,
 		User:        s.user,
 	}

@@ -299,6 +299,7 @@ Current validation follow-ups to preserve:
 - if a warm runtime container starts successfully but Valv fails to persist the final running status, Valv must best-effort remove that container and close its prepared runtime artifacts before returning the error
 - attached interactive Codex runs need terminal-integration coverage in addition to Bubble Tea golden tests, because TeaTest only covers Valv-owned TUI screens and cannot prove the attached `docker run` TTY behavior
 - attached `docker run -it` Codex launches should rely on direct stdio attachment and PTY-backed integration tests, not unsupported controlling-terminal syscalls on the Docker CLI process itself
+- attached interactive Docker launches should use `--init` and a container-safe terminal env; blindly passing host-only terminal types like `xterm-ghostty` into the slim Linux image breaks Codex TUI ownership
 - the repo must expose explicit local recipes for golden/TUI regression coverage rather than relying on ad hoc package test commands
 - containerized auth UX should prefer host-side account login before container launch so normal browser-based Codex login completes on macOS without Docker callback issues; device code remains the documented fallback when a host-side browser flow is not available
 - interactive `valv codex` launches should stay quiet before handing control to Codex; setup/auth guidance belongs in account flows and explicit failures, not in the steady-state interactive handoff
@@ -508,6 +509,7 @@ TUI testing policy:
 - TUI changes are not complete until the golden coverage is updated or explicitly shown to be unaffected
 - attached external `valv codex` visual regressions need transcript-style golden coverage through the real subprocess path; Bubble Tea goldens alone cannot prove interactive `/mcp` behavior or terminal handoff quality
 - keep explicit local recipes for both Bubble Tea goldens and external Codex transcript goldens, and keep CI running the external Codex golden on the Docker-backed integration path
+- Docker-backed transcript and integration tests must clean up any Valv-managed fixture containers they start; a green run must not leave `valv-codex:test*` containers running in Docker Desktop
 
 Recommended naming:
 

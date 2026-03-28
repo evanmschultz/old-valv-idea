@@ -135,6 +135,7 @@ For every user-visible Bubble Tea surface:
 - use transcript-style golden coverage for attached `valv codex` visual regressions, including the steady-state Codex screen and an interactive `/mcp` pass through the real subprocess path
 - keep `Justfile` recipes for Bubble Tea and external transcript goldens aligned with the actual test packages; do not claim a golden test workflow that the repo cannot run
 - when a change can affect visible Codex runtime behavior, run the external transcript golden path in addition to the Bubble Tea goldens
+- Docker-backed external golden and integration tests must clean up any Valv-managed fixture containers they start; passing tests must not leave `valv-codex:test*` containers running on the host
 
 ## 9.1) Containerized Codex Runtime Rules
 
@@ -142,7 +143,9 @@ For interactive `valv codex` runs:
 
 - do not run Codex inside a Valv Bubble Tea wrapper
 - launch Codex as an attached subprocess through Docker with the real terminal attached
+- use Docker's init process for interactive attached launches so signal handling and child reaping behave like a normal terminal app
 - ensure the container has a coherent in-container user and `HOME`; do not rely on the host absolute profile path doubling as the Linux home directory
+- normalize the in-container terminal environment; do not blindly pass host-only `TERM` values that the slim Linux image cannot interpret
 - preserve Codex auth/session/memory by mounting the selected Valv profile home, but normalize the in-container mount target so the CLI behaves like a normal Linux home layout
 - if Valv generates container-only config overlays, keep auth/session files durable while making the runtime config container-safe
 - attached Docker subprocesses should use direct stdio attachment and be validated with PTY-backed integration tests; do not rely on unsupported controlling-terminal syscalls on the Docker CLI process itself

@@ -133,6 +133,7 @@ func runCodexImageOnlyCommand(cmd *cobra.Command, paths config.Paths, args []str
 		Args:        append([]string(nil), args...),
 		Interactive: commandHasTTY(cmd.InOrStdin()),
 		TTY:         commandHasTTY(cmd.InOrStdin()) && commandHasTTY(cmd.OutOrStdout()),
+		Init:        commandHasTTY(cmd.InOrStdin()) || commandHasTTY(cmd.OutOrStdout()),
 		Remove:      true,
 	}
 	if err := executor.Run(cmd.Context(), request); err != nil {

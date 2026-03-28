@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"net/http"
@@ -324,6 +326,7 @@ func TestManageUpdateSecondRunReportsUpToDate(t *testing.T) {
 	paths := testCodexPaths(t)
 	logPath := installFakeDocker(t)
 	stubCodexVersionResolver(t, "0.117.0")
+	t.Setenv("VALV_DOCKER_IMAGE_INSPECT_OUTPUT", fakeCodexRecipeHash())
 
 	runManage(t, paths, []string{"update"})
 	output := runManage(t, paths, []string{"update"})
@@ -783,7 +786,7 @@ func installFakeDocker(t *testing.T) string {
 	binDir := t.TempDir()
 	logPath := filepath.Join(binDir, "docker.log")
 	scriptPath := filepath.Join(binDir, "docker")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$VALV_DOCKER_LOG\"\nif [ \"$1\" = \"ps\" ]; then\n  printf '%s' \"$VALV_DOCKER_PS_OUTPUT\"\nfi\nif [ \"$1\" = \"image\" ] && [ \"$2\" = \"ls\" ]; then\n  printf '%s' \"$VALV_DOCKER_IMAGE_LS_OUTPUT\"\nfi\n"
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$VALV_DOCKER_LOG\"\nif [ \"$1\" = \"ps\" ]; then\n  printf '%s' \"$VALV_DOCKER_PS_OUTPUT\"\nfi\nif [ \"$1\" = \"image\" ] && [ \"$2\" = \"ls\" ]; then\n  printf '%s' \"$VALV_DOCKER_IMAGE_LS_OUTPUT\"\nfi\nif [ \"$1\" = \"image\" ] && [ \"$2\" = \"inspect\" ] && [ \"$3\" = \"--format\" ]; then\n  printf '%s' \"$VALV_DOCKER_IMAGE_INSPECT_OUTPUT\"\nfi\n"
 	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
 		t.Fatalf("WriteFile(%q) error = %v", scriptPath, err)
 	}
@@ -792,6 +795,11 @@ func installFakeDocker(t *testing.T) string {
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+originalPath)
 	t.Setenv("VALV_DOCKER_LOG", logPath)
 	return logPath
+}
+
+func fakeCodexRecipeHash() string {
+	sum := sha256.Sum256([]byte(imagesservice.DefaultCodexDockerfile()))
+	return hex.EncodeToString(sum[:])
 }
 
 func installFakePgrep(t *testing.T, exitCode int) {

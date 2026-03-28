@@ -290,6 +290,7 @@ func buildFixtureImage(t *testing.T) string {
 
 	repo := "valv-codex"
 	tag := strings.ToLower(strings.ReplaceAll(t.Name(), "/", "-"))
+	imageRef := repo + ":" + tag
 	ctx := context.Background()
 	if err := exec.CommandContext(ctx, "docker", "version").Run(); err != nil {
 		t.Skipf("docker unavailable for integration test: %v", err)
@@ -310,11 +311,13 @@ func buildFixtureImage(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("testcontainers.Run() error = %v", err)
 	}
+	cleanupManagedFixtureContainers(t)
 	t.Cleanup(func() {
+		cleanupManagedFixtureContainers(t)
 		_ = container.Terminate(ctx)
 	})
 
-	return repo + ":" + tag
+	return imageRef
 }
 
 func buildFixtureMCPServer(t *testing.T, repoRoot string) string {
@@ -422,6 +425,49 @@ func waitForTranscript(t *testing.T, stream *bytes.Buffer, want string) {
 		time.Sleep(25 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for transcript to contain %q\nstream=%s", want, stream.String())
+}
+
+func cleanupManagedFixtureContainers(t *testing.T) {
+	t.Helper()
+
+	ctx := context.Background()
+	listCmd := exec.CommandContext(ctx, "docker", "ps", "-aq",
+		"--filter", "label=io.valv.managed=true",
+		"--filter", "name=^valv-codex-interactive-",
+	)
+	output, err := listCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("docker ps for fixture cleanup error = %v\n%s", err, output)
+	}
+	ids := strings.Fields(string(output))
+	if len(ids) == 0 {
+		return
+	}
+
+	inspectArgs := append([]string{"inspect", "--format", "{{.Id}} {{.Config.Image}}"}, ids...)
+	inspectCmd := exec.CommandContext(ctx, "docker", inspectArgs...)
+	inspectOutput, err := inspectCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("docker inspect for fixture cleanup error = %v\n%s", err, inspectOutput)
+	}
+	removeIDs := make([]string, 0, len(ids))
+	for _, line := range strings.Split(strings.TrimSpace(string(inspectOutput)), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		if strings.HasPrefix(fields[1], "valv-codex:test") {
+			removeIDs = append(removeIDs, fields[0])
+		}
+	}
+	if len(removeIDs) == 0 {
+		return
+	}
+	args := append([]string{"rm", "-f"}, removeIDs...)
+	removeCmd := exec.CommandContext(ctx, "docker", args...)
+	if output, err := removeCmd.CombinedOutput(); err != nil {
+		t.Fatalf("docker rm fixture cleanup error = %v\n%s", err, output)
+	}
 }
 
 var (

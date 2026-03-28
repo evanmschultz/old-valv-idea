@@ -19,6 +19,7 @@ import (
 type runnerRecorder struct {
 	calls [][]string
 	errs  map[string]error
+	outs  map[string]string
 }
 
 func (r *runnerRecorder) Run(_ context.Context, args []string) error {
@@ -29,6 +30,22 @@ func (r *runnerRecorder) Run(_ context.Context, args []string) error {
 		}
 	}
 	return nil
+}
+
+func (r *runnerRecorder) Output(_ context.Context, args []string) (string, error) {
+	r.calls = append(r.calls, append([]string(nil), args...))
+	key := strings.Join(args, " ")
+	if r.errs != nil {
+		if err := r.errs[key]; err != nil {
+			return "", err
+		}
+	}
+	if r.outs != nil {
+		if out, ok := r.outs[key]; ok {
+			return out, nil
+		}
+	}
+	return "", nil
 }
 
 type providerImageStateStore struct {
@@ -88,7 +105,7 @@ func TestServiceBuildAddsVersionAndUsesDefaultImageInfo(t *testing.T) {
 	if len(runner.calls) != 1 {
 		t.Fatalf("runner call count = %d, want 1", len(runner.calls))
 	}
-	want := []string{"buildx", "build", "--load", "-f", "/tmp/codex-image/Dockerfile", "-t", "ghcr.io/valv/codex:dev", "--build-arg", "CODEX_VERSION=0.117.0", "--build-arg", fmt.Sprintf("VALV_GID=%d", gid), "--build-arg", fmt.Sprintf("VALV_UID=%d", uid), "--label", "io.valv.managed=true", "--label", "io.valv.provider=codex", "--label", "io.valv.scope=image", "--label", "io.valv.version=0.117.0", "/tmp/codex-image"}
+	want := []string{"buildx", "build", "--load", "-f", "/tmp/codex-image/Dockerfile", "-t", "ghcr.io/valv/codex:dev", "--build-arg", "CODEX_VERSION=0.117.0", "--build-arg", fmt.Sprintf("VALV_GID=%d", gid), "--build-arg", fmt.Sprintf("VALV_UID=%d", uid), "--label", "io.valv.managed=true", "--label", "io.valv.provider=codex", "--label", fmt.Sprintf("%s=%s", recipeHashLabel, svc.recipeHash()), "--label", "io.valv.scope=image", "--label", "io.valv.version=0.117.0", "/tmp/codex-image"}
 	if !reflect.DeepEqual(runner.calls[0], want) {
 		t.Fatalf("Build() args = %#v, want %#v", runner.calls[0], want)
 	}
@@ -155,7 +172,11 @@ func TestEnsureLatestSkipsBuildWhenStateIsCurrent(t *testing.T) {
 		},
 		ok: true,
 	}
-	runner := &runnerRecorder{}
+	runner := &runnerRecorder{
+		outs: map[string]string{
+			`image inspect --format {{ index .Config.Labels "` + recipeHashLabel + `" }} ghcr.io/valv/codex:dev`: svcRecipeHashForTest("/tmp/codex-image", "Dockerfile"),
+		},
+	}
 	svc, err := New(Options{
 		Runner:     runner,
 		StateStore: stateStore,
@@ -174,11 +195,66 @@ func TestEnsureLatestSkipsBuildWhenStateIsCurrent(t *testing.T) {
 	if got, want := result.Action, EnsureActionUpToDate; got != want {
 		t.Fatalf("EnsureLatest() action = %q, want %q", got, want)
 	}
-	if len(runner.calls) != 1 {
-		t.Fatalf("runner call count = %d, want 1", len(runner.calls))
+	if len(runner.calls) != 2 {
+		t.Fatalf("runner call count = %d, want 2", len(runner.calls))
 	}
 	if got, want := runner.calls[0], []string{"image", "inspect", "ghcr.io/valv/codex:dev"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("inspect args = %#v, want %#v", got, want)
+	}
+	if got, want := runner.calls[1], []string{"image", "inspect", "--format", "{{ index .Config.Labels \"" + recipeHashLabel + "\" }}", "ghcr.io/valv/codex:dev"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("recipe inspect args = %#v, want %#v", got, want)
+	}
+}
+
+func TestEnsureLatestRebuildsWhenRecipeHashDiffers(t *testing.T) {
+
+	oldFindDockerBinary := findDockerBinary
+	findDockerBinary = func(string) (string, error) { return "/usr/bin/docker", nil }
+	t.Cleanup(func() { findDockerBinary = oldFindDockerBinary })
+
+	stateStore := &providerImageStateStore{
+		state: domain.ProviderImageState{
+			Provider:            domain.ProviderCodex,
+			LatestVersion:       "0.117.0",
+			LatestCheckedAt:     time.Date(2026, 3, 27, 12, 0, 0, 0, time.UTC),
+			InstalledVersion:    "0.117.0",
+			InstalledImageRef:   "ghcr.io/valv/codex:dev",
+			InstalledVersionTag: "ghcr.io/valv/codex:0-117-0",
+			UpdatedAt:           time.Date(2026, 3, 27, 12, 0, 0, 0, time.UTC),
+		},
+		ok: true,
+	}
+	runner := &runnerRecorder{
+		outs: map[string]string{
+			`image inspect --format {{ index .Config.Labels "` + recipeHashLabel + `" }} ghcr.io/valv/codex:dev`: "stale-recipe",
+		},
+	}
+	svc, err := New(Options{
+		Runner:     runner,
+		StateStore: stateStore,
+		Resolver:   staticResolver("0.117.0"),
+		Repository: "ghcr.io/valv/codex",
+		ContextDir: "/tmp/codex-image",
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	result, err := svc.EnsureLatest(context.Background(), EnsureRequest{})
+	if err != nil {
+		t.Fatalf("EnsureLatest() error = %v", err)
+	}
+	if got, want := result.Action, EnsureActionUpdated; got != want {
+		t.Fatalf("EnsureLatest() action = %q, want %q", got, want)
+	}
+	if len(runner.calls) != 3 {
+		t.Fatalf("runner call count = %d, want 3", len(runner.calls))
+	}
+	if got, want := runner.calls[1], []string{"image", "inspect", "--format", "{{ index .Config.Labels \"" + recipeHashLabel + "\" }}", "ghcr.io/valv/codex:dev"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("recipe inspect args = %#v, want %#v", got, want)
+	}
+	if got := runner.calls[2]; len(got) < 2 || got[0] != "buildx" || got[1] != "build" {
+		t.Fatalf("build args = %#v, want docker build invocation", got)
 	}
 }
 
@@ -258,10 +334,13 @@ func TestEnsureLatestRemovesPreviousVersionTagWhenUpdating(t *testing.T) {
 	if got, want := result.PreviousVersion, "0.116.0"; got != want {
 		t.Fatalf("previous version = %q, want %q", got, want)
 	}
-	if len(runner.calls) != 3 {
-		t.Fatalf("runner call count = %d, want 3", len(runner.calls))
+	if len(runner.calls) != 4 {
+		t.Fatalf("runner call count = %d, want 4", len(runner.calls))
 	}
-	if got, want := runner.calls[2], []string{"image", "rm", "--force", "ghcr.io/valv/codex:0-116-0"}; !reflect.DeepEqual(got, want) {
+	if got, want := runner.calls[1], []string{"image", "inspect", "--format", "{{ index .Config.Labels \"" + recipeHashLabel + "\" }}", "ghcr.io/valv/codex:dev"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("recipe inspect args = %#v, want %#v", got, want)
+	}
+	if got, want := runner.calls[3], []string{"image", "rm", "--force", "ghcr.io/valv/codex:0-116-0"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("image remove args = %#v, want %#v", got, want)
 	}
 }
@@ -298,7 +377,7 @@ func TestWriteDefaultCodexContextWritesDockerfile(t *testing.T) {
 		"NPM_CONFIG_AUDIT=false",
 		`ARG VALV_UID=1000`,
 		`ARG VALV_GID=1000`,
-		`apt-get install -y --no-install-recommends bubblewrap ca-certificates git`,
+		`apt-get install -y --no-install-recommends bubblewrap ca-certificates git ncurses-term`,
 		`getent group "${VALV_GID}" >/dev/null || groupadd -g "${VALV_GID}" valv`,
 		`useradd -o -m -u "${VALV_UID}" -g "${VALV_GID}" -s /bin/sh valv`,
 		`chown -R "${VALV_UID}:${VALV_GID}" /home/valv /workspace`,
@@ -334,7 +413,7 @@ func TestBuildIncludesExtraTags(t *testing.T) {
 	if len(result.Tags) != 2 {
 		t.Fatalf("result tags len = %d, want 2", len(result.Tags))
 	}
-	if !reflect.DeepEqual(runner.calls[0], []string{"buildx", "build", "--load", "-f", "/tmp/codex-image/Dockerfile", "-t", "ghcr.io/valv/codex:dev", "-t", "ghcr.io/valv/codex:0-117-0", "--build-arg", "CODEX_VERSION=0.117.0", "--build-arg", fmt.Sprintf("VALV_GID=%d", gid), "--build-arg", fmt.Sprintf("VALV_UID=%d", uid), "--label", "io.valv.managed=true", "--label", "io.valv.provider=codex", "--label", "io.valv.scope=image", "--label", "io.valv.version=0.117.0", "/tmp/codex-image"}) {
+	if !reflect.DeepEqual(runner.calls[0], []string{"buildx", "build", "--load", "-f", "/tmp/codex-image/Dockerfile", "-t", "ghcr.io/valv/codex:dev", "-t", "ghcr.io/valv/codex:0-117-0", "--build-arg", "CODEX_VERSION=0.117.0", "--build-arg", fmt.Sprintf("VALV_GID=%d", gid), "--build-arg", fmt.Sprintf("VALV_UID=%d", uid), "--label", "io.valv.managed=true", "--label", "io.valv.provider=codex", "--label", fmt.Sprintf("%s=%s", recipeHashLabel, svc.recipeHash()), "--label", "io.valv.scope=image", "--label", "io.valv.version=0.117.0", "/tmp/codex-image"}) {
 		t.Fatalf("Build() args = %#v", runner.calls[0])
 	}
 }
@@ -343,7 +422,7 @@ func TestServiceBuildFallsBackToLegacyBuildWhenBuildxUnavailable(t *testing.T) {
 
 	uid := os.Getuid()
 	gid := os.Getgid()
-	firstCall := strings.Join([]string{"buildx", "build", "--load", "-f", "/tmp/codex-image/Dockerfile", "-t", "ghcr.io/valv/codex:dev", "--build-arg", "CODEX_VERSION=0.117.0", "--build-arg", fmt.Sprintf("VALV_GID=%d", gid), "--build-arg", fmt.Sprintf("VALV_UID=%d", uid), "--label", "io.valv.managed=true", "--label", "io.valv.provider=codex", "--label", "io.valv.scope=image", "--label", "io.valv.version=0.117.0", "/tmp/codex-image"}, " ")
+	firstCall := strings.Join([]string{"buildx", "build", "--load", "-f", "/tmp/codex-image/Dockerfile", "-t", "ghcr.io/valv/codex:dev", "--build-arg", "CODEX_VERSION=0.117.0", "--build-arg", fmt.Sprintf("VALV_GID=%d", gid), "--build-arg", fmt.Sprintf("VALV_UID=%d", uid), "--label", "io.valv.managed=true", "--label", "io.valv.provider=codex", "--label", fmt.Sprintf("%s=%s", recipeHashLabel, svcRecipeHashForTest("/tmp/codex-image", "Dockerfile")), "--label", "io.valv.scope=image", "--label", "io.valv.version=0.117.0", "/tmp/codex-image"}, " ")
 	runner := &runnerRecorder{
 		errs: map[string]error{
 			firstCall: fmt.Errorf("docker buildx is required but unavailable"),
@@ -369,7 +448,7 @@ func TestServiceBuildFallsBackToLegacyBuildWhenBuildxUnavailable(t *testing.T) {
 	if len(runner.calls) != 2 {
 		t.Fatalf("runner call count = %d, want 2", len(runner.calls))
 	}
-	if got, want := runner.calls[1], []string{"build", "-f", "/tmp/codex-image/Dockerfile", "-t", "ghcr.io/valv/codex:dev", "--build-arg", "CODEX_VERSION=0.117.0", "--build-arg", fmt.Sprintf("VALV_GID=%d", gid), "--build-arg", fmt.Sprintf("VALV_UID=%d", uid), "--label", "io.valv.managed=true", "--label", "io.valv.provider=codex", "--label", "io.valv.scope=image", "--label", "io.valv.version=0.117.0", "/tmp/codex-image"}; !reflect.DeepEqual(got, want) {
+	if got, want := runner.calls[1], []string{"build", "-f", "/tmp/codex-image/Dockerfile", "-t", "ghcr.io/valv/codex:dev", "--build-arg", "CODEX_VERSION=0.117.0", "--build-arg", fmt.Sprintf("VALV_GID=%d", gid), "--build-arg", fmt.Sprintf("VALV_UID=%d", uid), "--label", "io.valv.managed=true", "--label", "io.valv.provider=codex", "--label", fmt.Sprintf("%s=%s", recipeHashLabel, svcRecipeHashForTest("/tmp/codex-image", "Dockerfile")), "--label", "io.valv.scope=image", "--label", "io.valv.version=0.117.0", "/tmp/codex-image"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("fallback args = %#v, want %#v", got, want)
 	}
 }
@@ -390,4 +469,14 @@ func TestCodexVersionResolverReadsLatestRelease(t *testing.T) {
 	if got, want := version, "0.117.0"; got != want {
 		t.Fatalf("version = %q, want %q", got, want)
 	}
+}
+
+func svcRecipeHashForTest(contextDir, dockerfile string) string {
+	svc, _ := New(Options{
+		Runner:     &runnerRecorder{},
+		Repository: "ghcr.io/valv/codex",
+		ContextDir: contextDir,
+		Dockerfile: dockerfile,
+	})
+	return svc.recipeHash()
 }

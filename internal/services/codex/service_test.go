@@ -153,6 +153,9 @@ func TestRunBuildsDockerRequestFromProjectBindingAndProfile(t *testing.T) {
 	if !executor.got.Interactive || !executor.got.TTY || !executor.got.Remove {
 		t.Fatalf("Run() interactive flags = %+v", executor.got)
 	}
+	if !executor.got.Init {
+		t.Fatalf("Run() init = %t, want true", executor.got.Init)
+	}
 	if got := executor.got.Env["CODEX_HOME"]; got != codexruntime.ContainerCodexDir {
 		t.Fatalf("Run() CODEX_HOME = %q, want %q", got, codexruntime.ContainerCodexDir)
 	}

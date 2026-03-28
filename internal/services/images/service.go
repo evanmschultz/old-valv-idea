@@ -2,6 +2,8 @@ package images
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,6 +26,7 @@ const (
 	defaultCodexDockerfile   = "Dockerfile"
 	defaultCodexLatestURL    = "https://api.github.com/repos/openai/codex/releases/latest"
 	defaultVersionRequestTTL = 10 * time.Second
+	recipeHashLabel          = "io.valv.recipe_hash"
 )
 
 var (
@@ -33,6 +36,10 @@ var (
 
 type Runner interface {
 	Run(context.Context, []string) error
+}
+
+type outputRunner interface {
+	Output(context.Context, []string) (string, error)
 }
 
 type StateStore interface {
@@ -247,6 +254,7 @@ func (s Service) Build(ctx context.Context, request BuildRequest) (BuildResult, 
 			"io.valv.provider": string(s.provider),
 			"io.valv.scope":    "image",
 			"io.valv.version":  version,
+			recipeHashLabel:    s.recipeHash(),
 		},
 		Pull:    request.Pull,
 		NoCache: request.NoCache,
@@ -328,8 +336,15 @@ func (s Service) EnsureLatest(ctx context.Context, request EnsureRequest) (Ensur
 	if err != nil {
 		return EnsureResult{}, err
 	}
+	recipeMatches := false
+	if available {
+		recipeMatches, err = s.imageRecipeMatches(ctx, defaultRef)
+		if err != nil {
+			return EnsureResult{}, err
+		}
+	}
 
-	if available && stateFound && state.InstalledVersion == latestVersion {
+	if available && stateFound && state.InstalledVersion == latestVersion && recipeMatches {
 		state.LatestVersion = latestVersion
 		state.LatestCheckedAt = checkedAt
 		state.UpdatedAt = time.Now().UTC()
@@ -423,6 +438,18 @@ func (s Service) defaultImageRef() docker.ImageRef {
 	return docker.NewImageRef(s.repository, s.defaultTag)
 }
 
+func (s Service) recipeHash() string {
+	content := DefaultCodexDockerfile()
+	if filepath.Base(s.dockerfile) != defaultCodexDockerfile {
+		path := filepath.Join(s.contextDir, s.dockerfile)
+		if fileContent, err := os.ReadFile(path); err == nil {
+			content = string(fileContent)
+		}
+	}
+	sum := sha256.Sum256([]byte(content))
+	return hex.EncodeToString(sum[:])
+}
+
 func (s Service) versionImageRef(version string) docker.ImageRef {
 	return docker.NewImageRef(s.repository, strings.ReplaceAll(strings.TrimSpace(version), ".", "-"))
 }
@@ -438,6 +465,21 @@ func (s Service) imageAvailable(ctx context.Context, image docker.ImageRef) (boo
 		return false, fmt.Errorf("inspect image %q: %w", image.String(), err)
 	}
 	return true, nil
+}
+
+func (s Service) imageRecipeMatches(ctx context.Context, image docker.ImageRef) (bool, error) {
+	runner, ok := s.runner.(outputRunner)
+	if !ok {
+		return true, nil
+	}
+	output, err := runner.Output(ctx, []string{"image", "inspect", "--format", "{{ index .Config.Labels \"" + recipeHashLabel + "\" }}", image.String()})
+	if err != nil {
+		if dockerImageMissingError(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("inspect image %q recipe hash: %w", image.String(), err)
+	}
+	return strings.TrimSpace(output) == s.recipeHash(), nil
 }
 
 func existingTags(state domain.ProviderImageState, defaultRef docker.ImageRef) []docker.ImageRef {
@@ -481,7 +523,7 @@ ARG VALV_UID=1000
 ARG VALV_GID=1000
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends bubblewrap ca-certificates git \
+    && apt-get install -y --no-install-recommends bubblewrap ca-certificates git ncurses-term \
     && rm -rf /var/lib/apt/lists/*
 
 RUN getent group "${VALV_GID}" >/dev/null || groupadd -g "${VALV_GID}" valv \
