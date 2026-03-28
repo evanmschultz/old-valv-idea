@@ -74,6 +74,9 @@ func PrepareRuntime(ctx context.Context, request PrepareRequest) (PreparedRuntim
 		"LOGNAME":    "valv",
 		"USER":       "valv",
 	}
+	if _, ok := os.LookupEnv("TERM"); !ok {
+		env["TERM"] = "xterm-256color"
+	}
 
 	bridgeManager, err := newBridgeManager(ctx, request.Logger)
 	if err != nil {
@@ -106,7 +109,8 @@ func PrepareRuntime(ctx context.Context, request PrepareRequest) (PreparedRuntim
 		return PreparedRuntime{}, fmt.Errorf("prepare codex runtime: translate profile config: %w", err)
 	}
 	warnings = append(warnings, profileResult.Warnings...)
-	envPassthrough := append([]string(nil), profileResult.EnvPassthrough...)
+	envPassthrough := terminalEnvPassthrough()
+	envPassthrough = appendUniqueStrings(envPassthrough, profileResult.EnvPassthrough...)
 	if profileResult.HasOverlay {
 		mounts = append(mounts, dockeradapter.NewMountSpec(profileOverlayPath, filepath.Join(ContainerCodexDir, "config.toml"), true))
 	}
@@ -368,4 +372,22 @@ func appendUniqueStrings(dst []string, values ...string) []string {
 
 func errorsJoin(errs ...error) error {
 	return errors.Join(errs...)
+}
+
+func terminalEnvPassthrough() []string {
+	names := []string{
+		"TERM",
+		"COLORTERM",
+		"TERM_PROGRAM",
+		"TERM_PROGRAM_VERSION",
+		"LANG",
+		"LC_CTYPE",
+	}
+	out := make([]string, 0, len(names))
+	for _, name := range names {
+		if _, ok := os.LookupEnv(name); ok {
+			out = append(out, name)
+		}
+	}
+	return out
 }

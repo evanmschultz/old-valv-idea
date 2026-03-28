@@ -222,6 +222,46 @@ CONTEXT7_API_KEY = "CONTEXT7_API_KEY"
 	}
 }
 
+func TestPrepareRuntimePassesThroughTerminalEnv(t *testing.T) {
+	t.Setenv("TERM", "xterm-256color")
+	t.Setenv("COLORTERM", "truecolor")
+	t.Setenv("TERM_PROGRAM", "Apple_Terminal")
+
+	root := t.TempDir()
+	profileHome := filepath.Join(root, "profile")
+	projectRoot := filepath.Join(root, "project")
+	tempRoot := filepath.Join(root, "tmp")
+	if err := os.MkdirAll(profileHome, 0o755); err != nil {
+		t.Fatalf("MkdirAll(profileHome) error = %v", err)
+	}
+	if err := os.MkdirAll(projectRoot, 0o755); err != nil {
+		t.Fatalf("MkdirAll(projectRoot) error = %v", err)
+	}
+
+	prepared, err := PrepareRuntime(context.Background(), PrepareRequest{
+		ProfileHome: profileHome,
+		ProjectRoot: projectRoot,
+		TempRoot:    tempRoot,
+	})
+	if err != nil {
+		t.Fatalf("PrepareRuntime() error = %v", err)
+	}
+	defer func() {
+		if err := prepared.Close(); err != nil {
+			t.Fatalf("prepared.Close() error = %v", err)
+		}
+	}()
+
+	for _, name := range []string{"TERM", "COLORTERM", "TERM_PROGRAM"} {
+		if !containsString(prepared.EnvPassthrough, name) {
+			t.Fatalf("EnvPassthrough = %#v, want %s", prepared.EnvPassthrough, name)
+		}
+	}
+	if _, ok := prepared.Env["TERM"]; ok {
+		t.Fatalf("Env = %#v, unexpected TERM override when host TERM exists", prepared.Env)
+	}
+}
+
 func newProfileMount(profileHome string) dockeradapter.MountSpec {
 	return dockeradapter.MountSpec{
 		Source:   profileHome,
