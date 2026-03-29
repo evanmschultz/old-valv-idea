@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	dockeradapter "github.com/evanmschultz/valv/internal/adapters/docker"
+	codexprovider "github.com/evanmschultz/valv/internal/adapters/providers/codex"
 	openaihandler "github.com/evanmschultz/valv/internal/api/openai"
 	"github.com/evanmschultz/valv/internal/config"
 	"github.com/evanmschultz/valv/internal/domain"
@@ -169,11 +170,11 @@ func pickProfile(cmd *cobra.Command, provider domain.Provider, profiles []domain
 	program := tea.NewProgram(managetui.NewProfilePicker(provider, sorted), tea.WithInput(cmd.InOrStdin()), tea.WithOutput(cmd.OutOrStdout()))
 	finalModel, err := program.Run()
 	if err != nil {
-		return "", fmt.Errorf("run profile picker: %w", err)
+		return "", fmt.Errorf("run account picker: %w", err)
 	}
 	model, ok := finalModel.(managetui.ProfilePickerModel)
 	if !ok {
-		return "", fmt.Errorf("run profile picker: unexpected final model %T", finalModel)
+		return "", fmt.Errorf("run account picker: unexpected final model %T", finalModel)
 	}
 	selected, ok := model.Selected()
 	if !ok {
@@ -185,15 +186,72 @@ func pickProfile(cmd *cobra.Command, provider domain.Provider, profiles []domain
 func listItemsForAccounts(profiles []domain.Profile) []output.ListItem {
 	items := make([]output.ListItem, 0, len(profiles))
 	for _, profile := range profiles {
+		identity := readAccountIdentity(profile)
 		items = append(items, output.ListItem{
 			Title: profile.Name,
 			Fields: []output.Field{
 				{Label: "provider", Value: string(profile.Provider), Muted: true},
+				{Label: "auth", Value: identity.authDisplay, Muted: true},
+				{Label: "email", Value: identity.emailDisplay},
 				{Label: "home", Value: profile.HomePath, Identifier: true},
 			},
 		})
 	}
 	return items
+}
+
+type accountDisplayIdentity struct {
+	authDisplay  string
+	emailDisplay string
+}
+
+func readAccountIdentity(profile domain.Profile) accountDisplayIdentity {
+	switch profile.Provider {
+	case domain.ProviderCodex:
+		identity, err := codexprovider.ReadAccountIdentity(profile.HomePath)
+		if err != nil {
+			return accountDisplayIdentity{
+				authDisplay:  "unavailable",
+				emailDisplay: "(unavailable)",
+			}
+		}
+		return accountDisplayIdentity{
+			authDisplay:  codexAuthDisplay(identity),
+			emailDisplay: codexEmailDisplay(identity),
+		}
+	default:
+		return accountDisplayIdentity{
+			authDisplay:  "unknown",
+			emailDisplay: "(unavailable)",
+		}
+	}
+}
+
+func codexAuthDisplay(identity codexprovider.AccountIdentity) string {
+	switch strings.ToLower(strings.TrimSpace(identity.AuthMode)) {
+	case "chatgpt":
+		return "ChatGPT"
+	case "api_key":
+		return "API key"
+	}
+	if identity.LoggedIn {
+		return "logged in"
+	}
+	return "not logged in"
+}
+
+func codexEmailDisplay(identity codexprovider.AccountIdentity) string {
+	if email := strings.TrimSpace(identity.Email); email != "" {
+		return email
+	}
+	switch strings.ToLower(strings.TrimSpace(identity.AuthMode)) {
+	case "api_key":
+		return "(api key login)"
+	}
+	if identity.LoggedIn {
+		return "(identity unavailable)"
+	}
+	return "(not logged in)"
 }
 
 func realHomeDir() string {

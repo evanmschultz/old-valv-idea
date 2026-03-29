@@ -34,6 +34,7 @@ This surface owns setup and repair flows. The direct ` + "`valv codex ...`" + ` 
 		Example: strings.TrimSpace(`
 valv manage account add codex
 valv manage account add codex work
+valv manage account list
 valv manage status
 valv manage update
 valv manage cleanup all
@@ -55,9 +56,8 @@ valv manage cleanup all
 
 func newManageAccountCommand(paths config.Paths, opts *rootOptions) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "account",
-		Aliases: []string{"profile"},
-		Short:   "Manage Valv provider accounts",
+		Use:   "account",
+		Short: "Manage Valv provider accounts",
 		Long: strings.TrimSpace(`
 Manage Valv provider accounts.
 
@@ -107,6 +107,8 @@ Output fields:
 - project: bound project root when Valv also updated the current project binding
 - provider: provider family for the account
 - account: Valv account name
+- auth: current auth mode inferred from the account home
+- email: email identity from the account when available
 - home: host path mounted into provider runtimes as that account's home
 `),
 		Example: strings.TrimSpace(`
@@ -142,7 +144,7 @@ func newManageAccountListCommand(paths config.Paths, opts *rootOptions) *cobra.C
 		Long: strings.TrimSpace(`
 List the accounts Valv knows for one provider or, if no provider is given, group accounts by provider.
 
-Human output shows the account name and mounted home path. JSON output uses one stable command-owned top-level key.
+Human output shows the account name, auth mode, email identity when available, and mounted home path. JSON output uses one stable command-owned top-level key.
 `),
 		Example: strings.TrimSpace(`
 valv manage account list
@@ -212,6 +214,14 @@ func newManageBindCommand(paths config.Paths, opts *rootOptions) *cobra.Command 
 Bind one detected project root to one provider account.
 
 After binding, direct runtime commands like ` + "`valv codex ...`" + ` can resolve the account without additional setup.
+
+Output fields:
+- project: detected project root now bound in Valv
+- provider: provider family for the account
+- account: Valv account name
+- auth: current auth mode inferred from the account home
+- email: email identity from the account when available
+- home: host path mounted into provider runtimes as that account's home
 `),
 		Example: strings.TrimSpace(`
 valv manage bind codex work
@@ -238,7 +248,7 @@ func runManageBindInteractive(cmd *cobra.Command, paths config.Paths, opts *root
 	defer closeStore()
 	profiles, err := service.ListProfiles(cmd.Context(), domain.ProviderCodex)
 	if err != nil {
-		return fmt.Errorf("manage bind: list profiles: %w", err)
+		return fmt.Errorf("manage bind: list accounts: %w", err)
 	}
 	selected, err := pickProfile(cmd, domain.ProviderCodex, profiles.Profiles)
 	if err != nil {
@@ -284,10 +294,13 @@ func runManageAccountAdd(cmd *cobra.Command, paths config.Paths, opts *rootOptio
 	if err := ensureManagedAccountReady(cmd, provider, profile, accountAuthOptions{SkipLogin: skipLogin}); err != nil {
 		return fmt.Errorf("manage account add: %w", err)
 	}
+	identity := readAccountIdentity(profile)
 	if !bind {
 		return output.WriteRecord(cmd.OutOrStdout(), mode, "Account ready", []output.Field{
 			{Label: "provider", Value: string(profile.Provider), Muted: true},
 			{Label: "account", Value: profile.Name, Identifier: true},
+			{Label: "auth", Value: identity.authDisplay, Muted: true},
+			{Label: "email", Value: identity.emailDisplay},
 			{Label: "home", Value: profile.HomePath},
 		})
 	}
@@ -303,10 +316,13 @@ func runManageAccountAdd(cmd *cobra.Command, paths config.Paths, opts *rootOptio
 	if err != nil {
 		return fmt.Errorf("manage account add: bind project: %w", err)
 	}
+	identity = readAccountIdentity(result.Profile)
 	return output.WriteRecord(cmd.OutOrStdout(), mode, "Account ready and project bound", []output.Field{
 		{Label: "project", Value: result.Project.Root, Identifier: true},
 		{Label: "provider", Value: string(result.Profile.Provider), Muted: true},
 		{Label: "account", Value: result.Profile.Name, Identifier: true},
+		{Label: "auth", Value: identity.authDisplay, Muted: true},
+		{Label: "email", Value: identity.emailDisplay},
 		{Label: "home", Value: result.Profile.HomePath},
 	})
 }
@@ -332,7 +348,15 @@ func runManageBind(cmd *cobra.Command, paths config.Paths, opts *rootOptions, pr
 	if err != nil {
 		return fmt.Errorf("manage bind: %w", err)
 	}
-	return output.WriteRecord(cmd.OutOrStdout(), mode, "Project binding updated", []output.Field{{Label: "project", Value: result.Project.Root, Identifier: true}, {Label: "provider", Value: string(result.Profile.Provider), Muted: true}, {Label: "account", Value: result.Profile.Name, Identifier: true}, {Label: "home", Value: result.Profile.HomePath}})
+	identity := readAccountIdentity(result.Profile)
+	return output.WriteRecord(cmd.OutOrStdout(), mode, "Project binding updated", []output.Field{
+		{Label: "project", Value: result.Project.Root, Identifier: true},
+		{Label: "provider", Value: string(result.Profile.Provider), Muted: true},
+		{Label: "account", Value: result.Profile.Name, Identifier: true},
+		{Label: "auth", Value: identity.authDisplay, Muted: true},
+		{Label: "email", Value: identity.emailDisplay},
+		{Label: "home", Value: result.Profile.HomePath},
+	})
 }
 
 func runManageAccountSwitch(cmd *cobra.Command, paths config.Paths, opts *rootOptions, args []string, projectPath string, skipLogin bool) error {
@@ -416,14 +440,14 @@ func resolveProfileSwitchTarget(cmd *cobra.Command, service interface {
 	}
 }
 
-func writeAccountsByProvider(cmd *cobra.Command, mode output.Mode, service profileLister) error {
-	sections := make([]profileSection, 0, len(supportedProviders()))
+func writeAccountsByProvider(cmd *cobra.Command, mode output.Mode, service accountLister) error {
+	sections := make([]accountSection, 0, len(supportedProviders()))
 	for _, provider := range supportedProviders() {
 		result, err := service.ListProfiles(cmd.Context(), provider)
 		if err != nil {
 			return fmt.Errorf("manage account list: %w", err)
 		}
-		sections = append(sections, profileSection{
+		sections = append(sections, accountSection{
 			Provider: provider,
 			Items:    listItemsForAccounts(result.Profiles),
 		})
@@ -431,7 +455,7 @@ func writeAccountsByProvider(cmd *cobra.Command, mode output.Mode, service profi
 
 	if mode.Format == domain.OutputFormatJSON {
 		payload := struct {
-			AccountsByProvider []profileSection `json:"accounts_by_provider"`
+			AccountsByProvider []accountSection `json:"accounts_by_provider"`
 		}{AccountsByProvider: sections}
 		encoder := json.NewEncoder(cmd.OutOrStdout())
 		encoder.SetEscapeHTML(false)
@@ -455,11 +479,11 @@ func writeAccountsByProvider(cmd *cobra.Command, mode output.Mode, service profi
 	return nil
 }
 
-type profileLister interface {
+type accountLister interface {
 	ListProfiles(context.Context, domain.Provider) (manageservice.ProfileListResult, error)
 }
 
-type profileSection struct {
+type accountSection struct {
 	Provider domain.Provider   `json:"provider"`
 	Items    []output.ListItem `json:"accounts"`
 }
@@ -488,6 +512,8 @@ Output fields:
 - project: detected project root
 - provider: bound provider
 - account: bound Valv account name
+- auth: current auth mode inferred from the bound account home
+- email: email identity from the bound account when available
 - home: bound provider home path
 - git marker: git directory used to detect the project root
 `),
@@ -525,7 +551,8 @@ func runManageStatus(cmd *cobra.Command, paths config.Paths, opts *rootOptions, 
 	if err != nil {
 		return err
 	}
-	return output.WriteRecord(cmd.OutOrStdout(), mode, "Project status", []output.Field{{Label: "project", Value: status.Project.Root, Identifier: true}, {Label: "provider", Value: string(status.Profile.Provider), Muted: true}, {Label: "account", Value: status.Profile.Name, Identifier: true}, {Label: "home", Value: status.Profile.HomePath}, {Label: "git marker", Value: status.Detected.GitMarker, Muted: true}})
+	identity := readAccountIdentity(status.Profile)
+	return output.WriteRecord(cmd.OutOrStdout(), mode, "Project status", []output.Field{{Label: "project", Value: status.Project.Root, Identifier: true}, {Label: "provider", Value: string(status.Profile.Provider), Muted: true}, {Label: "account", Value: status.Profile.Name, Identifier: true}, {Label: "auth", Value: identity.authDisplay, Muted: true}, {Label: "email", Value: identity.emailDisplay}, {Label: "home", Value: status.Profile.HomePath}, {Label: "git marker", Value: status.Detected.GitMarker, Muted: true}})
 }
 
 func newManageUpdateCommand(paths config.Paths, opts *rootOptions) *cobra.Command {

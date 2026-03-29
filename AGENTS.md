@@ -182,9 +182,10 @@ For containerized interactive Codex auth:
 User-facing account terminology:
 
 - user-facing management/help/output should prefer `account` over `profile`
-- `profile` may remain the internal storage term and a CLI compatibility alias, but the primary command/help surface should be `valv manage account ...`
+- do not keep advertising `profile` as a user-facing compatibility alias once the account-first surface exists; internal storage terms may still use `Profile`, but command/help/output should be account-first
 - `account add` should be the one-command default flow: create or reuse the account home, ensure host-side login when needed, and bind the current project unless `--no-bind` is explicitly requested
 - raw `--home` and `--skip-login` are expert overrides, not the primary UX
+- `manage status`, `manage account list`, and account-binding output should surface auth identity details when they can be inferred safely from the managed account home, including email for ChatGPT-backed Codex logins
 
 CLI alias policy:
 

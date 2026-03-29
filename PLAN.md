@@ -598,7 +598,8 @@ Recommended command-shape direction:
 - `valv manage account add ... --skip-login` and `--no-bind` should preserve advanced operator/script behavior
 - `valv manage account add ... --home <path>` should remain available as an expert override
 - `valv manage account switch [provider] [account-name]` should ensure the selected account is logged in before rebinding the current project
-- `profile` remains a compatibility alias for operators and scripts, but `account` is the primary user-facing term
+- user-facing management/help/output should be account-first; `profile` may remain an internal storage term, but it should stop being the advertised CLI noun once the account surface is in place
+- account observability should include auth/email identity in `valv manage status`, `valv manage account list`, and account-binding output so users can tell which login is actually bound to a project
 
 ## Proposed MVP Shape
 
@@ -636,10 +637,12 @@ Shipped and working:
 - account-first management UX exists:
   - `valv manage account add codex`
   - `valv manage account add codex <account-name>`
+  - `valv manage account list [provider]`
   - `valv manage account switch ...`
 - host-backed default Codex account reuse works through `~/.codex`
 - isolated named Codex accounts work and can complete host-side login before container launch
 - project-local binding and switching work
+- `valv manage status`, `valv manage account list`, and account add/bind output surface auth mode and email identity when they can be inferred from the managed account home
 - MCP translation and bridging work for:
   - host-loopback MCP URLs such as `127.0.0.1`
   - host-only stdio MCP commands such as `gopls` and `tillsyn`
@@ -678,6 +681,7 @@ What remains now that the API validation passes:
 
 - optional polish on interactive TTY ownership and `/mcp` UI parity
 - optional cleanup/migration UX for stale historical account aliases
+- optional richer account observability commands such as `valv manage account inspect` or `whoami`
 - future provider work:
   - Claude
   - Gemini

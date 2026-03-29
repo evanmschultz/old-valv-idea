@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,7 +16,7 @@ import (
 	"github.com/evanmschultz/valv/internal/pathutil"
 )
 
-func TestManageProfileAddCreatesIsolatedNamedProfileAndBindsProject(t *testing.T) {
+func TestManageAccountAddCreatesIsolatedNamedAccountAndBindsProject(t *testing.T) {
 	t.Parallel()
 
 	paths := testCodexPaths(t)
@@ -83,7 +85,7 @@ func TestManageProfileAddCreatesIsolatedNamedProfileAndBindsProject(t *testing.T
 	}
 }
 
-func TestManageProfileAddWithoutNameUsesDefaultHostProfileAndBindsProject(t *testing.T) {
+func TestManageAccountAddWithoutNameUsesDefaultHostAccountAndBindsProject(t *testing.T) {
 	t.Parallel()
 
 	paths := testCodexPaths(t)
@@ -104,7 +106,7 @@ func TestManageProfileAddWithoutNameUsesDefaultHostProfileAndBindsProject(t *tes
 	}
 }
 
-func TestManageProfileAddWithoutNameReusesExistingSameHomeAccount(t *testing.T) {
+func TestManageAccountAddWithoutNameReusesExistingSameHomeAccount(t *testing.T) {
 	t.Parallel()
 
 	paths := testCodexPaths(t)
@@ -128,7 +130,7 @@ func TestManageProfileAddWithoutNameReusesExistingSameHomeAccount(t *testing.T) 
 	}
 }
 
-func TestManageProfileAddNoBindSkipsProjectBinding(t *testing.T) {
+func TestManageAccountAddNoBindSkipsProjectBinding(t *testing.T) {
 	t.Parallel()
 
 	paths := testCodexPaths(t)
@@ -159,6 +161,7 @@ func TestManageBindAndStatusUseRealStoreAndProjectDetection(t *testing.T) {
 
 	profileHome := filepath.Join(paths.ProviderRoot, "codex", "profiles", "dev")
 	runManage(t, paths, []string{"account", "add", "codex", "dev", "--home", profileHome, "--skip-login", "--no-bind"})
+	writeTestCodexAuth(t, profileHome, "developer@example.com", "Developer Example")
 	runManage(t, paths, []string{"bind", "codex", "dev", "--project", workDir})
 
 	statusOut := runManage(t, paths, []string{"status", "--project", workDir})
@@ -168,9 +171,15 @@ func TestManageBindAndStatusUseRealStoreAndProjectDetection(t *testing.T) {
 	if !strings.Contains(statusOut, "provider=codex") {
 		t.Fatalf("unexpected status output: %q", statusOut)
 	}
+	if !strings.Contains(statusOut, "auth=ChatGPT") {
+		t.Fatalf("unexpected status output: %q", statusOut)
+	}
+	if !strings.Contains(statusOut, "email=developer@example.com") {
+		t.Fatalf("unexpected status output: %q", statusOut)
+	}
 }
 
-func TestManageProfileHelpSubcommandWorks(t *testing.T) {
+func TestManageAccountHelpSubcommandWorks(t *testing.T) {
 	t.Parallel()
 
 	paths := testCodexPaths(t)
@@ -188,12 +197,12 @@ func TestManageProfileHelpSubcommandWorks(t *testing.T) {
 	}
 	for _, want := range []string{"Manage Valv provider accounts", "add", "list"} {
 		if !strings.Contains(stdout.String(), want) {
-			t.Fatalf("unexpected profile help output %q missing %q", stdout.String(), want)
+			t.Fatalf("unexpected account help output %q missing %q", stdout.String(), want)
 		}
 	}
 }
 
-func TestManageProfileAliasStillWorks(t *testing.T) {
+func TestManageProfileAliasNoLongerWorks(t *testing.T) {
 	t.Parallel()
 
 	paths := testCodexPaths(t)
@@ -206,13 +215,9 @@ func TestManageProfileAliasStillWorks(t *testing.T) {
 	cmd.SetErr(&stderr)
 	cmd.SetArgs([]string{"profile", "help"})
 
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-	for _, want := range []string{"Manage Valv provider accounts", "add", "switch"} {
-		if !strings.Contains(stdout.String(), want) {
-			t.Fatalf("unexpected profile alias help output %q missing %q", stdout.String(), want)
-		}
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "unknown command") {
+		t.Fatalf("Execute() error = %v, want unknown command", err)
 	}
 }
 
@@ -231,4 +236,38 @@ func runManage(t *testing.T, paths config.Paths, args []string) string {
 		t.Fatalf("Execute(%v) error = %v\nstderr=%s", args, err, stderr.String())
 	}
 	return stdout.String()
+}
+
+func writeTestCodexAuth(t *testing.T, homePath, email, name string) {
+	t.Helper()
+	if err := os.MkdirAll(homePath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", homePath, err)
+	}
+	token := testJWT(t, map[string]string{"email": email, "name": name})
+	payload := map[string]any{
+		"auth_mode": "chatgpt",
+		"tokens": map[string]string{
+			"id_token": token,
+		},
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("Marshal(auth payload) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(homePath, "auth.json"), data, 0o600); err != nil {
+		t.Fatalf("WriteFile(auth.json) error = %v", err)
+	}
+}
+
+func testJWT(t *testing.T, claims map[string]string) string {
+	t.Helper()
+	header, err := json.Marshal(map[string]string{"alg": "RS256", "typ": "JWT"})
+	if err != nil {
+		t.Fatalf("Marshal(header) error = %v", err)
+	}
+	payload, err := json.Marshal(claims)
+	if err != nil {
+		t.Fatalf("Marshal(claims) error = %v", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(header) + "." + base64.RawURLEncoding.EncodeToString(payload) + ".signature"
 }

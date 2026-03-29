@@ -34,7 +34,7 @@ func newAPICommand(paths config.Paths, opts *rootOptions) *cobra.Command {
 		Use:   "api",
 		Short: "Run the Valv API surface",
 		Long: strings.TrimSpace(`
-Run the OpenAI-compatible Valv API surface backed by the current project's bound provider profile.
+Run the OpenAI-compatible Valv API surface backed by the current project's bound provider account.
 `),
 		Example: strings.TrimSpace(`
 valv api serve

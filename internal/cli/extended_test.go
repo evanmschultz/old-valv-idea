@@ -142,9 +142,11 @@ func TestManageAccountListOutputsStoredAccounts(t *testing.T) {
 
 	runManage(t, paths, []string{"account", "add", "codex", "alpha", "--home", profileHomeA})
 	runManage(t, paths, []string{"account", "add", "codex", "beta", "--home", profileHomeB})
+	writeTestCodexAuth(t, profileHomeA, "alpha@example.com", "Alpha Example")
+	writeTestCodexAuth(t, profileHomeB, "beta@example.com", "Beta Example")
 
 	output := runManage(t, paths, []string{"account", "list", "codex"})
-	for _, want := range []string{"codex accounts", "- alpha", "- beta", "home="} {
+	for _, want := range []string{"codex accounts", "- alpha", "- beta", "auth=ChatGPT", "email=alpha@example.com", "email=beta@example.com", "home="} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("unexpected account list output %q missing %q", output, want)
 		}
@@ -157,9 +159,10 @@ func TestManageAccountListWithoutProviderGroupsByProvider(t *testing.T) {
 	paths := testCodexPaths(t)
 	profileHome := filepath.Join(paths.ProviderRoot, "codex", "profiles", "alpha")
 	runManage(t, paths, []string{"account", "add", "codex", "alpha", "--home", profileHome})
+	writeTestCodexAuth(t, profileHome, "alpha@example.com", "Alpha Example")
 
 	output := runManage(t, paths, []string{"account", "list"})
-	for _, want := range []string{"codex accounts", "- alpha", "home="} {
+	for _, want := range []string{"codex accounts", "- alpha", "auth=ChatGPT", "email=alpha@example.com", "home="} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("unexpected grouped account list output %q missing %q", output, want)
 		}
@@ -172,6 +175,7 @@ func TestManageAccountListJSONUsesCommandKey(t *testing.T) {
 	paths := testCodexPaths(t)
 	profileHome := filepath.Join(paths.ProviderRoot, "codex", "profiles", "alpha")
 	runManage(t, paths, []string{"account", "add", "codex", "alpha", "--home", profileHome})
+	writeTestCodexAuth(t, profileHome, "alpha@example.com", "Alpha Example")
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -190,7 +194,7 @@ func TestManageAccountListJSONUsesCommandKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EvalSymlinks(%q) error = %v", profileHome, err)
 	}
-	want := fmt.Sprintf("{\n  \"accounts\": [\n    {\n      \"title\": \"alpha\",\n      \"fields\": [\n        {\n          \"label\": \"provider\",\n          \"value\": \"codex\",\n          \"muted\": true\n        },\n        {\n          \"label\": \"home\",\n          \"value\": %q,\n          \"identifier\": true\n        }\n      ]\n    }\n  ]\n}\n", wantHome)
+	want := fmt.Sprintf("{\n  \"accounts\": [\n    {\n      \"title\": \"alpha\",\n      \"fields\": [\n        {\n          \"label\": \"provider\",\n          \"value\": \"codex\",\n          \"muted\": true\n        },\n        {\n          \"label\": \"auth\",\n          \"value\": \"ChatGPT\",\n          \"muted\": true\n        },\n        {\n          \"label\": \"email\",\n          \"value\": \"alpha@example.com\"\n        },\n        {\n          \"label\": \"home\",\n          \"value\": %q,\n          \"identifier\": true\n        }\n      ]\n    }\n  ]\n}\n", wantHome)
 	if output != want {
 		t.Fatalf("unexpected account list json output:\n got: %q\nwant: %q", output, want)
 	}
@@ -626,7 +630,7 @@ func TestRunManageBindInteractiveRequiresTTYWhenProfilesExist(t *testing.T) {
 
 	paths := testCodexPaths(t)
 	profileHome := filepath.Join(paths.ProviderRoot, "codex", "profiles", "dev")
-	runManage(t, paths, []string{"profile", "add", "codex", "dev", "--home", profileHome})
+	runManage(t, paths, []string{"account", "add", "codex", "dev", "--home", profileHome})
 
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
@@ -643,7 +647,7 @@ func TestRunManageBindInteractiveRequiresTTYWhenProfilesExist(t *testing.T) {
 func TestRunGlobalSwitchWithoutProfileRequiresTTY(t *testing.T) {
 	paths := testCodexPaths(t)
 	profileHome := filepath.Join(paths.ProviderRoot, "codex", "profiles", "dev")
-	runManage(t, paths, []string{"profile", "add", "codex", "dev", "--home", profileHome})
+	runManage(t, paths, []string{"account", "add", "codex", "dev", "--home", profileHome})
 	installFakePgrep(t, 1)
 
 	cmd := &cobra.Command{}
@@ -668,8 +672,8 @@ func TestListItemsForAccountsIncludesHomeAndProvider(t *testing.T) {
 	if items[0].Title != "dev" {
 		t.Fatalf("Title = %q, want dev", items[0].Title)
 	}
-	if len(items[0].Fields) != 2 {
-		t.Fatalf("len(fields) = %d, want 2", len(items[0].Fields))
+	if len(items[0].Fields) != 4 {
+		t.Fatalf("len(fields) = %d, want 4", len(items[0].Fields))
 	}
 }
 
@@ -779,7 +783,7 @@ func TestRunAPIServeReturnsBindErrorBeforeAnnouncingSuccess(t *testing.T) {
 	paths := testCodexPaths(t)
 	projectRoot := t.TempDir()
 	profileHome := filepath.Join(paths.ProviderRoot, "codex", "profiles", "dev")
-	runManage(t, paths, []string{"profile", "add", "codex", "dev", "--home", profileHome})
+	runManage(t, paths, []string{"account", "add", "codex", "dev", "--home", profileHome})
 	runManage(t, paths, []string{"bind", "codex", "dev", "--project", projectRoot})
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -816,7 +820,7 @@ func TestRunAPIServeRejectsNonPositiveRuntimeTTL(t *testing.T) {
 	paths := testCodexPaths(t)
 	projectRoot := t.TempDir()
 	profileHome := filepath.Join(paths.ProviderRoot, "codex", "profiles", "dev")
-	runManage(t, paths, []string{"profile", "add", "codex", "dev", "--home", profileHome})
+	runManage(t, paths, []string{"account", "add", "codex", "dev", "--home", profileHome})
 	runManage(t, paths, []string{"bind", "codex", "dev", "--project", projectRoot})
 
 	var stdout bytes.Buffer
