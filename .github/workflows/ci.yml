@@ -12,8 +12,8 @@ permissions:
   contents: read
 
 jobs:
-  check:
-    name: check (macos-latest)
+  test:
+    name: test (macos-latest)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
@@ -21,10 +21,14 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - uses: taiki-e/install-action@just
-      - name: Run canonical CI gate
+      - name: Install Mage
         shell: bash
-        run: just ci
+        run: |
+          go install github.com/magefile/mage@v1.17.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Run canonical local gate
+        shell: bash
+        run: mage test
 
   integration:
     name: integration + external goldens (ubuntu-latest)
@@ -35,7 +39,11 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - uses: taiki-e/install-action@just
+      - name: Install Mage
+        shell: bash
+        run: |
+          go install github.com/magefile/mage@v1.17.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - name: Run Docker-backed integration and external golden tests
         shell: bash
-        run: just integration
+        run: mage integration

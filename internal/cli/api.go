@@ -160,7 +160,8 @@ func runAPIServe(cmd *cobra.Command, paths config.Paths, opts *rootOptions, list
 
 func runAPIRuntimeSweeper(ctx context.Context, logger *log.Logger, service interface {
 	PruneExpiredRuntimes(context.Context) (int, error)
-}, ttl time.Duration) {
+}, ttl time.Duration,
+) {
 	interval := ttl / 2
 	if interval <= 0 {
 		interval = ttl

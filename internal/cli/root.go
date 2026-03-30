@@ -24,9 +24,11 @@ type rootOptions struct {
 	debug      bool
 }
 
-type loggerKey struct{}
-type effectiveConfigKey struct{}
-type logCloserKey struct{}
+type (
+	loggerKey          struct{}
+	effectiveConfigKey struct{}
+	logCloserKey       struct{}
+)
 
 func NewRootCommand(ctx context.Context, stdout, stderr io.Writer) (*cobra.Command, error) {
 	paths, err := config.ResolvePaths("")

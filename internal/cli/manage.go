@@ -406,7 +406,8 @@ func runManageAccountSwitch(cmd *cobra.Command, paths config.Paths, opts *rootOp
 
 func resolveProfileSwitchTarget(cmd *cobra.Command, service interface {
 	Status(context.Context, string) (manageservice.StatusResult, error)
-}, startPath string, args []string) (domain.Provider, string, error) {
+}, startPath string, args []string,
+) (domain.Provider, string, error) {
 	defaultProvider := domain.ProviderCodex
 	currentProvider := func() (domain.Provider, error) {
 		status, err := service.Status(cmd.Context(), startPath)
@@ -467,7 +468,7 @@ func writeAccountsByProvider(cmd *cobra.Command, mode output.Mode, service accou
 	}
 
 	for i, section := range sections {
-		if i > 0 {
+		if i > 0 && mode.Format != domain.OutputFormatHuman {
 			if _, err := fmt.Fprintln(cmd.OutOrStdout()); err != nil {
 				return fmt.Errorf("manage account list: separate provider sections: %w", err)
 			}

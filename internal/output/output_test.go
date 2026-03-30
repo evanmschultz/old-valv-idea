@@ -2,7 +2,10 @@ package output
 
 import (
 	"bytes"
+	"strings"
 	"testing"
+
+	"github.com/charmbracelet/x/exp/golden"
 
 	"github.com/evanmschultz/valv/internal/domain"
 )
@@ -59,7 +62,7 @@ func TestWriteRecordHuman(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WriteRecord() error = %v", err)
 	}
-	if got, want := buf.String(), "Valv version\n  version: dev\n"; got != want {
+	if got, want := buf.String(), "\nValv version\n  version: dev\n"; got != want {
 		t.Fatalf("WriteRecord() output = %q, want %q", got, want)
 	}
 }
@@ -129,8 +132,11 @@ func TestWriteListHumanUsesFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WriteList() error = %v", err)
 	}
-	if got, want := buf.String(), "Profiles\n- dev [ACTIVE]\n  provider: codex\n  home: /tmp/dev\n"; got != want {
+	if got, want := buf.String(), "\nProfiles\n- dev [ACTIVE]\n  provider: codex\n  home: /tmp/dev\n"; got != want {
 		t.Fatalf("WriteList() output = %q, want %q", got, want)
+	}
+	if strings.Contains(buf.String(), "\x1b[") {
+		t.Fatalf("WriteList() output = %q, want no ANSI escapes", buf.String())
 	}
 }
 
@@ -141,8 +147,23 @@ func TestWriteRecordHumanEmptyState(t *testing.T) {
 	if err := WriteRecord(&buf, Mode{Format: domain.OutputFormatHuman, Styled: false}, "Valv status", nil); err != nil {
 		t.Fatalf("WriteRecord() error = %v", err)
 	}
-	if got, want := buf.String(), "Valv status\n  (none)\n"; got != want {
+	if got, want := buf.String(), "\nValv status\n(none)\n"; got != want {
 		t.Fatalf("WriteRecord() output = %q, want %q", got, want)
+	}
+}
+
+func TestWriteRecordHumanBadgeNoANSI(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	if err := WriteRecord(&buf, Mode{Format: domain.OutputFormatHuman, Styled: false}, "API server listening", []Field{{Label: "workspace", Value: "true", Badge: true}}); err != nil {
+		t.Fatalf("WriteRecord() error = %v", err)
+	}
+	if got, want := buf.String(), "\nAPI server listening\n  workspace: [TRUE]\n"; got != want {
+		t.Fatalf("WriteRecord() output = %q, want %q", got, want)
+	}
+	if strings.Contains(buf.String(), "\x1b[") {
+		t.Fatalf("WriteRecord() output = %q, want no ANSI escapes", buf.String())
 	}
 }
 
@@ -153,7 +174,7 @@ func TestWriteListHumanEmptyState(t *testing.T) {
 	if err := WriteList(&buf, Mode{Format: domain.OutputFormatHuman, Styled: false}, "Profiles", nil); err != nil {
 		t.Fatalf("WriteList() error = %v", err)
 	}
-	if got, want := buf.String(), "Profiles\n- (none)\n"; got != want {
+	if got, want := buf.String(), "\nProfiles\n- (none)\n"; got != want {
 		t.Fatalf("WriteList() output = %q, want %q", got, want)
 	}
 }
@@ -179,4 +200,47 @@ func TestListJSONKey(t *testing.T) {
 	if got, want := listJSONKey(""), "items"; got != want {
 		t.Fatalf("listJSONKey(\"\") = %q, want %q", got, want)
 	}
+}
+
+func TestWriteRecordHumanGolden(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	err := WriteRecord(&buf, Mode{Format: domain.OutputFormatHuman, Styled: false}, "Project status", []Field{
+		{Label: "project", Value: "/tmp/project", Identifier: true},
+		{Label: "provider", Value: "codex", Muted: true},
+		{Label: "workspace", Value: "true", Badge: true},
+	})
+	if err != nil {
+		t.Fatalf("WriteRecord() error = %v", err)
+	}
+
+	golden.RequireEqual(t, buf.String())
+}
+
+func TestWriteListHumanGolden(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	err := WriteList(&buf, Mode{Format: domain.OutputFormatHuman, Styled: false}, "codex accounts", []ListItem{
+		{
+			Title: "work",
+			Badge: "active",
+			Fields: []Field{
+				{Label: "email", Value: "dev@example.com"},
+				{Label: "home", Value: "/tmp/work", Identifier: true},
+			},
+		},
+		{
+			Title: "personal",
+			Fields: []Field{
+				{Label: "email", Value: "(unknown)", Muted: true},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("WriteList() error = %v", err)
+	}
+
+	golden.RequireEqual(t, buf.String())
 }

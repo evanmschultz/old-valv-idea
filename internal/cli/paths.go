@@ -17,7 +17,7 @@ func newPathsCommand(paths config.Paths, opts *rootOptions) *cobra.Command {
 		Long: strings.TrimSpace(`
 Show the filesystem locations Valv will use for durable state, logs, caches, and runtime scratch data.
 
-In disposable dev mode, these paths intentionally point into a temp-home root created by Just. That temp-home is safe to remove with ` + "`just dev-clean`" + `.
+In disposable dev mode, these paths intentionally point into a temp-home root created by Mage. That temp-home is safe to remove with ` + "`mage dev:clean`" + `.
 `),
 		Example: strings.TrimSpace(`
 valv paths

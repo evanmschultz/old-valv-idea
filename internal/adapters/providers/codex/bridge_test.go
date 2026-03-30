@@ -315,7 +315,7 @@ func TestShouldIgnoreBridgeCloseError(t *testing.T) {
 
 func TestBridgeHelperProcess(t *testing.T) {
 	if os.Getenv(helperEnv) != "1" {
-		t.Skip("helper subprocess only")
+		return
 	}
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "bridge-helper", Version: "v0.0.1"}, nil)
@@ -323,7 +323,8 @@ func TestBridgeHelperProcess(t *testing.T) {
 		Text string `json:"text"`
 	}) (*mcp.CallToolResult, struct {
 		Echo string `json:"echo"`
-	}, error) {
+	}, error,
+	) {
 		return nil, struct {
 			Echo string `json:"echo"`
 		}{Echo: input.Text}, nil
@@ -362,7 +363,7 @@ func TestBridgeHelperProcess(t *testing.T) {
 
 func TestBridgeToolOnlyHelperProcess(t *testing.T) {
 	if os.Getenv(helperEnv) != "1" {
-		t.Skip("helper subprocess only")
+		return
 	}
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "bridge-helper", Version: "v0.0.1"}, nil)
@@ -370,7 +371,8 @@ func TestBridgeToolOnlyHelperProcess(t *testing.T) {
 		Text string `json:"text"`
 	}) (*mcp.CallToolResult, struct {
 		Echo string `json:"echo"`
-	}, error) {
+	}, error,
+	) {
 		return nil, struct {
 			Echo string `json:"echo"`
 		}{Echo: input.Text}, nil
