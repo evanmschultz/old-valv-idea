@@ -391,15 +391,22 @@ func output(command string, args ...string) (string, error) {
 func outputWithEnv(extraEnv []string, command string, args ...string) (string, error) {
 	cmd := exec.Command(command, args...)
 	cmd.Env = append(os.Environ(), extraEnv...)
-	out, err := cmd.CombinedOutput()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
 	if err != nil {
-		text := strings.TrimSpace(string(out))
+		text := strings.TrimSpace(stderr.String())
+		if text == "" {
+			text = strings.TrimSpace(stdout.String())
+		}
 		if text == "" {
 			return "", fmt.Errorf("run %s %s: %w", command, strings.Join(args, " "), err)
 		}
 		return "", fmt.Errorf("run %s %s: %w\n%s", command, strings.Join(args, " "), err, text)
 	}
-	return string(out), nil
+	return stdout.String(), nil
 }
 
 func newMagePrinter(out io.Writer) *laslig.Printer {
