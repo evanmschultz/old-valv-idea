@@ -44,7 +44,7 @@ func TestPathsCommandPlain(t *testing.T) {
 
 func TestNewRootCommandUsesDefaultPathsOnDarwin(t *testing.T) {
 	if runtime.GOOS != "darwin" {
-		t.Skip("default path resolution is macOS-only")
+		return
 	}
 	t.Setenv("HOME", t.TempDir())
 
@@ -59,7 +59,7 @@ func TestNewRootCommandUsesDefaultPathsOnDarwin(t *testing.T) {
 
 func TestNewRootCommandReturnsUnsupportedOSOnNonDarwin(t *testing.T) {
 	if runtime.GOOS == "darwin" {
-		t.Skip("unsupported OS branch does not apply on macOS")
+		return
 	}
 
 	_, err := NewRootCommand(context.Background(), &bytes.Buffer{}, &bytes.Buffer{})

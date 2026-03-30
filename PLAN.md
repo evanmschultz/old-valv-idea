@@ -262,12 +262,13 @@ Development command direction:
 - keep normal `build` for the default local binary
 - provide a dev wrapper path that runs `./valv` with a temp-home root and a dev-specific image override
 - provide a dev cleanup path that removes the temp-home state and the dev-tagged image set
-- default developer validation should prefer the disposable `just dev ...` path over writing into the real home directory
+- default developer validation should prefer the disposable `mage dev:run "..."` path over writing into the real home directory
 
 Current validation follow-ups to preserve:
 
-- `just dev-reset` and other dev-mode entrypoints must clearly explain that the printed root is one disposable temp-home path, not a scary permanent system path
+- `mage dev:reset` and other dev-mode entrypoints must clearly explain that the printed root is one disposable temp-home path, not a scary permanent system path
 - dev-mode output should make it obvious which paths are disposable, which images are dev-only, and how to clean them up
+- disposable `mage dev:run "..."` smoke checks currently rebuild the binary on every invocation; follow-up should reuse an already-built binary when inputs have not changed, or expose a clear no-rebuild path for repeated manual validation
 - help menus should grow more explanatory as the command tree gets deeper
 - help menus should include realistic examples, and output-producing commands should explain the meaning of their key output fields
 - help/examples should prefer clear account-style names like `personal`, `work`, `alternate-account`, or `host-codex`; avoid ambiguous example names like `dev` that can be confused with environment modes

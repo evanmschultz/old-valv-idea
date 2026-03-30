@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/evanmschultz/laslig"
 	"github.com/spf13/cobra"
 
 	"github.com/evanmschultz/valv/internal/domain"
@@ -57,7 +58,12 @@ func ensureCodexAccountReady(cmd *cobra.Command, account domain.Profile, options
 	if !commandHasTTY(cmd.InOrStdin()) || !commandHasTTY(cmd.OutOrStdout()) {
 		return fmt.Errorf("account %q is not logged in; rerun in a TTY to complete host Codex login or pass `--skip-login`", account.Name)
 	}
-	if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "Host Codex login needed for account %q.\n", account.Name); err != nil {
+	if err := writeCLINotice(
+		cmd.ErrOrStderr(),
+		laslig.NoticeInfoLevel,
+		"Host Codex login needed",
+		fmt.Sprintf("Complete host Codex login for account %q.", account.Name),
+	); err != nil {
 		return fmt.Errorf("announce host codex login: %w", err)
 	}
 	if err := runner.Login(cmd.Context(), account.HomePath, cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr()); err != nil {

@@ -133,7 +133,7 @@ For every user-visible Bubble Tea surface:
 - add or update golden fixtures whenever a TUI layout or style change is intentional
 - user-visible Bubble Tea goldens only cover Valv-owned screens; attached external CLIs like Codex also need terminal-integration coverage that exercises the real subprocess path
 - use transcript-style golden coverage for attached `valv codex` visual regressions, including the steady-state Codex screen and an interactive `/mcp` pass through the real subprocess path
-- keep `Justfile` recipes for Bubble Tea and external transcript goldens aligned with the actual test packages; do not claim a golden test workflow that the repo cannot run
+- keep Mage targets for Bubble Tea and external transcript goldens aligned with the actual test packages; do not claim a golden test workflow that the repo cannot run
 - when a change can affect visible Codex runtime behavior, run the external transcript golden path in addition to the Bubble Tea goldens
 - Docker-backed external golden and integration tests must clean up any Valv-managed fixture containers they start; passing tests must not leave `valv-codex:test*` containers running on the host
 
@@ -279,12 +279,12 @@ Testing standards:
 
 - keep root docs and guidance aligned with implementation
 - prefer a clean repo layout with minimal root clutter
-- use `Justfile` as the command source of truth when present
+- use `magefile.go` as the command source of truth when present
 - keep CI and local command recipes aligned
 - keep a clean dev-mode path that does not dirty the developer's real home directory during normal local checks
-- prefer `just dev ...` flows for disposable local validation and `just build` for normal binary creation
-- keep `just ci` separate from `just build`; `just ci` is the test/coverage/integration gate, while `just build` is the final local binary creation check
-- after local `just ci` passes and after the pushed GitHub run passes, run `just build` before handing local CLI testing back to the user
+- prefer `mage dev:run "..."` flows for disposable local validation and `mage build` for normal binary creation
+- keep `mage test` separate from `mage build`; `mage test` is the local verification gate, while `mage build` is the final local binary creation check
+- after local `mage test` passes and after the pushed GitHub run passes, run `mage build` before handing local CLI testing back to the user
 - when using disposable dev-mode home directories, preserve access to the host Docker CLI configuration/plugins so Docker Desktop features such as `buildx` keep working
 - after every push, run `gh run watch` for the triggered workflow and confirm the result before considering the push complete
 - use `gh run watch` directly; do not route GitHub run watching through repo-local `bin` helpers, wrapper scripts, or workaround commands when plain `gh run watch` is sufficient
@@ -301,12 +301,12 @@ Do not alter Go cache or module environment variables to work around sandbox res
 
 Prohibited examples:
 
-- `GOCACHE=... just ci`
+- `GOCACHE=... mage test`
 - `GOCACHE=... go test ./...`
 - ad hoc overrides of `GOCACHE`, `GOMODCACHE`, `GOPATH`, or similar Go env paths to bypass local environment constraints
 
 Required behavior:
 
 - use the normal system Go cache and normal local command paths
-- keep `Justfile` recipes correct rather than wrapping them in sandbox workarounds
+- keep Mage targets correct rather than wrapping them in sandbox workarounds
 - if a Go command or test run fails because of sandbox restrictions, stop, report that clearly, and let the user run it or decide the next step

@@ -195,7 +195,8 @@ func ensureBoundCodexAccountReady(cmd *cobra.Command, paths config.Paths, workin
 
 func ensureCodexImageAvailable(ctx context.Context, runner interface {
 	Run(context.Context, []string) error
-}, image dockeradapter.ImageRef) error {
+}, image dockeradapter.ImageRef,
+) error {
 	if _, err := findDockerBinary("docker"); err != nil {
 		return nil
 	}

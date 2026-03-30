@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/evanmschultz/laslig"
 	"github.com/spf13/cobra"
 
 	"github.com/evanmschultz/valv/internal/config"
@@ -47,7 +48,9 @@ func ensureCodexBindingReady(cmd *cobra.Command, paths config.Paths, workingDir 
 func runCodexFirstRunSetup(cmd *cobra.Command, service manageservice.Service, projectRoot string) error {
 	reader := bufio.NewReader(cmd.InOrStdin())
 	for {
-		writeCodexSetupIntro(cmd.ErrOrStderr(), projectRoot)
+		if err := writeCodexSetupIntro(cmd.ErrOrStderr(), projectRoot); err != nil {
+			return fmt.Errorf("write setup intro: %w", err)
+		}
 		selection, err := readPrompt(reader, cmd.ErrOrStderr(), "Select [1-4]: ")
 		if err != nil {
 			if errors.Is(err, io.EOF) {
@@ -73,7 +76,12 @@ func runCodexFirstRunSetup(cmd *cobra.Command, service manageservice.Service, pr
 					return errCodexSetupCanceled
 				}
 				if strings.Contains(err.Error(), "no codex accounts found") {
-					_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "No existing Codex accounts are available yet.")
+					_ = writeCLINotice(
+						cmd.ErrOrStderr(),
+						laslig.NoticeWarningLevel,
+						"No existing Codex accounts are available yet",
+						"Create one or use the default account flow first.",
+					)
 					continue
 				}
 				return fmt.Errorf("select existing account: %w", err)
@@ -93,7 +101,12 @@ func runCodexFirstRunSetup(cmd *cobra.Command, service manageservice.Service, pr
 			}
 			name = strings.TrimSpace(name)
 			if name == "" {
-				_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "Account name cannot be empty.")
+				_ = writeCLINotice(
+					cmd.ErrOrStderr(),
+					laslig.NoticeErrorLevel,
+					"Account name cannot be empty",
+					"Enter a non-empty isolated account name.",
+				)
 				continue
 			}
 			profile, err := service.CreateProfile(cmd.Context(), domain.ProviderCodex, name, "")
@@ -104,7 +117,12 @@ func runCodexFirstRunSetup(cmd *cobra.Command, service manageservice.Service, pr
 		case "4", "q", "quit", "cancel", "esc":
 			return errCodexSetupCanceled
 		default:
-			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Unknown selection %q.\n", selection)
+			_ = writeCLINotice(
+				cmd.ErrOrStderr(),
+				laslig.NoticeWarningLevel,
+				"Unknown selection",
+				fmt.Sprintf("Choose one of 1-4, got %q.", selection),
+			)
 		}
 	}
 }
@@ -120,13 +138,17 @@ func loginBindAndReportCodexSetup(cmd *cobra.Command, service manageservice.Serv
 	return writeCodexSetupResult(cmd.ErrOrStderr(), "Account ready and project bound", result.Project.Root, result.Profile)
 }
 
-func writeCodexSetupIntro(out io.Writer, projectRoot string) {
-	_, _ = fmt.Fprintln(out, "Valv setup needed")
-	_, _ = fmt.Fprintf(out, "  project: %s\n", projectRoot)
-	_, _ = fmt.Fprintln(out, "  1. Use the default Codex account for this environment and bind it")
-	_, _ = fmt.Fprintln(out, "  2. Choose an existing Valv account")
-	_, _ = fmt.Fprintln(out, "  3. Create a new isolated Valv account")
-	_, _ = fmt.Fprintln(out, "  4. Cancel")
+func writeCodexSetupIntro(out io.Writer, projectRoot string) error {
+	return writeCLINotice(
+		out,
+		laslig.NoticeInfoLevel,
+		"Valv setup needed",
+		fmt.Sprintf("project: %s", projectRoot),
+		"1. Use the default Codex account for this environment and bind it",
+		"2. Choose an existing Valv account",
+		"3. Create a new isolated Valv account",
+		"4. Cancel",
+	)
 }
 
 func writeCodexSetupResult(out io.Writer, heading string, projectRoot string, profile domain.Profile) error {

@@ -77,7 +77,6 @@ type errResolver struct{ err error }
 func (r errResolver) LatestVersion(context.Context) (string, error) { return "", r.err }
 
 func TestServiceBuildAddsVersionAndUsesDefaultImageInfo(t *testing.T) {
-
 	runner := &runnerRecorder{}
 	uid := os.Getuid()
 	gid := os.Getgid()
@@ -112,7 +111,6 @@ func TestServiceBuildAddsVersionAndUsesDefaultImageInfo(t *testing.T) {
 }
 
 func TestEnsureLatestBuildsAndPersistsStateWhenImageIsMissing(t *testing.T) {
-
 	oldFindDockerBinary := findDockerBinary
 	findDockerBinary = func(string) (string, error) { return "/usr/bin/docker", nil }
 	t.Cleanup(func() { findDockerBinary = oldFindDockerBinary })
@@ -155,7 +153,6 @@ func TestEnsureLatestBuildsAndPersistsStateWhenImageIsMissing(t *testing.T) {
 }
 
 func TestEnsureLatestSkipsBuildWhenStateIsCurrent(t *testing.T) {
-
 	oldFindDockerBinary := findDockerBinary
 	findDockerBinary = func(string) (string, error) { return "/usr/bin/docker", nil }
 	t.Cleanup(func() { findDockerBinary = oldFindDockerBinary })
@@ -207,7 +204,6 @@ func TestEnsureLatestSkipsBuildWhenStateIsCurrent(t *testing.T) {
 }
 
 func TestEnsureLatestRebuildsWhenRecipeHashDiffers(t *testing.T) {
-
 	oldFindDockerBinary := findDockerBinary
 	findDockerBinary = func(string) (string, error) { return "/usr/bin/docker", nil }
 	t.Cleanup(func() { findDockerBinary = oldFindDockerBinary })
@@ -259,7 +255,6 @@ func TestEnsureLatestRebuildsWhenRecipeHashDiffers(t *testing.T) {
 }
 
 func TestEnsureLatestFallsBackToExistingImageWhenVersionCheckFails(t *testing.T) {
-
 	oldFindDockerBinary := findDockerBinary
 	findDockerBinary = func(string) (string, error) { return "/usr/bin/docker", nil }
 	t.Cleanup(func() { findDockerBinary = oldFindDockerBinary })
@@ -298,7 +293,6 @@ func TestEnsureLatestFallsBackToExistingImageWhenVersionCheckFails(t *testing.T)
 }
 
 func TestEnsureLatestRemovesPreviousVersionTagWhenUpdating(t *testing.T) {
-
 	oldFindDockerBinary := findDockerBinary
 	findDockerBinary = func(string) (string, error) { return "/usr/bin/docker", nil }
 	t.Cleanup(func() { findDockerBinary = oldFindDockerBinary })
@@ -346,7 +340,6 @@ func TestEnsureLatestRemovesPreviousVersionTagWhenUpdating(t *testing.T) {
 }
 
 func TestNewRequiresRunnerAndRepository(t *testing.T) {
-
 	if _, err := New(Options{}); err == nil {
 		t.Fatal("New() error = nil, want dependency failure")
 	}
@@ -358,7 +351,6 @@ func TestNewRequiresRunnerAndRepository(t *testing.T) {
 }
 
 func TestWriteDefaultCodexContextWritesDockerfile(t *testing.T) {
-
 	root := t.TempDir()
 	dockerfilePath, err := WriteDefaultCodexContext(root)
 	if err != nil {
@@ -392,7 +384,6 @@ func TestWriteDefaultCodexContextWritesDockerfile(t *testing.T) {
 }
 
 func TestBuildIncludesExtraTags(t *testing.T) {
-
 	runner := &runnerRecorder{}
 	uid := os.Getuid()
 	gid := os.Getgid()
@@ -419,7 +410,6 @@ func TestBuildIncludesExtraTags(t *testing.T) {
 }
 
 func TestServiceBuildFallsBackToLegacyBuildWhenBuildxUnavailable(t *testing.T) {
-
 	uid := os.Getuid()
 	gid := os.Getgid()
 	firstCall := strings.Join([]string{"buildx", "build", "--load", "-f", "/tmp/codex-image/Dockerfile", "-t", "ghcr.io/valv/codex:dev", "--build-arg", "CODEX_VERSION=0.117.0", "--build-arg", fmt.Sprintf("VALV_GID=%d", gid), "--build-arg", fmt.Sprintf("VALV_UID=%d", uid), "--label", "io.valv.managed=true", "--label", "io.valv.provider=codex", "--label", fmt.Sprintf("%s=%s", recipeHashLabel, svcRecipeHashForTest("/tmp/codex-image", "Dockerfile")), "--label", "io.valv.scope=image", "--label", "io.valv.version=0.117.0", "/tmp/codex-image"}, " ")
@@ -454,7 +444,6 @@ func TestServiceBuildFallsBackToLegacyBuildWhenBuildxUnavailable(t *testing.T) {
 }
 
 func TestCodexVersionResolverReadsLatestRelease(t *testing.T) {
-
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "application/json")
 		_, _ = w.Write([]byte(`{"tag_name":"rust-v0.117.0","name":"0.117.0"}`))

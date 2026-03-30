@@ -26,8 +26,10 @@ import (
 	managetui "github.com/evanmschultz/valv/internal/tui/manage"
 )
 
-var errSelectionCanceled = errors.New("selection canceled")
-var codexVersionResolverFactory = imagesservice.NewCodexVersionResolver
+var (
+	errSelectionCanceled        = errors.New("selection canceled")
+	codexVersionResolverFactory = imagesservice.NewCodexVersionResolver
+)
 
 func openManageService(cmd *cobra.Command, paths config.Paths) (manageservice.Service, func(), error) {
 	store, err := openStore(paths)
