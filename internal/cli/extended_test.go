@@ -315,6 +315,11 @@ func TestManageUpdateUsesFakeDockerAndWritesBuildContext(t *testing.T) {
 	if !strings.Contains(stdout.String(), "Provider image updated") {
 		t.Fatalf("unexpected update output: %q", stdout.String())
 	}
+	for _, want := range []string{"Checking provider image", "Provider image check complete"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want substring %q", stderr.String(), want)
+		}
+	}
 
 	dockerfilePath := filepath.Join(paths.BuildCacheDir, string(domain.ProviderCodex), "Dockerfile")
 	if _, err := os.Stat(dockerfilePath); err != nil {
@@ -413,6 +418,11 @@ func TestManageCleanupAllRemovesLocalStateAndInvokesDocker(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "Cleanup completed") {
 		t.Fatalf("unexpected cleanup output: %q", stdout.String())
+	}
+	for _, want := range []string{"Running all cleanup", "Cleanup complete"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want substring %q", stderr.String(), want)
+		}
 	}
 	for _, want := range []string{"scope=all", "containers=2 removed", "images=2 refs"} {
 		if !strings.Contains(stdout.String(), want) {

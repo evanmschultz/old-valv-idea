@@ -106,13 +106,6 @@ func TestPkg(pkg string) error {
 	if err := printer.Section("Tests"); err != nil {
 		return fmt.Errorf("render testPkg stage: %w", err)
 	}
-	if err := printer.StatusLine(laslig.StatusLine{
-		Level:  laslig.NoticeInfoLevel,
-		Text:   "Running package tests",
-		Detail: fmt.Sprintf("go test -count=1 -race -cover %s", pkg),
-	}); err != nil {
-		return fmt.Errorf("write testPkg status: %w", err)
-	}
 	report, err := runGoTestWithOptions(goTestRunOptions{
 		CaptureCoverage: true,
 		DisabledSections: []gotestout.Section{
@@ -171,13 +164,6 @@ func GoldenUpdate() error {
 }
 
 func runRepoTests(printer *laslig.Printer) error {
-	if err := printer.StatusLine(laslig.StatusLine{
-		Level:  laslig.NoticeInfoLevel,
-		Text:   "Running repo tests",
-		Detail: "go test -count=1 -race -cover ./...",
-	}); err != nil {
-		return fmt.Errorf("write repo test status: %w", err)
-	}
 	report, err := runGoTestWithOptions(goTestRunOptions{
 		CaptureCoverage: true,
 		DisabledSections: []gotestout.Section{
@@ -423,6 +409,7 @@ func runGoTest(args ...string) error {
 
 func runGoTestWithOptions(options goTestRunOptions, args ...string) (coverageReport, error) {
 	goArgs := append([]string{"test", "-json"}, args...)
+	printer := newMagePrinter(os.Stdout)
 	cmd := exec.Command("go", goArgs...)
 	cmd.Env = goEnv()
 	stdout, err := cmd.StdoutPipe()
@@ -435,20 +422,25 @@ func runGoTestWithOptions(options goTestRunOptions, args ...string) (coverageRep
 	if err := cmd.Start(); err != nil {
 		return coverageReport{}, fmt.Errorf("start go test: %w", err)
 	}
+	if err := printer.StatusLine(laslig.StatusLine{
+		Level:  laslig.NoticeInfoLevel,
+		Text:   "Started go test -json",
+		Detail: strings.Join(args, " "),
+	}); err != nil {
+		return coverageReport{}, fmt.Errorf("write go test start status: %w", err)
+	}
 
 	reader := io.Reader(stdout)
 	var raw bytes.Buffer
 	if options.CaptureCoverage {
-		reader = io.TeeReader(stdout, &raw)
+		reader = io.TeeReader(reader, &raw)
 	}
 
 	summary, renderErr := gotestout.Render(os.Stdout, reader, gotestout.Options{
-		Policy: laslig.Policy{
-			Format: laslig.FormatAuto,
-			Style:  laslig.StyleAuto,
-		},
-		View:             gotestout.ViewCompact,
 		DisabledSections: options.DisabledSections,
+		Activity: gotestout.ActivityOptions{
+			Mode: gotestout.ActivityAuto,
+		},
 	})
 	waitErr := cmd.Wait()
 

@@ -13,7 +13,7 @@ require (
 	github.com/charmbracelet/x/exp/teatest/v2 v2.0.0-20260323091123-df7b1bcffcca
 	github.com/charmbracelet/x/term v0.2.2
 	github.com/creack/pty/v2 v2.0.1
-	github.com/evanmschultz/laslig v0.1.1
+	github.com/evanmschultz/laslig v0.2.2
 	github.com/magefile/mage v1.17.0
 	github.com/modelcontextprotocol/go-sdk v1.2.0
 	github.com/spf13/cobra v1.10.2

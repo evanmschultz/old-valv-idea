@@ -600,7 +600,18 @@ func runManageUpdate(cmd *cobra.Command, paths config.Paths, opts *rootOptions, 
 		return fmt.Errorf("manage update: initialize image service: %w", err)
 	}
 	defer closeImages()
-	result, err := service.EnsureLatest(cmd.Context(), imagesservice.EnsureRequest{})
+	var result imagesservice.EnsureResult
+	err = runWithCLIQuietSpinner(
+		cmd.ErrOrStderr(),
+		"Checking provider image",
+		"Provider image check complete",
+		"Provider image update failed",
+		func() error {
+			var runErr error
+			result, runErr = service.EnsureLatest(cmd.Context(), imagesservice.EnsureRequest{})
+			return runErr
+		},
+	)
 	if err != nil {
 		return fmt.Errorf("manage update: %w", err)
 	}
@@ -666,32 +677,47 @@ func runManageCleanup(cmd *cobra.Command, paths config.Paths, opts *rootOptions,
 
 	var summary []output.Field
 	switch scope {
-	case "state":
-		result, err := service.CleanLocal(cmd.Context(), local)
-		if err != nil {
-			return fmt.Errorf("manage cleanup: %w", err)
-		}
-		summary = []output.Field{{Label: "scope", Value: "state", Badge: true}, {Label: "removed", Value: fmt.Sprintf("%d paths", len(result.Removed)), Identifier: true}}
-	case "images":
-		result, err := service.CleanDocker(cmd.Context(), cleanupservice.DockerCleanupRequest{ImageFilters: providerCleanupImageFilters(), Force: true})
-		if err != nil {
-			return fmt.Errorf("manage cleanup: %w", err)
-		}
-		summary = []output.Field{{Label: "scope", Value: "images", Badge: true}, {Label: "images", Value: fmt.Sprintf("%d refs", len(result.RemovedImages)), Identifier: true}}
-	case "docker":
-		result, err := service.CleanDocker(cmd.Context(), dockerRequest)
-		if err != nil {
-			return fmt.Errorf("manage cleanup: %w", err)
-		}
-		summary = []output.Field{{Label: "scope", Value: "docker", Badge: true}, {Label: "containers", Value: fmt.Sprintf("%d removed", len(result.RemovedContainers)), Identifier: true}, {Label: "images", Value: fmt.Sprintf("%d refs", len(result.RemovedImages)), Identifier: true}}
-	case "all":
-		localResult, dockerResult, err := service.Clean(cmd.Context(), local, dockerRequest)
-		if err != nil {
-			return fmt.Errorf("manage cleanup: %w", err)
-		}
-		summary = []output.Field{{Label: "scope", Value: "all", Badge: true}, {Label: "removed", Value: fmt.Sprintf("%d paths", len(localResult.Removed)), Identifier: true}, {Label: "containers", Value: fmt.Sprintf("%d removed", len(dockerResult.RemovedContainers)), Identifier: true}, {Label: "images", Value: fmt.Sprintf("%d refs", len(dockerResult.RemovedImages)), Identifier: true}}
+	case "state", "images", "docker", "all":
 	default:
 		return fmt.Errorf("manage cleanup: unsupported scope %q", scope)
+	}
+	err = runWithCLIQuietSpinner(
+		cmd.ErrOrStderr(),
+		fmt.Sprintf("Running %s cleanup", scope),
+		"Cleanup complete",
+		"Cleanup failed",
+		func() error {
+			switch scope {
+			case "state":
+				result, err := service.CleanLocal(cmd.Context(), local)
+				if err != nil {
+					return err
+				}
+				summary = []output.Field{{Label: "scope", Value: "state", Badge: true}, {Label: "removed", Value: fmt.Sprintf("%d paths", len(result.Removed)), Identifier: true}}
+			case "images":
+				result, err := service.CleanDocker(cmd.Context(), cleanupservice.DockerCleanupRequest{ImageFilters: providerCleanupImageFilters(), Force: true})
+				if err != nil {
+					return err
+				}
+				summary = []output.Field{{Label: "scope", Value: "images", Badge: true}, {Label: "images", Value: fmt.Sprintf("%d refs", len(result.RemovedImages)), Identifier: true}}
+			case "docker":
+				result, err := service.CleanDocker(cmd.Context(), dockerRequest)
+				if err != nil {
+					return err
+				}
+				summary = []output.Field{{Label: "scope", Value: "docker", Badge: true}, {Label: "containers", Value: fmt.Sprintf("%d removed", len(result.RemovedContainers)), Identifier: true}, {Label: "images", Value: fmt.Sprintf("%d refs", len(result.RemovedImages)), Identifier: true}}
+			case "all":
+				localResult, dockerResult, err := service.Clean(cmd.Context(), local, dockerRequest)
+				if err != nil {
+					return err
+				}
+				summary = []output.Field{{Label: "scope", Value: "all", Badge: true}, {Label: "removed", Value: fmt.Sprintf("%d paths", len(localResult.Removed)), Identifier: true}, {Label: "containers", Value: fmt.Sprintf("%d removed", len(dockerResult.RemovedContainers)), Identifier: true}, {Label: "images", Value: fmt.Sprintf("%d refs", len(dockerResult.RemovedImages)), Identifier: true}}
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("manage cleanup: %w", err)
 	}
 	return output.WriteRecord(cmd.OutOrStdout(), mode, "Cleanup completed", summary)
 }

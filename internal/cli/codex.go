@@ -95,7 +95,13 @@ func runCodexCommand(cmd *cobra.Command, paths config.Paths, args []string) erro
 	if err != nil {
 		return fmt.Errorf("run codex command: initialize launcher: %w", err)
 	}
-	if err := ensureCodexImageCurrent(cmd, paths); err != nil {
+	if err := runWithCLIQuietSpinner(
+		cmd.ErrOrStderr(),
+		"Checking Codex image",
+		"Codex image ready",
+		"Codex image check failed",
+		func() error { return ensureCodexImageCurrent(cmd, paths) },
+	); err != nil {
 		return fmt.Errorf("run codex command: %w", err)
 	}
 	if err := service.ValidateBinding(cmd.Context(), workingDir); err != nil {
@@ -109,7 +115,13 @@ func runCodexCommand(cmd *cobra.Command, paths config.Paths, args []string) erro
 }
 
 func runCodexImageOnlyCommand(cmd *cobra.Command, paths config.Paths, args []string) error {
-	if err := ensureCodexImageCurrent(cmd, paths); err != nil {
+	if err := runWithCLIQuietSpinner(
+		cmd.ErrOrStderr(),
+		"Checking Codex image",
+		"Codex image ready",
+		"Codex image check failed",
+		func() error { return ensureCodexImageCurrent(cmd, paths) },
+	); err != nil {
 		return fmt.Errorf("run codex command: %w", err)
 	}
 	image := codexImageRef()

@@ -100,8 +100,8 @@ github.com/dustin/go-humanize v1.0.1 h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkp
 github.com/dustin/go-humanize v1.0.1/go.mod h1:Mu1zIs6XwVuF/gI1OepvI0qD18qycQx+mFykh5fBlto=
 github.com/ebitengine/purego v0.10.0 h1:QIw4xfpWT6GWTzaW5XEKy3HXoqrJGx1ijYHzTF0/ISU=
 github.com/ebitengine/purego v0.10.0/go.mod h1:iIjxzd6CiRiOG0UyXP+V1+jWqUXVjPKLAI0mRfJZTmQ=
-github.com/evanmschultz/laslig v0.1.1 h1:vGV9hue1xeoiRWKnV3E4c+pywx3Z1jSBUKoErct23Kw=
-github.com/evanmschultz/laslig v0.1.1/go.mod h1:7N2h1tPxjc6whmaRtl6n8JAKTd63bgBxVq/ilbWF754=
+github.com/evanmschultz/laslig v0.2.2 h1:4PHfsZd4Q1alMKjvlky/dJOI6tzrmqWcW22Gh37/mww=
+github.com/evanmschultz/laslig v0.2.2/go.mod h1:4+qYxQTo7ar8F6aLZCtwonxmjpmf4JrnVwCPQrhOOAU=
 github.com/felixge/httpsnoop v1.0.4 h1:NFTV2Zj1bL4mc9sqWACXbQFVBBg2W3GPvqp8/ESS2Wg=
 github.com/felixge/httpsnoop v1.0.4/go.mod h1:m8KPJKqk1gH5J9DgRY2ASl2lWCfGKXixSwevea8zH2U=
 github.com/go-logfmt/logfmt v0.6.1 h1:4hvbpePJKnIzH1B+8OR/JPbTx37NktoI9LE2QZBBkvE=

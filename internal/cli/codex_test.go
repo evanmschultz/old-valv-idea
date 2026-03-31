@@ -305,6 +305,11 @@ func TestRunCodexImageOnlyCommandPassesThroughArgs(t *testing.T) {
 	if err := runCodexImageOnlyCommand(cmd, testCodexPaths(t), []string{"resume", "--help"}); err != nil {
 		t.Fatalf("runCodexImageOnlyCommand() error = %v", err)
 	}
+	for _, want := range []string{"Checking Codex image", "Codex image ready"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want substring %q", stderr.String(), want)
+		}
+	}
 
 	content, err := os.ReadFile(logPath)
 	if err != nil {
