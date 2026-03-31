@@ -571,6 +571,97 @@ func TestListProfilesCollapsesSameHomeAliasesForPresentation(t *testing.T) {
 	}
 }
 
+func TestListProfilesPrefersRenamedPrimaryHostAccountOverLegacyAlias(t *testing.T) {
+	t.Parallel()
+
+	store, providerRoot := testStore(t)
+	homeRoot := t.TempDir()
+	service, err := New(Options{
+		Store:        store,
+		ProviderRoot: providerRoot,
+		HomeDir:      homeRoot,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	hostHome := filepath.Join(homeRoot, ".codex")
+	if _, err := service.CreateProfile(context.Background(), domain.ProviderCodex, "host", hostHome); err != nil {
+		t.Fatalf("CreateProfile(host) error = %v", err)
+	}
+	legacy, err := store.ProfileByName(context.Background(), domain.ProviderCodex, "host")
+	if err != nil {
+		t.Fatalf("ProfileByName(host) error = %v", err)
+	}
+	if _, err := store.UpdateProfileName(context.Background(), domain.ProviderCodex, legacy.Name, "personal"); err != nil {
+		t.Fatalf("UpdateProfileName(personal) error = %v", err)
+	}
+	alias, err := domain.NewProfile(domain.ProviderCodex, "host", hostHome)
+	if err != nil {
+		t.Fatalf("NewProfile(host alias) error = %v", err)
+	}
+	if _, err := store.CreateProfile(context.Background(), alias); err != nil {
+		t.Fatalf("CreateProfile(host alias) error = %v", err)
+	}
+
+	result, err := service.ListProfiles(context.Background(), domain.ProviderCodex)
+	if err != nil {
+		t.Fatalf("ListProfiles() error = %v", err)
+	}
+	if got, want := len(result.Profiles), 1; got != want {
+		t.Fatalf("profiles len = %d, want %d", got, want)
+	}
+	if got, want := result.Profiles[0].Name, "personal"; got != want {
+		t.Fatalf("profiles[0].Name = %q, want %q", got, want)
+	}
+}
+
+func TestCleanupDuplicateAliasesDeletesUnboundLegacyHostAliases(t *testing.T) {
+	t.Parallel()
+
+	store, providerRoot := testStore(t)
+	homeRoot := t.TempDir()
+	service, err := New(Options{
+		Store:        store,
+		ProviderRoot: providerRoot,
+		HomeDir:      homeRoot,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	hostHome := filepath.Join(homeRoot, ".codex")
+	personal, err := service.CreateProfile(context.Background(), domain.ProviderCodex, "personal", hostHome)
+	if err != nil {
+		t.Fatalf("CreateProfile(personal) error = %v", err)
+	}
+	hostAlias, err := domain.NewProfile(domain.ProviderCodex, "host", hostHome)
+	if err != nil {
+		t.Fatalf("NewProfile(host) error = %v", err)
+	}
+	if _, err := store.CreateProfile(context.Background(), hostAlias); err != nil {
+		t.Fatalf("CreateProfile(host) error = %v", err)
+	}
+	projectRoot := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(filepath.Join(projectRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git) error = %v", err)
+	}
+	if _, err := service.BindProject(context.Background(), domain.ProviderCodex, personal.Name, projectRoot); err != nil {
+		t.Fatalf("BindProject() error = %v", err)
+	}
+
+	result, err := service.CleanupDuplicateAliases(context.Background(), domain.ProviderCodex)
+	if err != nil {
+		t.Fatalf("CleanupDuplicateAliases() error = %v", err)
+	}
+	if got, want := len(result.Deleted), 1; got != want {
+		t.Fatalf("deleted len = %d, want %d", got, want)
+	}
+	if got, want := result.Deleted[0].Name, "host"; got != want {
+		t.Fatalf("deleted[0].Name = %q, want %q", got, want)
+	}
+}
+
 func testStore(t *testing.T) (*sqliteadapter.Store, string) {
 	t.Helper()
 

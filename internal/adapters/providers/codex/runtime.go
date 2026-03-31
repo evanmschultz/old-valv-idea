@@ -22,6 +22,7 @@ const (
 
 type PrepareRequest struct {
 	ProfileHome string
+	SharedHome  string
 	ProjectRoot string
 	TempRoot    string
 	Logger      *log.Logger
@@ -59,6 +60,16 @@ func PrepareRuntime(ctx context.Context, request PrepareRequest) (PreparedRuntim
 	if err := os.MkdirAll(tempRoot, 0o755); err != nil {
 		return PreparedRuntime{}, fmt.Errorf("prepare codex runtime: ensure temp root %q: %w", tempRoot, err)
 	}
+	sharedHome := profileHome
+	if strings.TrimSpace(request.SharedHome) != "" {
+		sharedHome, err = pathutil.Normalize(request.SharedHome)
+		if err != nil {
+			return PreparedRuntime{}, fmt.Errorf("prepare codex runtime: normalize shared home: %w", err)
+		}
+	}
+	if err := os.MkdirAll(sharedHome, 0o755); err != nil {
+		return PreparedRuntime{}, fmt.Errorf("prepare codex runtime: ensure shared home %q: %w", sharedHome, err)
+	}
 
 	runtimeDir, err := os.MkdirTemp(tempRoot, "codex-runtime-")
 	if err != nil {
@@ -66,7 +77,15 @@ func PrepareRuntime(ctx context.Context, request PrepareRequest) (PreparedRuntim
 	}
 
 	mounts := []dockeradapter.MountSpec{
-		dockeradapter.NewMountSpec(profileHome, ContainerCodexDir, false),
+		dockeradapter.NewMountSpec(sharedHome, ContainerCodexDir, false),
+	}
+	if profileHome != sharedHome {
+		authPath := filepath.Join(profileHome, "auth.json")
+		if info, err := os.Stat(authPath); err == nil && !info.IsDir() {
+			mounts = append(mounts, dockeradapter.NewMountSpec(authPath, filepath.Join(ContainerCodexDir, "auth.json"), false))
+		} else if err != nil && !os.IsNotExist(err) {
+			return PreparedRuntime{}, fmt.Errorf("prepare codex runtime: stat auth file %q: %w", authPath, err)
+		}
 	}
 	env := map[string]string{
 		"CODEX_HOME": ContainerCodexDir,

@@ -681,13 +681,17 @@ Immediate next steps:
 What remains now that the API validation passes:
 
 - optional polish on interactive TTY ownership and `/mcp` UI parity
-- optional cleanup/migration UX for stale historical account aliases
+- shipped account cleanup for stale unbound same-home aliases
 - account observability and editing now cover:
   - `valv manage account inspect`
   - `valv manage account whoami`
   - `valv manage account rename`
   - `valv manage account delete`
+  - `valv manage account login`
+  - `valv manage account logout`
+  - `valv manage account cleanup`
   - `valv manage project list`
+- Codex account auth stays account-scoped while resume/memory state now shares the default host `~/.codex` path across account switches
 - future provider work:
   - Claude
   - Gemini

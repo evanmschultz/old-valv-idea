@@ -65,6 +65,12 @@ type ProfileListResult struct {
 	Profiles []domain.Profile
 }
 
+type CleanupAliasesResult struct {
+	Deleted []domain.Profile
+	Kept    []domain.Profile
+	Skipped []domain.Profile
+}
+
 type HostProfileSpec struct {
 	Provider domain.Provider
 	Name     string
@@ -345,6 +351,56 @@ func (s Service) ListBindings(ctx context.Context, provider domain.Provider) ([]
 	return out, nil
 }
 
+func (s Service) CleanupDuplicateAliases(ctx context.Context, provider domain.Provider) (CleanupAliasesResult, error) {
+	profiles, err := s.store.ListProfilesByProvider(ctx, provider)
+	if err != nil {
+		return CleanupAliasesResult{}, fmt.Errorf("cleanup duplicate aliases: list profiles for provider %q: %w", provider, err)
+	}
+	bindings, err := s.ListBindings(ctx, provider)
+	if err != nil {
+		return CleanupAliasesResult{}, fmt.Errorf("cleanup duplicate aliases: %w", err)
+	}
+	bound := map[string]bool{}
+	for _, binding := range bindings {
+		bound[binding.Profile.ID] = true
+	}
+	grouped := map[string][]domain.Profile{}
+	for _, profile := range profiles {
+		grouped[profile.HomePath] = append(grouped[profile.HomePath], profile)
+	}
+	var result CleanupAliasesResult
+	hostSpec, _ := s.DefaultHostProfile(provider)
+	for _, group := range grouped {
+		if len(group) < 2 {
+			continue
+		}
+		keep := group[0]
+		for _, candidate := range group[1:] {
+			if shouldPreferPresentableProfile(hostSpec, candidate, keep) {
+				keep = candidate
+			}
+		}
+		result.Kept = append(result.Kept, keep)
+		for _, profile := range group {
+			if profile.ID == keep.ID {
+				continue
+			}
+			if bound[profile.ID] {
+				result.Skipped = append(result.Skipped, profile)
+				continue
+			}
+			if err := s.store.DeleteProfile(ctx, profile.Provider, profile.Name); err != nil {
+				return CleanupAliasesResult{}, fmt.Errorf("cleanup duplicate aliases: delete account %q: %w", profile.Name, err)
+			}
+			result.Deleted = append(result.Deleted, profile)
+		}
+	}
+	sort.Slice(result.Deleted, func(i, j int) bool { return result.Deleted[i].Name < result.Deleted[j].Name })
+	sort.Slice(result.Kept, func(i, j int) bool { return result.Kept[i].Name < result.Kept[j].Name })
+	sort.Slice(result.Skipped, func(i, j int) bool { return result.Skipped[i].Name < result.Skipped[j].Name })
+	return result, nil
+}
+
 func (s Service) debug(msg string, keyvals ...any) {
 	if s.logger == nil {
 		return
@@ -448,9 +504,22 @@ func shouldPreferPresentableProfile(hostSpec HostProfileSpec, candidate, current
 			return true
 		case current.Name == hostSpec.Name && candidate.Name != hostSpec.Name:
 			return false
+		case isLegacyHostAlias(current.Name) && !isLegacyHostAlias(candidate.Name):
+			return true
+		case isLegacyHostAlias(candidate.Name) && !isLegacyHostAlias(current.Name):
+			return false
 		}
 	}
 	return candidate.Name < current.Name
+}
+
+func isLegacyHostAlias(name string) bool {
+	switch strings.TrimSpace(name) {
+	case "default", "host", "host-codex":
+		return true
+	default:
+		return false
+	}
 }
 
 func copyFile(sourcePath, targetPath string, mode os.FileMode) error {

@@ -193,6 +193,7 @@ CLI alias policy:
 - preferred short aliases are `h`, `m`, and `g`
 - do not invent blanket one-letter aliases for every command
 - keep user-facing account management terminology as `account`; do not reintroduce `profile` in the primary help, examples, or operator output surface
+- explicit account lifecycle commands should exist for existing accounts; do not rely only on `account add` side effects for login/logout management
 - avoid alias schemes that create ambiguity across commands like `status`, `serve`, and `switch`
 - support trailing `help` / `h` on branch commands when that is unambiguous
 - do not reinterpret trailing args on leaf commands or pass-through commands like `valv codex`

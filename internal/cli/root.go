@@ -54,6 +54,7 @@ Use the direct runtime commands for provider execution and the management surfac
 		Example: strings.TrimSpace(`
 valv paths
 valv account list
+valv account login
 valv manage update
 valv manage account add codex
 valv manage account add codex work

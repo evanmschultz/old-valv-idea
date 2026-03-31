@@ -110,6 +110,7 @@ func (s Service) Run(ctx context.Context, cwd string, codexArgs []string) error 
 
 	prepared, err := codexruntime.PrepareRuntime(ctx, codexruntime.PrepareRequest{
 		ProfileHome: resolved.profile.HomePath,
+		SharedHome:  s.sharedCodexStateHome(resolved.profile),
 		ProjectRoot: resolved.project.Root,
 		TempRoot:    s.tempRoot,
 		Logger:      s.logger,
@@ -130,6 +131,20 @@ func (s Service) Run(ctx context.Context, cwd string, codexArgs []string) error 
 		return fmt.Errorf("run codex launch service: execute docker request for project %q: %w", resolved.project.Root, err)
 	}
 	return nil
+}
+
+func (s Service) sharedCodexStateHome(profile domain.Profile) string {
+	if profile.Provider != domain.ProviderCodex {
+		return profile.HomePath
+	}
+	if strings.TrimSpace(s.realHome) == "" {
+		return profile.HomePath
+	}
+	_, homePath, err := codexruntime.DefaultHostProfile(s.realHome)
+	if err != nil {
+		return profile.HomePath
+	}
+	return homePath
 }
 
 func (s Service) ValidateBinding(ctx context.Context, cwd string) error {

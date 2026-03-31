@@ -19,6 +19,7 @@ import (
 type codexAccountAuthRunner interface {
 	LoginStatus(context.Context, string) (bool, error)
 	Login(context.Context, string, io.Reader, io.Writer, io.Writer) error
+	Logout(context.Context, string, io.Reader, io.Writer, io.Writer) error
 }
 
 type accountAuthOptions struct {
@@ -35,6 +36,24 @@ func ensureManagedAccountReady(cmd *cobra.Command, provider domain.Provider, acc
 	switch provider {
 	case domain.ProviderCodex:
 		return ensureCodexAccountReady(cmd, account, options)
+	default:
+		return nil
+	}
+}
+
+func logoutManagedAccount(cmd *cobra.Command, provider domain.Provider, account domain.Profile) error {
+	switch provider {
+	case domain.ProviderCodex:
+		return logoutCodexAccount(cmd, account)
+	default:
+		return nil
+	}
+}
+
+func loginManagedAccount(cmd *cobra.Command, provider domain.Provider, account domain.Profile) error {
+	switch provider {
+	case domain.ProviderCodex:
+		return loginCodexAccount(cmd, account)
 	default:
 		return nil
 	}
@@ -79,6 +98,22 @@ func ensureCodexAccountReady(cmd *cobra.Command, account domain.Profile, options
 	return nil
 }
 
+func logoutCodexAccount(cmd *cobra.Command, account domain.Profile) error {
+	runner := codexAccountAuthFromContext(cmd.Context())
+	if err := runner.Logout(cmd.Context(), account.HomePath, cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr()); err != nil {
+		return fmt.Errorf("run host Codex logout for account %q: %w", account.Name, err)
+	}
+	return nil
+}
+
+func loginCodexAccount(cmd *cobra.Command, account domain.Profile) error {
+	runner := codexAccountAuthFromContext(cmd.Context())
+	if err := runner.Login(cmd.Context(), account.HomePath, cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr()); err != nil {
+		return fmt.Errorf("run host Codex login for account %q: %w", account.Name, err)
+	}
+	return nil
+}
+
 func codexAccountAuthFromContext(ctx context.Context) codexAccountAuthRunner {
 	if runner, ok := ctx.Value(codexAccountAuthRunnerKey{}).(codexAccountAuthRunner); ok && runner != nil {
 		return runner
@@ -105,6 +140,14 @@ func (systemCodexAccountAuthRunner) LoginStatus(ctx context.Context, homePath st
 
 func (systemCodexAccountAuthRunner) Login(ctx context.Context, homePath string, stdin io.Reader, stdout, stderr io.Writer) error {
 	_, err := runCodexHostCommand(ctx, homePath, stdin, stdout, stderr, "login")
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (systemCodexAccountAuthRunner) Logout(ctx context.Context, homePath string, stdin io.Reader, stdout, stderr io.Writer) error {
+	_, err := runCodexHostCommand(ctx, homePath, stdin, stdout, stderr, "logout")
 	if err != nil {
 		return err
 	}

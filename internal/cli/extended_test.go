@@ -16,6 +16,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	sqliteadapter "github.com/evanmschultz/valv/internal/adapters/sqlite"
 	openaiapi "github.com/evanmschultz/valv/internal/api/openai"
 	"github.com/evanmschultz/valv/internal/config"
 	"github.com/evanmschultz/valv/internal/domain"
@@ -348,6 +349,88 @@ func TestManageProjectListShowsBoundProjects(t *testing.T) {
 		if !strings.Contains(output, want) {
 			t.Fatalf("unexpected project list output %q missing %q", output, want)
 		}
+	}
+}
+
+func TestManageAccountLoginUsesExistingAccount(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	profileHome := filepath.Join(paths.ProviderRoot, "codex", "profiles", "hylla")
+	runManage(t, paths, []string{"account", "add", "codex", "hylla", "--home", profileHome, "--skip-login", "--no-bind"})
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd := newManageCommand(paths, &rootOptions{})
+	cmd.SetContext(context.Background())
+	cmd.SetIn(bytes.NewBuffer(nil))
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"account", "login", "hylla"})
+	stub := installStubCodexAccountAuth(t, cmd, false)
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if stub.loginHits != 1 {
+		t.Fatalf("Login() hits = %d, want 1", stub.loginHits)
+	}
+}
+
+func TestManageAccountLogoutUsesExistingAccount(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	profileHome := filepath.Join(paths.ProviderRoot, "codex", "profiles", "hylla")
+	runManage(t, paths, []string{"account", "add", "codex", "hylla", "--home", profileHome, "--skip-login", "--no-bind"})
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd := newManageCommand(paths, &rootOptions{})
+	cmd.SetContext(context.Background())
+	cmd.SetIn(bytes.NewBuffer(nil))
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"account", "logout", "hylla"})
+	stub := installStubCodexAccountAuth(t, cmd, true)
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if stub.loggedIn {
+		t.Fatal("loggedIn = true, want false after logout")
+	}
+}
+
+func TestManageAccountCleanupRemovesLegacyAlias(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	hostHome := filepath.Join(paths.HomeDir, ".codex")
+	runManage(t, paths, []string{"account", "add", "codex", "personal", "--home", hostHome, "--skip-login", "--no-bind"})
+	store, err := sqliteadapter.NewStore(paths.DatabasePath)
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+	hostAlias, err := domain.NewProfile(domain.ProviderCodex, "host", hostHome)
+	if err != nil {
+		t.Fatalf("NewProfile(host) error = %v", err)
+	}
+	if _, err := store.CreateProfile(context.Background(), hostAlias); err != nil {
+		t.Fatalf("CreateProfile(host) error = %v", err)
+	}
+
+	output := runManage(t, paths, []string{"account", "cleanup", "codex"})
+	if !strings.Contains(output, "deleted=host") {
+		t.Fatalf("unexpected account cleanup output: %q", output)
+	}
+
+	listOutput := runManage(t, paths, []string{"account", "list", "codex"})
+	if strings.Contains(listOutput, "- host") {
+		t.Fatalf("unexpected account list output after cleanup: %q", listOutput)
 	}
 }
 

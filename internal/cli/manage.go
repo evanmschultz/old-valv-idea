@@ -75,7 +75,10 @@ valv manage account switch work
 valv manage account list
 valv manage account list codex
 valv manage account inspect
+valv manage account login
+valv manage account logout
 valv manage account rename personal hylla
+valv manage account cleanup
 valv manage account delete hylla
 `),
 		Args: cobra.NoArgs,
@@ -85,8 +88,11 @@ valv manage account delete hylla
 	}
 	cmd.AddCommand(newManageAccountAddCommand(paths, opts))
 	cmd.AddCommand(newManageAccountInspectCommand(paths, opts))
+	cmd.AddCommand(newManageAccountLoginCommand(paths, opts))
+	cmd.AddCommand(newManageAccountLogoutCommand(paths, opts))
 	cmd.AddCommand(newManageAccountListCommand(paths, opts))
 	cmd.AddCommand(newManageAccountRenameCommand(paths, opts))
+	cmd.AddCommand(newManageAccountCleanupCommand(paths, opts))
 	cmd.AddCommand(newManageAccountDeleteCommand(paths, opts))
 	cmd.AddCommand(newManageAccountSwitchCommand(paths, opts))
 	return cmd
@@ -112,6 +118,54 @@ valv manage account whoami
 		Args: cobra.MaximumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runManageAccountInspect(cmd, paths, opts, args, projectPath)
+		},
+	}
+	cmd.Flags().StringVar(&projectPath, "project", "", "explicit project path to inspect instead of the current working directory")
+	return cmd
+}
+
+func newManageAccountLoginCommand(paths config.Paths, opts *rootOptions) *cobra.Command {
+	var projectPath string
+	cmd := &cobra.Command{
+		Use:   "login [provider] [account]",
+		Short: "Log in one existing provider account on the host",
+		Long: strings.TrimSpace(`
+Log in one existing provider account on the host without changing the current project binding.
+
+With no args, Valv uses the account currently bound to the detected project.
+`),
+		Example: strings.TrimSpace(`
+valv manage account login
+valv manage account login hylla
+valv manage account login codex hylla
+`),
+		Args: cobra.MaximumNArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runManageAccountLogin(cmd, paths, opts, args, projectPath)
+		},
+	}
+	cmd.Flags().StringVar(&projectPath, "project", "", "explicit project path to inspect instead of the current working directory")
+	return cmd
+}
+
+func newManageAccountLogoutCommand(paths config.Paths, opts *rootOptions) *cobra.Command {
+	var projectPath string
+	cmd := &cobra.Command{
+		Use:   "logout [provider] [account]",
+		Short: "Log out one existing provider account on the host",
+		Long: strings.TrimSpace(`
+Log out one existing provider account on the host without deleting the Valv account record or changing project bindings.
+
+With no args, Valv uses the account currently bound to the detected project.
+`),
+		Example: strings.TrimSpace(`
+valv manage account logout
+valv manage account logout hylla
+valv manage account logout codex hylla
+`),
+		Args: cobra.MaximumNArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runManageAccountLogout(cmd, paths, opts, args, projectPath)
 		},
 	}
 	cmd.Flags().StringVar(&projectPath, "project", "", "explicit project path to inspect instead of the current working directory")
@@ -250,6 +304,27 @@ valv manage account delete codex hylla
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runManageAccountDelete(cmd, paths, opts, args)
+		},
+	}
+	return cmd
+}
+
+func newManageAccountCleanupCommand(paths config.Paths, opts *rootOptions) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "cleanup [provider]",
+		Short: "Remove stale unbound same-home account aliases",
+		Long: strings.TrimSpace(`
+Remove stale unbound same-home account aliases while preserving the canonical account Valv should present for that home path.
+
+This is intended to clean up historical duplicate host-home aliases such as ` + "`host`" + ` or ` + "`host-codex`" + ` after renames.
+`),
+		Example: strings.TrimSpace(`
+valv manage account cleanup
+valv manage account cleanup codex
+`),
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runManageAccountCleanup(cmd, paths, opts, args)
 		},
 	}
 	return cmd
@@ -528,6 +603,60 @@ func runManageAccountSwitch(cmd *cobra.Command, paths config.Paths, opts *rootOp
 	return runManageBind(cmd, paths, opts, provider, profileName, projectPath)
 }
 
+func runManageAccountLogin(cmd *cobra.Command, paths config.Paths, opts *rootOptions, args []string, projectPath string) error {
+	mode, err := commandOutputMode(cmd, opts)
+	if err != nil {
+		return fmt.Errorf("resolve output policy: %w", err)
+	}
+	service, closeStore, err := openManageService(cmd, paths)
+	if err != nil {
+		return fmt.Errorf("manage account login: %w", err)
+	}
+	defer closeStore()
+	profile, err := resolveManagedAccount(cmd, service, args, projectPath)
+	if err != nil {
+		return fmt.Errorf("manage account login: %w", err)
+	}
+	if err := loginManagedAccount(cmd, profile.Provider, profile); err != nil {
+		return fmt.Errorf("manage account login: %w", err)
+	}
+	identity := readAccountIdentity(profile)
+	return output.WriteRecord(cmd.OutOrStdout(), mode, "Account ready", []output.Field{
+		{Label: "provider", Value: string(profile.Provider), Muted: true},
+		{Label: "account", Value: profile.Name, Identifier: true},
+		{Label: "auth", Value: identity.authDisplay, Muted: true},
+		{Label: "email", Value: identity.emailDisplay},
+		{Label: "home", Value: profile.HomePath},
+	})
+}
+
+func runManageAccountLogout(cmd *cobra.Command, paths config.Paths, opts *rootOptions, args []string, projectPath string) error {
+	mode, err := commandOutputMode(cmd, opts)
+	if err != nil {
+		return fmt.Errorf("resolve output policy: %w", err)
+	}
+	service, closeStore, err := openManageService(cmd, paths)
+	if err != nil {
+		return fmt.Errorf("manage account logout: %w", err)
+	}
+	defer closeStore()
+	profile, err := resolveManagedAccount(cmd, service, args, projectPath)
+	if err != nil {
+		return fmt.Errorf("manage account logout: %w", err)
+	}
+	if err := logoutManagedAccount(cmd, profile.Provider, profile); err != nil {
+		return fmt.Errorf("manage account logout: %w", err)
+	}
+	identity := readAccountIdentity(profile)
+	return output.WriteRecord(cmd.OutOrStdout(), mode, "Account logged out", []output.Field{
+		{Label: "provider", Value: string(profile.Provider), Muted: true},
+		{Label: "account", Value: profile.Name, Identifier: true},
+		{Label: "auth", Value: identity.authDisplay, Muted: true},
+		{Label: "email", Value: identity.emailDisplay},
+		{Label: "home", Value: profile.HomePath},
+	})
+}
+
 func runManageAccountInspect(cmd *cobra.Command, paths config.Paths, opts *rootOptions, args []string, projectPath string) error {
 	mode, err := commandOutputMode(cmd, opts)
 	if err != nil {
@@ -617,6 +746,32 @@ func runManageAccountRename(cmd *cobra.Command, paths config.Paths, opts *rootOp
 	})
 }
 
+func runManageAccountCleanup(cmd *cobra.Command, paths config.Paths, opts *rootOptions, args []string) error {
+	mode, err := commandOutputMode(cmd, opts)
+	if err != nil {
+		return fmt.Errorf("resolve output policy: %w", err)
+	}
+	service, closeStore, err := openManageService(cmd, paths)
+	if err != nil {
+		return fmt.Errorf("manage account cleanup: %w", err)
+	}
+	defer closeStore()
+	provider, err := parseOptionalProvider(args, domain.ProviderCodex)
+	if err != nil {
+		return err
+	}
+	result, err := service.CleanupDuplicateAliases(cmd.Context(), provider)
+	if err != nil {
+		return fmt.Errorf("manage account cleanup: %w", err)
+	}
+	return output.WriteRecord(cmd.OutOrStdout(), mode, "Account cleanup complete", []output.Field{
+		{Label: "provider", Value: string(provider), Muted: true},
+		{Label: "deleted", Value: strings.Join(profileNames(result.Deleted), ", "), Muted: len(result.Deleted) == 0},
+		{Label: "kept", Value: strings.Join(profileNames(result.Kept), ", "), Muted: len(result.Kept) == 0},
+		{Label: "skipped", Value: strings.Join(profileNames(result.Skipped), ", "), Muted: len(result.Skipped) == 0},
+	})
+}
+
 func runManageAccountDelete(cmd *cobra.Command, paths config.Paths, opts *rootOptions, args []string) error {
 	mode, err := commandOutputMode(cmd, opts)
 	if err != nil {
@@ -684,6 +839,36 @@ func resolveProfileSwitchTarget(cmd *cobra.Command, service interface {
 	}
 }
 
+func resolveManagedAccount(cmd *cobra.Command, service interface {
+	Status(context.Context, string) (manageservice.StatusResult, error)
+	ProfileByName(context.Context, domain.Provider, string) (domain.Profile, error)
+}, args []string, projectPath string) (domain.Profile, error) {
+	startPath := strings.TrimSpace(projectPath)
+	var err error
+	if startPath == "" {
+		startPath, err = os.Getwd()
+		if err != nil {
+			return domain.Profile{}, fmt.Errorf("resolve working directory: %w", err)
+		}
+	}
+	provider, profileName, err := resolveProfileSwitchTarget(cmd, service, startPath, args)
+	if err != nil {
+		return domain.Profile{}, err
+	}
+	if profileName == "" {
+		status, err := service.Status(cmd.Context(), startPath)
+		if err != nil {
+			return domain.Profile{}, err
+		}
+		return status.Profile, nil
+	}
+	profile, err := service.ProfileByName(cmd.Context(), provider, profileName)
+	if err != nil {
+		return domain.Profile{}, fmt.Errorf("resolve account %q: %w", profileName, err)
+	}
+	return profile, nil
+}
+
 func resolveRenameArgs(args []string) (domain.Provider, string, string, error) {
 	switch len(args) {
 	case 2:
@@ -712,6 +897,17 @@ func resolveDeleteArgs(args []string) (domain.Provider, string, error) {
 	default:
 		return "", "", fmt.Errorf("unsupported arg count %d", len(args))
 	}
+}
+
+func profileNames(profiles []domain.Profile) []string {
+	if len(profiles) == 0 {
+		return []string{"(none)"}
+	}
+	names := make([]string, 0, len(profiles))
+	for _, profile := range profiles {
+		names = append(names, profile.Name)
+	}
+	return names
 }
 
 func writeAccountsByProvider(cmd *cobra.Command, mode output.Mode, service accountLister) error {

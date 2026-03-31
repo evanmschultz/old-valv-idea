@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +16,7 @@ import (
 	"github.com/evanmschultz/valv/internal/adapters/docker"
 	codexruntime "github.com/evanmschultz/valv/internal/adapters/providers/codex"
 	"github.com/evanmschultz/valv/internal/domain"
+	"github.com/evanmschultz/valv/internal/pathutil"
 	projectdetect "github.com/evanmschultz/valv/internal/project"
 )
 
@@ -196,7 +199,11 @@ func TestRunBuildsDockerRequestFromProjectBindingAndProfile(t *testing.T) {
 	if executor.got.Mounts[0] != docker.NewMountSpec(project.Root, project.Root, false) {
 		t.Fatalf("Run() project mount = %+v", executor.got.Mounts[0])
 	}
-	if executor.got.Mounts[1] != docker.NewMountSpec(profile.HomePath, codexruntime.ContainerCodexDir, false) {
+	wantProfileHome, err := pathutil.Normalize(profile.HomePath)
+	if err != nil {
+		t.Fatalf("Normalize(profile.HomePath) error = %v", err)
+	}
+	if executor.got.Mounts[1] != docker.NewMountSpec(wantProfileHome, codexruntime.ContainerCodexDir, false) {
 		t.Fatalf("Run() profile mount = %+v", executor.got.Mounts[1])
 	}
 	for index, arg := range args {
@@ -315,6 +322,66 @@ func TestBuildRequestCarriesEnvPassthrough(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(request.EnvPassthrough, ","), "CONTEXT7_API_KEY") {
 		t.Fatalf("EnvPassthrough = %#v, want CONTEXT7_API_KEY", request.EnvPassthrough)
+	}
+}
+
+func TestRunUsesSharedHostHomeForCodexStateWhenRealHomeIsSet(t *testing.T) {
+	t.Parallel()
+
+	realHome := t.TempDir()
+	projectRoot := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(projectRoot, 0o755); err != nil {
+		t.Fatalf("MkdirAll(project.Root) error = %v", err)
+	}
+	normalizedProjectRoot, err := pathutil.Normalize(projectRoot)
+	if err != nil {
+		t.Fatalf("Normalize(projectRoot) error = %v", err)
+	}
+	project := domain.Project{ID: "project-1234567890", Root: normalizedProjectRoot, Name: "project"}
+	hostCodexHome := filepath.Join(realHome, ".codex")
+	if err := os.MkdirAll(hostCodexHome, 0o755); err != nil {
+		t.Fatalf("MkdirAll(hostCodexHome) error = %v", err)
+	}
+	profileHome := filepath.Join(t.TempDir(), "profile")
+	if err := os.MkdirAll(profileHome, 0o755); err != nil {
+		t.Fatalf("MkdirAll(profileHome) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(profileHome, "auth.json"), []byte(`{"auth_mode":"chatgpt"}`), 0o600); err != nil {
+		t.Fatalf("WriteFile(auth.json) error = %v", err)
+	}
+	binding := domain.ProjectBinding{ProjectID: project.ID, ProfileID: "profile-1", Provider: domain.ProviderCodex}
+	profile := domain.Profile{ID: "profile-1", Provider: domain.ProviderCodex, Name: "hylla", HomePath: profileHome}
+	executor := &fakeExecutor{}
+	service, err := New(Options{
+		Store: fakeStore{
+			project: project,
+			binding: binding,
+			profile: profile,
+		},
+		Executor: executor,
+		Detect: func(start string) (projectdetect.Result, error) {
+			return projectdetect.Result{Root: project.Root, HasGitMarker: true}, nil
+		},
+		Image:    docker.NewImageRef("valv-codex", "dev"),
+		TempRoot: t.TempDir(),
+		RealHome: realHome,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if err := service.Run(context.Background(), project.Root, []string{"resume", "session-123"}); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	wantSharedHome, err := pathutil.Normalize(hostCodexHome)
+	if err != nil {
+		t.Fatalf("Normalize(hostCodexHome) error = %v", err)
+	}
+	if got := executor.got.Mounts[1]; got != docker.NewMountSpec(wantSharedHome, codexruntime.ContainerCodexDir, false) {
+		t.Fatalf("shared codex mount = %+v, want %+v", got, docker.NewMountSpec(wantSharedHome, codexruntime.ContainerCodexDir, false))
+	}
+	if got := executor.got.Mounts[2].Target; got != filepath.Join(codexruntime.ContainerCodexDir, "auth.json") {
+		t.Fatalf("auth mount target = %q, want %q", got, filepath.Join(codexruntime.ContainerCodexDir, "auth.json"))
 	}
 }
 

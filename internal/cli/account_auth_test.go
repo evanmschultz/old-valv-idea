@@ -38,6 +38,12 @@ func (s *stubCodexAccountAuthRunner) Login(_ context.Context, homePath string, _
 	return s.loginErr
 }
 
+func (s *stubCodexAccountAuthRunner) Logout(_ context.Context, homePath string, _ io.Reader, _, _ io.Writer) error {
+	s.homePaths = append(s.homePaths, homePath)
+	s.loggedIn = false
+	return nil
+}
+
 func installStubCodexAccountAuth(t *testing.T, cmd *cobra.Command, loggedIn bool) *stubCodexAccountAuthRunner {
 	t.Helper()
 
@@ -155,6 +161,23 @@ func TestSystemCodexAccountAuthRunnerLoginUsesCODEXHOME(t *testing.T) {
 	}
 }
 
+func TestSystemCodexAccountAuthRunnerLogoutUsesCODEXHOME(t *testing.T) {
+	logPath := installFakeHostCodex(t, "ok")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := systemCodexAccountAuthRunner{}.Logout(context.Background(), "/tmp/work", bytes.NewBuffer(nil), &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Logout() error = %v", err)
+	}
+	content, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v", logPath, err)
+	}
+	if !strings.Contains(string(content), "CODEX_HOME=/tmp/work") || !strings.Contains(string(content), "args:logout") {
+		t.Fatalf("fake codex log = %q, want logout CODEX_HOME entry", string(content))
+	}
+}
+
 func installFakeHostCodex(t *testing.T, mode string) string {
 	t.Helper()
 
@@ -184,6 +207,10 @@ if [ "${1:-}" = "login" ] && [ "${2:-}" = "status" ]; then
 fi
 if [ "${1:-}" = "login" ]; then
   printf 'login ok\n'
+  exit 0
+fi
+if [ "${1:-}" = "logout" ]; then
+  printf 'logout ok\n'
   exit 0
 fi
 printf 'unexpected args\n'

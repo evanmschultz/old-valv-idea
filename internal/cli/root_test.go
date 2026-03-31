@@ -123,7 +123,7 @@ func TestTopLevelAccountCommandWorks(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	for _, want := range []string{"Manage Valv provider accounts", "rename", "delete", "inspect"} {
+	for _, want := range []string{"Manage Valv provider accounts", "rename", "delete", "inspect", "login", "logout", "cleanup"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("unexpected account help output %q missing %q", stdout.String(), want)
 		}

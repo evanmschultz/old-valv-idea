@@ -298,6 +298,60 @@ func TestPrepareRuntimeNormalizesUnsupportedTERM(t *testing.T) {
 	}
 }
 
+func TestPrepareRuntimeUsesSharedHomeAndOverlaysAccountAuth(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	sharedHome := filepath.Join(root, "shared")
+	profileHome := filepath.Join(root, "profile")
+	projectRoot := filepath.Join(root, "project")
+	tempRoot := filepath.Join(root, "tmp")
+	if err := os.MkdirAll(profileHome, 0o755); err != nil {
+		t.Fatalf("MkdirAll(profileHome) error = %v", err)
+	}
+	if err := os.MkdirAll(projectRoot, 0o755); err != nil {
+		t.Fatalf("MkdirAll(projectRoot) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(profileHome, "auth.json"), []byte(`{"auth_mode":"chatgpt"}`), 0o600); err != nil {
+		t.Fatalf("WriteFile(auth.json) error = %v", err)
+	}
+
+	prepared, err := PrepareRuntime(context.Background(), PrepareRequest{
+		ProfileHome: profileHome,
+		SharedHome:  sharedHome,
+		ProjectRoot: projectRoot,
+		TempRoot:    tempRoot,
+	})
+	if err != nil {
+		t.Fatalf("PrepareRuntime() error = %v", err)
+	}
+	defer func() {
+		if err := prepared.Close(); err != nil {
+			t.Fatalf("prepared.Close() error = %v", err)
+		}
+	}()
+
+	wantShared, err := pathutil.Normalize(sharedHome)
+	if err != nil {
+		t.Fatalf("Normalize(sharedHome) error = %v", err)
+	}
+	gotShared, err := pathutil.Normalize(prepared.Mounts[0].Source)
+	if err != nil {
+		t.Fatalf("Normalize(shared mount source) error = %v", err)
+	}
+	if got := dockeradapter.NewMountSpec(gotShared, prepared.Mounts[0].Target, prepared.Mounts[0].ReadOnly); got != dockeradapter.NewMountSpec(wantShared, ContainerCodexDir, false) {
+		t.Fatalf("shared mount = %+v, want %+v", got, dockeradapter.NewMountSpec(wantShared, ContainerCodexDir, false))
+	}
+	authMount := findMountTarget(t, prepared.Mounts, filepath.Join(ContainerCodexDir, "auth.json"))
+	wantAuth, err := pathutil.Normalize(filepath.Join(profileHome, "auth.json"))
+	if err != nil {
+		t.Fatalf("Normalize(authPath) error = %v", err)
+	}
+	if got := authMount.Source; got != wantAuth {
+		t.Fatalf("auth mount source = %q, want %q", got, wantAuth)
+	}
+}
+
 func newProfileMount(profileHome string) dockeradapter.MountSpec {
 	return dockeradapter.MountSpec{
 		Source:   profileHome,
