@@ -276,6 +276,8 @@ Testing standards:
 - mocks, fakes, and stubs are allowed only when there is no practical real-environment option or when isolating a narrow pure-domain concern
 - do not default to mock-heavy unit tests for runtime, provider, storage, Docker, or CLI launch-path behavior
 - if a mock is introduced, document briefly in the worklog why a real test was not practical
+- use targeted `go test` or `go build` only for debugging narrow failures; final local signoff must run the canonical Mage gates
+- final local signoff for normal work must include `mage test`; when Docker-backed or external transcript coverage is relevant, final signoff must also include `mage integration`
 
 ## 12) Repository Standards
 

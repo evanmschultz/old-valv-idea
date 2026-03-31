@@ -71,6 +71,15 @@ func PrepareRuntime(ctx context.Context, request PrepareRequest) (PreparedRuntim
 	if err := os.MkdirAll(sharedHome, 0o755); err != nil {
 		return PreparedRuntime{}, fmt.Errorf("prepare codex runtime: ensure shared home %q: %w", sharedHome, err)
 	}
+	debugLog(request.Logger,
+		"preparing codex runtime",
+		"profile_home", profileHome,
+		"shared_home", sharedHome,
+		"project_root", projectRoot,
+		"temp_root", tempRoot,
+		"host_term", strings.TrimSpace(os.Getenv("TERM")),
+		"container_term", normalizedContainerTERM(),
+	)
 
 	runtimeDir, err := os.MkdirTemp(tempRoot, "codex-runtime-")
 	if err != nil {
@@ -86,6 +95,11 @@ func PrepareRuntime(ctx context.Context, request PrepareRequest) (PreparedRuntim
 		if err := copyDirContents(sharedHome, runtimeCodexHome, nil); err != nil {
 			return PreparedRuntime{}, fmt.Errorf("prepare codex runtime: stage shared home %q: %w", sharedHome, err)
 		}
+		debugLog(request.Logger,
+			"staged shared codex home for account runtime",
+			"runtime_codex_home", runtimeCodexHome,
+			"shared_home", sharedHome,
+		)
 	}
 	mounts := []dockeradapter.MountSpec{
 		dockeradapter.NewMountSpec(runtimeCodexHome, ContainerCodexDir, false),
@@ -106,6 +120,11 @@ func PrepareRuntime(ctx context.Context, request PrepareRequest) (PreparedRuntim
 	cleanup := func() error {
 		var errs []error
 		if runtimeCodexHome != sharedHome {
+			debugLog(request.Logger,
+				"syncing shared codex state back to host home",
+				"runtime_codex_home", runtimeCodexHome,
+				"shared_home", sharedHome,
+			)
 			if err := syncDirContents(runtimeCodexHome, sharedHome, map[string]struct{}{
 				"auth.json":   {},
 				"config.toml": {},
@@ -179,6 +198,14 @@ func PrepareRuntime(ctx context.Context, request PrepareRequest) (PreparedRuntim
 	if projectResult.HasOverlay {
 		mounts = append(mounts, dockeradapter.NewMountSpec(projectOverlayPath, projectConfigPath, true))
 	}
+	debugLog(request.Logger,
+		"prepared codex runtime",
+		"runtime_codex_home", runtimeCodexHome,
+		"env", env,
+		"env_passthrough", envPassthrough,
+		"warnings", warnings,
+		"mount_count", len(mounts),
+	)
 
 	return PreparedRuntime{
 		ContainerHome:  ContainerHomeDir,
@@ -188,6 +215,13 @@ func PrepareRuntime(ctx context.Context, request PrepareRequest) (PreparedRuntim
 		Warnings:       warnings,
 		cleanup:        cleanup,
 	}, nil
+}
+
+func debugLog(logger *log.Logger, msg string, keyvals ...any) {
+	if logger == nil {
+		return
+	}
+	logger.Debug(msg, keyvals...)
 }
 
 func copyDirContents(src, dst string, exclude map[string]struct{}) error {

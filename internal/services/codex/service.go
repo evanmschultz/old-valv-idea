@@ -108,9 +108,10 @@ func (s Service) Run(ctx context.Context, cwd string, codexArgs []string) error 
 		return err
 	}
 
+	sharedHome := s.sharedCodexStateHome(resolved.profile)
 	prepared, err := codexruntime.PrepareRuntime(ctx, codexruntime.PrepareRequest{
 		ProfileHome: resolved.profile.HomePath,
-		SharedHome:  s.sharedCodexStateHome(resolved.profile),
+		SharedHome:  sharedHome,
 		ProjectRoot: resolved.project.Root,
 		TempRoot:    s.tempRoot,
 		Logger:      s.logger,
@@ -125,7 +126,21 @@ func (s Service) Run(ctx context.Context, cwd string, codexArgs []string) error 
 	if err != nil {
 		return fmt.Errorf("run codex launch service: build docker request: %w", err)
 	}
-	s.debug("launching codex container", "container_name", request.Name, "image", request.Image.String(), "args", request.Args)
+	s.debug(
+		"launching codex container",
+		"container_name", request.Name,
+		"image", request.Image.String(),
+		"args", request.Args,
+		"tty", request.TTY,
+		"interactive", request.Interactive,
+		"init", request.Init,
+		"user", request.User,
+		"working_dir", request.WorkingDir,
+		"profile_home", resolved.profile.HomePath,
+		"shared_home", sharedHome,
+		"env_passthrough", request.EnvPassthrough,
+		"mount_count", len(request.Mounts),
+	)
 
 	if err := s.executor.Run(ctx, request); err != nil {
 		return fmt.Errorf("run codex launch service: execute docker request for project %q: %w", resolved.project.Root, err)

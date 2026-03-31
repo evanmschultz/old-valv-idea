@@ -74,6 +74,22 @@ func runCodexCommand(cmd *cobra.Command, paths config.Paths, args []string) erro
 		return fmt.Errorf("run codex command: %w", err)
 	}
 
+	stdinTTY := commandHasTTY(cmd.InOrStdin())
+	stdoutTTY := commandHasTTY(cmd.OutOrStdout())
+	stderrTTY := commandHasTTY(cmd.ErrOrStderr())
+	logger := LoggerFromContext(cmd.Context())
+	if logger != nil {
+		logger.Debug(
+			"resolved codex terminal state",
+			"stdin_tty", stdinTTY,
+			"stdout_tty", stdoutTTY,
+			"stderr_tty", stderrTTY,
+			"term", strings.TrimSpace(os.Getenv("TERM")),
+			"colorterm", strings.TrimSpace(os.Getenv("COLORTERM")),
+			"term_program", strings.TrimSpace(os.Getenv("TERM_PROGRAM")),
+		)
+	}
+
 	store, err := openStore(paths)
 	if err != nil {
 		return fmt.Errorf("run codex command: %w", err)
@@ -85,23 +101,17 @@ func runCodexCommand(cmd *cobra.Command, paths config.Paths, args []string) erro
 		Executor: dockeradapter.NewExecutor(dockeradapter.NewSystemRunner("docker", cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr())),
 		Image:    codexImageRef(),
 		User:     currentContainerUser(),
-		TTY:      commandHasTTY(cmd.InOrStdin()) && commandHasTTY(cmd.OutOrStdout()),
-		Stdin:    commandHasTTY(cmd.InOrStdin()),
+		TTY:      stdinTTY && stdoutTTY,
+		Stdin:    stdinTTY,
 		TempRoot: paths.TempCacheDir,
 		RealHome: realHomeDir(),
-		Logger:   LoggerFromContext(cmd.Context()),
+		Logger:   logger,
 		Notices:  cmd.ErrOrStderr(),
 	})
 	if err != nil {
 		return fmt.Errorf("run codex command: initialize launcher: %w", err)
 	}
-	if err := runWithCLIQuietSpinner(
-		cmd.ErrOrStderr(),
-		"Checking Codex image",
-		"Codex image ready",
-		"Codex image check failed",
-		func() error { return ensureCodexImageCurrent(cmd, paths) },
-	); err != nil {
+	if err := ensureCodexImageCurrent(cmd, paths); err != nil {
 		return fmt.Errorf("run codex command: %w", err)
 	}
 	if err := service.ValidateBinding(cmd.Context(), workingDir); err != nil {
