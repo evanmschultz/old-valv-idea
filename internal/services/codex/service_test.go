@@ -203,7 +203,11 @@ func TestRunBuildsDockerRequestFromProjectBindingAndProfile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Normalize(profile.HomePath) error = %v", err)
 	}
-	if executor.got.Mounts[1] != docker.NewMountSpec(wantProfileHome, codexruntime.ContainerCodexDir, false) {
+	gotProfileHome, err := pathutil.Normalize(executor.got.Mounts[1].Source)
+	if err != nil {
+		t.Fatalf("Normalize(profile mount source) error = %v", err)
+	}
+	if got := docker.NewMountSpec(gotProfileHome, executor.got.Mounts[1].Target, executor.got.Mounts[1].ReadOnly); got != docker.NewMountSpec(wantProfileHome, codexruntime.ContainerCodexDir, false) {
 		t.Fatalf("Run() profile mount = %+v", executor.got.Mounts[1])
 	}
 	for index, arg := range args {
