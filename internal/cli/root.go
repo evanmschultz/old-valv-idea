@@ -53,6 +53,7 @@ Use the direct runtime commands for provider execution and the management surfac
 `),
 		Example: strings.TrimSpace(`
 valv paths
+valv account list
 valv manage update
 valv manage account add codex
 valv manage account add codex work
@@ -122,12 +123,14 @@ valv api serve --runtime-ttl 2m
 	codexCmd.GroupID = "runtime"
 	apiCmd := newAPICommand(paths, opts)
 	apiCmd.GroupID = "runtime"
+	accountCmd := newManageAccountCommand(paths, opts)
+	accountCmd.GroupID = "manage"
 	manageCmd := newManageCommand(paths, opts)
 	manageCmd.GroupID = "manage"
 	globalCmd := newGlobalCommand(paths, opts)
 	globalCmd.GroupID = "manage"
 
-	cmd.AddCommand(pathsCmd, versionCmd, codexCmd, apiCmd, manageCmd, globalCmd)
+	cmd.AddCommand(pathsCmd, versionCmd, codexCmd, apiCmd, accountCmd, manageCmd, globalCmd)
 	installBranchHelpCommands(cmd)
 
 	return cmd, nil

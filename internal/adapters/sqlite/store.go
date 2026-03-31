@@ -142,6 +142,33 @@ func (s *Store) ProjectByRoot(ctx context.Context, root string) (domain.Project,
 	return project, nil
 }
 
+func (s *Store) ListProjects(ctx context.Context) ([]domain.Project, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, root, name, created_at FROM projects ORDER BY root ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("list projects: %w", err)
+	}
+	defer rows.Close()
+
+	var projects []domain.Project
+	for rows.Next() {
+		var project domain.Project
+		var createdAt string
+		if err := rows.Scan(&project.ID, &project.Root, &project.Name, &createdAt); err != nil {
+			return nil, fmt.Errorf("list projects: scan row: %w", err)
+		}
+		parsedCreatedAt, err := parseTime("list projects", "created_at", createdAt)
+		if err != nil {
+			return nil, err
+		}
+		project.CreatedAt = parsedCreatedAt
+		projects = append(projects, project)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list projects: %w", err)
+	}
+	return projects, nil
+}
+
 func (s *Store) CreateProfile(ctx context.Context, profile domain.Profile) (domain.Profile, error) {
 	if _, err := s.db.ExecContext(
 		ctx,
@@ -239,6 +266,47 @@ func (s *Store) ListProfilesByProvider(ctx context.Context, provider domain.Prov
 	return profiles, nil
 }
 
+func (s *Store) UpdateProfileName(ctx context.Context, provider domain.Provider, currentName, newName string) (domain.Profile, error) {
+	result, err := s.db.ExecContext(
+		ctx,
+		`UPDATE profiles SET name = ? WHERE provider = ? AND name = ?`,
+		newName,
+		string(provider),
+		currentName,
+	)
+	if err != nil {
+		return domain.Profile{}, fmt.Errorf("update profile name %q/%q->%q: %w", provider, currentName, newName, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return domain.Profile{}, fmt.Errorf("update profile name %q/%q->%q: rows affected: %w", provider, currentName, newName, err)
+	}
+	if affected == 0 {
+		return domain.Profile{}, fmt.Errorf("update profile name %q/%q->%q: %w", provider, currentName, newName, domain.ErrNotFound)
+	}
+	return s.ProfileByName(ctx, provider, newName)
+}
+
+func (s *Store) DeleteProfile(ctx context.Context, provider domain.Provider, name string) error {
+	result, err := s.db.ExecContext(
+		ctx,
+		`DELETE FROM profiles WHERE provider = ? AND name = ?`,
+		string(provider),
+		name,
+	)
+	if err != nil {
+		return fmt.Errorf("delete profile %q/%q: %w", provider, name, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("delete profile %q/%q: rows affected: %w", provider, name, err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("delete profile %q/%q: %w", provider, name, domain.ErrNotFound)
+	}
+	return nil
+}
+
 func (s *Store) UpsertProjectBinding(ctx context.Context, binding domain.ProjectBinding) (domain.ProjectBinding, error) {
 	if _, err := s.db.ExecContext(
 		ctx,
@@ -287,6 +355,46 @@ func (s *Store) BindingByProjectID(ctx context.Context, projectID string) (domai
 	binding.CreatedAt = parsedCreatedAt
 	binding.ModifiedAt = parsedModifiedAt
 	return binding, nil
+}
+
+func (s *Store) ListBindings(ctx context.Context) ([]domain.ProjectBinding, error) {
+	rows, err := s.db.QueryContext(
+		ctx,
+		`SELECT project_id, profile_id, provider, created_at, modified_at
+		 FROM project_bindings
+		 ORDER BY modified_at DESC, project_id ASC`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list bindings: %w", err)
+	}
+	defer rows.Close()
+
+	var bindings []domain.ProjectBinding
+	for rows.Next() {
+		var binding domain.ProjectBinding
+		var providerValue string
+		var createdAt string
+		var modifiedAt string
+		if err := rows.Scan(&binding.ProjectID, &binding.ProfileID, &providerValue, &createdAt, &modifiedAt); err != nil {
+			return nil, fmt.Errorf("list bindings: scan row: %w", err)
+		}
+		binding.Provider = domain.Provider(providerValue)
+		parsedCreatedAt, err := parseTime("list bindings", "created_at", createdAt)
+		if err != nil {
+			return nil, err
+		}
+		parsedModifiedAt, err := parseTime("list bindings", "modified_at", modifiedAt)
+		if err != nil {
+			return nil, err
+		}
+		binding.CreatedAt = parsedCreatedAt
+		binding.ModifiedAt = parsedModifiedAt
+		bindings = append(bindings, binding)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list bindings: %w", err)
+	}
+	return bindings, nil
 }
 
 func (s *Store) UpsertRuntime(ctx context.Context, runtime domain.RuntimeRecord) (domain.RuntimeRecord, error) {

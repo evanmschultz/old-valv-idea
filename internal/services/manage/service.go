@@ -54,6 +54,12 @@ type StatusResult struct {
 	Binding  domain.ProjectBinding
 }
 
+type BindingView struct {
+	Project domain.Project
+	Profile domain.Profile
+	Binding domain.ProjectBinding
+}
+
 type ProfileListResult struct {
 	Provider domain.Provider
 	Profiles []domain.Profile
@@ -253,6 +259,90 @@ func (s Service) ListProfiles(ctx context.Context, provider domain.Provider) (Pr
 		Provider: provider,
 		Profiles: profiles,
 	}, nil
+}
+
+func (s Service) RenameProfile(ctx context.Context, provider domain.Provider, currentName, newName string) (domain.Profile, error) {
+	currentName = strings.TrimSpace(currentName)
+	newName = strings.TrimSpace(newName)
+	if currentName == "" {
+		return domain.Profile{}, fmt.Errorf("rename profile: current account name is required")
+	}
+	if newName == "" {
+		return domain.Profile{}, fmt.Errorf("rename profile: new account name is required")
+	}
+	if currentName == newName {
+		return s.ProfileByName(ctx, provider, currentName)
+	}
+	if _, err := s.store.ProfileByName(ctx, provider, newName); err == nil {
+		return domain.Profile{}, fmt.Errorf("rename profile: account %q already exists for provider %q", newName, provider)
+	} else if !errors.Is(err, domain.ErrNotFound) {
+		return domain.Profile{}, fmt.Errorf("rename profile: lookup target account %q: %w", newName, err)
+	}
+	profile, err := s.store.UpdateProfileName(ctx, provider, currentName, newName)
+	if err != nil {
+		return domain.Profile{}, fmt.Errorf("rename profile: %w", err)
+	}
+	return profile, nil
+}
+
+func (s Service) DeleteProfile(ctx context.Context, provider domain.Provider, name string) (domain.Profile, error) {
+	profile, err := s.ProfileByName(ctx, provider, name)
+	if err != nil {
+		return domain.Profile{}, fmt.Errorf("delete profile: %w", err)
+	}
+	bindings, err := s.ListBindings(ctx, provider)
+	if err != nil {
+		return domain.Profile{}, fmt.Errorf("delete profile: %w", err)
+	}
+	var boundProjects []string
+	for _, binding := range bindings {
+		if binding.Profile.ID == profile.ID {
+			boundProjects = append(boundProjects, binding.Project.Root)
+		}
+	}
+	if len(boundProjects) > 0 {
+		sort.Strings(boundProjects)
+		return domain.Profile{}, fmt.Errorf("delete profile: account %q is still bound to project paths: %s", profile.Name, strings.Join(boundProjects, ", "))
+	}
+	if err := s.store.DeleteProfile(ctx, provider, profile.Name); err != nil {
+		return domain.Profile{}, fmt.Errorf("delete profile: %w", err)
+	}
+	return profile, nil
+}
+
+func (s Service) ListBindings(ctx context.Context, provider domain.Provider) ([]BindingView, error) {
+	projects, err := s.store.ListProjects(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list bindings: %w", err)
+	}
+	projectByID := make(map[string]domain.Project, len(projects))
+	for _, project := range projects {
+		projectByID[project.ID] = project
+	}
+	bindings, err := s.store.ListBindings(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list bindings: %w", err)
+	}
+	out := make([]BindingView, 0, len(bindings))
+	for _, binding := range bindings {
+		if provider != "" && binding.Provider != provider {
+			continue
+		}
+		project, ok := projectByID[binding.ProjectID]
+		if !ok {
+			return nil, fmt.Errorf("list bindings: project %q: %w", binding.ProjectID, domain.ErrNotFound)
+		}
+		profile, err := s.store.ProfileByID(ctx, binding.ProfileID)
+		if err != nil {
+			return nil, fmt.Errorf("list bindings: profile %q: %w", binding.ProfileID, err)
+		}
+		out = append(out, BindingView{
+			Project: project,
+			Profile: profile,
+			Binding: binding,
+		})
+	}
+	return out, nil
 }
 
 func (s Service) debug(msg string, keyvals ...any) {

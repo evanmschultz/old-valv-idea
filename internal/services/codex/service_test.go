@@ -37,6 +37,10 @@ func (f fakeStore) ProjectByRoot(_ context.Context, root string) (domain.Project
 	return f.project, f.projectErr
 }
 
+func (f fakeStore) ListProjects(context.Context) ([]domain.Project, error) {
+	panic("unexpected call")
+}
+
 func (f fakeStore) CreateProfile(context.Context, domain.Profile) (domain.Profile, error) {
 	panic("unexpected call")
 }
@@ -54,12 +58,24 @@ func (f fakeStore) ListProfilesByProvider(context.Context, domain.Provider) ([]d
 	panic("unexpected call")
 }
 
+func (f fakeStore) UpdateProfileName(context.Context, domain.Provider, string, string) (domain.Profile, error) {
+	panic("unexpected call")
+}
+
+func (f fakeStore) DeleteProfile(context.Context, domain.Provider, string) error {
+	panic("unexpected call")
+}
+
 func (f fakeStore) UpsertProjectBinding(context.Context, domain.ProjectBinding) (domain.ProjectBinding, error) {
 	panic("unexpected call")
 }
 
 func (f fakeStore) BindingByProjectID(context.Context, string) (domain.ProjectBinding, error) {
 	return f.binding, f.bindingErr
+}
+
+func (f fakeStore) ListBindings(context.Context) ([]domain.ProjectBinding, error) {
+	panic("unexpected call")
 }
 
 type fakeExecutor struct {

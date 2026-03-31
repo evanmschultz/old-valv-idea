@@ -682,7 +682,12 @@ What remains now that the API validation passes:
 
 - optional polish on interactive TTY ownership and `/mcp` UI parity
 - optional cleanup/migration UX for stale historical account aliases
-- optional richer account observability commands such as `valv manage account inspect` or `whoami`
+- account observability and editing now cover:
+  - `valv manage account inspect`
+  - `valv manage account whoami`
+  - `valv manage account rename`
+  - `valv manage account delete`
+  - `valv manage project list`
 - future provider work:
   - Claude
   - Gemini

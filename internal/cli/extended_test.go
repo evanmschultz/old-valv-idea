@@ -265,6 +265,92 @@ func TestManageAccountSwitchMissingAccountShowsActionableGuidance(t *testing.T) 
 	}
 }
 
+func TestManageAccountInspectShowsIdentityAndBindingCount(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	projectRoot := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(filepath.Join(projectRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git) error = %v", err)
+	}
+	profileHome := filepath.Join(paths.ProviderRoot, "codex", "profiles", "personal")
+	runManage(t, paths, []string{"account", "add", "codex", "personal", "--home", profileHome, "--project", projectRoot})
+	writeTestCodexAuth(t, profileHome, "person@example.com", "Person Example")
+
+	output := runManage(t, paths, []string{"account", "inspect", "personal", "--project", projectRoot})
+	for _, want := range []string{"Account details", "account=personal", "auth=ChatGPT", "email=person@example.com", "bound_projects=1"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("unexpected account inspect output %q missing %q", output, want)
+		}
+	}
+}
+
+func TestManageAccountRenameKeepsBindingByProfileID(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	projectRoot := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(filepath.Join(projectRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git) error = %v", err)
+	}
+	profileHome := filepath.Join(paths.ProviderRoot, "codex", "profiles", "personal")
+	runManage(t, paths, []string{"account", "add", "codex", "personal", "--home", profileHome, "--project", projectRoot})
+
+	output := runManage(t, paths, []string{"account", "rename", "personal", "hylla"})
+	if !strings.Contains(output, "account=hylla") {
+		t.Fatalf("unexpected account rename output: %q", output)
+	}
+
+	status := runManage(t, paths, []string{"status", "--project", projectRoot})
+	if !strings.Contains(status, "account=hylla") {
+		t.Fatalf("unexpected status after rename: %q", status)
+	}
+}
+
+func TestManageAccountDeleteRejectsBoundAccount(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	projectRoot := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(filepath.Join(projectRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git) error = %v", err)
+	}
+	profileHome := filepath.Join(paths.ProviderRoot, "codex", "profiles", "personal")
+	runManage(t, paths, []string{"account", "add", "codex", "personal", "--home", profileHome, "--project", projectRoot})
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd := newManageCommand(paths, &rootOptions{})
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"account", "delete", "personal"})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "still bound to project paths") {
+		t.Fatalf("Execute() error = %v, want bound-project failure", err)
+	}
+}
+
+func TestManageProjectListShowsBoundProjects(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	projectRoot := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(filepath.Join(projectRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git) error = %v", err)
+	}
+	profileHome := filepath.Join(paths.ProviderRoot, "codex", "profiles", "personal")
+	runManage(t, paths, []string{"account", "add", "codex", "personal", "--home", profileHome, "--project", projectRoot})
+	writeTestCodexAuth(t, profileHome, "person@example.com", "Person Example")
+
+	output := runManage(t, paths, []string{"project", "list", "codex"})
+	for _, want := range []string{projectRoot, "account=personal", "auth=ChatGPT", "email=person@example.com"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("unexpected project list output %q missing %q", output, want)
+		}
+	}
+}
+
 func TestRunManageBindInteractiveShowsGuidanceWhenNoAccountsExist(t *testing.T) {
 	t.Parallel()
 

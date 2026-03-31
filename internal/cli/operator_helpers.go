@@ -202,6 +202,24 @@ func listItemsForAccounts(profiles []domain.Profile) []output.ListItem {
 	return items
 }
 
+func listItemsForBindings(bindings []manageservice.BindingView) []output.ListItem {
+	items := make([]output.ListItem, 0, len(bindings))
+	for _, binding := range bindings {
+		identity := readAccountIdentity(binding.Profile)
+		items = append(items, output.ListItem{
+			Title: binding.Project.Root,
+			Fields: []output.Field{
+				{Label: "provider", Value: string(binding.Profile.Provider), Muted: true},
+				{Label: "account", Value: binding.Profile.Name, Identifier: true},
+				{Label: "auth", Value: identity.authDisplay, Muted: true},
+				{Label: "email", Value: identity.emailDisplay},
+				{Label: "home", Value: binding.Profile.HomePath},
+			},
+		})
+	}
+	return items
+}
+
 type accountDisplayIdentity struct {
 	authDisplay  string
 	emailDisplay string

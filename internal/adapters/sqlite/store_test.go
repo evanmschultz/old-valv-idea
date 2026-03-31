@@ -246,6 +246,74 @@ func TestStoreListProfilesByProviderReturnsSortedProfiles(t *testing.T) {
 	}
 }
 
+func TestStoreUpdateAndDeleteProfile(t *testing.T) {
+	t.Parallel()
+
+	store := newBootstrappedStore(t)
+	profile := mustProfile(t, domain.ProviderCodex, "personal", "/tmp/valv/providers/codex/personal")
+	if _, err := store.CreateProfile(context.Background(), profile); err != nil {
+		t.Fatalf("CreateProfile() error = %v", err)
+	}
+
+	renamed, err := store.UpdateProfileName(context.Background(), domain.ProviderCodex, "personal", "hylla")
+	if err != nil {
+		t.Fatalf("UpdateProfileName() error = %v", err)
+	}
+	if got, want := renamed.Name, "hylla"; got != want {
+		t.Fatalf("UpdateProfileName().Name = %q, want %q", got, want)
+	}
+	if _, err := store.ProfileByName(context.Background(), domain.ProviderCodex, "personal"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("ProfileByName(old) error = %v, want domain.ErrNotFound", err)
+	}
+
+	if err := store.DeleteProfile(context.Background(), domain.ProviderCodex, "hylla"); err != nil {
+		t.Fatalf("DeleteProfile() error = %v", err)
+	}
+	if _, err := store.ProfileByName(context.Background(), domain.ProviderCodex, "hylla"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("ProfileByName(deleted) error = %v, want domain.ErrNotFound", err)
+	}
+}
+
+func TestStoreListsProjectsAndBindings(t *testing.T) {
+	t.Parallel()
+
+	store := newBootstrappedStore(t)
+	project, _ := domain.NewProject("/tmp/example/project")
+	profile := mustProfile(t, domain.ProviderCodex, "dev", "/tmp/valv/providers/codex/dev")
+	if _, err := store.CreateProject(context.Background(), project); err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	if _, err := store.CreateProfile(context.Background(), profile); err != nil {
+		t.Fatalf("CreateProfile() error = %v", err)
+	}
+	binding, err := domain.NewProjectBinding(project.ID, profile.ID, domain.ProviderCodex)
+	if err != nil {
+		t.Fatalf("NewProjectBinding() error = %v", err)
+	}
+	if _, err := store.UpsertProjectBinding(context.Background(), binding); err != nil {
+		t.Fatalf("UpsertProjectBinding() error = %v", err)
+	}
+
+	projects, err := store.ListProjects(context.Background())
+	if err != nil {
+		t.Fatalf("ListProjects() error = %v", err)
+	}
+	if got, want := len(projects), 1; got != want {
+		t.Fatalf("len(projects) = %d, want %d", got, want)
+	}
+
+	bindings, err := store.ListBindings(context.Background())
+	if err != nil {
+		t.Fatalf("ListBindings() error = %v", err)
+	}
+	if got, want := len(bindings), 1; got != want {
+		t.Fatalf("len(bindings) = %d, want %d", got, want)
+	}
+	if got, want := bindings[0].ProfileID, profile.ID; got != want {
+		t.Fatalf("ListBindings()[0].ProfileID = %q, want %q", got, want)
+	}
+}
+
 func mustProfile(t *testing.T, provider domain.Provider, name, home string) domain.Profile {
 	t.Helper()
 	profile, err := domain.NewProfile(provider, name, home)

@@ -189,6 +189,96 @@ func TestCreateDefaultHostProfileReusesExistingSameHomeAccount(t *testing.T) {
 	}
 }
 
+func TestRenameProfileKeepsHomeAndUpdatesLookup(t *testing.T) {
+	t.Parallel()
+
+	store, providerRoot := testStore(t)
+	service, err := New(Options{Store: store, ProviderRoot: providerRoot})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	profile, err := service.CreateProfile(context.Background(), domain.ProviderCodex, "personal", "")
+	if err != nil {
+		t.Fatalf("CreateProfile() error = %v", err)
+	}
+
+	renamed, err := service.RenameProfile(context.Background(), domain.ProviderCodex, "personal", "hylla")
+	if err != nil {
+		t.Fatalf("RenameProfile() error = %v", err)
+	}
+	if got, want := renamed.HomePath, profile.HomePath; got != want {
+		t.Fatalf("RenameProfile().HomePath = %q, want %q", got, want)
+	}
+	if _, err := service.ProfileByName(context.Background(), domain.ProviderCodex, "personal"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("ProfileByName(old) error = %v, want domain.ErrNotFound", err)
+	}
+}
+
+func TestDeleteProfileRejectsBoundProjects(t *testing.T) {
+	t.Parallel()
+
+	store, providerRoot := testStore(t)
+	service, err := New(Options{Store: store, ProviderRoot: providerRoot})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	profile, err := service.CreateProfile(context.Background(), domain.ProviderCodex, "personal", "/tmp/example/profile")
+	if err != nil {
+		t.Fatalf("CreateProfile() error = %v", err)
+	}
+	projectRoot := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(filepath.Join(projectRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git) error = %v", err)
+	}
+	if _, err := service.BindProject(context.Background(), domain.ProviderCodex, profile.Name, projectRoot); err != nil {
+		t.Fatalf("BindProject() error = %v", err)
+	}
+
+	_, err = service.DeleteProfile(context.Background(), domain.ProviderCodex, profile.Name)
+	if err == nil || !strings.Contains(err.Error(), "still bound to project paths") {
+		t.Fatalf("DeleteProfile() error = %v, want bound-project guidance", err)
+	}
+}
+
+func TestListBindingsJoinsProjectsAndProfiles(t *testing.T) {
+	t.Parallel()
+
+	store, providerRoot := testStore(t)
+	service, err := New(Options{Store: store, ProviderRoot: providerRoot})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	profile, err := service.CreateProfile(context.Background(), domain.ProviderCodex, "personal", "/tmp/example/profile")
+	if err != nil {
+		t.Fatalf("CreateProfile() error = %v", err)
+	}
+	projectRoot := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(filepath.Join(projectRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git) error = %v", err)
+	}
+	if _, err := service.BindProject(context.Background(), domain.ProviderCodex, profile.Name, projectRoot); err != nil {
+		t.Fatalf("BindProject() error = %v", err)
+	}
+
+	bindings, err := service.ListBindings(context.Background(), domain.ProviderCodex)
+	if err != nil {
+		t.Fatalf("ListBindings() error = %v", err)
+	}
+	if got, want := len(bindings), 1; got != want {
+		t.Fatalf("len(bindings) = %d, want %d", got, want)
+	}
+	if got, want := bindings[0].Profile.Name, profile.Name; got != want {
+		t.Fatalf("bindings[0].Profile.Name = %q, want %q", got, want)
+	}
+	wantRoot, err := pathutil.Normalize(projectRoot)
+	if err != nil {
+		t.Fatalf("Normalize(projectRoot) error = %v", err)
+	}
+	if got, want := bindings[0].Project.Root, wantRoot; got != want {
+		t.Fatalf("bindings[0].Project.Root = %q, want %q", got, want)
+	}
+}
+
 func TestCreateProfileSeedsConfigFromDefaultHostHome(t *testing.T) {
 	t.Parallel()
 

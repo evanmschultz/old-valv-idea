@@ -114,6 +114,22 @@ func TestManageAliasWorks(t *testing.T) {
 	}
 }
 
+func TestTopLevelAccountCommandWorks(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	cmd := newTestRootCommand(t, &stdout, &stderr)
+	cmd.SetArgs([]string{"account", "h"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	for _, want := range []string{"Manage Valv provider accounts", "rename", "delete", "inspect"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("unexpected account help output %q missing %q", stdout.String(), want)
+		}
+	}
+}
+
 func TestGlobalAliasWorks(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
