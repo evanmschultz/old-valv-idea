@@ -842,7 +842,8 @@ func resolveProfileSwitchTarget(cmd *cobra.Command, service interface {
 func resolveManagedAccount(cmd *cobra.Command, service interface {
 	Status(context.Context, string) (manageservice.StatusResult, error)
 	ProfileByName(context.Context, domain.Provider, string) (domain.Profile, error)
-}, args []string, projectPath string) (domain.Profile, error) {
+}, args []string, projectPath string,
+) (domain.Profile, error) {
 	startPath := strings.TrimSpace(projectPath)
 	var err error
 	if startPath == "" {

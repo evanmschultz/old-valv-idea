@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -76,16 +77,18 @@ func PrepareRuntime(ctx context.Context, request PrepareRequest) (PreparedRuntim
 		return PreparedRuntime{}, fmt.Errorf("prepare codex runtime: create runtime dir: %w", err)
 	}
 
-	mounts := []dockeradapter.MountSpec{
-		dockeradapter.NewMountSpec(sharedHome, ContainerCodexDir, false),
-	}
+	runtimeCodexHome := sharedHome
 	if profileHome != sharedHome {
-		authPath := filepath.Join(profileHome, "auth.json")
-		if info, err := os.Stat(authPath); err == nil && !info.IsDir() {
-			mounts = append(mounts, dockeradapter.NewMountSpec(authPath, filepath.Join(ContainerCodexDir, "auth.json"), false))
-		} else if err != nil && !os.IsNotExist(err) {
-			return PreparedRuntime{}, fmt.Errorf("prepare codex runtime: stat auth file %q: %w", authPath, err)
+		runtimeCodexHome = filepath.Join(runtimeDir, "codex-home")
+		if err := os.MkdirAll(runtimeCodexHome, 0o755); err != nil {
+			return PreparedRuntime{}, fmt.Errorf("prepare codex runtime: ensure runtime codex home %q: %w", runtimeCodexHome, err)
 		}
+		if err := copyDirContents(sharedHome, runtimeCodexHome, nil); err != nil {
+			return PreparedRuntime{}, fmt.Errorf("prepare codex runtime: stage shared home %q: %w", sharedHome, err)
+		}
+	}
+	mounts := []dockeradapter.MountSpec{
+		dockeradapter.NewMountSpec(runtimeCodexHome, ContainerCodexDir, false),
 	}
 	env := map[string]string{
 		"CODEX_HOME": ContainerCodexDir,
@@ -102,6 +105,14 @@ func PrepareRuntime(ctx context.Context, request PrepareRequest) (PreparedRuntim
 	}
 	cleanup := func() error {
 		var errs []error
+		if runtimeCodexHome != sharedHome {
+			if err := syncDirContents(runtimeCodexHome, sharedHome, map[string]struct{}{
+				"auth.json":   {},
+				"config.toml": {},
+			}); err != nil {
+				errs = append(errs, err)
+			}
+		}
 		if err := bridgeManager.Close(); err != nil {
 			errs = append(errs, err)
 		}
@@ -128,7 +139,24 @@ func PrepareRuntime(ctx context.Context, request PrepareRequest) (PreparedRuntim
 	warnings = append(warnings, profileResult.Warnings...)
 	envPassthrough := terminalEnvPassthrough()
 	envPassthrough = appendUniqueStrings(envPassthrough, profileResult.EnvPassthrough...)
-	if profileResult.HasOverlay {
+	if profileHome != sharedHome {
+		authPath := filepath.Join(profileHome, "auth.json")
+		if info, err := os.Stat(authPath); err == nil && !info.IsDir() {
+			if err := copyFile(authPath, filepath.Join(runtimeCodexHome, "auth.json")); err != nil {
+				_ = cleanup()
+				return PreparedRuntime{}, fmt.Errorf("prepare codex runtime: stage account auth: %w", err)
+			}
+		} else if err != nil && !os.IsNotExist(err) {
+			_ = cleanup()
+			return PreparedRuntime{}, fmt.Errorf("prepare codex runtime: stat auth file %q: %w", authPath, err)
+		}
+		if profileResult.HasOverlay {
+			if err := copyFile(profileOverlayPath, filepath.Join(runtimeCodexHome, "config.toml")); err != nil {
+				_ = cleanup()
+				return PreparedRuntime{}, fmt.Errorf("prepare codex runtime: stage profile config overlay: %w", err)
+			}
+		}
+	} else if profileResult.HasOverlay {
 		mounts = append(mounts, dockeradapter.NewMountSpec(profileOverlayPath, filepath.Join(ContainerCodexDir, "config.toml"), true))
 	}
 
@@ -160,6 +188,88 @@ func PrepareRuntime(ctx context.Context, request PrepareRequest) (PreparedRuntim
 		Warnings:       warnings,
 		cleanup:        cleanup,
 	}, nil
+}
+
+func copyDirContents(src, dst string, exclude map[string]struct{}) error {
+	info, err := os.Stat(src)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%q is not a directory", src)
+	}
+	return filepath.Walk(src, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == src {
+			return nil
+		}
+		relative, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		parts := strings.Split(relative, string(filepath.Separator))
+		if len(parts) > 0 {
+			if _, skip := exclude[parts[0]]; skip {
+				if info.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+		}
+		target := filepath.Join(dst, relative)
+		if info.IsDir() {
+			return os.MkdirAll(target, info.Mode().Perm())
+		}
+		return copyFile(path, target)
+	})
+}
+
+func syncDirContents(src, dst string, exclude map[string]struct{}) error {
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return err
+	}
+	return copyDirContents(src, dst, exclude)
+}
+
+func copyFile(src, dst string) error {
+	info, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return fmt.Errorf("%q is a directory", src)
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, info.Mode().Perm())
+	if err != nil {
+		return err
+	}
+	closed := false
+	defer func() {
+		if !closed {
+			_ = out.Close()
+		}
+	}()
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	closed = true
+	return nil
 }
 
 type translateRequest struct {

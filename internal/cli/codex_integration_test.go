@@ -47,6 +47,7 @@ func TestCodexCommandRunsFixtureImageEndToEnd(t *testing.T) {
 	}
 	imageRef := buildFixtureImage(t)
 	t.Setenv("VALV_CODEX_IMAGE", imageRef)
+	t.Setenv("VALV_REAL_HOME", paths.HomeDir)
 	runManageForIntegration(t, paths, projectRoot, []string{"account", "add", "codex", "profile-name", "--home", profileHome, "--skip-login"})
 	runManageForIntegration(t, paths, workDir, []string{"bind", "codex", "profile-name"})
 
@@ -101,7 +102,8 @@ func TestCodexCommandRunsFixtureImageEndToEnd(t *testing.T) {
 		}
 	}
 
-	homeResult := readKeyValueFile(t, filepath.Join(profileHome, ".valv-fixture-home.txt"))
+	sharedCodexHome := filepath.Join(paths.HomeDir, ".codex")
+	homeResult := readKeyValueFile(t, filepath.Join(sharedCodexHome, ".valv-fixture-home.txt"))
 	if got := homeResult["pwd"]; got != wantWorkDir {
 		t.Fatalf("fixture home pwd = %q, want %q", got, wantWorkDir)
 	}
@@ -147,6 +149,7 @@ func TestCodexCommandRunsFixtureImageWithTTYEndToEnd(t *testing.T) {
 	runCmd.Dir = workDir
 	runCmd.Env = append(os.Environ(),
 		"HOME="+paths.HomeDir,
+		"VALV_REAL_HOME="+paths.HomeDir,
 		"VALV_TEST_HOME_DIR="+paths.HomeDir,
 		"VALV_CODEX_IMAGE="+imageRef,
 		valvTestSkipHostCodexLoginEnv+"=1",
@@ -240,6 +243,7 @@ command = "`+fakeMCPPath+`"
 	runCmd.Dir = workDir
 	runCmd.Env = append(os.Environ(),
 		"HOME="+paths.HomeDir,
+		"VALV_REAL_HOME="+paths.HomeDir,
 		"VALV_TEST_HOME_DIR="+paths.HomeDir,
 		"VALV_CODEX_IMAGE="+imageRef,
 		valvTestSkipHostCodexLoginEnv+"=1",
@@ -404,6 +408,7 @@ func runValvBinaryCommand(t *testing.T, binaryPath, homeDir, workingDir, imageRe
 	command.Dir = workingDir
 	command.Env = append(os.Environ(),
 		"HOME="+homeDir,
+		"VALV_REAL_HOME="+homeDir,
 		"VALV_TEST_HOME_DIR="+homeDir,
 		"VALV_CODEX_IMAGE="+imageRef,
 		valvTestSkipHostCodexLoginEnv+"=1",

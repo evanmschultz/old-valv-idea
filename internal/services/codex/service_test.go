@@ -377,11 +377,18 @@ func TestRunUsesSharedHostHomeForCodexStateWhenRealHomeIsSet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Normalize(hostCodexHome) error = %v", err)
 	}
-	if got := executor.got.Mounts[1]; got != docker.NewMountSpec(wantSharedHome, codexruntime.ContainerCodexDir, false) {
-		t.Fatalf("shared codex mount = %+v, want %+v", got, docker.NewMountSpec(wantSharedHome, codexruntime.ContainerCodexDir, false))
+	if got := executor.got.Mounts[1]; got.Target != codexruntime.ContainerCodexDir || got.ReadOnly {
+		t.Fatalf("shared codex mount = %+v, want writable target %q", got, codexruntime.ContainerCodexDir)
 	}
-	if got := executor.got.Mounts[2].Target; got != filepath.Join(codexruntime.ContainerCodexDir, "auth.json") {
-		t.Fatalf("auth mount target = %q, want %q", got, filepath.Join(codexruntime.ContainerCodexDir, "auth.json"))
+	gotMountSource, err := pathutil.Normalize(executor.got.Mounts[1].Source)
+	if err != nil {
+		t.Fatalf("Normalize(runtime codex mount) error = %v", err)
+	}
+	if gotMountSource == wantSharedHome {
+		t.Fatalf("runtime codex mount source = %q, want staged runtime dir distinct from shared home", gotMountSource)
+	}
+	if len(executor.got.Mounts) != 2 {
+		t.Fatalf("mount count = %d, want 2 without nested auth mount", len(executor.got.Mounts))
 	}
 }
 

@@ -309,11 +309,20 @@ func TestPrepareRuntimeUsesSharedHomeAndOverlaysAccountAuth(t *testing.T) {
 	if err := os.MkdirAll(profileHome, 0o755); err != nil {
 		t.Fatalf("MkdirAll(profileHome) error = %v", err)
 	}
+	if err := os.MkdirAll(sharedHome, 0o755); err != nil {
+		t.Fatalf("MkdirAll(sharedHome) error = %v", err)
+	}
 	if err := os.MkdirAll(projectRoot, 0o755); err != nil {
 		t.Fatalf("MkdirAll(projectRoot) error = %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(sharedHome, "history.txt"), []byte("shared"), 0o600); err != nil {
+		t.Fatalf("WriteFile(shared history) error = %v", err)
+	}
 	if err := os.WriteFile(filepath.Join(profileHome, "auth.json"), []byte(`{"auth_mode":"chatgpt"}`), 0o600); err != nil {
 		t.Fatalf("WriteFile(auth.json) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(profileHome, "config.toml"), []byte("[mcp_servers.test]\nurl = \"http://127.0.0.1:7389/mcp\"\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile(config.toml) error = %v", err)
 	}
 
 	prepared, err := PrepareRuntime(context.Background(), PrepareRequest{
@@ -325,31 +334,63 @@ func TestPrepareRuntimeUsesSharedHomeAndOverlaysAccountAuth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PrepareRuntime() error = %v", err)
 	}
-	defer func() {
-		if err := prepared.Close(); err != nil {
-			t.Fatalf("prepared.Close() error = %v", err)
-		}
-	}()
-
-	wantShared, err := pathutil.Normalize(sharedHome)
-	if err != nil {
-		t.Fatalf("Normalize(sharedHome) error = %v", err)
-	}
 	gotShared, err := pathutil.Normalize(prepared.Mounts[0].Source)
 	if err != nil {
 		t.Fatalf("Normalize(shared mount source) error = %v", err)
 	}
-	if got := dockeradapter.NewMountSpec(gotShared, prepared.Mounts[0].Target, prepared.Mounts[0].ReadOnly); got != dockeradapter.NewMountSpec(wantShared, ContainerCodexDir, false) {
-		t.Fatalf("shared mount = %+v, want %+v", got, dockeradapter.NewMountSpec(wantShared, ContainerCodexDir, false))
+	if got := dockeradapter.NewMountSpec(gotShared, prepared.Mounts[0].Target, prepared.Mounts[0].ReadOnly); got.Target != ContainerCodexDir || got.ReadOnly {
+		t.Fatalf("runtime mount = %+v, want writable mount to %q", got, ContainerCodexDir)
 	}
-	authMount := findMountTarget(t, prepared.Mounts, filepath.Join(ContainerCodexDir, "auth.json"))
-	wantAuth, err := pathutil.Normalize(filepath.Join(profileHome, "auth.json"))
+	if gotShared == sharedHome {
+		t.Fatalf("runtime mount source = %q, want staged runtime dir distinct from shared home %q", gotShared, sharedHome)
+	}
+	runtimeAuthPath := filepath.Join(prepared.Mounts[0].Source, "auth.json")
+	wantAuth, err := pathutil.Normalize(runtimeAuthPath)
 	if err != nil {
-		t.Fatalf("Normalize(authPath) error = %v", err)
+		t.Fatalf("Normalize(runtime auth path) error = %v", err)
 	}
-	if got := authMount.Source; got != wantAuth {
-		t.Fatalf("auth mount source = %q, want %q", got, wantAuth)
+	gotAuth, err := pathutil.Normalize(runtimeAuthPath)
+	if err != nil {
+		t.Fatalf("Normalize(got auth path) error = %v", err)
 	}
+	if gotAuth != wantAuth {
+		t.Fatalf("runtime auth path = %q, want %q", gotAuth, wantAuth)
+	}
+	authContent, err := os.ReadFile(runtimeAuthPath)
+	if err != nil {
+		t.Fatalf("ReadFile(runtime auth) error = %v", err)
+	}
+	if string(authContent) != `{"auth_mode":"chatgpt"}` {
+		t.Fatalf("runtime auth = %q, want staged account auth", string(authContent))
+	}
+	configContent, err := os.ReadFile(filepath.Join(prepared.Mounts[0].Source, "config.toml"))
+	if err != nil {
+		t.Fatalf("ReadFile(runtime config) error = %v", err)
+	}
+	if !strings.Contains(string(configContent), "host.docker.internal") {
+		t.Fatalf("runtime config missing translated overlay: %s", string(configContent))
+	}
+	if err := os.WriteFile(filepath.Join(prepared.Mounts[0].Source, ".valv-fixture-home.txt"), []byte("pwd=/workspace\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile(runtime shared state) error = %v", err)
+	}
+	if err := prepared.Close(); err != nil {
+		t.Fatalf("prepared.Close() error = %v", err)
+	}
+	if got := string(mustReadFile(t, filepath.Join(sharedHome, ".valv-fixture-home.txt"))); got != "pwd=/workspace\n" {
+		t.Fatalf("shared home sync = %q, want persisted runtime state", got)
+	}
+	if _, err := os.Stat(filepath.Join(sharedHome, "auth.json")); !os.IsNotExist(err) {
+		t.Fatalf("shared home auth.json should not be synced back, stat err = %v", err)
+	}
+}
+
+func mustReadFile(t *testing.T, path string) []byte {
+	t.Helper()
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v", path, err)
+	}
+	return content
 }
 
 func newProfileMount(profileHome string) dockeradapter.MountSpec {
