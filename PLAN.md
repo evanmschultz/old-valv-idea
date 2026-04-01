@@ -167,6 +167,12 @@ Implication for future providers:
 
 Do not conflate provider identity with protocol compatibility. The handler should match the compatibility contract being served, not the marketing name of the backing provider.
 
+Streaming compatibility plan:
+
+- OpenAI-compatible endpoints should accept `stream: true` for providers that route through `valv/v1/api`.
+- Streaming responses should be emitted as SSE (`text/event-stream`) with `data:` frames and a terminal `data: [DONE]` marker.
+- The streaming frame contract should hold for all future OpenAI-style clients (Codex, Gemini, and others), even when providers only support chunk-level completion after full-model output today.
+
 ## Modes
 
 Valv should keep the mode vocabulary from the architecture notes:

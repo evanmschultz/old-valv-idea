@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -84,7 +85,86 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		response.ID = id
 	}
+	if req.HasStreaming() {
+		writeStream(w, response)
+		return
+	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+type streamDelta struct {
+	Role    string `json:"role,omitempty"`
+	Content string `json:"content,omitempty"`
+}
+
+type streamChoice struct {
+	Index        int         `json:"index"`
+	Delta        streamDelta `json:"delta"`
+	FinishReason *string     `json:"finish_reason,omitempty"`
+}
+
+type streamResponse struct {
+	ID      string         `json:"id"`
+	Object  string         `json:"object"`
+	Created int64          `json:"created"`
+	Model   string         `json:"model"`
+	Choices []streamChoice `json:"choices"`
+	Usage   *Usage         `json:"usage"`
+}
+
+func writeStream(w http.ResponseWriter, response Response) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+
+	content := ""
+	if len(response.Choices) > 0 {
+		content = response.Choices[0].Message.Content
+	}
+
+	streamUsage := (*Usage)(nil)
+	first := streamResponse{
+		ID:      response.ID,
+		Object:  "chat.completion.chunk",
+		Created: response.Created,
+		Model:   response.Model,
+		Choices: []streamChoice{{
+			Index: 0,
+			Delta: streamDelta{
+				Role:    "assistant",
+				Content: content,
+			},
+		}},
+		Usage: streamUsage,
+	}
+	writeSSEChunk(w, first)
+
+	finish := "stop"
+	final := streamResponse{
+		ID:      response.ID,
+		Object:  "chat.completion.chunk",
+		Created: response.Created,
+		Model:   response.Model,
+		Choices: []streamChoice{{
+			Index:        0,
+			FinishReason: &finish,
+		}},
+		Usage: streamUsage,
+	}
+	writeSSEChunk(w, final)
+	_, _ = w.Write([]byte("data: [DONE]\n\n"))
+}
+
+func writeSSEChunk(w http.ResponseWriter, chunk streamResponse) {
+	var buf bytes.Buffer
+	enc := newJSONEncoder(&buf)
+	if err := enc.Encode(chunk); err != nil {
+		return
+	}
+	_, _ = w.Write([]byte("data: "))
+	_, _ = w.Write(buf.Bytes())
+	_, _ = w.Write([]byte("\n"))
 }
 
 func (h *Handler) debug(msg string, keyvals ...any) {

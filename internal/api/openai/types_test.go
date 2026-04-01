@@ -53,7 +53,7 @@ func TestRequestValidate(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "streaming unsupported",
+			name: "streaming supported",
 			request: Request{
 				Model:  "gpt-5.2",
 				Stream: boolPtr(true),
@@ -62,7 +62,7 @@ func TestRequestValidate(t *testing.T) {
 					Content: "hello",
 				}},
 			},
-			wantErr: true,
+			wantErr: false,
 		},
 		{
 			name: "multiple choices unsupported",

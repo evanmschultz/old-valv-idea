@@ -78,9 +78,6 @@ func (r Request) Validate() error {
 	if len(r.Messages) == 0 {
 		return invalidRequest("messages must contain at least one entry", "messages")
 	}
-	if r.Stream != nil && *r.Stream {
-		return unsupportedFeature("streaming chat completions are not supported", "stream")
-	}
 	if r.N != nil && *r.N != 1 {
 		return unsupportedFeature("only n=1 is supported", "n")
 	}

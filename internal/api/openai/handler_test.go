@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -102,7 +103,7 @@ func TestHandlerServeHTTPWritesChatCompletionResponse(t *testing.T) {
 	}
 }
 
-func TestHandlerRejectsStreamingRequests(t *testing.T) {
+func TestHandlerStreamsChatCompletionResponse(t *testing.T) {
 	t.Parallel()
 
 	handler, err := NewHandler(&stubExecutor{}, Options{})
@@ -116,16 +117,19 @@ func TestHandlerRejectsStreamingRequests(t *testing.T) {
 
 	handler.ServeHTTP(rr, req)
 
-	if got, want := rr.Code, http.StatusBadRequest; got != want {
+	if got, want := rr.Code, http.StatusOK; got != want {
 		t.Fatalf("status = %d, want %d", got, want)
 	}
-
-	var payload ErrorResponse
-	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
-		t.Fatalf("unmarshal error payload = %v", err)
+	if got, want := rr.Header().Get("Content-Type"), "text/event-stream"; got != want {
+		t.Fatalf("content-type = %q, want %q", got, want)
 	}
-	if payload.Error.Code != "unsupported_feature" {
-		t.Fatalf("error code = %q, want unsupported_feature", payload.Error.Code)
+
+	bodyText := rr.Body.String()
+	if !strings.Contains(bodyText, "data: [DONE]") {
+		t.Fatalf("stream body missing DONE marker: %q", bodyText)
+	}
+	if !strings.Contains(bodyText, "\"object\":\"chat.completion.chunk\"") {
+		t.Fatalf("stream body missing chunk object: %q", bodyText)
 	}
 }
 
