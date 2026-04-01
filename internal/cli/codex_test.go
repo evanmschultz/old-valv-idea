@@ -376,6 +376,67 @@ func TestRootDebugFlagIsNotPassedThroughToCodex(t *testing.T) {
 	}
 }
 
+func TestRootDebugFlagIsNotPassedThroughToInteractiveCodexLaunch(t *testing.T) {
+	t.Setenv("VALV_CODEX_IMAGE", "valv-codex-dev:dev")
+	t.Setenv(valvTestSkipHostCodexLoginEnv, "1")
+
+	paths := testCodexPaths(t)
+	projectRoot := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(filepath.Join(projectRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", filepath.Join(projectRoot, ".git"), err)
+	}
+	runManage(t, paths, []string{"account", "add", "codex", "--project", projectRoot, "--skip-login"})
+
+	binDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "docker-run.txt")
+	scriptPath := filepath.Join(binDir, "docker")
+	script := "#!/bin/sh\n" +
+		"set -eu\n" +
+		"case \"$1 $2\" in\n" +
+		"  \"image inspect\") exit 0 ;;\n" +
+		"  \"run --rm\") printf '%s\\n' \"$@\" > " + shellQuote(logPath) + "; exit 0 ;;\n" +
+		"esac\n" +
+		"exit 0\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile(docker) error = %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	prevWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd() error = %v", err)
+	}
+	if err := os.Chdir(projectRoot); err != nil {
+		t.Fatalf("Chdir(%q) error = %v", projectRoot, err)
+	}
+	defer func() {
+		_ = os.Chdir(prevWD)
+	}()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd, err := newRootCommandWithPaths(context.Background(), &stdout, &stderr, paths)
+	if err != nil {
+		t.Fatalf("newRootCommandWithPaths() error = %v", err)
+	}
+	cmd.SetIn(bytes.NewBuffer(nil))
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--debug", "codex"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+
+	got, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v", logPath, err)
+	}
+	if bytes.Contains(got, []byte("--debug")) {
+		t.Fatalf("docker run args unexpectedly contained root debug flag: %q", string(got))
+	}
+}
+
 func shellQuote(value string) string {
 	replacer := strings.NewReplacer("'", "'\"'\"'")
 	return "'" + replacer.Replace(value) + "'"
