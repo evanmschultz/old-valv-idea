@@ -45,8 +45,9 @@ func NewRootCommandWithPaths(ctx context.Context, stdout, stderr io.Writer, path
 func newRootCommandWithPaths(ctx context.Context, stdout, stderr io.Writer, paths config.Paths) (*cobra.Command, error) {
 	opts := &rootOptions{}
 	cmd := &cobra.Command{
-		Use:   "valv",
-		Short: "Valv control plane for containerized AI CLIs",
+		Use:              "valv",
+		Short:            "Valv control plane for containerized AI CLIs",
+		TraverseChildren: true,
 		Long: strings.TrimSpace(`
 Valv manages provider accounts, Docker runtimes, and API execution for local AI CLIs.
 Use the direct runtime commands for provider execution and the management surface for setup and operator workflows.

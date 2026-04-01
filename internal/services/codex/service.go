@@ -28,6 +28,9 @@ type Store interface {
 
 type Executor interface {
 	Run(context.Context, docker.ContainerRunRequest) error
+	Create(context.Context, docker.ContainerRunRequest) (string, error)
+	Start(context.Context, docker.ContainerStartRequest) error
+	RemoveContainer(context.Context, docker.ContainerRemoveRequest) error
 }
 
 type DetectFunc func(string) (projectdetect.Result, error)
@@ -142,8 +145,64 @@ func (s Service) Run(ctx context.Context, cwd string, codexArgs []string) error 
 		"mount_count", len(request.Mounts),
 	)
 
+	if request.Interactive && request.TTY {
+		if err := s.runAttached(ctx, resolved.project.Root, request); err != nil {
+			return err
+		}
+		return nil
+	}
 	if err := s.executor.Run(ctx, request); err != nil {
 		return fmt.Errorf("run codex launch service: execute docker request for project %q: %w", resolved.project.Root, err)
+	}
+	return nil
+}
+
+func (s Service) runAttached(ctx context.Context, projectRoot string, request docker.ContainerRunRequest) error {
+	createRequest := request
+	createRequest.Detached = false
+	createRequest.Remove = false
+
+	containerID, err := s.executor.Create(ctx, createRequest)
+	if err != nil {
+		return fmt.Errorf("run codex launch service: create docker request for project %q: %w", projectRoot, err)
+	}
+	containerRef := strings.TrimSpace(request.Name)
+	if containerRef == "" {
+		containerRef = strings.TrimSpace(containerID)
+	}
+	s.debug("created interactive codex container", "container_id", strings.TrimSpace(containerID), "container_ref", containerRef)
+
+	remove := func() error {
+		if strings.TrimSpace(containerRef) == "" {
+			return nil
+		}
+		err := s.executor.RemoveContainer(ctx, docker.ContainerRemoveRequest{
+			IDs:   []string{containerRef},
+			Force: true,
+		})
+		if err != nil && !strings.Contains(err.Error(), "No such container") {
+			return err
+		}
+		return nil
+	}
+
+	startErr := s.executor.Start(ctx, docker.ContainerStartRequest{
+		ContainerID: containerRef,
+		Attach:      true,
+		Interactive: request.Interactive,
+	})
+	removeErr := remove()
+	if startErr != nil && removeErr != nil {
+		return errors.Join(
+			fmt.Errorf("run codex launch service: start attached docker request for project %q: %w", projectRoot, startErr),
+			fmt.Errorf("run codex launch service: cleanup interactive container %q: %w", containerRef, removeErr),
+		)
+	}
+	if startErr != nil {
+		return fmt.Errorf("run codex launch service: start attached docker request for project %q: %w", projectRoot, startErr)
+	}
+	if removeErr != nil {
+		return fmt.Errorf("run codex launch service: cleanup interactive container %q: %w", containerRef, removeErr)
 	}
 	return nil
 }

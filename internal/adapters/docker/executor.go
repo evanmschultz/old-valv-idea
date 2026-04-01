@@ -23,6 +23,12 @@ func (e Executor) RemoveContainer(ctx context.Context, request ContainerRemoveRe
 	if err != nil {
 		return err
 	}
+	if outputter, ok := e.runner.(interface {
+		Output(context.Context, []string) (string, error)
+	}); ok {
+		_, err := outputter.Output(ctx, args)
+		return err
+	}
 	return e.runner.Run(ctx, args)
 }
 

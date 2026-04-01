@@ -103,6 +103,58 @@ func TestBuildContainerListArgs(t *testing.T) {
 	}
 }
 
+func TestBuildCreateArgs(t *testing.T) {
+	t.Parallel()
+
+	got, err := BuildCreateArgs(ContainerRunRequest{
+		Name:        "valv-test",
+		Image:       NewImageRef("ghcr.io/valv/codex", "dev"),
+		WorkingDir:  "/workspace",
+		Interactive: true,
+		TTY:         true,
+		Init:        true,
+		Remove:      true,
+		Env:         map[string]string{"HOME": "/home/valv"},
+		Args:        []string{"resume", "abc"},
+	})
+	if err != nil {
+		t.Fatalf("BuildCreateArgs() error = %v", err)
+	}
+
+	want := []string{
+		"create",
+		"-i",
+		"-t",
+		"--init",
+		"--name", "valv-test",
+		"--workdir", "/workspace",
+		"-e", "HOME=/home/valv",
+		"ghcr.io/valv/codex:dev",
+		"resume", "abc",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("BuildCreateArgs() = %#v, want %#v", got, want)
+	}
+}
+
+func TestBuildStartArgs(t *testing.T) {
+	t.Parallel()
+
+	got, err := BuildStartArgs(ContainerStartRequest{
+		ContainerID: "valv-test",
+		Attach:      true,
+		Interactive: true,
+	})
+	if err != nil {
+		t.Fatalf("BuildStartArgs() error = %v", err)
+	}
+
+	want := []string{"start", "-a", "-i", "valv-test"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("BuildStartArgs() = %#v, want %#v", got, want)
+	}
+}
+
 func TestBuildBuilderPruneArgs(t *testing.T) {
 	t.Parallel()
 

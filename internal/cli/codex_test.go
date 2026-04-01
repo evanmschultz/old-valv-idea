@@ -337,6 +337,45 @@ func TestRunCodexImageOnlyCommandPassesThroughArgs(t *testing.T) {
 	}
 }
 
+func TestRootDebugFlagIsNotPassedThroughToCodex(t *testing.T) {
+	t.Setenv("VALV_CODEX_IMAGE", "valv-codex-dev:dev")
+
+	paths := testCodexPaths(t)
+	binDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "docker-run.txt")
+	scriptPath := filepath.Join(binDir, "docker")
+	script := "#!/bin/sh\n" +
+		"set -eu\n" +
+		"case \"$1 $2\" in\n" +
+		"  \"image inspect\") exit 0 ;;\n" +
+		"  \"run --rm\") printf '%s\\n' \"$@\" > " + shellQuote(logPath) + "; exit 0 ;;\n" +
+		"esac\n" +
+		"printf '%s\\n' \"$@\" > " + shellQuote(logPath) + "\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile(docker) error = %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd, err := newRootCommandWithPaths(context.Background(), &stdout, &stderr, paths)
+	if err != nil {
+		t.Fatalf("newRootCommandWithPaths() error = %v", err)
+	}
+	cmd.SetArgs([]string{"--debug", "codex", "--help"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	content, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile(logPath) error = %v", err)
+	}
+	if strings.Contains(string(content), "--debug") {
+		t.Fatalf("docker args unexpectedly contained root debug flag: %q", string(content))
+	}
+}
+
 func shellQuote(value string) string {
 	replacer := strings.NewReplacer("'", "'\"'\"'")
 	return "'" + replacer.Replace(value) + "'"

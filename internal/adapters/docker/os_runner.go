@@ -57,6 +57,36 @@ func (r SystemRunner) Run(ctx context.Context, args []string) error {
 	return nil
 }
 
+func (r SystemRunner) Output(ctx context.Context, args []string) (string, error) {
+	binary := strings.TrimSpace(r.Binary)
+	if binary == "" {
+		binary = "docker"
+	}
+
+	factory := r.newCommand
+	if factory == nil {
+		factory = exec.CommandContext
+	}
+
+	cmd := factory(ctx, binary, args...)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if len(r.Env) > 0 {
+		cmd.Env = append(os.Environ(), r.Env...)
+	}
+
+	if err := cmd.Run(); err != nil {
+		output := strings.TrimSpace(strings.Join([]string{stdout.String(), stderr.String()}, "\n"))
+		if output != "" {
+			return "", fmt.Errorf("run %s %s: %w: %s", binary, strings.Join(args, " "), err, output)
+		}
+		return "", fmt.Errorf("run %s %s: %w", binary, strings.Join(args, " "), err)
+	}
+	return strings.TrimSpace(stdout.String()), nil
+}
+
 type QuietRunner struct {
 	Binary     string
 	Env        []string

@@ -2,10 +2,13 @@ package docker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 )
+
+var ErrOutputUnsupported = errors.New("docker runner does not support output capture")
 
 type ImageRef struct {
 	Repository string
@@ -67,12 +70,25 @@ type ContainerExecRequest struct {
 	User           string
 }
 
+type ContainerStartRequest struct {
+	ContainerID string
+	Attach      bool
+	Interactive bool
+}
+
 func (r ContainerExecRequest) Valid() error {
 	if strings.TrimSpace(r.ContainerID) == "" {
 		return fmt.Errorf("validate container exec request: container id is required")
 	}
 	if len(r.Args) == 0 {
 		return fmt.Errorf("validate container exec request: args are required")
+	}
+	return nil
+}
+
+func (r ContainerStartRequest) Valid() error {
+	if strings.TrimSpace(r.ContainerID) == "" {
+		return fmt.Errorf("validate container start request: container id is required")
 	}
 	return nil
 }
@@ -103,15 +119,23 @@ func (f CommandRunnerFunc) Run(ctx context.Context, args []string) error {
 }
 
 func BuildRunArgs(request ContainerRunRequest) ([]string, error) {
+	return buildRunLikeArgs("run", request, true)
+}
+
+func BuildCreateArgs(request ContainerRunRequest) ([]string, error) {
+	return buildRunLikeArgs("create", request, false)
+}
+
+func buildRunLikeArgs(verb string, request ContainerRunRequest, includeRemove bool) ([]string, error) {
 	if err := request.Valid(); err != nil {
 		return nil, err
 	}
 
-	args := []string{"run"}
+	args := []string{verb}
 	if request.Detached {
 		args = append(args, "-d")
 	}
-	if request.Remove {
+	if includeRemove && request.Remove {
 		args = append(args, "--rm")
 	}
 	if request.Interactive {
@@ -234,4 +258,19 @@ func BuildInspectArgs(name string) ([]string, error) {
 		return nil, fmt.Errorf("build inspect args: name is required")
 	}
 	return []string{"inspect", strings.TrimSpace(name)}, nil
+}
+
+func BuildStartArgs(request ContainerStartRequest) ([]string, error) {
+	if err := request.Valid(); err != nil {
+		return nil, err
+	}
+	args := []string{"start"}
+	if request.Attach {
+		args = append(args, "-a")
+	}
+	if request.Interactive {
+		args = append(args, "-i")
+	}
+	args = append(args, strings.TrimSpace(request.ContainerID))
+	return args, nil
 }
