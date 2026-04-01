@@ -265,8 +265,41 @@ func TestPrepareRuntimePassesThroughTerminalEnv(t *testing.T) {
 	}
 }
 
-func TestPrepareRuntimeNormalizesUnsupportedTERM(t *testing.T) {
+func TestPrepareRuntimePreservesHostTERM(t *testing.T) {
 	t.Setenv("TERM", "xterm-ghostty")
+
+	root := t.TempDir()
+	profileHome := filepath.Join(root, "profile")
+	projectRoot := filepath.Join(root, "project")
+	tempRoot := filepath.Join(root, "tmp")
+	if err := os.MkdirAll(profileHome, 0o755); err != nil {
+		t.Fatalf("MkdirAll(profileHome) error = %v", err)
+	}
+	if err := os.MkdirAll(projectRoot, 0o755); err != nil {
+		t.Fatalf("MkdirAll(projectRoot) error = %v", err)
+	}
+
+	prepared, err := PrepareRuntime(context.Background(), PrepareRequest{
+		ProfileHome: profileHome,
+		ProjectRoot: projectRoot,
+		TempRoot:    tempRoot,
+	})
+	if err != nil {
+		t.Fatalf("PrepareRuntime() error = %v", err)
+	}
+	defer func() {
+		if err := prepared.Close(); err != nil {
+			t.Fatalf("prepared.Close() error = %v", err)
+		}
+	}()
+
+	if got := prepared.Env["TERM"]; got != "xterm-ghostty" {
+		t.Fatalf("Env TERM = %q, want xterm-ghostty", got)
+	}
+}
+
+func TestPrepareRuntimeFallsBackWhenTERMEmpty(t *testing.T) {
+	t.Setenv("TERM", "")
 
 	root := t.TempDir()
 	profileHome := filepath.Join(root, "profile")

@@ -555,7 +555,7 @@ func terminalEnvPassthrough() []string {
 func normalizedContainerTERM() string {
 	value := strings.TrimSpace(os.Getenv("TERM"))
 	switch value {
-	case "", "xterm-ghostty", "ghostty":
+	case "":
 		return "xterm-256color"
 	default:
 		return value
