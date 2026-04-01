@@ -278,6 +278,8 @@ Testing standards:
 - if a mock is introduced, document briefly in the worklog why a real test was not practical
 - use targeted `go test` or `go build` only for debugging narrow failures; final local signoff must run the canonical Mage gates
 - final local signoff for normal work must include `mage test`; when Docker-backed or external transcript coverage is relevant, final signoff must also include `mage integration`
+- for CLI/model compatibility smoke tests use the cheapest viable OpenAI-compatible model (`gpt-5-nano`, or the smallest available default model from the local client when unavailable)
+- keep reasoning effort explicit and low for these tests (`--reasoning-effort low` when supported by the client/adapter, or equivalent low-cost mode)
 
 ## 12) Repository Standards
 
