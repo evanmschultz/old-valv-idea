@@ -119,6 +119,28 @@ func TestExecutorStartUsesBuiltArgs(t *testing.T) {
 	}
 }
 
+func TestExecutorAttachUsesBuiltArgs(t *testing.T) {
+	t.Parallel()
+
+	var got []string
+	exec := NewExecutor(CommandRunnerFunc(func(ctx context.Context, args []string) error {
+		got = append([]string(nil), args...)
+		return nil
+	}))
+
+	if err := exec.Attach(context.Background(), ContainerAttachRequest{
+		ContainerID: "valv-test",
+		Interactive: true,
+	}); err != nil {
+		t.Fatalf("Attach() error = %v", err)
+	}
+
+	want := []string{"attach", "valv-test"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Attach() args = %#v, want %#v", got, want)
+	}
+}
+
 func TestExecutorRemoveContainerUsesOutputWhenAvailable(t *testing.T) {
 	t.Parallel()
 

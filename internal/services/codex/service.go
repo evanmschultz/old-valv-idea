@@ -176,6 +176,8 @@ func (s Service) runAttached(ctx context.Context, projectRoot string, request do
 		if strings.TrimSpace(containerRef) == "" {
 			return nil
 		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
 		err := s.executor.RemoveContainer(ctx, docker.ContainerRemoveRequest{
 			IDs:   []string{containerRef},
 			Force: true,

@@ -76,6 +76,11 @@ type ContainerStartRequest struct {
 	Interactive bool
 }
 
+type ContainerAttachRequest struct {
+	ContainerID string
+	Interactive bool
+}
+
 func (r ContainerExecRequest) Valid() error {
 	if strings.TrimSpace(r.ContainerID) == "" {
 		return fmt.Errorf("validate container exec request: container id is required")
@@ -89,6 +94,13 @@ func (r ContainerExecRequest) Valid() error {
 func (r ContainerStartRequest) Valid() error {
 	if strings.TrimSpace(r.ContainerID) == "" {
 		return fmt.Errorf("validate container start request: container id is required")
+	}
+	return nil
+}
+
+func (r ContainerAttachRequest) Valid() error {
+	if strings.TrimSpace(r.ContainerID) == "" {
+		return fmt.Errorf("validate container attach request: container id is required")
 	}
 	return nil
 }
@@ -270,6 +282,19 @@ func BuildStartArgs(request ContainerStartRequest) ([]string, error) {
 	}
 	if request.Interactive {
 		args = append(args, "-i")
+	}
+	args = append(args, strings.TrimSpace(request.ContainerID))
+	return args, nil
+}
+
+func BuildAttachArgs(request ContainerAttachRequest) ([]string, error) {
+	if err := request.Valid(); err != nil {
+		return nil, err
+	}
+
+	args := []string{"attach"}
+	if !request.Interactive {
+		args = append(args, "--no-stdin")
 	}
 	args = append(args, strings.TrimSpace(request.ContainerID))
 	return args, nil

@@ -55,3 +55,11 @@ func (e Executor) Start(ctx context.Context, request ContainerStartRequest) erro
 	}
 	return e.runner.Run(ctx, args)
 }
+
+func (e Executor) Attach(ctx context.Context, request ContainerAttachRequest) error {
+	args, err := BuildAttachArgs(request)
+	if err != nil {
+		return err
+	}
+	return e.runner.Run(ctx, args)
+}

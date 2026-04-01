@@ -155,6 +155,23 @@ func TestBuildStartArgs(t *testing.T) {
 	}
 }
 
+func TestBuildAttachArgs(t *testing.T) {
+	t.Parallel()
+
+	got, err := BuildAttachArgs(ContainerAttachRequest{
+		ContainerID: "valv-test",
+		Interactive: true,
+	})
+	if err != nil {
+		t.Fatalf("BuildAttachArgs() error = %v", err)
+	}
+
+	want := []string{"attach", "valv-test"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("BuildAttachArgs() = %#v, want %#v", got, want)
+	}
+}
+
 func TestBuildBuilderPruneArgs(t *testing.T) {
 	t.Parallel()
 

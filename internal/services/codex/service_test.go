@@ -249,8 +249,14 @@ func TestRunBuildsDockerRequestFromProjectBindingAndProfile(t *testing.T) {
 	if got, want := executor.started.ContainerID, executor.created.Name; got != want {
 		t.Fatalf("Run() start container = %q, want %q", got, want)
 	}
-	if !executor.started.Attach || !executor.started.Interactive {
-		t.Fatalf("Run() start request = %+v, want attached interactive start", executor.started)
+	if executor.started.ContainerID != executor.created.Name {
+		t.Fatalf("Run() start container = %q, want %q", executor.started.ContainerID, executor.created.Name)
+	}
+	if !executor.started.Attach {
+		t.Fatalf("Run() start request = %+v, want attached start", executor.started)
+	}
+	if !executor.started.Interactive {
+		t.Fatalf("Run() start request = %+v, want interactive start", executor.started)
 	}
 	if got := executor.removed.IDs; len(got) != 1 || got[0] != executor.created.Name {
 		t.Fatalf("Run() cleanup ids = %#v, want [%q]", got, executor.created.Name)
