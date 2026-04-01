@@ -91,11 +91,23 @@ type fakeExecutor struct {
 	createErr error
 	startErr  error
 	removeErr error
+	runErr    error
 }
 
 func (f *fakeExecutor) Run(_ context.Context, request docker.ContainerRunRequest) error {
 	f.got = request
-	return f.err
+	f.started = docker.ContainerStartRequest{
+		ContainerID: request.Name,
+		Attach:      request.Interactive,
+		Interactive: request.Interactive,
+	}
+	if f.runErr != nil {
+		return f.runErr
+	}
+	if f.err != nil {
+		return f.err
+	}
+	return nil
 }
 
 func (f *fakeExecutor) Create(_ context.Context, request docker.ContainerRunRequest) (string, error) {
@@ -185,81 +197,75 @@ func TestRunBuildsDockerRequestFromProjectBindingAndProfile(t *testing.T) {
 		t.Fatalf("Run() error = %v", err)
 	}
 
-	if got, want := executor.created.Name, "valv-codex-interactive-project-123456789"; got != want {
+	if got, want := executor.got.Name, "valv-codex-interactive-project-123456789"; got != want {
 		t.Fatalf("Run() container name = %q, want %q", got, want)
 	}
-	if executor.created.WorkingDir != "/tmp/project/subdir" {
-		t.Fatalf("Run() working dir = %q", executor.created.WorkingDir)
+	if executor.got.WorkingDir != "/tmp/project/subdir" {
+		t.Fatalf("Run() working dir = %q", executor.got.WorkingDir)
 	}
-	if executor.created.Image.String() != "valv-codex:dev" {
-		t.Fatalf("Run() image = %q", executor.created.Image.String())
+	if executor.got.Image.String() != "valv-codex:dev" {
+		t.Fatalf("Run() image = %q", executor.got.Image.String())
 	}
-	if executor.created.User != "" {
-		t.Fatalf("Run() user = %q, want empty to use the image default user", executor.created.User)
+	if executor.got.User != "" {
+		t.Fatalf("Run() user = %q, want empty to use the image default user", executor.got.User)
 	}
-	if !executor.created.Interactive || !executor.created.TTY {
-		t.Fatalf("Run() interactive flags = %+v", executor.created)
+	if !executor.got.Interactive || !executor.got.TTY {
+		t.Fatalf("Run() interactive flags = %+v", executor.got)
 	}
-	if executor.created.Remove {
-		t.Fatalf("Run() create request remove = %t, want false for create/start lifecycle", executor.created.Remove)
+	if !executor.got.Remove {
+		t.Fatalf("Run() request remove = %t, want true", executor.got.Remove)
 	}
-	if !executor.created.Init {
-		t.Fatalf("Run() init = %t, want true", executor.created.Init)
+	if !executor.got.Init {
+		t.Fatalf("Run() init = %t, want true", executor.got.Init)
 	}
-	if got := executor.created.Env["CODEX_HOME"]; got != codexruntime.ContainerCodexDir {
+	if got := executor.got.Env["CODEX_HOME"]; got != codexruntime.ContainerCodexDir {
 		t.Fatalf("Run() CODEX_HOME = %q, want %q", got, codexruntime.ContainerCodexDir)
 	}
-	if got := executor.created.Env["HOME"]; got != codexruntime.ContainerHomeDir {
+	if got := executor.got.Env["HOME"]; got != codexruntime.ContainerHomeDir {
 		t.Fatalf("Run() HOME = %q, want %q", got, codexruntime.ContainerHomeDir)
 	}
-	if got := executor.created.Labels["io.valv.managed"]; got != "true" {
+	if got := executor.got.Labels["io.valv.managed"]; got != "true" {
 		t.Fatalf("Run() managed label = %q, want true", got)
 	}
-	if got := executor.created.Labels["io.valv.scope"]; got != "interactive" {
+	if got := executor.got.Labels["io.valv.scope"]; got != "interactive" {
 		t.Fatalf("Run() scope label = %q, want interactive", got)
 	}
-	if got := executor.created.Labels["io.valv.project_id"]; got != project.ID {
+	if got := executor.got.Labels["io.valv.project_id"]; got != project.ID {
 		t.Fatalf("Run() project label = %q, want %q", got, project.ID)
 	}
-	if got := executor.created.Labels["io.valv.profile_id"]; got != profile.ID {
+	if got := executor.got.Labels["io.valv.profile_id"]; got != profile.ID {
 		t.Fatalf("Run() profile label = %q, want %q", got, profile.ID)
 	}
-	if len(executor.created.Mounts) != 2 {
-		t.Fatalf("Run() mounts len = %d, want 2", len(executor.created.Mounts))
+	if len(executor.got.Mounts) != 2 {
+		t.Fatalf("Run() mounts len = %d, want 2", len(executor.got.Mounts))
 	}
-	if executor.created.Mounts[0] != docker.NewMountSpec(project.Root, project.Root, false) {
-		t.Fatalf("Run() project mount = %+v", executor.created.Mounts[0])
+	if executor.got.Mounts[0] != docker.NewMountSpec(project.Root, project.Root, false) {
+		t.Fatalf("Run() project mount = %+v", executor.got.Mounts[0])
 	}
 	wantProfileHome, err := pathutil.Normalize(profile.HomePath)
 	if err != nil {
 		t.Fatalf("Normalize(profile.HomePath) error = %v", err)
 	}
-	gotProfileHome, err := pathutil.Normalize(executor.created.Mounts[1].Source)
+	gotProfileHome, err := pathutil.Normalize(executor.got.Mounts[1].Source)
 	if err != nil {
 		t.Fatalf("Normalize(profile mount source) error = %v", err)
 	}
-	if got := docker.NewMountSpec(gotProfileHome, executor.created.Mounts[1].Target, executor.created.Mounts[1].ReadOnly); got != docker.NewMountSpec(wantProfileHome, codexruntime.ContainerCodexDir, false) {
-		t.Fatalf("Run() profile mount = %+v", executor.created.Mounts[1])
+	if got := docker.NewMountSpec(gotProfileHome, executor.got.Mounts[1].Target, executor.got.Mounts[1].ReadOnly); got != docker.NewMountSpec(wantProfileHome, codexruntime.ContainerCodexDir, false) {
+		t.Fatalf("Run() profile mount = %+v", executor.got.Mounts[1])
 	}
 	for index, arg := range args {
-		if executor.created.Args[index] != arg {
-			t.Fatalf("Run() args[%d] = %q, want %q", index, executor.created.Args[index], arg)
+		if executor.got.Args[index] != arg {
+			t.Fatalf("Run() args[%d] = %q, want %q", index, executor.got.Args[index], arg)
 		}
 	}
-	if got, want := executor.started.ContainerID, executor.created.Name; got != want {
-		t.Fatalf("Run() start container = %q, want %q", got, want)
+	if got, want := executor.started.Attach, true; got != want {
+		t.Fatalf("Run() attached request = %+v, want attached=%t", executor.started, want)
 	}
-	if executor.started.ContainerID != executor.created.Name {
-		t.Fatalf("Run() start container = %q, want %q", executor.started.ContainerID, executor.created.Name)
+	if got, want := executor.started.Interactive, true; got != want {
+		t.Fatalf("Run() start request interactive = %t, want %t", got, want)
 	}
-	if !executor.started.Attach {
-		t.Fatalf("Run() start request = %+v, want attached start", executor.started)
-	}
-	if !executor.started.Interactive {
-		t.Fatalf("Run() start request = %+v, want interactive start", executor.started)
-	}
-	if got := executor.removed.IDs; len(got) != 1 || got[0] != executor.created.Name {
-		t.Fatalf("Run() cleanup ids = %#v, want [%q]", got, executor.created.Name)
+	if executor.got.Name == "" {
+		t.Fatalf("Run() container name = %q", executor.got.Name)
 	}
 }
 

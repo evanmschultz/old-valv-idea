@@ -56,6 +56,10 @@ valv codex exec "summarize the latest diff"
 }
 
 func runCodexCommand(cmd *cobra.Command, paths config.Paths, args []string) error {
+	if logger := LoggerFromContext(cmd.Context()); logger != nil {
+		logger.Debug("run codex command arguments", "args", args)
+	}
+
 	if codexArgsSkipProjectBinding(args) {
 		return runCodexImageOnlyCommand(cmd, paths, args)
 	}

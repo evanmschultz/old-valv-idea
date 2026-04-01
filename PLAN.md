@@ -657,11 +657,13 @@ Shipped and working:
 
 Known remaining gaps:
 
-- direct interactive Codex TTY ownership still does not feel identical to direct host `codex` in all terminals
 - interactive `/mcp` presentation in containerized Codex is still not proven identical to direct host Codex for all entries, especially:
   - `codex_apps`
   - `context7-mcp`
 - these gaps are now treated as runtime/UI parity issues, not core control-plane blockers
+
+- interactive `valv codex` now uses a single attached `docker run -i/-t` invocation (via `executor.Run`) instead of create/start/remove to better match native terminal handoff behavior.
+- remaining risk is residual visual parity in specific terminals; track as follow-up validation, not control-plane logic.
 
 Non-goals for the current Codex-first MVP slice:
 
@@ -681,6 +683,7 @@ Immediate next steps:
 What remains now that the API validation passes:
 
 - optional polish on interactive TTY ownership and `/mcp` UI parity
+- add dedicated transcript-style checks for `./valv codex` ownership handoff on macOS terminals that have shown regression history
 - shipped account cleanup for stale unbound same-home aliases
 - account observability and editing now cover:
   - `valv manage account inspect`

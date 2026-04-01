@@ -139,6 +139,9 @@ valv api serve --runtime-ttl 2m
 }
 
 func LoggerFromContext(ctx context.Context) *log.Logger {
+	if ctx == nil {
+		return nil
+	}
 	logger, _ := ctx.Value(loggerKey{}).(*log.Logger)
 	return logger
 }
