@@ -24,7 +24,7 @@ func main() {
 }
 
 func newMainContext() (context.Context, context.CancelFunc) {
-	return signalNotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	return signalNotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 }
 
 func realMain(ctx context.Context, stdout, stderr io.Writer) int {

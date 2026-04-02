@@ -1,6 +1,11 @@
 package openai
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
+
+const compatibilityIssueTrackerURL = "https://github.com/evanmschultz/valv/issues"
 
 const (
 	errorTypeInvalidRequest = "invalid_request_error"
@@ -39,6 +44,10 @@ func invalidRequest(message string, param string) RequestError {
 }
 
 func unsupportedFeature(message string, param string) RequestError {
+	message = strings.TrimSpace(message)
+	if message != "" {
+		message = fmt.Sprintf("%s. If this is a valid feature of the request, please open an issue in this repo: %s", message, compatibilityIssueTrackerURL)
+	}
 	return RequestError{
 		Status:  400,
 		Type:    errorTypeInvalidRequest,

@@ -149,6 +149,16 @@ func TestHandlerRejectsInvalidJSON(t *testing.T) {
 	if got, want := rr.Code, http.StatusBadRequest; got != want {
 		t.Fatalf("status = %d, want %d", got, want)
 	}
+	var payload ErrorResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal error payload = %v", err)
+	}
+	if payload.Error.Code != "invalid_request_error" {
+		t.Fatalf("error code = %q, want invalid_request_error", payload.Error.Code)
+	}
+	if payload.Error.Type != "invalid_request_error" {
+		t.Fatalf("error type = %q, want invalid_request_error", payload.Error.Type)
+	}
 }
 
 func TestHandlerPropagatesExecutorFailure(t *testing.T) {

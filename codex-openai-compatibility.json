@@ -1,0 +1,412 @@
+{
+  "provider": "codex",
+  "provider_command": "codex exec",
+  "runtime_model": "valv api (headless, warm container reused per project/profile)",
+  "api_surface": {
+    "name": "OpenAI-compatible chat completions",
+    "method": "POST",
+    "path": "/v1/chat/completions"
+  },
+  "manifest_version": "2026-04-01",
+  "generated_at_utc": "2026-04-01T00:00:00Z",
+  "updated": "2026-04-01",
+  "last_reviewed_utc": "2026-04-01T00:00:00Z",
+  "review_interval_days": 30,
+  "codex_exec_flags": [
+    {
+      "name": "--config",
+      "short": "-c",
+      "description": "Override config entries for this invocation",
+      "api_equivalent": null
+    },
+    {
+      "name": "--enable",
+      "description": "Enable codex feature flag for the call",
+      "api_equivalent": null
+    },
+    {
+      "name": "--disable",
+      "description": "Disable codex feature flag for the call",
+      "api_equivalent": null
+    },
+    {
+      "name": "--remote",
+      "description": "Connect to remote app server",
+      "api_equivalent": null
+    },
+    {
+      "name": "--remote-auth-token-env",
+      "description": "Read token from env var for remote app server",
+      "api_equivalent": null
+    },
+    {
+      "name": "--image",
+      "short": "-i",
+      "description": "Attach image files to prompt context",
+      "api_equivalent": null
+    },
+    {
+      "name": "--model",
+      "short": "-m",
+      "description": "Set the model for this call",
+      "api_equivalent": "model"
+    },
+    {
+      "name": "--oss",
+      "description": "Use open-source provider",
+      "api_equivalent": null
+    },
+    {
+      "name": "--local-provider",
+      "description": "Select local OSS provider",
+      "api_equivalent": null
+    },
+    {
+      "name": "--profile",
+      "short": "-p",
+      "description": "Select codex config profile",
+      "api_equivalent": null
+    },
+    {
+      "name": "--sandbox",
+      "short": "-s",
+      "description": "Configure shell command sandboxing",
+      "api_equivalent": null
+    },
+    {
+      "name": "--ask-for-approval",
+      "short": "-a",
+      "description": "Set command-approval policy",
+      "api_equivalent": null
+    },
+    {
+      "name": "--full-auto",
+      "description": "Convenience alias for default auto path",
+      "api_equivalent": null
+    },
+    {
+      "name": "--dangerously-bypass-approvals-and-sandbox",
+      "description": "Dangerous bypass of approvals/sandboxing",
+      "api_equivalent": null
+    },
+    {
+      "name": "--cd",
+      "short": "-C",
+      "description": "Set command working root",
+      "api_equivalent": "workspace context"
+    },
+    {
+      "name": "--skip-git-repo-check",
+      "description": "Skip git repo safety check",
+      "api_equivalent": null
+    },
+    {
+      "name": "--add-dir",
+      "description": "Additional writable directories",
+      "api_equivalent": null
+    },
+    {
+      "name": "--ephemeral",
+      "description": "Disable persistent session writes",
+      "api_equivalent": null
+    },
+    {
+      "name": "--output-schema",
+      "description": "JSON schema for final response shape",
+      "api_equivalent": null
+    },
+    {
+      "name": "--color",
+      "description": "Color output mode",
+      "api_equivalent": null
+    },
+    {
+      "name": "--json",
+      "description": "Emit JSONL event stream on stdout",
+      "api_equivalent": "stream=true response body shaping"
+    },
+    {
+      "name": "--output-last-message",
+      "short": "-o",
+      "description": "Write final assistant message to file",
+      "api_equivalent": "chat completion result content"
+    },
+    {
+      "name": "--help",
+      "short": "-h",
+      "description": "Show help and exit",
+      "api_equivalent": null
+    },
+    {
+      "name": "--version",
+      "short": "-V",
+      "description": "Show version and exit",
+      "api_equivalent": null
+    }
+  ],
+  "openai_to_codex": [
+    {
+      "openai_field": "model",
+      "openai_type": "string",
+      "status": "supported",
+      "codex_invocation": {
+        "command": [
+          "codex",
+          "exec",
+          "--model",
+          "<model>"
+        ],
+        "notes": "Passed through to --model"
+      },
+      "notes": "Mapped directly from request.model"
+    },
+    {
+      "openai_field": "messages",
+      "openai_type": "array",
+      "status": "supported",
+      "codex_invocation": {
+        "command": [
+          "codex",
+          "exec",
+          "<rendered_messages>"
+        ],
+        "notes": "Messages are rendered to prompt text before execution"
+      },
+      "notes": "Rendered into a prompt and passed to the command arguments"
+    },
+    {
+      "openai_field": "stream",
+      "openai_type": "boolean",
+      "status": "supported",
+      "codex_invocation": {
+        "command": [
+          "codex",
+          "exec",
+          "--json",
+          "--output-last-message"
+        ],
+        "notes": "Valv returns OpenAI-compatible SSE chunks followed by data: [DONE]"
+      },
+      "notes": "Maps to SSE response mode"
+    },
+    {
+      "openai_field": "n",
+      "openai_type": "integer",
+      "status": "supported",
+      "codex_invocation": {
+        "command": null,
+        "notes": "Current runtime only supports n=1"
+      },
+      "notes": "Enforced to 1; other values are rejected"
+    },
+    {
+      "openai_field": "temperature",
+      "openai_type": "number",
+      "status": "unsupported",
+      "codex_invocation": null,
+      "notes": "No equivalent mapping implemented for valv API endpoint yet"
+    },
+    {
+      "openai_field": "top_p",
+      "openai_type": "number",
+      "status": "unsupported",
+      "codex_invocation": null,
+      "notes": "No equivalent mapping implemented for valv API endpoint yet"
+    },
+    {
+      "openai_field": "max_tokens",
+      "openai_type": "integer",
+      "status": "unsupported",
+      "codex_invocation": null,
+      "notes": "No equivalent mapping implemented for valv API endpoint yet"
+    },
+    {
+      "openai_field": "max_completion_tokens",
+      "openai_type": "integer",
+      "status": "unsupported",
+      "codex_invocation": null,
+      "notes": "No equivalent mapping implemented for valv API endpoint yet"
+    },
+    {
+      "openai_field": "user",
+      "openai_type": "string",
+      "status": "accepted",
+      "codex_invocation": null,
+      "notes": "Parsed and reserved; currently not translated"
+    },
+    {
+      "openai_field": "presence_penalty",
+      "openai_type": "number",
+      "status": "unsupported",
+      "codex_invocation": null,
+      "notes": "No equivalent mapping implemented for valv API endpoint yet"
+    },
+    {
+      "openai_field": "frequency_penalty",
+      "openai_type": "number",
+      "status": "unsupported",
+      "codex_invocation": null,
+      "notes": "No equivalent mapping implemented for valv API endpoint yet"
+    },
+    {
+      "openai_field": "logit_bias",
+      "openai_type": "map",
+      "status": "unsupported",
+      "codex_invocation": null,
+      "notes": "No equivalent mapping implemented for valv API endpoint yet"
+    },
+    {
+      "openai_field": "stop",
+      "openai_type": "array|string",
+      "status": "unsupported",
+      "codex_invocation": null,
+      "notes": "No equivalent mapping implemented for valv API endpoint yet"
+    },
+    {
+      "openai_field": "tools",
+      "openai_type": "array",
+      "status": "unsupported",
+      "codex_invocation": null,
+      "notes": "Tool-calling is not translated from API payload yet"
+    },
+    {
+      "openai_field": "tool_choice",
+      "openai_type": "string|object",
+      "status": "unsupported",
+      "codex_invocation": null,
+      "notes": "No equivalent mapping implemented for valv API endpoint yet"
+    },
+    {
+      "openai_field": "functions",
+      "openai_type": "array",
+      "status": "unsupported",
+      "codex_invocation": null,
+      "notes": "Function declarations are not translated from API payload yet"
+    },
+    {
+      "openai_field": "function_call",
+      "openai_type": "string|object",
+      "status": "unsupported",
+      "codex_invocation": null,
+      "notes": "Tool/function calling is not translated from API payload yet"
+    },
+    {
+      "openai_field": "response_format",
+      "openai_type": "string|object",
+      "status": "unsupported",
+      "codex_invocation": null,
+      "notes": "No equivalent mapping implemented for valv API endpoint yet"
+    },
+    {
+      "openai_field": "seed",
+      "openai_type": "integer",
+      "status": "unsupported",
+      "codex_invocation": null,
+      "notes": "No equivalent mapping implemented for valv API endpoint yet"
+    },
+    {
+      "openai_field": "top_logprobs",
+      "openai_type": "integer",
+      "status": "unsupported",
+      "codex_invocation": null,
+      "notes": "No equivalent mapping implemented for valv API endpoint yet"
+    },
+    {
+      "openai_field": "logprobs",
+      "openai_type": "boolean",
+      "status": "unsupported",
+      "codex_invocation": null,
+      "notes": "No equivalent mapping implemented for valv API endpoint yet"
+    },
+    {
+      "openai_field": "parallel_tool_calls",
+      "openai_type": "boolean",
+      "status": "unsupported",
+      "codex_invocation": null,
+      "notes": "No equivalent mapping implemented for valv API endpoint yet"
+    },
+    {
+      "openai_field": "service_tier",
+      "openai_type": "string",
+      "status": "unsupported",
+      "codex_invocation": null,
+      "notes": "No equivalent mapping implemented for valv API endpoint yet"
+    },
+    {
+      "openai_field": "stream_options",
+      "openai_type": "object",
+      "status": "unsupported",
+      "codex_invocation": null,
+      "notes": "No equivalent mapping implemented for valv API endpoint yet"
+    },
+    {
+      "openai_field": "modalities",
+      "openai_type": "array",
+      "status": "unsupported",
+      "codex_invocation": null,
+      "notes": "No equivalent mapping implemented for valv API endpoint yet"
+    },
+    {
+      "openai_field": "store",
+      "openai_type": "boolean",
+      "status": "accepted",
+      "codex_invocation": null,
+      "notes": "Parsed and discarded for future mapping"
+    },
+    {
+      "openai_field": "metadata",
+      "openai_type": "object",
+      "status": "accepted",
+      "codex_invocation": null,
+      "notes": "Ignored today; reserved for future mapping"
+    },
+    {
+      "openai_field": "reasoning_effort",
+      "openai_type": "string",
+      "status": "unsupported",
+      "codex_invocation": null,
+      "notes": "No equivalent mapping implemented for valv API endpoint yet"
+    },
+    {
+      "openai_field": "prediction",
+      "openai_type": "object",
+      "status": "unsupported",
+      "codex_invocation": null,
+      "notes": "No equivalent mapping implemented for valv API endpoint yet"
+    }
+  ],
+  "api_call_examples": [
+    {
+      "name": "chat_completion_non_stream",
+      "openai_request": {
+        "model": "gpt-5.2",
+        "messages": [
+          { "role": "user", "content": "Say hi" }
+        ]
+      },
+      "codex_equivalent": [
+        "codex exec --json --output-last-message <tmp> --skip-git-repo-check --model gpt-5.2 --cd <workspace> \"SYSTEM: ... USER: ...\""
+      ]
+    },
+    {
+      "name": "chat_completion_stream",
+      "openai_request": {
+        "model": "gpt-5.2",
+        "messages": [
+          { "role": "user", "content": "Say hi" }
+        ],
+        "stream": true
+      },
+      "codex_equivalent": [
+        "codex exec --json --output-last-message <tmp> --skip-git-repo-check --model gpt-5.2 --cd <workspace> \"SYSTEM: ... USER: ...\""
+      ],
+      "notes": "Valv returns OpenAI-compatible SSE chunks followed by data: [DONE]"
+    }
+  ],
+  "compliance_notes": [
+    "Unknown request fields are rejected as unsupported_feature so clients get explicit signal instead of silent drops.",
+    "Unknown or changed OpenAI behavior should be added here before release and tracked as an issue.",
+    "For new fields that can be mapped to Codex flags or behavior, update this manifest and then open/track a follow-up issue if runtime mapping is not yet implemented.",
+    "If the manifest fields look stale, skip re-checking only if within review_interval_days and no open issue reports changes."
+  ]
+}

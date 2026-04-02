@@ -11,10 +11,22 @@ type ErrorResponse struct {
 }
 
 func DecodeRequest(r io.Reader) (Request, error) {
-	var req Request
-	dec := json.NewDecoder(r)
-	if err := dec.Decode(&req); err != nil {
+	body, err := io.ReadAll(r)
+	if err != nil {
 		return Request{}, fmt.Errorf("decode chat completions request: %w", err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return Request{}, invalidRequest(fmt.Sprintf("decode chat completions request: invalid JSON: %v", err), "body")
+	}
+	for field := range raw {
+		if _, ok := openAIChatCompletionFields[field]; !ok {
+			return Request{}, unsupportedFeature(fmt.Sprintf("field %q is not supported by valv api compatibility", field), field)
+		}
+	}
+	var req Request
+	if err := json.Unmarshal(body, &req); err != nil {
+		return Request{}, invalidRequest(fmt.Sprintf("decode chat completions request: %v", err), "body")
 	}
 	if err := req.Validate(); err != nil {
 		return Request{}, err

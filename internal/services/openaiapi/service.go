@@ -12,6 +12,7 @@ import (
 
 	"github.com/charmbracelet/log"
 
+	compat "github.com/evanmschultz/valv"
 	dockeradapter "github.com/evanmschultz/valv/internal/adapters/docker"
 	codexruntime "github.com/evanmschultz/valv/internal/adapters/providers/codex"
 	openaiapi "github.com/evanmschultz/valv/internal/api/openai"
@@ -65,6 +66,7 @@ type Service struct {
 	now             func() time.Time
 	logger          *log.Logger
 	artifacts       *runtimeArtifacts
+	compatibility   compat.CodexOpenAICompatibility
 }
 
 type runtimeArtifacts struct {
@@ -73,6 +75,10 @@ type runtimeArtifacts struct {
 }
 
 func New(options Options) (Service, error) {
+	compatibility, err := compat.CodexOpenAICompatibilityManifest()
+	if err != nil {
+		return Service{}, fmt.Errorf("new openai api service: load openai compatibility manifest: %w", err)
+	}
 	if options.Store == nil {
 		return Service{}, fmt.Errorf("new openai api service: store is required")
 	}
@@ -109,8 +115,25 @@ func New(options Options) (Service, error) {
 		idleTTL:         idleTTL,
 		now:             now,
 		logger:          options.Logger,
+		compatibility:   compatibility,
 		artifacts:       &runtimeArtifacts{byContainer: map[string]codexruntime.PreparedRuntime{}},
 	}, nil
+}
+
+func (s Service) Compatibility() compat.CodexOpenAICompatibility {
+	return s.compatibility
+}
+
+func (s Service) Warmup(ctx context.Context) error {
+	resolved, err := s.resolveBinding(ctx)
+	if err != nil {
+		return fmt.Errorf("warmup runtime: %w", err)
+	}
+	_, err = s.leaseRuntime(ctx, resolved)
+	if err != nil {
+		return fmt.Errorf("warmup runtime: %w", err)
+	}
+	return nil
 }
 
 func (s Service) ValidateBinding(ctx context.Context) error {
@@ -365,12 +388,14 @@ func (s Service) leaseRuntime(ctx context.Context, resolved resolvedBinding) (do
 			continue
 		}
 		s.debug("reusing warm runtime", "runtime", record.ID, "container", record.ContainerID)
+		s.debug("attaching to warm runtime", "runtime", record.ID, "container", record.ContainerID)
 		return record, nil
 	}
 	return s.startRuntime(ctx, resolved, now)
 }
 
 func (s Service) startRuntime(ctx context.Context, resolved resolvedBinding, now time.Time) (domain.RuntimeRecord, error) {
+	s.debug("creating runtime record", "project", resolved.project.Root, "profile", resolved.profile.Name, "workspace_access", s.workspaceAccess)
 	containerID := s.runtimeContainerID()
 	record, err := domain.NewRuntimeRecord(domain.ProviderCodex, resolved.project.ID, resolved.profile.ID, domain.ModeFresh, containerID, s.image.String(), "starting")
 	if err != nil {
@@ -398,11 +423,13 @@ func (s Service) startRuntime(ctx context.Context, resolved resolvedBinding, now
 		s.markRuntimeFailed(ctx, record)
 		return domain.RuntimeRecord{}, fmt.Errorf("start runtime for project %q: build docker run request: %w", resolved.project.Root, err)
 	}
+	s.debug("starting runtime backend container", "runtime", record.ID, "container", record.ContainerID, "image", s.image.String(), "workspace_access", s.workspaceAccess)
 	if err := s.executor.Run(ctx, request); err != nil {
 		_ = prepared.Close()
 		s.markRuntimeFailed(ctx, record)
 		return domain.RuntimeRecord{}, fmt.Errorf("start runtime for project %q: launch runtime container: %w", resolved.project.Root, err)
 	}
+	s.debug("runtime backend container started", "runtime", record.ID, "container", record.ContainerID)
 	record.Status = "running"
 	record.UpdatedAt = s.now()
 	updatedRecord, err := s.store.UpsertRuntime(ctx, record)

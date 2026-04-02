@@ -105,7 +105,7 @@ func TestNewMainContextUsesSignalNotifyContext(t *testing.T) {
 	if !called {
 		t.Fatal("newMainContext() did not invoke signalNotifyContext")
 	}
-	if len(received) != 2 || received[0] != os.Interrupt || received[1] != syscall.SIGTERM {
-		t.Fatalf("newMainContext() signals = %#v, want [os.Interrupt syscall.SIGTERM]", received)
+	if len(received) != 3 || received[0] != os.Interrupt || received[1] != syscall.SIGTERM || received[2] != syscall.SIGHUP {
+		t.Fatalf("newMainContext() signals = %#v, want [os.Interrupt syscall.SIGTERM syscall.SIGHUP]", received)
 	}
 }

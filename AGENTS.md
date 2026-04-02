@@ -316,3 +316,16 @@ Required behavior:
 - use the normal system Go cache and normal local command paths
 - keep Mage targets correct rather than wrapping them in sandbox workarounds
 - if a Go command or test run fails because of sandbox restrictions, stop, report that clearly, and let the user run it or decide the next step
+
+## OpenAI Compatibility Contract
+
+- canonical compatibility mapping for the `valv api` OpenAI surface is [`codex-openai-compatibility.json`](./codex-openai-compatibility.json) in repo root
+- manifest updates are expected to include timestamp metadata:
+  - `generated_at_utc`
+  - `last_reviewed_utc`
+  - `review_interval_days`
+- if Codex adds or changes flags/semantics that the endpoint uses, update this manifest in the same change and open a follow-up issue so the missing mapping is tracked
+- unsupported or removed OpenAI fields in this manifest must be explicit and documented before merge
+- unknown request fields are not passed through silently; they should be rejected in compatibility checks so behavior is explicit
+- keep manifest drift low: before skipping manual checks, compare `last_reviewed_utc` and `review_interval_days` and only defer checks when no runtime/API regressions are observed
+- if a mapping is incomplete and request payloads are correct, return `unsupported_feature` with an explicit pointer to filing an issue in this repo

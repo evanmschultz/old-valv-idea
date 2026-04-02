@@ -62,13 +62,24 @@ func TestRequestValidate(t *testing.T) {
 					Content: "hello",
 				}},
 			},
-			wantErr: false,
 		},
 		{
 			name: "multiple choices unsupported",
 			request: Request{
 				Model: "gpt-5.2",
 				N:     intPtr(2),
+				Messages: []Message{{
+					Role:    RoleUser,
+					Content: "hello",
+				}},
+			},
+			wantErr: true,
+		},
+		{
+			name: "temperature unsupported",
+			request: Request{
+				Model:       "gpt-5.2",
+				Temperature: float64Ptr(0.5),
 				Messages: []Message{{
 					Role:    RoleUser,
 					Content: "hello",
@@ -104,6 +115,33 @@ func TestDecodeRequest(t *testing.T) {
 	}
 	if got := req.Messages[0].Role; got != RoleUser {
 		t.Fatalf("DecodeRequest().Messages[0].Role = %q, want %q", got, RoleUser)
+	}
+}
+
+func TestDecodeRequestRejectsUnsupportedKnownField(t *testing.T) {
+	t.Parallel()
+
+	_, err := DecodeRequest(strings.NewReader(`{"model":"gpt-5.2","messages":[{"role":"user","content":"hello"}],"temperature":0.7}`))
+	if err == nil {
+		t.Fatal("DecodeRequest() error = nil, want unsupported error")
+	}
+	if !strings.Contains(err.Error(), "temperature is not supported") {
+		t.Fatalf("DecodeRequest() error = %v, want temperature unsupported", err)
+	}
+	if !strings.Contains(err.Error(), "open an issue") {
+		t.Fatalf("DecodeRequest() error = %v, want issue guidance", err)
+	}
+}
+
+func TestDecodeRequestRejectsUnknownField(t *testing.T) {
+	t.Parallel()
+
+	_, err := DecodeRequest(strings.NewReader(`{"model":"gpt-5.2","messages":[{"role":"user","content":"hello"}],"non_standard_api_field":true}`))
+	if err == nil {
+		t.Fatal("DecodeRequest() error = nil, want unsupported error")
+	}
+	if !strings.Contains(err.Error(), "not supported") {
+		t.Fatalf("DecodeRequest() error = %v, want unsupported field", err)
 	}
 }
 
@@ -181,5 +219,9 @@ func boolPtr(v bool) *bool {
 }
 
 func intPtr(v int) *int {
+	return &v
+}
+
+func float64Ptr(v float64) *float64 {
 	return &v
 }

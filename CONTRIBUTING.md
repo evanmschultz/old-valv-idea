@@ -10,6 +10,11 @@ Work in an active worktree, not in the bare repository root.
 
 Read [AGENTS.md](./AGENTS.md) and [PLAN.md](./PLAN.md) before making non-trivial changes.
 
+Compatibility change policy:
+
+- if Codex adds/changes CLI flags or payload semantics that affect `valv api`, update [`codex-openai-compatibility.json`](./codex-openai-compatibility.json) before merging and open/track an issue when runtime mapping is missing or outdated in this repo.
+- check `generated_at_utc`, `last_reviewed_utc`, and `review_interval_days` in the manifest before touching API compatibility changes; if the file is stale and no issue is being handled, schedule a compatibility sweep in the next change.
+
 ## Tooling
 
 Install Mage:

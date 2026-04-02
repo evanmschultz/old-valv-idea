@@ -1,6 +1,7 @@
 package openaiapi
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	sqliteadapter "github.com/evanmschultz/valv/internal/adapters/sqlite"
 	openaiapi "github.com/evanmschultz/valv/internal/api/openai"
 	"github.com/evanmschultz/valv/internal/domain"
+	"github.com/evanmschultz/valv/internal/logging"
 	projectdetect "github.com/evanmschultz/valv/internal/project"
 )
 
@@ -38,6 +40,81 @@ func TestNewRequiresDependencies(t *testing.T) {
 
 	if _, err := New(Options{}); err == nil {
 		t.Fatal("New() error = nil, want dependency failure")
+	}
+}
+
+func TestNewLoadsOpenAICompatibilityManifest(t *testing.T) {
+	t.Parallel()
+
+	store := newOpenAIStore(t)
+	executor := &recordingExecutor{}
+	service, err := New(Options{
+		Store:    store,
+		Executor: executor,
+		Image:    dockeradapter.NewImageRef("valv-codex", "dev"),
+		TempRoot: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if got := service.Compatibility().Provider; got != "codex" {
+		t.Fatalf("compatibility provider = %q, want codex", got)
+	}
+	if got := service.Compatibility().API.Path; got != "/v1/chat/completions" {
+		t.Fatalf("compatibility api path = %q, want /v1/chat/completions", got)
+	}
+}
+
+func TestWarmupStartsBackendContainerAndReusesIt(t *testing.T) {
+	t.Parallel()
+
+	store, project, profile := seededOpenAIStore(t, "/tmp/project", "/tmp/profile")
+	now := time.Date(2026, 3, 25, 15, 0, 0, 0, time.UTC)
+	executor := &recordingExecutor{content: "fixture response"}
+	service, err := New(Options{
+		Store:     store,
+		Executor:  executor,
+		Image:     dockeradapter.NewImageRef("valv-codex", "dev"),
+		TempRoot:  t.TempDir(),
+		StartPath: "/tmp/project",
+		IdleTTL:   time.Minute,
+		Now:       func() time.Time { return now },
+		Detect: func(string) (projectdetect.Result, error) {
+			return projectdetect.Result{Root: "/tmp/project"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if err := service.Warmup(context.Background()); err != nil {
+		t.Fatalf("Warmup() first error = %v", err)
+	}
+	if len(executor.runRequests) != 1 {
+		t.Fatalf("runRequests len = %d, want 1", len(executor.runRequests))
+	}
+	recordsAfterFirst, err := store.ListRuntimesByProjectID(context.Background(), project.ID)
+	if err != nil {
+		t.Fatalf("ListRuntimesByProjectID() error = %v", err)
+	}
+	if len(recordsAfterFirst) != 1 {
+		t.Fatalf("runtime record count after first warmup = %d, want 1", len(recordsAfterFirst))
+	}
+	if got := recordsAfterFirst[0].ProfileID; got != profile.ID {
+		t.Fatalf("runtime profile id = %q, want %q", got, profile.ID)
+	}
+	if recordsAfterFirst[0].Status != "running" {
+		t.Fatalf("runtime status = %q, want running", recordsAfterFirst[0].Status)
+	}
+
+	if err := service.Warmup(context.Background()); err != nil {
+		t.Fatalf("Warmup() second error = %v", err)
+	}
+	if len(executor.runRequests) != 1 {
+		t.Fatalf("runRequests len = %d, want 1 after second warmup", len(executor.runRequests))
+	}
+	if len(executor.inspectCalls) != 1 {
+		t.Fatalf("inspectCalls len = %d, want 1 on second warmup", len(executor.inspectCalls))
 	}
 }
 
@@ -211,12 +288,27 @@ func TestCompleteCreatesAndReusesWarmRuntimeUsingRealStore(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 
+	runtimesBefore, err := store.ListRuntimesByProjectID(context.Background(), project.ID)
+	if err != nil {
+		t.Fatalf("ListRuntimesByProjectID() before complete error = %v", err)
+	}
+	if len(runtimesBefore) != 0 {
+		t.Fatalf("runtime record count before complete = %d, want 0", len(runtimesBefore))
+	}
+
 	first, err := service.Complete(context.Background(), openaiapi.Request{
 		Model:    "gpt-5.2",
 		Messages: []openaiapi.Message{{Role: openaiapi.RoleUser, Content: "hello"}},
 	})
 	if err != nil {
 		t.Fatalf("Complete() first error = %v", err)
+	}
+	recordsAfterFirst, err := store.ListRuntimesByProjectID(context.Background(), project.ID)
+	if err != nil {
+		t.Fatalf("ListRuntimesByProjectID() after first complete error = %v", err)
+	}
+	if len(recordsAfterFirst) != 1 {
+		t.Fatalf("runtime record count after first complete = %d, want 1", len(recordsAfterFirst))
 	}
 	now = now.Add(30 * time.Second)
 	second, err := service.Complete(context.Background(), openaiapi.Request{
@@ -255,6 +347,65 @@ func TestCompleteCreatesAndReusesWarmRuntimeUsingRealStore(t *testing.T) {
 	}
 	if records[0].Status != "running" {
 		t.Fatalf("runtime status = %q, want running", records[0].Status)
+	}
+}
+
+func TestCompleteLogsRuntimeLifecycleEvents(t *testing.T) {
+	t.Parallel()
+
+	store, _, _ := seededOpenAIStore(t, "/tmp/project", "/tmp/profile")
+	now := time.Date(2026, 3, 25, 15, 0, 0, 0, time.UTC)
+	executor := &recordingExecutor{content: "fixture response"}
+	var logs bytes.Buffer
+	logger, err := logging.New(logging.Options{Writer: &logs, Level: "debug", Prefix: "valv"})
+	if err != nil {
+		t.Fatalf("logging.New() error = %v", err)
+	}
+	service, err := New(Options{
+		Store:     store,
+		Executor:  executor,
+		Image:     dockeradapter.NewImageRef("valv-codex", "dev"),
+		TempRoot:  t.TempDir(),
+		StartPath: "/tmp/project",
+		IdleTTL:   time.Minute,
+		Now:       func() time.Time { return now },
+		Logger:    logger,
+		Detect: func(string) (projectdetect.Result, error) {
+			return projectdetect.Result{Root: "/tmp/project"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := service.Complete(context.Background(), openaiapi.Request{
+		Model:    "gpt-5.2",
+		Messages: []openaiapi.Message{{Role: openaiapi.RoleUser, Content: "hello"}},
+	}); err != nil {
+		t.Fatalf("first Complete() error = %v", err)
+	}
+	if _, err := service.Complete(context.Background(), openaiapi.Request{
+		Model:    "gpt-5.2",
+		Messages: []openaiapi.Message{{Role: openaiapi.RoleUser, Content: "hello again"}},
+	}); err != nil {
+		t.Fatalf("second Complete() error = %v", err)
+	}
+
+	output := logs.String()
+	if !strings.Contains(output, "creating runtime record") {
+		t.Fatalf("runtime lifecycle logs = %q, want creating runtime record", output)
+	}
+	if !strings.Contains(output, "starting runtime backend container") {
+		t.Fatalf("runtime lifecycle logs = %q, want starting runtime backend container", output)
+	}
+	if !strings.Contains(output, "runtime backend container started") {
+		t.Fatalf("runtime lifecycle logs = %q, want runtime backend container started", output)
+	}
+	if !strings.Contains(output, "attaching to warm runtime") {
+		t.Fatalf("runtime lifecycle logs = %q, want attaching to warm runtime", output)
+	}
+	if !strings.Contains(output, "reusing warm runtime") {
+		t.Fatalf("runtime lifecycle logs = %q, want reusing warm runtime", output)
 	}
 }
 

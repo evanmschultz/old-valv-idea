@@ -3,6 +3,7 @@ package openai
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -28,15 +29,67 @@ type Message struct {
 }
 
 type Request struct {
-	Model               string    `json:"model"`
-	Messages            []Message `json:"messages"`
-	Stream              *bool     `json:"stream,omitempty"`
-	Temperature         *float64  `json:"temperature,omitempty"`
-	TopP                *float64  `json:"top_p,omitempty"`
-	N                   *int      `json:"n,omitempty"`
-	MaxTokens           *int      `json:"max_tokens,omitempty"`
-	MaxCompletionTokens *int      `json:"max_completion_tokens,omitempty"`
-	User                string    `json:"user,omitempty"`
+	Model               string          `json:"model"`
+	Messages            []Message       `json:"messages"`
+	Stream              *bool           `json:"stream,omitempty"`
+	Temperature         *float64        `json:"temperature,omitempty"`
+	TopP                *float64        `json:"top_p,omitempty"`
+	N                   *int            `json:"n,omitempty"`
+	MaxTokens           *int            `json:"max_tokens,omitempty"`
+	MaxCompletionTokens *int            `json:"max_completion_tokens,omitempty"`
+	User                string          `json:"user,omitempty"`
+	PresencePenalty     *float64        `json:"presence_penalty,omitempty"`
+	FrequencyPenalty    *float64        `json:"frequency_penalty,omitempty"`
+	LogitBias           json.RawMessage `json:"logit_bias,omitempty"`
+	Stop                json.RawMessage `json:"stop,omitempty"`
+	Tools               json.RawMessage `json:"tools,omitempty"`
+	ToolChoice          json.RawMessage `json:"tool_choice,omitempty"`
+	Functions           json.RawMessage `json:"functions,omitempty"`
+	ResponseFormat      json.RawMessage `json:"response_format,omitempty"`
+	Seed                *int            `json:"seed,omitempty"`
+	TopLogprobs         *int            `json:"top_logprobs,omitempty"`
+	Logprobs            *bool           `json:"logprobs,omitempty"`
+	ParallelToolCalls   *bool           `json:"parallel_tool_calls,omitempty"`
+	FunctionCall        json.RawMessage `json:"function_call,omitempty"`
+	Store               *bool           `json:"store,omitempty"`
+	Metadata            json.RawMessage `json:"metadata,omitempty"`
+	ReasoningEffort     string          `json:"reasoning_effort,omitempty"`
+	Prediction          json.RawMessage `json:"prediction,omitempty"`
+	ServiceTier         string          `json:"service_tier,omitempty"`
+	StreamOptions       json.RawMessage `json:"stream_options,omitempty"`
+	Modalities          json.RawMessage `json:"modalities,omitempty"`
+}
+
+var openAIChatCompletionFields = map[string]struct{}{
+	"model":                 {},
+	"messages":              {},
+	"stream":                {},
+	"temperature":           {},
+	"top_p":                 {},
+	"n":                     {},
+	"max_tokens":            {},
+	"max_completion_tokens": {},
+	"user":                  {},
+	"presence_penalty":      {},
+	"frequency_penalty":     {},
+	"logit_bias":            {},
+	"stop":                  {},
+	"tools":                 {},
+	"tool_choice":           {},
+	"functions":             {},
+	"response_format":       {},
+	"seed":                  {},
+	"top_logprobs":          {},
+	"logprobs":              {},
+	"parallel_tool_calls":   {},
+	"function_call":         {},
+	"store":                 {},
+	"metadata":              {},
+	"reasoning_effort":      {},
+	"prediction":            {},
+	"service_tier":          {},
+	"stream_options":        {},
+	"modalities":            {},
 }
 
 type Result struct {
@@ -81,17 +134,71 @@ func (r Request) Validate() error {
 	if r.N != nil && *r.N != 1 {
 		return unsupportedFeature("only n=1 is supported", "n")
 	}
-	if r.Temperature != nil && (*r.Temperature < 0 || *r.Temperature > 2) {
-		return invalidRequest("temperature must be between 0 and 2", "temperature")
+	if r.Temperature != nil {
+		return unsupportedFeature("temperature is not supported for api compatibility", "temperature")
 	}
-	if r.TopP != nil && (*r.TopP < 0 || *r.TopP > 1) {
-		return invalidRequest("top_p must be between 0 and 1", "top_p")
+	if r.TopP != nil {
+		return unsupportedFeature("top_p is not supported for api compatibility", "top_p")
 	}
-	if r.MaxTokens != nil && *r.MaxTokens < 1 {
-		return invalidRequest("max_tokens must be greater than 0", "max_tokens")
+	if r.MaxTokens != nil {
+		return unsupportedFeature("max_tokens is not supported for api compatibility", "max_tokens")
 	}
-	if r.MaxCompletionTokens != nil && *r.MaxCompletionTokens < 1 {
-		return invalidRequest("max_completion_tokens must be greater than 0", "max_completion_tokens")
+	if r.MaxCompletionTokens != nil {
+		return unsupportedFeature("max_completion_tokens is not supported for api compatibility", "max_completion_tokens")
+	}
+	if r.PresencePenalty != nil {
+		return unsupportedFeature("presence_penalty is not supported for api compatibility", "presence_penalty")
+	}
+	if r.FrequencyPenalty != nil {
+		return unsupportedFeature("frequency_penalty is not supported for api compatibility", "frequency_penalty")
+	}
+	if len(r.LogitBias) > 0 {
+		return unsupportedFeature("logit_bias is not supported for api compatibility", "logit_bias")
+	}
+	if len(r.Stop) > 0 {
+		return unsupportedFeature("stop is not supported for api compatibility", "stop")
+	}
+	if len(r.Tools) > 0 {
+		return unsupportedFeature("tools is not supported for api compatibility", "tools")
+	}
+	if len(r.ToolChoice) > 0 {
+		return unsupportedFeature("tool_choice is not supported for api compatibility", "tool_choice")
+	}
+	if len(r.Functions) > 0 {
+		return unsupportedFeature("functions is not supported for api compatibility", "functions")
+	}
+	if len(r.ResponseFormat) > 0 {
+		return unsupportedFeature("response_format is not supported for api compatibility", "response_format")
+	}
+	if r.Seed != nil {
+		return unsupportedFeature("seed is not supported for api compatibility", "seed")
+	}
+	if r.TopLogprobs != nil {
+		return unsupportedFeature("top_logprobs is not supported for api compatibility", "top_logprobs")
+	}
+	if r.Logprobs != nil {
+		return unsupportedFeature("logprobs is not supported for api compatibility", "logprobs")
+	}
+	if r.ParallelToolCalls != nil {
+		return unsupportedFeature("parallel_tool_calls is not supported for api compatibility", "parallel_tool_calls")
+	}
+	if len(r.FunctionCall) > 0 {
+		return unsupportedFeature("function_call is not supported for api compatibility", "function_call")
+	}
+	if r.ReasoningEffort != "" {
+		return unsupportedFeature("reasoning_effort is not supported for api compatibility", "reasoning_effort")
+	}
+	if len(r.Prediction) > 0 {
+		return unsupportedFeature("prediction is not supported for api compatibility", "prediction")
+	}
+	if r.ServiceTier != "" {
+		return unsupportedFeature("service_tier is not supported for api compatibility", "service_tier")
+	}
+	if len(r.StreamOptions) > 0 {
+		return unsupportedFeature("stream_options is not supported for api compatibility", "stream_options")
+	}
+	if len(r.Modalities) > 0 {
+		return unsupportedFeature("modalities is not supported for api compatibility", "modalities")
 	}
 	for i, message := range r.Messages {
 		if err := message.Validate(i); err != nil {

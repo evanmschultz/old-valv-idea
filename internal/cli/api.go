@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -15,12 +16,14 @@ import (
 
 	openaihandler "github.com/evanmschultz/valv/internal/api/openai"
 	"github.com/evanmschultz/valv/internal/config"
+	"github.com/evanmschultz/valv/internal/domain"
 	"github.com/evanmschultz/valv/internal/output"
 )
 
 type openAIAPIService interface {
 	openaihandler.Executor
 	ValidateBinding(context.Context) error
+	Warmup(context.Context) error
 	PruneExpiredRuntimes(context.Context) (int, error)
 	Shutdown(context.Context) (int, error)
 }
@@ -64,11 +67,14 @@ Serve the OpenAI-compatible /v1/chat/completions surface for the current bound p
 Important behavior:
 - ` + "`--runtime-ttl`" + ` is the idle lifetime for warm API runtime containers, not an automatic shutdown timer for the HTTP server
 - ` + "`--workspace`" + ` controls whether the bound project root is mounted into API runtime containers
+- API listener binding (` + "`listen`" + `) starts the host endpoint immediately
+- API runtime for ` + "`api`" + ` is started during ` + "`serve`" + ` startup and then reused until idle TTL expires
 
 Output fields:
 - listen: TCP address the HTTP server is attempting to bind
 - path: API route served by Valv
 - workspace: whether runtime containers get the project workspace mount
+- runtime backend: whether API runtime is warm and project-bound
 - runtime ttl: idle timeout for warm runtime containers
 - project: project root whose binding backs the API
 `),
@@ -125,6 +131,9 @@ func runAPIServe(cmd *cobra.Command, paths config.Paths, opts *rootOptions, list
 		return fmt.Errorf("api serve: listen: %w", err)
 	}
 	defer listener.Close()
+	if err := warmRuntimeForAPIServe(cmd.Context(), cmd.OutOrStdout(), mode, service); err != nil {
+		return err
+	}
 
 	shutdownDone := make(chan struct{})
 	go func() {
@@ -137,7 +146,7 @@ func runAPIServe(cmd *cobra.Command, paths config.Paths, opts *rootOptions, list
 	go runAPIRuntimeSweeper(cmd.Context(), LoggerFromContext(cmd.Context()), service, runtimeTTL)
 
 	boundAddr := listener.Addr().String()
-	if err := output.WriteRecord(cmd.OutOrStdout(), mode, "API server listening", []output.Field{{Label: "listen", Value: boundAddr, Identifier: true}, {Label: "path", Value: openaihandler.ChatCompletionsPath, Identifier: true}, {Label: "workspace", Value: fmt.Sprintf("%t", workspaceAccess), Badge: true}, {Label: "runtime ttl", Value: runtimeTTL.String(), Identifier: true}, {Label: "project", Value: startPath, Muted: true}}); err != nil {
+	if err := output.WriteRecord(cmd.OutOrStdout(), mode, "API server listening", []output.Field{{Label: "listen", Value: boundAddr, Identifier: true}, {Label: "path", Value: openaihandler.ChatCompletionsPath, Identifier: true}, {Label: "workspace", Value: fmt.Sprintf("%t", workspaceAccess), Badge: true}, {Label: "runtime backend", Value: "api warm", Identifier: true}, {Label: "runtime ttl", Value: runtimeTTL.String(), Identifier: true}, {Label: "project", Value: startPath, Muted: true}}); err != nil {
 		return fmt.Errorf("api serve: write startup output: %w", err)
 	}
 	serveErr := server.Serve(listener)
@@ -154,6 +163,32 @@ func runAPIServe(cmd *cobra.Command, paths config.Paths, opts *rootOptions, list
 	logger := LoggerFromContext(cmd.Context())
 	if removed > 0 && logger != nil {
 		logger.Debug("api serve stopped warm runtimes on shutdown", "count", removed)
+	}
+	return nil
+}
+
+func warmRuntimeForAPIServe(ctx context.Context, out interface {
+	io.Writer
+}, mode output.Mode, service interface {
+	Warmup(context.Context) error
+},
+) error {
+	if mode.Format == domain.OutputFormatJSON {
+		if err := service.Warmup(ctx); err != nil {
+			return fmt.Errorf("api serve: warm runtime backend: %w", err)
+		}
+		return nil
+	}
+	if err := runWithCLIQuietSpinner(
+		out,
+		"Starting API runtime backend",
+		"API runtime backend ready",
+		"API runtime backend failed",
+		func() error {
+			return service.Warmup(ctx)
+		},
+	); err != nil {
+		return fmt.Errorf("api serve: warm runtime backend: %w", err)
 	}
 	return nil
 }

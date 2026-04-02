@@ -60,8 +60,15 @@ func (p *pruneRecorder) PruneExpiredRuntimes(context.Context) (int, error) {
 }
 
 type apiServeStubService struct {
+	warmupCalls   int
 	shutdownCalls int
+	warmupErr     error
 	shutdownErr   error
+}
+
+func (s *apiServeStubService) Warmup(context.Context) error {
+	s.warmupCalls++
+	return s.warmupErr
 }
 
 func (s *apiServeStubService) ValidateBinding(context.Context) error {
@@ -912,8 +919,17 @@ func TestRunAPIServeStartsAndStopsCleanly(t *testing.T) {
 	if !strings.Contains(stdout.String(), "API server listening") {
 		t.Fatalf("unexpected api output: %q", stdout.String())
 	}
+	if !strings.Contains(stdout.String(), "listen=127.0.0.1:") {
+		t.Fatalf("unexpected api listen output: %q", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "runtime_backend=api warm") {
+		t.Fatalf("unexpected api output: %q", stdout.String())
+	}
 	if !strings.Contains(stdout.String(), "runtime_ttl=1m0s") {
 		t.Fatalf("unexpected api output: %q", stdout.String())
+	}
+	if service.warmupCalls != 1 {
+		t.Fatalf("Warmup() calls = %d, want 1", service.warmupCalls)
 	}
 	if service.shutdownCalls != 1 {
 		t.Fatalf("Shutdown() calls = %d, want 1", service.shutdownCalls)
