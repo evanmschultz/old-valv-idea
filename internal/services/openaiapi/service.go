@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,6 +32,7 @@ type Store interface {
 type Executor interface {
 	Run(context.Context, dockeradapter.ContainerRunRequest) error
 	Exec(context.Context, dockeradapter.ContainerExecRequest) error
+	ExecStream(context.Context, dockeradapter.ContainerExecRequest, io.Writer, io.Writer) error
 	Inspect(context.Context, string) error
 	RemoveContainer(context.Context, dockeradapter.ContainerRemoveRequest) error
 }
@@ -218,8 +220,14 @@ func (s Service) Complete(ctx context.Context, request openaiapi.Request) (opena
 	if err != nil {
 		return openaiapi.Result{}, fmt.Errorf("complete chat request: build docker exec request: %w", err)
 	}
+	s.info("api request started", "model", request.Model, "stream", request.HasStreaming(), "project", resolved.project.Root, "profile", resolved.profile.Name, "runtime", runtimeRecord.ContainerID)
 	s.debug("executing headless codex request", "project", resolved.project.Root, "profile", resolved.profile.Name, "runtime", runtimeRecord.ContainerID, "workspace_access", s.workspaceAccess)
 	if err := s.executor.Exec(ctx, req); err != nil {
+		if providerErr, ok := extractProviderRequestError(err); ok {
+			s.info("api request rejected by provider", "model", request.Model, "runtime", runtimeRecord.ContainerID, "error", providerErr)
+			return openaiapi.Result{}, providerErr
+		}
+		s.info("api request failed", "model", request.Model, "runtime", runtimeRecord.ContainerID, "error", err)
 		return openaiapi.Result{}, fmt.Errorf("complete chat request: execute runtime %q: %w", runtimeRecord.ContainerID, err)
 	}
 	runtimeRecord.Status = "running"
@@ -231,12 +239,76 @@ func (s Service) Complete(ctx context.Context, request openaiapi.Request) (opena
 	if err != nil {
 		return openaiapi.Result{}, fmt.Errorf("complete chat request: read output message: %w", err)
 	}
+	s.info("api request completed", "model", request.Model, "runtime", runtimeRecord.ContainerID)
 	return openaiapi.Result{
 		Model:        request.Model,
 		Content:      strings.TrimRight(string(content), "\n"),
 		FinishReason: "stop",
 		CreatedAt:    time.Now().UTC(),
 	}, nil
+}
+
+func (s Service) Stream(ctx context.Context, request openaiapi.Request, onAssistant func(string) error) error {
+	resolved, err := s.resolveBinding(ctx)
+	if err != nil {
+		return err
+	}
+	runtimeRecord, err := s.leaseRuntime(ctx, resolved)
+	if err != nil {
+		return err
+	}
+	prepared, ok := s.lookupArtifacts(runtimeRecord.ContainerID)
+	if !ok {
+		return fmt.Errorf("complete chat request: runtime %q is missing prepared artifacts", runtimeRecord.ContainerID)
+	}
+	tempDir, err := os.MkdirTemp(s.tempRoot, "openai-stream-")
+	if err != nil {
+		return fmt.Errorf("complete chat request: create temp dir: %w", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	resultPath := filepath.Join(tempDir, "last-message.txt")
+	req, err := s.buildExecRequest(request, runtimeRecord, resolved.project, resolved.profile, tempDir, resultPath, prepared)
+	if err != nil {
+		return fmt.Errorf("complete chat request: build docker exec request: %w", err)
+	}
+	s.info("api stream started", "model", request.Model, "project", resolved.project.Root, "profile", resolved.profile.Name, "runtime", runtimeRecord.ContainerID)
+	eventStream := newCodexEventStream(onAssistant)
+	if err := s.executor.ExecStream(ctx, req, eventStream, eventStream); err != nil {
+		_ = eventStream.Flush()
+		if eventStream.providerErr != nil {
+			s.info("api stream rejected by provider", "model", request.Model, "runtime", runtimeRecord.ContainerID, "error", eventStream.providerErr)
+			return eventStream.providerErr
+		}
+		if providerErr, ok := extractProviderRequestError(err); ok {
+			s.info("api stream rejected by provider", "model", request.Model, "runtime", runtimeRecord.ContainerID, "error", providerErr)
+			return providerErr
+		}
+		s.info("api stream failed", "model", request.Model, "runtime", runtimeRecord.ContainerID, "error", err)
+		return fmt.Errorf("complete chat request: execute runtime %q: %w", runtimeRecord.ContainerID, err)
+	}
+	if err := eventStream.Flush(); err != nil {
+		return err
+	}
+	runtimeRecord.Status = "running"
+	runtimeRecord.UpdatedAt = s.now()
+	if _, err := s.store.UpsertRuntime(ctx, runtimeRecord); err != nil {
+		return fmt.Errorf("complete chat request: update runtime %q: %w", runtimeRecord.ID, err)
+	}
+	if !eventStream.sawContent {
+		content, err := os.ReadFile(resultPath)
+		if err != nil {
+			return fmt.Errorf("complete chat request: read output message: %w", err)
+		}
+		trimmed := strings.TrimRight(string(content), "\n")
+		if trimmed != "" {
+			if err := onAssistant(trimmed); err != nil {
+				return err
+			}
+		}
+	}
+	s.info("api stream completed", "model", request.Model, "runtime", runtimeRecord.ContainerID)
+	return nil
 }
 
 type resolvedBinding struct {
@@ -333,6 +405,13 @@ func (s Service) buildExecRequest(request openaiapi.Request, runtimeRecord domai
 	prompt := renderPrompt(request)
 	workingDir := "/tmp"
 	args := []string{"codex", "exec", "--json", "--output-last-message", resultPath, "--skip-git-repo-check"}
+	reasoningEffort := resolveAPIReasoningEffort(profile, request)
+	args = append(args,
+		"-c", codexConfigOverride("model_reasoning_effort", reasoningEffort),
+		"-c", codexConfigOverride("plan_mode_reasoning_effort", reasoningEffort),
+		"-c", `model_reasoning_summary="none"`,
+		"-c", "show_raw_agent_reasoning=false",
+	)
 	if s.workspaceAccess {
 		workingDir = project.Root
 		args = append(args, "--cd", project.Root)
@@ -387,6 +466,7 @@ func (s Service) leaseRuntime(ctx context.Context, resolved resolvedBinding) (do
 			}
 			continue
 		}
+		s.info("reusing api runtime backend", "runtime", record.ID, "container", record.ContainerID)
 		s.debug("reusing warm runtime", "runtime", record.ID, "container", record.ContainerID)
 		s.debug("attaching to warm runtime", "runtime", record.ID, "container", record.ContainerID)
 		return record, nil
@@ -423,12 +503,14 @@ func (s Service) startRuntime(ctx context.Context, resolved resolvedBinding, now
 		s.markRuntimeFailed(ctx, record)
 		return domain.RuntimeRecord{}, fmt.Errorf("start runtime for project %q: build docker run request: %w", resolved.project.Root, err)
 	}
+	s.info("starting api runtime backend", "runtime", record.ID, "container", record.ContainerID, "image", s.image.String())
 	s.debug("starting runtime backend container", "runtime", record.ID, "container", record.ContainerID, "image", s.image.String(), "workspace_access", s.workspaceAccess)
 	if err := s.executor.Run(ctx, request); err != nil {
 		_ = prepared.Close()
 		s.markRuntimeFailed(ctx, record)
 		return domain.RuntimeRecord{}, fmt.Errorf("start runtime for project %q: launch runtime container: %w", resolved.project.Root, err)
 	}
+	s.info("api runtime backend ready", "runtime", record.ID, "container", record.ContainerID)
 	s.debug("runtime backend container started", "runtime", record.ID, "container", record.ContainerID)
 	record.Status = "running"
 	record.UpdatedAt = s.now()
@@ -467,6 +549,7 @@ func (s Service) stopRuntime(ctx context.Context, record domain.RuntimeRecord, s
 	}
 	record.Status = status
 	record.UpdatedAt = s.now()
+	s.info("api runtime backend stopped", "runtime", record.ID, "container", record.ContainerID, "status", status)
 	_, err := s.store.UpsertRuntime(ctx, record)
 	return err
 }
@@ -531,6 +614,13 @@ func (s Service) debug(msg string, keyvals ...any) {
 		return
 	}
 	s.logger.Debug(msg, keyvals...)
+}
+
+func (s Service) info(msg string, keyvals ...any) {
+	if s.logger == nil {
+		return
+	}
+	s.logger.Info(msg, keyvals...)
 }
 
 func (s Service) storeArtifacts(containerID string, prepared codexruntime.PreparedRuntime) {

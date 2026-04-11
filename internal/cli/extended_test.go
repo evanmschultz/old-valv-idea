@@ -934,6 +934,9 @@ func TestRunAPIServeStartsAndStopsCleanly(t *testing.T) {
 	if service.shutdownCalls != 1 {
 		t.Fatalf("Shutdown() calls = %d, want 1", service.shutdownCalls)
 	}
+	if !strings.Contains(stderr.String(), "API runtime backend stopped") {
+		t.Fatalf("unexpected shutdown stderr: %q", stderr.String())
+	}
 }
 
 func TestRunAPIServeReturnsShutdownError(t *testing.T) {

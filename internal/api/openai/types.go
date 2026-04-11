@@ -185,9 +185,6 @@ func (r Request) Validate() error {
 	if len(r.FunctionCall) > 0 {
 		return unsupportedFeature("function_call is not supported for api compatibility", "function_call")
 	}
-	if r.ReasoningEffort != "" {
-		return unsupportedFeature("reasoning_effort is not supported for api compatibility", "reasoning_effort")
-	}
 	if len(r.Prediction) > 0 {
 		return unsupportedFeature("prediction is not supported for api compatibility", "prediction")
 	}
@@ -224,6 +221,7 @@ func (r Request) Normalize() Request {
 	next := r
 	next.Model = strings.TrimSpace(next.Model)
 	next.User = strings.TrimSpace(next.User)
+	next.ReasoningEffort = strings.TrimSpace(next.ReasoningEffort)
 	for i := range next.Messages {
 		next.Messages[i].Role = Role(strings.TrimSpace(string(next.Messages[i].Role)))
 		next.Messages[i].Name = strings.TrimSpace(next.Messages[i].Name)

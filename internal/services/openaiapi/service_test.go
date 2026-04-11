@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -203,6 +204,9 @@ func TestBuildExecRequestOmitsWorkspaceByDefault(t *testing.T) {
 	if request.ContainerID != record.ContainerID {
 		t.Fatalf("ContainerID = %q, want %q", request.ContainerID, record.ContainerID)
 	}
+	if !strings.Contains(strings.Join(request.Args, " "), `model_reasoning_effort="medium"`) {
+		t.Fatalf("args missing api reasoning override: %#v", request.Args)
+	}
 }
 
 func TestBuildExecRequestIncludesWorkspaceWhenEnabled(t *testing.T) {
@@ -223,6 +227,28 @@ func TestBuildExecRequestIncludesWorkspaceWhenEnabled(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(request.Args, " "), "--cd /tmp/project") {
 		t.Fatalf("args missing project cd: %#v", request.Args)
+	}
+}
+
+func TestBuildExecRequestUsesExplicitReasoningEffort(t *testing.T) {
+	t.Parallel()
+
+	service := Service{image: dockeradapter.NewImageRef("valv-codex", "dev")}
+	project := domain.Project{Root: "/tmp/project"}
+	profile := domain.Profile{HomePath: "/tmp/profile"}
+	record := domain.RuntimeRecord{ContainerID: "valv-api-codex-nowork-123"}
+	prepared := preparedRuntimeForTests(project.Root)
+
+	request, err := service.buildExecRequest(openaiapi.Request{
+		Model:           "gpt-5.2",
+		ReasoningEffort: "low",
+		Messages:        []openaiapi.Message{{Role: openaiapi.RoleUser, Content: "hello"}},
+	}, record, project, profile, "/tmp/result", "/tmp/result/out.txt", prepared)
+	if err != nil {
+		t.Fatalf("buildExecRequest() error = %v", err)
+	}
+	if !strings.Contains(strings.Join(request.Args, " "), `model_reasoning_effort="low"`) {
+		t.Fatalf("args missing explicit reasoning override: %#v", request.Args)
 	}
 }
 
@@ -728,6 +754,45 @@ func TestCompleteMarksRuntimeFailedWhenContainerLaunchFails(t *testing.T) {
 	}
 }
 
+func TestCompleteMapsStructuredProviderError(t *testing.T) {
+	t.Parallel()
+
+	store, _, _ := seededOpenAIStore(t, "/tmp/project", "/tmp/profile")
+	executor := &recordingExecutor{
+		execErr: errors.New("run docker exec ...: exit status 1: {\"type\":\"error\",\"message\":\"{\\\"type\\\":\\\"error\\\",\\\"status\\\":400,\\\"error\\\":{\\\"type\\\":\\\"invalid_request_error\\\",\\\"code\\\":\\\"unsupported_value\\\",\\\"message\\\":\\\"unsupported\\\",\\\"param\\\":\\\"reasoning.effort\\\"}}\"}"),
+	}
+	service, err := New(Options{
+		Store:     store,
+		Executor:  executor,
+		Image:     dockeradapter.NewImageRef("valv-codex", "dev"),
+		TempRoot:  t.TempDir(),
+		StartPath: "/tmp/project",
+		IdleTTL:   time.Minute,
+		Now:       func() time.Time { return time.Date(2026, 3, 25, 15, 0, 0, 0, time.UTC) },
+		Detect: func(string) (projectdetect.Result, error) {
+			return projectdetect.Result{Root: "/tmp/project"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	_, err = service.Complete(context.Background(), openaiapi.Request{
+		Model:    "gpt-5.1-codex-mini",
+		Messages: []openaiapi.Message{{Role: openaiapi.RoleUser, Content: "hello"}},
+	})
+	if err == nil {
+		t.Fatal("Complete() error = nil, want provider request error")
+	}
+	reqErr, ok := err.(openaiapi.RequestError)
+	if !ok {
+		t.Fatalf("Complete() error type = %T, want RequestError", err)
+	}
+	if reqErr.Status != 400 || reqErr.Type != "invalid_request_error" || reqErr.Code != "unsupported_value" || reqErr.Param != "reasoning.effort" {
+		t.Fatalf("Complete() request error = %+v, want preserved provider error", reqErr)
+	}
+}
+
 type recordingExecutor struct {
 	runRequests     []dockeradapter.ContainerRunRequest
 	execRequests    []dockeradapter.ContainerExecRequest
@@ -735,6 +800,8 @@ type recordingExecutor struct {
 	inspectCalls    []string
 	content         string
 	runErr          error
+	execErr         error
+	streamErr       error
 	inspectErr      error
 }
 
@@ -745,6 +812,35 @@ func (e *recordingExecutor) Run(_ context.Context, request dockeradapter.Contain
 
 func (e *recordingExecutor) Exec(_ context.Context, request dockeradapter.ContainerExecRequest) error {
 	e.execRequests = append(e.execRequests, request)
+	if e.execErr != nil {
+		return e.execErr
+	}
+	for i := 0; i < len(request.Args); i++ {
+		if request.Args[i] == "--output-last-message" || request.Args[i] == "-o" {
+			if i+1 < len(request.Args) {
+				if err := os.MkdirAll(filepath.Dir(request.Args[i+1]), 0o755); err != nil {
+					return err
+				}
+				return os.WriteFile(request.Args[i+1], []byte(e.content), 0o644)
+			}
+		}
+	}
+	return fmt.Errorf("output-last-message argument not found")
+}
+
+func (e *recordingExecutor) ExecStream(_ context.Context, request dockeradapter.ContainerExecRequest, stdout, _ io.Writer) error {
+	e.execRequests = append(e.execRequests, request)
+	if e.streamErr != nil {
+		return e.streamErr
+	}
+	if e.execErr != nil {
+		return e.execErr
+	}
+	if e.content != "" {
+		if _, err := io.WriteString(stdout, fmt.Sprintf("{\"type\":\"message\",\"role\":\"assistant\",\"content\":%q}\n", e.content)); err != nil {
+			return err
+		}
+	}
 	for i := 0; i < len(request.Args); i++ {
 		if request.Args[i] == "--output-last-message" || request.Args[i] == "-o" {
 			if i+1 < len(request.Args) {

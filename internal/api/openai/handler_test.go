@@ -15,16 +15,29 @@ import (
 )
 
 type stubExecutor struct {
-	request Request
-	result  Result
-	err     error
-	called  bool
+	request   Request
+	result    Result
+	err       error
+	stream    []string
+	streamErr error
+	called    bool
 }
 
 func (s *stubExecutor) Complete(_ context.Context, req Request) (Result, error) {
 	s.called = true
 	s.request = req
 	return s.result, s.err
+}
+
+func (s *stubExecutor) Stream(_ context.Context, req Request, emit func(string) error) error {
+	s.called = true
+	s.request = req
+	for _, chunk := range s.stream {
+		if err := emit(chunk); err != nil {
+			return err
+		}
+	}
+	return s.streamErr
 }
 
 type fixedClock struct {
@@ -106,7 +119,7 @@ func TestHandlerServeHTTPWritesChatCompletionResponse(t *testing.T) {
 func TestHandlerStreamsChatCompletionResponse(t *testing.T) {
 	t.Parallel()
 
-	handler, err := NewHandler(&stubExecutor{}, Options{})
+	handler, err := NewHandler(&stubExecutor{stream: []string{"hello"}}, Options{})
 	if err != nil {
 		t.Fatalf("NewHandler() error = %v", err)
 	}
@@ -130,6 +143,12 @@ func TestHandlerStreamsChatCompletionResponse(t *testing.T) {
 	}
 	if !strings.Contains(bodyText, "\"object\":\"chat.completion.chunk\"") {
 		t.Fatalf("stream body missing chunk object: %q", bodyText)
+	}
+	if !strings.Contains(bodyText, "\"logprobs\":null") {
+		t.Fatalf("stream body missing logprobs null: %q", bodyText)
+	}
+	if !strings.Contains(bodyText, "\"finish_reason\":null") {
+		t.Fatalf("stream body missing null finish reason chunk: %q", bodyText)
 	}
 }
 
@@ -184,6 +203,33 @@ func TestHandlerPropagatesExecutorFailure(t *testing.T) {
 	}
 	if payload.Error.Code != "server_error" {
 		t.Fatalf("error code = %q, want server_error", payload.Error.Code)
+	}
+}
+
+func TestHandlerReturnsJSONErrorWhenStreamingFailsBeforeFirstChunk(t *testing.T) {
+	t.Parallel()
+
+	handler, err := NewHandler(&stubExecutor{streamErr: RequestError{
+		Status:  400,
+		Type:    "invalid_request_error",
+		Message: "unsupported",
+		Param:   "reasoning_effort",
+		Code:    "unsupported_value",
+	}}, Options{})
+	if err != nil {
+		t.Fatalf("NewHandler() error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, ChatCompletionsPath, bytes.NewBufferString(`{"model":"gpt-5.2","stream":true,"messages":[{"role":"user","content":"hello"}]}`))
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if got, want := rr.Code, http.StatusBadRequest; got != want {
+		t.Fatalf("status = %d, want %d", got, want)
+	}
+	if got := rr.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("content-type = %q, want application/json", got)
 	}
 }
 

@@ -87,6 +87,17 @@ func TestRequestValidate(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name: "reasoning effort accepted",
+			request: Request{
+				Model:           "gpt-5.2",
+				ReasoningEffort: "medium",
+				Messages: []Message{{
+					Role:    RoleUser,
+					Content: "hello",
+				}},
+			},
+		},
 	}
 
 	for _, tc := range tests {

@@ -363,9 +363,22 @@
     {
       "openai_field": "reasoning_effort",
       "openai_type": "string",
-      "status": "unsupported",
-      "codex_invocation": null,
-      "notes": "No equivalent mapping implemented for valv API endpoint yet"
+      "status": "supported",
+      "codex_invocation": {
+        "command": [
+          "codex",
+          "exec",
+          "--json",
+          "--output-last-message",
+          "<tmp>",
+          "--skip-git-repo-check",
+          "-c",
+          "model_reasoning_effort=\"<reasoning_effort>\"",
+          "-c",
+          "plan_mode_reasoning_effort=\"<reasoning_effort>\""
+        ]
+      },
+      "notes": "Mapped to per-run Codex config overrides so API requests do not inherit incompatible profile defaults"
     },
     {
       "openai_field": "prediction",

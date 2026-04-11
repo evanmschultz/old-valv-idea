@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/log"
+	"github.com/evanmschultz/laslig"
 	"github.com/spf13/cobra"
 
 	openaihandler "github.com/evanmschultz/valv/internal/api/openai"
@@ -163,6 +164,11 @@ func runAPIServe(cmd *cobra.Command, paths config.Paths, opts *rootOptions, list
 	logger := LoggerFromContext(cmd.Context())
 	if removed > 0 && logger != nil {
 		logger.Debug("api serve stopped warm runtimes on shutdown", "count", removed)
+	}
+	if mode.Format != domain.OutputFormatJSON {
+		if err := writeCLINotice(cmd.ErrOrStderr(), laslig.NoticeInfoLevel, "API runtime backend stopped", "Warm API runtime cleanup finished.", fmt.Sprintf("removed %d runtime(s)", removed)); err != nil {
+			return fmt.Errorf("api serve: write shutdown notice: %w", err)
+		}
 	}
 	return nil
 }

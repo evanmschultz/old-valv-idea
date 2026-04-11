@@ -1,6 +1,9 @@
 package docker
 
-import "context"
+import (
+	"context"
+	"io"
+)
 
 type Executor struct {
 	runner CommandRunner
@@ -46,6 +49,20 @@ func (e Executor) Exec(ctx context.Context, request ContainerExecRequest) error 
 		return err
 	}
 	return e.runner.Run(ctx, args)
+}
+
+func (e Executor) ExecStream(ctx context.Context, request ContainerExecRequest, stdout, stderr io.Writer) error {
+	args, err := BuildExecArgs(request)
+	if err != nil {
+		return err
+	}
+	streamer, ok := e.runner.(interface {
+		Stream(context.Context, []string, io.Writer, io.Writer) error
+	})
+	if !ok {
+		return ErrOutputUnsupported
+	}
+	return streamer.Stream(ctx, args, stdout, stderr)
 }
 
 func (e Executor) Start(ctx context.Context, request ContainerStartRequest) error {

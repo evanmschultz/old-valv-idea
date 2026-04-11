@@ -17,6 +17,10 @@ type Executor interface {
 	Complete(context.Context, Request) (Result, error)
 }
 
+type Streamer interface {
+	Stream(context.Context, Request, func(string) error) error
+}
+
 type Clock interface {
 	Now() time.Time
 }
@@ -86,10 +90,88 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		response.ID = id
 	}
 	if req.HasStreaming() {
+		if streamer, ok := h.executor.(Streamer); ok {
+			h.writeExecutorStream(w, r, req, streamer, response.ID)
+			return
+		}
 		writeStream(w, response)
 		return
 	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+func (h *Handler) writeExecutorStream(w http.ResponseWriter, r *http.Request, req Request, streamer Streamer, responseID string) {
+	model := strings.TrimSpace(req.Model)
+	if model == "" {
+		model = "unknown"
+	}
+	created := h.clock.Now().UTC().Unix()
+	flusher, _ := w.(http.Flusher)
+	started := false
+
+	writeStart := func() {
+		if started {
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.WriteHeader(http.StatusOK)
+		started = true
+	}
+	writeContent := func(content string) error {
+		writeStart()
+		writeSSEChunk(w, streamResponse{
+			ID:      responseID,
+			Object:  "chat.completion.chunk",
+			Created: created,
+			Model:   model,
+			Choices: []streamChoice{{
+				Index: 0,
+				Delta: streamDelta{
+					Role:    "assistant",
+					Content: content,
+				},
+				Logprobs:     nil,
+				FinishReason: nil,
+			}},
+			Usage: nil,
+		})
+		if flusher != nil {
+			flusher.Flush()
+		}
+		return nil
+	}
+
+	if err := streamer.Stream(r.Context(), req, writeContent); err != nil {
+		if started {
+			h.debug("chat completion streaming executor failed after stream start", "error", err)
+			return
+		}
+		h.debug("chat completion streaming executor failed", "error", err)
+		writeError(w, statusFromExecutorError(err), err)
+		return
+	}
+
+	writeStart()
+	finish := "stop"
+	writeSSEChunk(w, streamResponse{
+		ID:      responseID,
+		Object:  "chat.completion.chunk",
+		Created: created,
+		Model:   model,
+		Choices: []streamChoice{{
+			Index:        0,
+			Delta:        streamDelta{},
+			Logprobs:     nil,
+			FinishReason: &finish,
+		}},
+		Usage: nil,
+	})
+	_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	if flusher != nil {
+		flusher.Flush()
+	}
 }
 
 type streamDelta struct {
@@ -100,7 +182,8 @@ type streamDelta struct {
 type streamChoice struct {
 	Index        int         `json:"index"`
 	Delta        streamDelta `json:"delta"`
-	FinishReason *string     `json:"finish_reason,omitempty"`
+	Logprobs     any         `json:"logprobs"`
+	FinishReason *string     `json:"finish_reason"`
 }
 
 type streamResponse struct {
@@ -135,6 +218,8 @@ func writeStream(w http.ResponseWriter, response Response) {
 				Role:    "assistant",
 				Content: content,
 			},
+			Logprobs:     nil,
+			FinishReason: nil,
 		}},
 		Usage: streamUsage,
 	}
@@ -148,6 +233,8 @@ func writeStream(w http.ResponseWriter, response Response) {
 		Model:   response.Model,
 		Choices: []streamChoice{{
 			Index:        0,
+			Delta:        streamDelta{},
+			Logprobs:     nil,
 			FinishReason: &finish,
 		}},
 		Usage: streamUsage,
