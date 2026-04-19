@@ -1,6 +1,6 @@
 # DROP_0 — DOCS BOOTSTRAP
 
-**State:** planning
+**State:** building
 **Blocked by:** —
 **Paths (expected):** `CLAUDE.md` (bare-root), `main/CLAUDE.md`, `main/drops/WORKFLOW.md`, `main/drops/_TEMPLATE/CLOSEOUT.md`, `main/PLAN.md`, `main/WIKI.md` (new), `main/LEDGER.md` (new), `main/REFINEMENTS.md` (new), `main/HYLLA_FEEDBACK.md` (new), `main/HYLLA_REFINEMENTS.md` (new), `main/WIKI_CHANGELOG.md` (new), `main/.worklog/.FROZEN` (new)
 **Packages (expected):** none — docs-only drop, no Go packages touched
