@@ -26,3 +26,32 @@ Append a `## Unit N.M — Round K` section per falsification pass. See `main/dro
 ### Verdict
 
 PASS. All nine attack surfaces either refuted outright or flagged as a soft informational-only issue (F1: missing `in_progress` transition). The scaffolds are byte-correct, encoding-clean, scope-bounded, Phase-7-append-safe, and the HEAD commit is tidy. The sole finding is lifecycle bookkeeping, not spec-breaking. U0.4 builder output holds against falsification.
+
+## Unit 0.6 — Round 1
+
+**Verdict:** PASS
+
+### Findings
+
+| ID | Severity | Criterion | Counterexample | Mitigation |
+|---|---|---|---|---|
+
+_No findings — all attacks refuted._
+
+### Attacks Attempted And Refuted
+
+- **A1 — Hidden `.gitignore` mutation.** `git show HEAD -- main/.gitignore` returns empty; `git show --stat HEAD` lists exactly two files (`drops/DROP_0_DOCS_BOOTSTRAP/PLAN.md`, `drops/DROP_0_DOCS_BOOTSTRAP/BUILDER_WORKLOG.md`). `.gitignore` is untouched. REFUTED.
+- **A2 — Hidden `magefile.go` mutation.** `git show HEAD -- main/magefile.go` returns empty; commit stat confirms no Go files changed. `magefile.go:311` `.worklog` skip is intact. REFUTED.
+- **A3 — Historical content deletion / mtime rewrite.** `/usr/bin/find main/.worklog -type f | wc -l` returns `49` — 48 pre-existing historical files + 1 new `.FROZEN` marker. Matches builder's claim exactly. No historical file was deleted or touched (would have shown up in commit stat or required separate mutations; commit touched zero `.worklog/` paths because the directory is gitignored). REFUTED.
+- **A4 — `.FROZEN` content-quality attack (tokenistic vs semantic).** Full-file read (20 lines) shows the heading is `# .worklog/ — FROZEN (historical archive)` and body opens with "This directory is frozen as of DROP_0_DOCS_BOOTSTRAP." and "All pre-existing `.worklog/` files are historical artifacts from the pre-rak-workflow era and remain on disk for archival reference only." Both `frozen` and `historical` are used as direct descriptors of the directory and its contents, not in distracting phrases like "frozen in some other sense." Content also correctly routes readers to `main/drops/` and `main/drops/WORKFLOW.md` per spec criterion 2. REFUTED.
+- **A5 — BOM smuggling on `.FROZEN`.** `xxd` first 16 bytes: `2320 2e77 6f72 6b6c 6f67 2f20 e280 9420` — i.e. `#`, space, `.worklog/`, space, then the em-dash UTF-8 triplet (`e2 80 94`). No `ef bb bf` (U+FEFF) prefix. File is raw UTF-8 starting with ASCII `# `. REFUTED.
+- **A6 — Semantic `.gitignore` drift.** `Grep` of `.gitignore` for `^\.worklog/$` returns exactly one match on line 4. `Grep` for `\.worklog` anywhere returns the same single line 4 match. Direct read of `.gitignore` confirms `.worklog/` sits on line 4 between `.cache/` (line 3) and the blank line (line 5) introducing the `# OS clutter` block. No duplicate, no move. REFUTED.
+- **A7 — PLAN.md off-unit edits.** `git diff HEAD~1 HEAD -- drops/DROP_0_DOCS_BOOTSTRAP/PLAN.md` is a single hunk (`@@ -149,7 +149,7 @@`) flipping one line: `- **State:** todo` → `- **State:** done` on the U0.6 row. Zero other lines changed. U0.1/U0.2/U0.3/U0.5 state cells and all acceptance criteria untouched. REFUTED.
+- **A8 — BUILDER_WORKLOG.md off-unit edits.** `git diff HEAD~1 HEAD -- drops/DROP_0_DOCS_BOOTSTRAP/BUILDER_WORKLOG.md` is a single hunk `@@ -10,3 +10,10 @@` — pure append of 7 lines after the existing U0.4 Round 1 block. No deletions, no edits to U0.4 content. REFUTED.
+- **A9 — find-count edge (symlinks / device files).** `/usr/bin/find main/.worklog -type l` returns empty — no symlinks. `/usr/bin/find main/.worklog -not -type f -not -type d` returns empty — no device files, sockets, or pipes. All 49 counted entries are regular files. The `49` count is honest. REFUTED.
+- **A10 — Commit scope violation.** `git show --stat HEAD` touches exactly two files: `drops/DROP_0_DOCS_BOOTSTRAP/BUILDER_WORKLOG.md` (+7) and `drops/DROP_0_DOCS_BOOTSTRAP/PLAN.md` (+1/-1). No Go files, no `.gitignore`, no `magefile.go`, no other markdown. Commit subject `docs(drop-0): freeze .worklog with marker file` is accurate and in spec format (lowercase, no period, under 72 chars, no body). REFUTED.
+- **A11 — `.FROZEN` leaked into git history.** `git log --all -- main/.worklog/.FROZEN` returns empty — the file is nowhere in git history, matching spec intent that the marker is local-only (disk-state, not git-state). `git check-ignore -v` confirms match on `.gitignore:4:.worklog/`. REFUTED.
+
+### Verdict
+
+PASS. Eleven attack surfaces probed, all refuted. Commit scope is bounded to the two expected files (PLAN.md state flip + BUILDER_WORKLOG.md append). `.FROZEN` content is 786 bytes of clean UTF-8 (no BOM), content semantically matches "frozen / historical" intent and correctly points readers at `main/drops/` as the new substrate. Historical `.worklog/` content preserved (48 + 1 = 49 regular files). `.gitignore` line 4 and `magefile.go:311` untouched. `.FROZEN` correctly gitignored and never committed. U0.6 builder output holds against falsification.
