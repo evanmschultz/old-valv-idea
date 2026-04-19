@@ -149,7 +149,7 @@ Six atomic units. Each is docs-only (no Go package footprint). All units are ind
 
 ### Unit 0.6 — Freeze `main/.worklog/` with a marker file
 
-- **State:** todo
+- **State:** done
 - **Paths:** `/Users/evanschultz/Documents/Code/hylla/valv/main/.worklog/.FROZEN` (new)
 - **Packages:** none — docs-only
 - **Acceptance:**
