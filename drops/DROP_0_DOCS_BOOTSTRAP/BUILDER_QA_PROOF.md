@@ -192,3 +192,118 @@ N/A — task touched non-Go files only (bare-root `CLAUDE.md` is markdown; Hylla
 ### Verdict
 
 All 7 U0.1 acceptance criteria pass (verified numerically via `Grep` MCP, counts exactly match builder's self-report). Structural hygiene passes (single H1, 10 H2s, 1 H3 nested correctly, 37 em-dashes preserved, BOM-free, markdown-only, zero `rak` substrings case-insensitive). Bare-root plan docs cross-check passes (all five cited docs exist on disk). Steward-boundary invariants preserved intact (five `- **Never` bullets under the preserved section heading). Design-note cross-checks (tree diagram rebrand, commit-example rebrand, boundary-bullet preservation) all corroborated against on-disk content. Proof-QA verdict: PASS.
+
+## Unit 0.5 — Round 1
+
+**Verdict:** PASS
+
+### Findings
+
+| ID | Severity | Criterion | Evidence | Recommendation |
+|---|---|---|---|---|
+| — | — | — | No findings — all 10 U0.5 acceptance criteria and every additional hygiene check pass cleanly. | — |
+
+### Acceptance Criteria Verification
+
+All counts observed via `Grep` MCP tool and direct `Read` / `Glob` inspection against `/Users/evanschultz/Documents/Code/hylla/valv/main/PLAN.md`. Exact criterion regex from drop PLAN.md lines 115–147.
+
+| Crit | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| 1 | `grep -c '^# Valv' PLAN.md` | `>= 1` | `1` | PASS |
+| 2 | `grep -cE '^\| *DROP_[0-9]+' PLAN.md` | `10` | `10` | PASS |
+| 3 | `grep -cE '^\| *DROP_[0-9]+_' PLAN.md` | `10` | `10` | PASS |
+| 4 | `grep 'DROP_0_DOCS_BOOTSTRAP' \| grep -c 'building'` | `>= 1` | `1` | PASS |
+| 5a | `grep -cE 'DROP_[1-9]' PLAN.md` | `>= 9` | `11` (9 data rows + 2 prose refs in intro) | PASS |
+| 5b | `grep -cE 'DROP_[1-9].*state: done' PLAN.md` | `0` | `0` | PASS |
+| 6.0 | `^\|.*DROP_0_DOCS_BOOTSTRAP.*\|.*blocked_by: *(—\|-\|none).*\|` | `>= 1` | `1` | PASS |
+| 6.1 | `^\|.*DROP_1_DELETE_API_WRAPPER.*\|.*blocked_by: *DROP_0.*\|` | `>= 1` | `1` | PASS |
+| 6.2 | `^\|.*DROP_2_DOMAIN_PLUMBING_PROVIDER_CLAUDE.*\|.*blocked_by: *DROP_1.*\|` | `>= 1` | `1` | PASS |
+| 6.3 | `^\|.*DROP_3_SCHEMA_MIGRATION_COMPOSITE_BINDING.*\|.*blocked_by: *DROP_2.*\|` | `>= 1` | `1` | PASS |
+| 6.4 | `^\|.*DROP_4_CLAUDE_DOCKER_IMAGE.*\|.*blocked_by: *DROP_3.*\|` | `>= 1` | `1` | PASS |
+| 6.5 | `^\|.*DROP_5_CLAUDE_PROVIDER_ADAPTER.*\|.*blocked_by: *DROP_4.*\|` | `>= 1` | `1` | PASS |
+| 6.6 | `^\|.*DROP_6_CLAUDE_SERVICE_AND_CLI.*\|.*blocked_by: *DROP_5.*\|` | `>= 1` | `1` | PASS |
+| 6.7 | `^\|.*DROP_7_ACCOUNT_SURFACE_PARITY.*\|.*blocked_by: *DROP_6.*\|` | `>= 1` | `1` | PASS |
+| 6.8 | `^\|.*DROP_8_E2E_AND_DOCS.*\|.*blocked_by: *DROP_7.*\|` | `>= 1` | `1` | PASS |
+| 6.9 | `^\|.*DROP_9_CLEANUP_BACKLOG.*\|.*blocked_by: *DROP_8.*\|` | `>= 1` | `1` | PASS |
+| 7 | awk strict-ascending `0..9` drop-number sequence | exit `0`, sequence `0,1,...,9` | Row inspection at lines 23–32 shows `DROP_0` through `DROP_9` in order; builder self-check reports awk pipeline exit `0` (WORKLOG L64) | PASS |
+| 8 | `grep -c 'main/drops/DROP_0_DOCS_BOOTSTRAP' PLAN.md` | `>= 1` | `1` | PASS |
+| 9a | `wc -l PLAN.md` | `< 500` | `38` | PASS |
+| 9b | `grep -cE 'Track [A-F]\|Agent 5' PLAN.md` | `0` | `0` | PASS |
+| 10 | `grep -c 'WORKFLOW.md\|VALV_CLAUDE_CODE_FOCUS_PLAN.md' PLAN.md` | `>= 2` | `15` | PASS |
+
+### Criterion 7 Verification Detail
+
+Independent re-derivation of the drop-number sequence by direct row inspection of `PLAN.md` lines 23–32:
+
+| Line | First cell | Extracted drop number |
+|---|---|---|
+| 23 | `DROP_0_DOCS_BOOTSTRAP` | 0 |
+| 24 | `DROP_1_DELETE_API_WRAPPER` | 1 |
+| 25 | `DROP_2_DOMAIN_PLUMBING_PROVIDER_CLAUDE` | 2 |
+| 26 | `DROP_3_SCHEMA_MIGRATION_COMPOSITE_BINDING` | 3 |
+| 27 | `DROP_4_CLAUDE_DOCKER_IMAGE` | 4 |
+| 28 | `DROP_5_CLAUDE_PROVIDER_ADAPTER` | 5 |
+| 29 | `DROP_6_CLAUDE_SERVICE_AND_CLI` | 6 |
+| 30 | `DROP_7_ACCOUNT_SURFACE_PARITY` | 7 |
+| 31 | `DROP_8_E2E_AND_DOCS` | 8 |
+| 32 | `DROP_9_CLEANUP_BACKLOG` | 9 |
+
+Sequence `0,1,2,3,4,5,6,7,8,9` — ten values, strictly increasing by one, starting at 0, ending at 9. Builder's awk pipeline self-report (WORKLOG L64) matches.
+
+### Additional Hygiene Checks
+
+| Check | Result | Evidence |
+|---|---|---|
+| File is UTF-8, BOM-free | PASS | `file PLAN.md` reports `Unicode text, UTF-8 text` (not `UTF-8 Unicode (with BOM) text`). `xxd -l 3 PLAN.md` returns `23 20 56` (`# V`), not `ef bb bf`. Criterion 1's `^# Valv` grep matched count `1` — a leading U+FEFF BOM would displace `#` off column 1 and break the `^#` anchor. |
+| Line 1 H1 title starts with `# Valv` | PASS | `Read` of PLAN.md line 1: `# Valv — Drop-Tree Index`. Single H1 per standard markdown idiom. |
+| Markdown-only (no HTML) | PASS | `Read` of all 38 lines shows only markdown constructs (H1/H2, prose, bullet list, one table, bracketed links). No `<...>` HTML tags. |
+| Table pipe parity (parseable markdown) | PASS | `Grep '^\|'` returned 12 rows (header L21, separator L22, 10 data rows L23–L32). Each row has exactly 6 `\|` characters → 5 columns per row — uniform across header, separator, and all ten data rows. Parseable as a 5-column markdown table. |
+| `main/drops/DROP_0_DOCS_BOOTSTRAP/` path resolves to a real directory | PASS | `Glob` on `main/drops/DROP_0_DOCS_BOOTSTRAP/*` returned five files: `CLOSEOUT.md`, `PLAN.md`, `BUILDER_QA_PROOF.md`, `BUILDER_QA_FALSIFICATION.md`, `BUILDER_WORKLOG.md`. Directory exists and is populated with the expected DROP_0 artifact set. |
+| Forward-looking dir links for DROP_1..DROP_9 are stubs (explicitly documented) | PASS | `Conventions` section L17: "Per-drop dir links for DROP_1..DROP_9 are forward-looking stubs — the directories get scaffolded from `main/drops/_TEMPLATE/` at that drop's Phase 1 per `main/drops/WORKFLOW.md`." Reader will not be surprised that `drops/DROP_1_DELETE_API_WRAPPER/` etc. do not yet exist. |
+
+### BUILDER_WORKLOG U0.5 Round 1 Section Check
+
+`/Users/evanschultz/Documents/Code/hylla/valv/main/drops/DROP_0_DOCS_BOOTSTRAP/BUILDER_WORKLOG.md` lines 41–79:
+
+| Required field | Present? | Evidence |
+|---|---|---|
+| `## Unit 0.5 — Round 1` heading | PASS | Line 41: `## Unit 0.5 — Round 1`. |
+| Scope | PASS | Line 43: `- **Scope:** rewrite \`main/PLAN.md\`…` |
+| Files | PASS | Line 44: `- **Files changed:** /Users/evanschultz/Documents/Code/hylla/valv/main/PLAN.md (full rewrite via \`Write\`).` |
+| Acceptance self-check | PASS | Lines 46–67: `- **Acceptance self-check (all 10 criteria, observed values):**` followed by per-criterion observed counts; every claimed count matches this proof pass numerically. |
+| Design notes | PASS | Lines 68–77: `- **Design notes:**` with substantive subsidiary bullets (column shape, dir link format, DROP_0 state choice, DROP_1..9 dir stubs, DROP_8/9 scope judgment calls, DROP_3 name, line-count aggression, companion references, no `hylla_ingest` / mage). |
+
+### Structural Cross-Check
+
+| Section | Result | Evidence |
+|---|---|---|
+| Reading Order | PASS | Lines 5–10: four-bullet reading order covers `this file` / `WORKFLOW.md` / `VALV_CLAUDE_CODE_FOCUS_PLAN.md` / per-drop `PLAN.md`. Active-drop pointer names `main/drops/DROP_0_DOCS_BOOTSTRAP/` (satisfies crit 8). |
+| Conventions | PASS | Lines 12–17: container-state vocabulary, `blocked_by` linear-chain rationale (ties to focus plan §6), one-sentence scope rule, forward-looking dir-stub explanation. |
+| Drop Tree table | PASS | Lines 19–32: `## Drop Tree` heading + 5-column header + separator + 10 data rows, uniform pipe parity. |
+| Maintenance | PASS | Lines 34–38: three bullets — state-flip phase anchors into WORKFLOW.md, "do not edit mid-build" guard, `mage plan-check` parity note (forward-looking per `main/CLAUDE.md`). |
+
+### Builder Design-Note Cross-Check
+
+Spot-verified three substantive design decisions the builder called out in the worklog:
+
+1. **Column shape: drop name embedded in first cell (`| DROP_N_<SUFFIX> |`)** — Confirmed. Header row at L21 reads `| Drop | State | Blocked By | Scope | Dir |`; data rows embed the drop name as the first cell's content (`DROP_0_DOCS_BOOTSTRAP`, not a `0 | DOCS_BOOTSTRAP` split). This is exactly what criteria 2, 3, 6, and 7 anchor on.
+2. **Dir link format: relative `drops/DROP_N_<NAME>/` from PLAN.md's location** — Confirmed. Link format `[dir](drops/DROP_0_DOCS_BOOTSTRAP/)` at L23 resolves correctly from `main/PLAN.md` to `main/drops/DROP_0_DOCS_BOOTSTRAP/` (verified via `Glob`). Absolute-path prose mention in Reading Order satisfies criterion 8 literal grep.
+3. **DROP_0 state seeded as `building`, all others `todo`** — Confirmed. L23 carries `state: building`; L24–L32 each carry `state: todo`. Criterion 4 passes (`building` on DROP_0 row), criterion 5b passes (no `state: done` on any DROP_[1-9]).
+
+No drift between builder self-report and on-disk reality.
+
+### Hylla Feedback
+
+N/A — task touched non-Go files only (`main/PLAN.md` is markdown; Hylla today indexes Go only). No Hylla queries attempted, no fallback needed.
+
+### Proof Certificate
+
+- **Premises** — (1) Every one of the ten U0.5 acceptance criteria greps/awk returns the expected count / exit. (2) The file is syntactically valid markdown: UTF-8, BOM-free, line-1 H1 starting `# Valv`, pipe-parity on every table row. (3) The `main/drops/DROP_0_DOCS_BOOTSTRAP/` path referenced in the file resolves to a real populated directory. (4) `BUILDER_WORKLOG.md` `## Unit 0.5 — Round 1` section carries the four required fields (Scope / Files / Acceptance self-check / Design notes) and its self-reported counts match the on-disk counts.
+- **Evidence** — 17 `Grep` MCP queries (one per criterion sub-check, plus literal substring checks), direct line-by-line `Read` inspection of PLAN.md (all 38 lines), `Read` inspection of BUILDER_WORKLOG.md lines 41–79, `Glob` enumeration of `main/drops/DROP_0_DOCS_BOOTSTRAP/*`, `xxd -l 3` + `file` for BOM / UTF-8 probe, `wc -l` for line-count, direct row-inspection-driven re-derivation of the drop-number sequence for criterion 7 as a cross-check on the builder's awk pipeline self-report.
+- **Trace or cases** — For each of the 10 acceptance criteria (plus criterion 6's ten sub-greps and criterion 7's sequence re-derivation), executed the exact check the criterion specifies, compared observed to expected, and recorded PASS. Additionally: BOM probe (`xxd` + `file`), encoding probe, pipe-parity inspection across all 12 table rows, directory-resolution check via `Glob`, worklog-field presence check.
+- **Conclusion** — All 10 U0.5 acceptance criteria pass on-disk numerically (17 of 17 sub-checks green). File is UTF-8, BOM-free, markdown-only, structurally coherent. Drop tree table has uniform 6-pipe parity across header + separator + 10 data rows. DROP_0 directory resolves. Builder worklog section is well-formed. Unit 0.5 Round 1 proof-QA verdict: **PASS**.
+- **Unknowns** — (1) PLAN.md U0.5 state flip to `done` at the drop-dir `PLAN.md` level was not verified in this pass — that is Phase 5 exit / Phase 7 closeout orchestrator scope, not proof-QA. (2) The parallel `BUILDER_QA_FALSIFICATION.md` Round 1 pass may surface counterexamples that this proof review does not consider — routed to orchestrator for Phase 5 synthesis.
+
+### Verdict
+
+All 10 U0.5 acceptance criteria pass (17 of 17 sub-checks green, verified numerically via `Grep` MCP). File hygiene passes (UTF-8, BOM-free, `# Valv` H1 on line 1, markdown-only, uniform 6-pipe parity across all 12 table rows). `main/drops/DROP_0_DOCS_BOOTSTRAP/` path resolves to a populated drop directory. `BUILDER_WORKLOG.md` `## Unit 0.5 — Round 1` section carries Scope / Files / Acceptance self-check / Design notes as required. Builder design-note cross-checks (column shape, dir link format, DROP_0 state seeding) all corroborated against on-disk content. Zero drift between builder self-report and observed state. Proof-QA verdict: PASS.
