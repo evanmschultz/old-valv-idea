@@ -89,7 +89,7 @@ Six atomic units. Each is docs-only (no Go package footprint). All units are ind
 
 ### Unit 0.4 — Bootstrap six durable Phase 7 closeout artifacts
 
-- **State:** todo
+- **State:** done
 - **Paths:** `/Users/evanschultz/Documents/Code/hylla/valv/main/WIKI.md` (new), `/Users/evanschultz/Documents/Code/hylla/valv/main/LEDGER.md` (new), `/Users/evanschultz/Documents/Code/hylla/valv/main/REFINEMENTS.md` (new), `/Users/evanschultz/Documents/Code/hylla/valv/main/HYLLA_FEEDBACK.md` (new), `/Users/evanschultz/Documents/Code/hylla/valv/main/HYLLA_REFINEMENTS.md` (new), `/Users/evanschultz/Documents/Code/hylla/valv/main/WIKI_CHANGELOG.md` (new)
 - **Packages:** none — docs-only
 - **Acceptance:**
