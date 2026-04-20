@@ -92,3 +92,44 @@
 ### Hylla Feedback
 
 N/A — no Hylla query issued for this falsification round. All evidence came from `git show` / `git log` / `Read` / `Grep` / `LSP documentSymbol` / `./valv` binary probes / `mage testPkg` run. Unit 1.1 changes files modified in the last 4 commits (post-ingest), so `git diff` / direct Read is the correct source per `main/CLAUDE.md` § "Code Understanding Rules" item 2. Hylla would have been stale for these files.
+
+## Unit 1.2 — Round 1
+
+**Verdict:** pass
+
+**Commit:** `97bc656 refactor(services): delete openaiapi package`
+
+### Per-attack findings
+
+1. **Residual `openaiapi` references (Go tree):** MITIGATED. `grep` across all `.go` files under `main/` — zero matches. All 11 residual references live in drop-artifact markdown (`drops/DROP_1_DELETE_API_WRAPPER/*.md`, `drops/DROP_0_DOCS_BOOTSTRAP/CLOSEOUT.md`) or top-level planning docs (`PLAN.md`, `REFINEMENTS.md`, `LEDGER.md`, `VALV_CLAUDE_CODE_FOCUS_PLAN.md`) — expected historical record, not code.
+2. **Dangling symbol imports:** MITIGATED. `grep` under `internal/` for `openaiapi|openaiapiservice` — zero matches.
+3. **Indirect usage via consumers (`services/codex`, `adapters/providers/codex`, `cli`):** MITIGATED. Same grep — zero matches in any consumer package.
+4. **Leaf-status falsification:** MITIGATED. Pre-delete `git grep -l "openaiapi" 97bc656^ -- '*.go'` returned only files inside `internal/services/openaiapi/` itself. No external Go consumer existed; leaf claim confirmed. Pre-delete exports (`Store`, `Executor`, `DetectFunc`, `DefaultIdleTTL`, `Options`, `Service`, `New` in `service.go`; additional symbols in `codex_events.go` / `codex_models.go`) were all package-internal.
+5. **Integration-test collateral:** MITIGATED (with note). Deleted `service_integration_test.go` was self-contained — `git show 97bc656 -- internal/services/openaiapi/service_integration_test.go` shows no shared fixtures or helpers referenced from outside the package. `mage test` passes per WORKLOG. `mage integration` not re-run in this QA pass — recommend closeout confirm `mage integration` green as a belt-and-suspenders check, but not a unit-1.2 blocker since the deleted tests were entirely scoped to the deleted package.
+6. **Orphan test fixtures / testdata:** MITIGATED. `internal/services/openaiapi/` directory does not exist on disk post-delete (`Glob` on `internal/services/openaiapi/**` returns zero files). No `testdata/` was ever present in the pre-delete commit — only 5 `.go` files, all deleted.
+7. **`mage test` package-count change (21 → 20):** MITIGATED. Expected — exactly one package deleted, so 21 → 20 is arithmetic-correct.
+8. **Coverage floor impact on retained packages:** MITIGATED. `mage test` passes, which includes the 60% floor gate per WORKLOG. `internal/cli` was not touched by 1.2 (no `cli` files in commit 97bc656), so its unit-1.1 baseline of 71.8% is unchanged. Re-ran `mage testPkg ./internal/api/openai` during this review: 72.3% coverage, 22 tests pass.
+9. **Commit scope (exactly 7 files):** MITIGATED. `git show --stat 97bc656` shows exactly 7 files: 5 deletions in `internal/services/openaiapi/` (`codex_events.go`, `codex_models.go`, `service.go`, `service_integration_test.go`, `service_test.go`) + `drops/DROP_1_DELETE_API_WRAPPER/PLAN.md` (+2/-2 toggle to unit status) + `drops/DROP_1_DELETE_API_WRAPPER/BUILDER_WORKLOG.md` (+36 lines). Net -1918 lines. Matches builder's reported scope exactly. Nothing outside the drop + target package touched.
+10. **Orphan compile state (`internal/api/openai`, `valvcompat`):** MITIGATED. `mage testPkg ./internal/api/openai` — 22 tests pass, 72.3% coverage. `mage build` — `valv` binary builds cleanly. `valvcompat` package: `Glob` on `**/valvcompat*` returns zero files — the package does not exist in the current tree (prompt reference was aspirational / future-drop). No orphan-compile failures.
+
+### Additional falsification attempts (not in prompt)
+
+- **Config / YAML references to `openaiapi`:** Not applicable — Valv uses Go-constant provider registration, not external config files. No YAML/TOML referenced the deleted package.
+- **`go:generate` / `go:embed` directives:** Only one `go:embed` in the tree (`compatibility.go` embeds `codex-openai-compatibility.json`), unrelated to `openaiapi`.
+- **External module dependency leak:** `openaiapi` was an internal package (`internal/services/openaiapi`), not a Go module — nothing to leak in `go.mod`.
+
+### Plan refinement recommendations
+
+- None blocking for unit 1.2 verdict.
+- **Optional, closeout-scope:** run `mage integration` before drop closeout to confirm no integration-suite regression from deleted `service_integration_test.go`. Not a unit-1.2 gate — integration suite was previously passing and the deleted test was package-scoped.
+- **Observation (forward-looking):** prompt listed `valvcompat` as an orphan-state check target; package does not exist in current tree. If `valvcompat` is planned for a later drop, harmless; if it was a stale reference, future drop prompts can drop it.
+
+### Evidence summary
+
+- `git show --stat 97bc656` — 7 files, -1918 net lines.
+- `git show 97bc656^:internal/services/openaiapi/service.go` — confirmed 656 lines pre-delete.
+- `git grep -l "openaiapi" 97bc656^ -- '*.go'` — only 5 files inside deleted package itself; leaf confirmed.
+- `grep` across current `main/` Go tree — zero residual references.
+- `mage testPkg ./internal/api/openai` — 22/22 pass, 72.3% cover.
+- `mage build` — SUCCESS.
+- `Glob internal/services/openaiapi/**` — zero files (directory fully removed).
