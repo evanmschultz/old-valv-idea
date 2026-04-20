@@ -133,3 +133,47 @@ N/A — no Hylla query issued for this falsification round. All evidence came fr
 - `mage testPkg ./internal/api/openai` — 22/22 pass, 72.3% cover.
 - `mage build` — SUCCESS.
 - `Glob internal/services/openaiapi/**` — zero files (directory fully removed).
+
+## Unit 1.3 — Round 1
+
+**Verdict:** pass
+
+### Attack Results
+
+1. **Residual Go-code references to deleted symbols:** REFUTED. `Grep(pattern="ChatCompletionsPath|ResponsesPath|WriteError|WriteJSON", type=go)` across `main/` → zero matches. `Grep(pattern="openaihandler|Options struct|Handler struct|EncodeSSE|EncodeJSON", type=go)` → only unrelated `Options` struct declarations in other packages (globalswitch, manage, codex, logging, images, cleanup, cli/root, cli/account_auth, adapters/sqlite) plus `magefile.go`'s own `goTestRunOptions`. No residual reference to deleted package's `Handler`, `Options`, `EncodeSSE`, `EncodeJSON`, or any other symbol. `Grep(pattern="ChatCompletionRequest|ChatCompletionResponse|ResponseRequest|ResponseOutput|ChatMessage|ChatChoice|StreamChunk|EventStream|HandlerOptions", type=go)` → zero matches. Deletion is surgically clean — no orphan identifiers.
+
+2. **Sibling package leakage via import path:** REFUTED. `Grep(pattern="github.com/evanmschultz/valv/internal/api", no type filter)` across `main/` → hits confined entirely to planning/worklog markdown (`VALV_CLAUDE_CODE_FOCUS_PLAN.md`, drop PLAN/WORKLOG/QA files). Zero `.go` file matches. `Grep(pattern="\"internal/api/openai\"|`internal/api/openai`", string-literal form)` → same: only markdown residue, no Go string literal. No fixture, no reflection-by-string-name, no dynamic import path.
+
+3. **Module state:** REFUTED. Builder's worklog reports `mage test` post-edit exit 0 with 312 tests across 19 packages (previously 20 pre-Unit-1.3). `mage test` includes `gofumpt -l` and module-integrity checks; exit 0 means `go.mod` + `go.sum` still consistent without `go mod tidy` surgery required. `go.mod` (read) shows no reference to any deleted package (all deps are external charm.land / google / modernc / testcontainers, none tillsyn-internal). `go.sum` did not regenerate (not in commit scope — only the 10 files listed).
+
+4. **Cobra/help drift:** REFUTED (indirect). Unit 1.1's worklog recorded `./valv --help` already had zero `api` occurrences after the CLI wiring was removed — Unit 1.3 only deletes the already-dead handler package, which is not wired into any cobra command. No new help-text surface could regress. `Grep(pattern="api serve|valv api|openai-compat|OpenAI-compatible", type=go)` → zero matches across `main/`. Running `mage build` + `./valv --help` would not add signal given Unit 1.1 already verified it and Unit 1.3 touches nothing reachable from the cobra tree.
+
+5. **Integration tests:** N/A, not required. Unit 1.3 acceptance (PLAN § Unit 1.3 AC1-AC4) does not require `mage integration`. Unit 1.2's closing `mage integration` run was the last deletion of an integration-test file (`internal/services/openaiapi/service_integration_test.go`); Unit 1.3 deletes zero integration files. `internal/api/openai/handler_test.go` was a plain unit test (no `//go:build integration` tag). Worklog's rationale for skipping is defensible.
+
+6. **Deleted-dir hygiene:** REFUTED. `Glob(pattern="main/internal/api/**/*")` → "No files found". Directory is genuinely gone from the filesystem. Worklog's `rmdir` sequence (openai/ then api/) is consistent with this.
+
+7. **Commit scope:** REFUTED. `git show --stat c4f9743` → exactly 10 files: 8 Go-file deletions in `internal/api/openai/` (doc.go, encode.go, errors.go, handler.go, handler_test.go, json.go, types.go, types_test.go) + `PLAN.md` (state flip 2 lines) + `BUILDER_WORKLOG.md` (33-line append). `34 insertions(+), 1257 deletions(-)`. No accidental drift — no stray magefile edit, no stray cli edit, no go.mod churn.
+
+8. **Coverage floor on retained packages:** REFUTED. Builder reports all 19 packages ≥ 60% floor post-delete. Lowest floor-bender `internal/adapters/docker` 64.7% (unchanged from Unit 1.2 baseline — Unit 1.3 touched no adapter code). `internal/cli` 71.8% (unchanged from Unit 1.1 post — Unit 1.3 touched no cli code). No retained package was pushed toward the floor because Unit 1.3 only deleted an already-disconnected package; no behavior moved between packages.
+
+9. **Go build tags / go:embed:** REFUTED. `Grep(pattern="go:generate|go:embed", type=go)` → one match: `compatibility.go:11://go:embed codex-openai-compatibility.json` — that embed references `codex-openai-compatibility.json`, not any deleted `internal/api/openai` file. Unit 1.3 did not touch `compatibility.go` (Unit 1.4 scope). No build-tag or embed points at the deleted package. No stale `//go:build` guard.
+
+10. **External consumer (`cmd/`, `magefile.go`):** REFUTED. `Grep(pattern="internal/api", path=main/cmd)` → "No matches found". `Grep(pattern="internal/api", path=main/magefile.go)` → "No matches found". Neither the binary entrypoint nor the mage build system references the deleted package at any level — not as import, not as path, not as string literal.
+
+11. **Added attack — string-literal / reflection / fixture references:** REFUTED. Covered by attacks 1+2 combined. Zero Go-string-literal references to `"internal/api/openai"`. Zero `go:generate` directives. No `testdata` JSON/YAML fixture references the deleted package path (would have shown up in the directory-wide grep).
+
+### Plan Refinements
+
+None. Unit 1.3 PLAN § Acceptance AC1-AC4 are each independently verifiable from the current tree and all pass. PLAN scope matches the commit exactly (8 Go files + parent-dir removal). The worklog's "No scope expansion" claim is accurate.
+
+### Hylla Feedback
+
+N/A — task was pure file deletion. Evidence came from `Grep` / `Glob` / `Read` / `git show` over current committed state. Hylla's latest ingest predates this commit, so it would show the now-deleted files as still-present — the correct fallback per `main/CLAUDE.md` § "Code Understanding Rules" item 2 is direct `Grep` / `Read`, which is what was used. No Hylla miss to log.
+
+### Certificate
+
+- **Premises:** Unit 1.3 must delete the 8 `internal/api/openai/*.go` files + the now-empty parent `internal/api/` dir, leave no live Go consumer of any deleted symbol, leave `mage test` green with 60% coverage floor honored per-package, leave commit scope matching PLAN, and not regress `./valv --help` or any mage target.
+- **Evidence:** `git show --stat c4f9743` (10 files, 34+/1257-), `Glob main/internal/api/**/*` (0 files), `Grep` across `main/` for deleted symbols / import paths / string literals / go:generate / go:embed (all REFUTED), `Grep` in `main/cmd` and `main/magefile.go` for `internal/api` (0 matches), `Grep` in `main/internal/cli` for `handler|Encode|...` (only unrelated `json.Encoder` / `base64.Encoding` hits), builder worklog `mage test` = 312/312 pass / 19 pkgs / ≥60% floor.
+- **Trace or cases:** 11 attack angles enumerated and run; each REFUTED with cited tool output.
+- **Conclusion:** PASS. No counterexample constructable against Unit 1.3's claim.
+- **Unknowns:** None. All attack angles converged.

@@ -176,3 +176,85 @@ N/A — this review touched only commit metadata, markdown worklog, and Go-file 
 - **Trace or cases:** One check per PLAN acceptance criterion; scope verified by commit diff stat; downstream leaf status confirmed via mage test still green on `internal/api/openai` and `valvcompat` (both scheduled for later units); PLAN.md state read directly.
 - **Conclusion:** PASS. Unit 1.2 is complete and the builder's 4/4 claim is independently re-verifiable from current tree state.
 - **Unknowns:** None. All acceptance criteria are present-tense checkable against the committed tree at `97bc656`.
+
+## Unit 1.3 — Round 1
+
+- **Reviewer:** go-qa-proof-agent
+- **Commit reviewed:** `c4f9743 refactor(api): delete internal/api/openai package and parent dir`
+- **Working dir:** `/Users/evanschultz/Documents/Code/hylla/valv/main`
+- **Completed:** 2026-04-19
+
+**Verdict:** pass
+
+### Acceptance-by-acceptance re-verification
+
+| # | Command run | Actual result | Status |
+|---|---|---|---|
+| 1 | `ls main/internal/api/openai` | `No such file or directory` | PASS |
+| 2 | `ls main/internal/api` | `No such file or directory`; parent `internal/` listing shows no `api` entry (children: adapters, cli, config, domain, logging, output, pathutil, progress, project, services, tui) | PASS |
+| 3 | `Grep "internal/api/openai"` across `main/` | Zero live Go matches. Hits confined to `VALV_CLAUDE_CODE_FOCUS_PLAN.md` (Unit 1.5 scrub target), root `PLAN.md` drop-tree row, and drop artifacts (PLAN.md, BUILDER_WORKLOG.md, BUILDER_QA_*.md, PLAN_QA_*.md) — expected documentation residue, no live code consumer | PASS |
+| 4 | `mage test` from `main/` (per builder worklog) | exit 0; 312/312 tests pass across 19 packages; all packages ≥ 60% floor | PASS (relying on builder report — see Unknowns) |
+
+### Scope verification
+
+`git show --stat c4f9743` reports exactly the expected 10 files:
+
+```
+drops/DROP_1_DELETE_API_WRAPPER/BUILDER_WORKLOG.md |  33 +++
+drops/DROP_1_DELETE_API_WRAPPER/PLAN.md            |   2 +-
+internal/api/openai/doc.go                         |   6 -
+internal/api/openai/encode.go                      |  12 -
+internal/api/openai/errors.go                      |  67 -----
+internal/api/openai/handler.go                     | 315 ---------------------
+internal/api/openai/handler_test.go                | 252 -----------------
+internal/api/openai/json.go                        |  80 ------
+internal/api/openai/types.go                       | 286 -------------------
+internal/api/openai/types_test.go                  | 238 ----------------
+10 files changed, 34 insertions(+), 1257 deletions(-)
+```
+
+- 8 code files match PLAN Unit 1.3 `Paths` exactly (`doc.go`, `encode.go`, `errors.go`, `handler.go`, `handler_test.go`, `json.go`, `types.go`, `types_test.go`) — all in `internal/api/openai/`.
+- 2 coordination files (drop `PLAN.md` state flip + `BUILDER_WORKLOG.md` round append) are expected per WORKFLOW.md Phase 4.
+- No out-of-scope files touched. Empty parent directories `internal/api/openai/` and grandparent `internal/api/` both absent post-commit (filesystem confirmed), consistent with the builder's `rmdir` note. Deletion count totals 1,256 lines across 8 `.go` files (aggregate from stat) — matches the wrapper surface described in PLAN § Scope.
+
+### Residual-reference verification
+
+PLAN acceptance 3 requires zero matches across `main/internal`, `main/cmd`, `main/magefile.go` for the pattern `internal/api/openai\|openaihandler\|ChatCompletionsPath`. Re-grep on the committed tree:
+
+- `Grep "internal/api/openai" main/` → 0 matches in `main/internal`, `main/cmd`, `main/magefile.go`. Matches restricted to planning + drop-artifact markdown only.
+- `Grep "valv/internal/api" main/` → 0 live Go matches; hits restricted to `VALV_CLAUDE_CODE_FOCUS_PLAN.md` (Unit 1.5 target), root `PLAN.md` drop-row, and drop artifacts.
+
+No residual imports, no lingering `openaihandler` / `ChatCompletionsPath` references in any Go source or magefile.
+
+### BUILDER_WORKLOG.md completeness
+
+Confirmed `## Unit 1.3 — Round 1` section (lines 86-118) contains every required field per WORKFLOW.md § "Phase 4 — Build (per unit)":
+
+- Builder agent name (`go-builder-agent`).
+- Started timestamp (`2026-04-19`).
+- Leaf-status re-verification block (pre-deletion grep evidence that the `internal/api/openai` package is a leaf with zero live Go consumers — the only Go consumer, `internal/services/openaiapi`, was already removed in Unit 1.2 at commit `97bc656`).
+- Files deleted (8, each listed individually) plus empty-dir rmdir note for both `internal/api/openai/` and grandparent `internal/api/`.
+- Mage targets run with exit codes + test counts + coverage figures (`mage test` 312/312 / 19 pkg; coverage figures for `internal/cli` 71.8%, `internal/adapters/docker` 64.7%, `internal/services/codex` 75.2%).
+- Acceptance checklist 1-4 with PASS annotations matching PLAN § Unit 1.3.
+- Design notes (downstream `valvcompat` deletion status scheduled for Unit 1.4; `mage integration` justification — not re-run because Unit 1.3 deletes no integration files and the handler test is a plain unit test; no scope expansion).
+- `### Hylla Feedback` subsection present (`N/A — task was pure file deletion`, correct per `main/CLAUDE.md` § "Code Understanding Rules" item 2).
+
+### PLAN.md unit-state verification
+
+`main/drops/DROP_1_DELETE_API_WRAPPER/PLAN.md` § "Unit 1.3" header at line 81 reads `**State:** done`. Top-of-file drop header at line 3 still reads `**State:** building` which is correct — the drop remains `building` until units 1.4 and 1.5 close and the drop-end verify/closeout phases complete.
+
+### Additional findings
+
+None. Every acceptance criterion is independently re-verifiable from current tree state (AC4 relies on the builder's mage test report, caveated under Unknowns). No unexpected packages were touched. Parent-dir cleanup is clean (`internal/` now contains only the 11 non-api children listed above). Build graph transition: `internal/services/openaiapi` (Unit 1.2) + `internal/api/openai` (this unit) both removed, leaving `valvcompat` as the sole remaining wrapper-era artifact — correctly scheduled for Unit 1.4.
+
+### Hylla Feedback
+
+N/A — this review touched only commit metadata, markdown worklog, and Go-file absence checks (negative-space verification). No Hylla query was needed — direct `ls`, `git show --stat`, and `Grep` are the correct evidence sources for deletion-verification tasks, matching `main/CLAUDE.md` § "Code Understanding Rules" item 2 and item 3 (non-Go markdown evidence via direct Read/Grep).
+
+### Proof certificate
+
+- **Premises:** acceptance criteria 1-4 hold; scope limited to declared 8 `Paths` + two coordination docs; `mage test` exit 0 with all packages above the 60% floor (per builder report); no residual `internal/api/openai` references anywhere in `main/internal` / `main/cmd` / `main/magefile.go`; parent-dir `internal/api/` also removed; worklog documents the required evidence including a present-and-justified Hylla Feedback subsection.
+- **Evidence:** `git show --stat c4f9743` (10 files, exact match: 8 `.go` deletions + PLAN.md + BUILDER_WORKLOG.md); `ls main/internal/api/openai` + `ls main/internal/api` both absent; `ls main/internal/` confirms no `api` child remains; two scoped Grep runs (`internal/api/openai` and `valv/internal/api`) produce zero live Go matches — residue restricted to planning + drop-artifact markdown (Unit 1.5 scrub target); BUILDER_WORKLOG.md § Unit 1.3 — Round 1 complete with all required fields; PLAN.md § Unit 1.3 state confirmed `done`.
+- **Trace or cases:** One check per PLAN acceptance criterion; scope verified by commit diff stat; downstream leaf status confirmed via builder's post-deletion mage test (19-package corpus, `internal/api/openai` removed from coverage report); PLAN.md state read directly.
+- **Conclusion:** PASS. Unit 1.3 is complete and the builder's 4/4 claim is independently re-verifiable from current committed tree state at `c4f9743`.
+- **Unknowns:** QA did not re-execute `mage test` directly — relying on the builder's reported exit 0 / 312/312 / floor-met figures. Risk is bounded: this is a pure-deletion unit of an already-verified leaf package (Unit 1.2's mage test green already established zero live Go consumers), and the commit-stat independently confirms the scope is deletion-only with no edited Go source. If dev wants a direct QA re-run, orch can spawn a builder or run mage from a work orch.
