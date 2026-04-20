@@ -77,3 +77,30 @@ Append a `## Unit N.M — Round K` section per build attempt. See `main/drops/WO
   - **No `hylla_ingest` or mage invocation.** Docs-only per U0.5 spec. File was written via the `Write` tool; UTF-8 without BOM; no HTML; markdown only.
 - **Hylla Feedback:** N/A — task touched non-Go files only.
 - **Unknowns:** none — all 10 acceptance criteria verified numerically, awk pipeline exit 0 confirmed, file is syntactically valid markdown, drop-tree shape matches the focus plan's §6 slice ordering, DROP_8 / DROP_9 scope text documented above as design judgment calls in case a later planner round wants to sharpen them.
+
+## Unit 0.3 — Round 1
+
+- **Scope:** rebrand `main/drops/WORKFLOW.md` from "Rak" to "Valv" (title + prose + example drop name) and fix the `github.com/evanmschultz/rak@main` Hylla artifact ref on line 29 of `main/drops/_TEMPLATE/CLOSEOUT.md`. Structural content (phase order, file lifecycles, Agent Spawn Contract preamble structure, Per-Role Spawn Appendices) preserved verbatim.
+- **Files changed:**
+  - `/Users/evanschultz/Documents/Code/hylla/valv/main/drops/WORKFLOW.md` (four targeted `Edit` calls — H1 title, example drop directory name in the tree diagram, two rak-branding sentences inside the Agent Spawn Contract section, and the closing Section-0 reminder line).
+  - `/Users/evanschultz/Documents/Code/hylla/valv/main/drops/_TEMPLATE/CLOSEOUT.md` (single `Edit` on the Hylla Ingest Source line).
+- **Mage targets run:** none (docs-only; no Go code touched — `mage build` + `mage test` run at Phase 6 per WORKFLOW.md).
+- **Acceptance self-check (all 9 criteria, observed via `Grep` count mode):**
+  1. `grep -c 'Rak' WORKFLOW.md` → `0` (expected `0`, pass).
+  2. `grep -ciE '\brak\b' WORKFLOW.md` → `0` (expected `0`, pass).
+  3. `grep -c '^# Valv — Per-Drop Workflow' WORKFLOW.md` → `1` (expected `1`, pass — em-dash U+2014 preserved).
+  4. `grep -c 'DROP_1_CODE_SCAFFOLD_MAGE_CI' WORKFLOW.md` → `0` (expected `0`, pass); `grep -c 'DROP_1_DELETE_API_WRAPPER' WORKFLOW.md` → `1` (expected `>=1`, pass — example drop name aligned with focus plan §6.1).
+  5. `grep -c 'rak artifact' WORKFLOW.md` → `0` (expected `0`, pass); `grep -c 'Valv artifact' WORKFLOW.md` → `1` (expected `>=1`, pass — Agent Spawn Contract preamble last line rebranded).
+  6. `grep -ci 'rak does not use' WORKFLOW.md` → `0` (expected `0`, pass); `grep -c 'Valv does not use' WORKFLOW.md` → `1` (expected `>=1`, pass — Tillsyn-override sentence rebranded).
+  7. `grep -c 'github.com/evanmschultz/rak@main' _TEMPLATE/CLOSEOUT.md` → `0` (expected `0`, pass); `grep -c 'github.com/evanmschultz/valv@main' _TEMPLATE/CLOSEOUT.md` → `1` (expected `>=1`, pass — template line-29 bug fixed).
+  8. `grep -c '^## Phase [1-7] — ' WORKFLOW.md` → `7` (expected `7`, pass — phase order preserved exactly).
+  9. `grep -c 'Agent Spawn Contract' WORKFLOW.md` → `6` (expected `>=1`, pass — single canonical preamble source preserved; the six occurrences are the section heading plus the five cross-references from Phases 1, 2, 4, 5, and the "Per-Role Spawn Appendices" pointer).
+- **Design notes:**
+  - **Targeted `Edit` over `Write`.** The rebrand surface in WORKFLOW.md is tiny — four lines total (1, 18, 54, 80) plus one line in `_TEMPLATE/CLOSEOUT.md`. Chose five surgical `Edit` calls over a full rewrite because the file is 217 lines and a rewrite risks UTF-8 artifact drift (em-dash U+2014 appears in the H1 title and throughout; Write-tool round-trip tends to normalize things I did not intend to normalize).
+  - **Brand-token audit before editing.** Ran `Grep` for `[Rr]ak`, `DROP_1_CODE_SCAFFOLD`, `evanmschultz/rak`, `/hylla/rak|cmd/rak` across WORKFLOW.md to enumerate every rebrand target. Only the four line locations above matched — no `/hylla/rak` paths, no `cmd/rak` binary references, no `evanmschultz/rak` URLs in WORKFLOW.md. The compound-identifier forms called out in the prompt ("rak artifact", "rak orchestrator", "rak source code") resolved to two tokens on one line (line 54: "Rak does not use" + "rak orchestrator") plus one token on line 80 ("durable rak artifact"). This confirmed `Edit` with `replace_all: false` on each distinct full-line context was safe — no substring-collision risk from "Raku" / "strake" / "drake" / etc.
+  - **Ordering of edits.** Performed all five `Edit` calls in a single message (parallel tool batch) since each targeted a unique `old_string` and the file was read fresh once at the top of this round. No ordering dependency between them.
+  - **Structural preservation.** Verified after editing that Phase 1–7 section headings count exactly `7`, the `Agent Spawn Contract` section remains the single canonical preamble source (6 occurrences: section heading + 5 cross-references from phases), and the Per-Role Spawn Appendices section is untouched. The Tillsyn-override preamble inside the fenced code block on lines 61–80 is unchanged except for the final word on line 80 (`rak artifact` → `Valv artifact`), which keeps the preamble reading naturally when pasted into future spawn prompts (Valv is now the durable artifact name).
+  - **Casing choice for replacement.** Used `Valv` (Title case) everywhere rather than `valv` (lowercase). The prompt's override text the orchestrator is using right now for U0.3 itself says "Valv does not use Tillsyn", "Valv orchestrator", "Valv artifact" — all Title case — so this matches the casing already established upstream in the orchestrator prompt and in the bare-root + main CLAUDE.md files.
+  - **`_TEMPLATE/CLOSEOUT.md` scope discipline.** Changed only the single Hylla artifact line (line 29). Did not touch the four other placeholder sections (Hylla Feedback Aggregation, Refinements, Ledger Entry, Wiki Changelog) — they contain no rak references and their shape is template-driven, not scoped to U0.3.
+- **Hylla Feedback:** N/A — task touched non-Go files only.
+- **Unknowns:** none — all 9 acceptance criteria verified numerically via `Grep` count mode, structural invariants confirmed intact, brand-token sweep confirmed zero residue.
