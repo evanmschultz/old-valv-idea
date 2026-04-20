@@ -51,14 +51,14 @@ Extend the `Provider` domain type with `ProviderClaude` and thread compile-safe 
 - `state`: `todo`
 - `paths`:
   - `internal/cli/account_auth.go` (edit)
-  - `internal/cli/account_auth_test.go` (create — new file; no such test file exists today per `ls internal/cli/account_auth*_test.go` returning no files)
+  - `internal/cli/account_auth_test.go` (edit — file already exists at 226 lines with Codex-path tests; extend with ProviderClaude table-driven coverage while preserving existing Codex coverage; builder must Read first, never Write-clobber)
 - `packages`: `github.com/evanmschultz/valv/internal/cli`
 - `blocked_by`: `2.1` (imports `domain.ProviderClaude` — must exist before this unit compiles)
 - `acceptance`:
   - `ensureManagedAccountReady`, `logoutManagedAccount`, `loginManagedAccount` each contain an explicit `case domain.ProviderClaude:` branch returning `nil` before the `default` branch. Grep `\bcase domain\.ProviderClaude\b` in `internal/cli/account_auth.go` returns exactly three matches.
   - The `default:` branch in each of the three functions is retained (grep `\bdefault:\b` in `internal/cli/account_auth.go` returns three matches — catch-all for any future provider added without a compile-time check).
-  - New test file `internal/cli/account_auth_test.go` exists and contains table-driven tests covering `ensureManagedAccountReady`, `logoutManagedAccount`, `loginManagedAccount` for `domain.ProviderClaude`, each asserting `err == nil` when invoked with a throwaway `domain.Profile{}` (the functions must not dereference provider-specific state for `ProviderClaude` in the stub path).
-  - Codex paths in the same three functions remain behaviorally unchanged — at least one existing Codex-path test in `internal/cli` must still pass (`mage testPkg ./internal/cli` green is the gate).
+  - Existing `internal/cli/account_auth_test.go` is extended with table-driven `ProviderClaude` coverage for `ensureManagedAccountReady`, `logoutManagedAccount`, `loginManagedAccount`, each asserting `err == nil` when invoked with a throwaway `domain.Profile{Provider: domain.ProviderClaude}` (the functions must not dereference provider-specific state for `ProviderClaude` in the stub path). Existing Codex-path tests in the same file must remain present and passing — `git diff internal/cli/account_auth_test.go` must show additions only, no deletions of existing test functions.
+  - Codex paths in the three switches remain behaviorally unchanged — all existing Codex-path tests in `internal/cli/account_auth_test.go` must still pass (`mage testPkg ./internal/cli` green is the gate).
   - `mage testPkg ./internal/cli` passes (gofumpt + race + coverage 70%).
   - Nothing outside `internal/cli/account_auth.go` + `internal/cli/account_auth_test.go` is edited in this unit.
 
