@@ -1,6 +1,6 @@
 # DROP_1 — DELETE API WRAPPER
 
-**State:** planning
+**State:** building
 **Blocked by:** —
 **Paths (expected):** `internal/api/openai/`, `internal/services/openaiapi/`, `internal/cli/api.go`, `internal/cli/root.go` (edit), `internal/cli/operator_helpers.go` (edit), `internal/cli/extended_test.go` (edit), `compatibility.go`, `compatibility_test.go`, `codex-openai-compatibility.json`, `API_COMPAT_EXECUTION_PLAN.md`, plus doc scrubs in `README.md`, `AGENTS.md`, `CLAUDE.md`, `VALV_REPO_PLAN.md`, `valv_architecture_notes.md`, `CONTRIBUTING.md`
 **Packages (expected):** `internal/api/openai` (deleted), `internal/services/openaiapi` (deleted), `valvcompat` (root package, deleted); `internal/cli` (edits only — remove wiring + stubs + tests, keep the rest)
@@ -54,8 +54,9 @@ Evidence sources: Hylla ingest at commit `1bd5f98` (queryable but not needed for
   5. `grep -n "openaiapi\|apiServeStub\|installStubOpenAIAPIServiceFactory\|TestRunAPIServe\|TestNewOpenAIAPIServiceCreatesService" main/internal/cli/extended_test.go` returns zero matches.
   6. Non-API helpers in `operator_helpers.go` remain intact: `grep -n "^func openManageService\|^func openGlobalSwitchService\|^func openImagesService\|^func newCleanupService\|^func runManageHome\|^func pickProfile\|^func readAccountIdentity" main/internal/cli/operator_helpers.go` returns exactly 7 matches.
   7. Non-API tests in `extended_test.go` remain intact: `grep -cE "^func Test" main/internal/cli/extended_test.go` returns at least 15 (spot-check lower bound; pre-drop count is higher — the builder records the exact post-delta figure in the worklog).
-  8. `mage test` from `main/` exits 0. (Per-package coverage floor is currently 60%; if the deletion pushes `internal/cli` below, the builder escalates — see planner note above.)
-  9. `mage build` from `main/` exits 0 and the produced `./valv --help` output contains no `api` group (verified by `./valv --help 2>&1 | grep -c "^  api\b" | grep -qx 0`).
+  8. Builder captures pre-change and post-change `internal/cli` coverage in `BUILDER_WORKLOG.md` (commands: `mage testPkg ./internal/cli` before any edit, again after all edits) — evidence for the coverage-floor risk called out in the planner note. If post-change coverage < 60%, builder escalates to orch per planner note rather than silently adding tests.
+  9. `mage test` from `main/` exits 0. (Per-package coverage floor is currently 60%; if the deletion pushes `internal/cli` below, the builder escalates — see planner note above.)
+  10. `mage build` from `main/` exits 0 and the produced `./valv --help` output contains no `api` group (verified by `./valv --help 2>&1 | grep -c "^  api\b" | grep -qx 0`).
 - **Blocked by:** —
 
 ### Unit 1.2 — Delete `internal/services/openaiapi/` package
@@ -119,7 +120,7 @@ Evidence sources: Hylla ingest at commit `1bd5f98` (queryable but not needed for
   - `README.md` (EDIT — drop §"API Compatibility Matrix" and §"API Smoke Test Flow", lines ~69-129)
   - `CONTRIBUTING.md` (EDIT — drop "Compatibility change policy" block, lines 13-16)
   - `AGENTS.md` (EDIT — four scrubs detailed below)
-  - `CLAUDE.md` (EDIT — two scrubs in § "Project Structure" / "Package Map")
+  - `CLAUDE.md` (EDIT — § "Package Map" bullet at line 124 removed; § "Import DAG" paragraph at line 133 rewritten to drop `internal/api` from the consumer-tier sentence and from the `cmd/valv` wiring clause; § "Build-QA-Commit Loop" line 122 `valv api serve` mention removed)
   - `VALV_REPO_PLAN.md` (EDIT — drop `api/openapi/` line 78; drop parent `├── api/` line 77 if it becomes an empty container after child removal)
   - `valv_architecture_notes.md` (EDIT — add one-line supersede note above §"Public API shape" at line 250 pointing at `VALV_CLAUDE_CODE_FOCUS_PLAN.md`; do NOT delete the section — focus plan §2.12 says defer deletion to a later doc sweep)
 - **Packages:** none (docs only)
@@ -135,7 +136,7 @@ Evidence sources: Hylla ingest at commit `1bd5f98` (queryable but not needed for
      - PRESERVED (do NOT scrub): `grep -n "cheapest viable OpenAI-compatible model" main/AGENTS.md` returns exactly 1 match (§11 line 281 is Codex-as-OpenAI-product testing-cost guidance, not wrapper prose).
   5. `CLAUDE.md` scrubs verified by grep:
      - `grep -n "valv api serve" main/CLAUDE.md` returns zero matches.
-     - `grep -n "internal/api/" main/CLAUDE.md` returns zero matches (the `internal/api/` Package Map bullet is removed because the directory no longer exists).
+     - `grep -nE "internal/api\b" main/CLAUDE.md` returns zero matches (catches both the `internal/api/` Package Map bullet at line 124 AND the bare `internal/api` references inside the § "Import DAG" paragraph at line 133 — falsification A6-1).
   6. `VALV_REPO_PLAN.md` scrubs verified by grep:
      - `grep -n "api/openapi/\|openapi/" main/VALV_REPO_PLAN.md` returns zero matches.
   7. `valv_architecture_notes.md` scrub verified by grep:
@@ -146,6 +147,8 @@ Evidence sources: Hylla ingest at commit `1bd5f98` (queryable but not needed for
 
 ## Notes
 
+- **Bare-root `AGENTS.md:63` is out of scope (steward).** Falsification A6-c flagged a stale `internal/api` reference in the bare-root `AGENTS.md` at `/Users/evanschultz/Documents/Code/hylla/valv/AGENTS.md` line 63. That file is steward-orchestrator scope (see bare-root `CLAUDE.md`); the work-orch cannot edit it. Route to the steward via a bare-root session, or fold into DROP_8 docs pass if a later drop bundles cross-checkout doc scrubs.
+- **TOS_COMPLIANCE.md is preserved.** Falsification A6-b flagged `main/TOS_COMPLIANCE.md` as API-wrapper prose. Verified: the doc explicitly states its scope is "Valv-as-Docker-runtime hosting Claude Code (and Codex) with per-container OAuth identity pinning" and "Out of scope: the retracted earlier shape that wrapped `claude --bare -p` behind an OpenAI-compatible HTTP API. That scope is explicitly not covered here because it is no longer Valv's direction." The doc is the canonical TOS rationale for DROP_1 itself and every drop that follows. Keep intact.
 - **Focus plan §2 items skipped as obsolete** (one-line justifications, no units needed):
   - §2 item 11 — supersede note at top of `main/PLAN.md`: current `main/PLAN.md` is already the rewritten drop-tree index (DROP_0 deliverable), with zero Track-F / Agent-5 content. Adding a supersede note would be meaningless.
   - §2 item 15 — config-field grep: verified during planning that `internal/config/` contains zero `listen` / `APIServe` / `api.listen` / `api_serve` fields; nothing to remove.
