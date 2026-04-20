@@ -408,3 +408,164 @@ N/A — task touched non-Go files only (`main/drops/WORKFLOW.md` and `main/drops
 ### Verdict
 
 All 9 U0.3 acceptance criteria pass (13 of 13 sub-checks green, verified numerically via `Grep` MCP, counts match builder's self-report exactly). Phase heading ordering passes (seven `## Phase [1-7] — ` headings at lines 93/102/112/123/132/142/154, strictly ascending 1→7, names match the canonical phase order on line 48). Both files are UTF-8, BOM-free, markdown-only. The Agent Spawn Contract fenced preamble block (lines 60–81) is internally consistent post-rebrand with no orphan `rak`/`Rak` tokens, and a case-insensitive `rak` sweep across the whole file returns zero. `_TEMPLATE/CLOSEOUT.md` is structurally unchanged except for the line-29 rebrand (reasoned via scaffold-copy proxy — template is untracked). Builder worklog `## Unit 0.3 — Round 1` section carries every required field and zero self-report-vs-observed drift. Proof-QA verdict: PASS.
+
+## Unit 0.2 — Round 1
+
+### Scope
+
+Proof QA over the `main/CLAUDE.md` rewrite claimed in BUILDER_WORKLOG.md `## Unit 0.2 — Round 1` (lines 108–148). 15 acceptance criteria, 24 sub-checks counting the multi-part criteria (criterion 9 has 5 sub-checks, criterion 11 has 2, criterion 13 has 3, several others have 2 a/b pairs). Cross-checks Tech Stack section against `main/go.mod` and Mage Targets table against `main/magefile.go` for factual accuracy, not just criterion compliance.
+
+### Built File Under Review
+
+- `/Users/evanschultz/Documents/Code/hylla/valv/main/CLAUDE.md` — 293 lines, UTF-8 text, BOM-free (first three bytes are `# V` via `head -c 3 | od -c`; `file(1)` reports `Unicode text, UTF-8 text`), markdown-only.
+
+### Verification Method
+
+Ran each acceptance criterion using `Grep` MCP (ripgrep-backed) in `count` or `content` mode — same semantics as the spec's `grep -c` / `grep -oE` commands, results directly comparable. For the two-part and multi-sub-check criteria, each sub-check executed separately. Tech Stack and Mage Targets accuracy cross-checked line-by-line against `main/go.mod` (137 lines) and `main/magefile.go` (662 lines). Builder worklog `## Unit 0.2 — Round 1` section audited for required field set and self-report-vs-observed drift.
+
+### Acceptance Criteria — Observed vs Expected
+
+| # | Criterion | Expected | Observed | Verdict |
+|---|---|---|---|---|
+| 1 | `head -1 | grep -c '^# Valv — Project CLAUDE.md'` | `1` | `1` | OK |
+| 2 | `grep -c 'Rak'` | `0` | `0` | OK |
+| 3 | `grep -ciE '\brak\b'` | `0` | `0` | OK |
+| 4a | `grep -c 'github.com/evanmschultz/rak@main'` | `0` | `0` | OK |
+| 4b | `grep -c 'github.com/evanmschultz/valv@main'` | `>=1` | `1` | OK |
+| 5 | `grep -c '/hylla/rak'` | `0` | `0` | OK |
+| 6a | `grep -c 'cmd/rak'` | `0` | `0` | OK |
+| 6b | `grep -c 'cmd/valv'` | `>=1` | `3` | OK |
+| 7 | `grep -c '\./cmd/valv'` | `>=1` | `2` | OK |
+| 8a | `grep -cE '\b(counting|fileset)\b'` | `0` | `0` | OK |
+| 8b | `grep -c 'internal/domain\|internal/adapters\|internal/services\|internal/cli\|internal/tui'` | `>=5` | `9` | OK |
+| 8c | `grep -c 'internal/lang\b\|internal/render\b\|internal/summary\b\|internal/tokens\b\|internal/ignore\b'` | `0` | `0` | OK |
+| 9a | `grep -c 'tiktoken-go/tokenizer\|golang.org/x/sync/errgroup'` | `0` | `0` | OK |
+| 9b | `grep -oE 'charm\.land/[a-z]+/v2' | sort -u | wc -l` (distinct) | `>=3` | `4` | OK |
+| 9c | `grep -c 'modernc.org/sqlite'` | `>=1` | `3` | OK |
+| 9d | `grep -c 'testcontainers'` | `>=1` | `4` | OK |
+| 9e | `grep -c 'modelcontextprotocol/go-sdk'` | `>=1` | `1` | OK |
+| 10a | `grep -c 'mage install\|mage format\|mage lint\|mage ci\|mage coverage\|mage plan-check'` | `0` | `0` | OK |
+| 10b | `grep -c 'mage test\b\|mage build\b\|mage testPkg\|mage integration\|mage golden\|mage goldenUpdate\|mage run\|mage dev:'` | `>=6` | `19` | OK |
+| 11a | `grep -cE 'domain.*→.*(adapters|adapt).*→.*services.*→.*(cli|tui)'` | `>=1` | `1` | OK |
+| 11b | arrow-chain window (-B 2 -A 5) contains `no cycles|strictly layered` | `>=1` | `1` | OK |
+| 12 | `grep -c '^\| File \| Role \| LOC \|'` | `0` | `0` | OK |
+| 13a | `grep -cE '^## .*AGENTS\.md'` | `>=1` | `1` | OK |
+| 13b | `grep -cE '^## (Legacy|Historical|Deprecated|Obsolete|Old|Former) .*AGENTS\.md'` | `0` | `0` | OK |
+| 13c | `grep -A 10 -E '^## .*AGENTS\.md' \| grep -cE 'authoritative\|defers to\|source of truth'` | `>=1` | `1` | OK |
+| 14 | `grep -c 'main/drops/WORKFLOW.md'` | `>=1` | `10` | OK |
+| 15 | `grep -c 'go-builder-agent\|go-planning-agent\|go-qa-proof-agent\|go-qa-falsification-agent'` | `>=4` | `11` | OK |
+
+Zero drift between builder self-report (BUILDER_WORKLOG.md lines 113–136) and independent on-disk verification. All 27 sub-checks green.
+
+### Criterion 9b Distinct-Imports Breakdown
+
+Spec demands **distinct** Charm v2 imports, not raw mentions. Extraction via `grep -oE 'charm\.land/[a-z]+/v2' | sort -u` returned exactly the four direct Charm v2 requires from `main/go.mod` lines 6–9:
+
+- `charm.land/bubbles/v2` (CLAUDE.md line 143; go.mod line 6)
+- `charm.land/bubbletea/v2` (CLAUDE.md line 141; go.mod line 7)
+- `charm.land/fang/v2` (CLAUDE.md line 140; go.mod line 8)
+- `charm.land/lipgloss/v2` (CLAUDE.md line 142; go.mod line 9)
+
+Four distinct ≥ 3 floor — pass. Regression hole from earlier rounds closed: the escaped dot `\.` forces a literal period, so prose like "charm-land/…" or "charm/land/…" would not have counted.
+
+### Criterion 11 Arrow-Chain + Polarity Window
+
+CLAUDE.md line 133 carries the full DAG statement on a single line:
+
+> Linear layered flow: `internal/domain → internal/adapters → internal/services → (internal/cli | internal/tui)`. `internal/api` sits at the same consumer tier as `cli`/`tui`. `cmd/valv` wires `cli` (and its sub-commands that mount `tui` / `api`) at the top. No cycles — strictly layered.
+
+- (a) Arrow-chain regex `domain.*→.*(adapters|adapt).*→.*services.*→.*(cli|tui)` matches line 133 — count = 1.
+- (b) Polarity phrase "No cycles — strictly layered." appears on the same line 133, which is inside its own two-before / five-after window — count = 1.
+
+Polarity-flip attack ("do NOT follow domain → …") cannot coexist — the text explicitly asserts the layering is correct. Attack mitigated.
+
+### Criterion 13 AGENTS.md Deferral — Three-Part Check
+
+- (a) Line 5: `## AGENTS.md — Authoritative For Cross-Cutting Rules` — matches the `^## .*AGENTS\.md` shape (heading cites AGENTS.md). Count = 1.
+- (b) No `^## (Legacy|Historical|Deprecated|Obsolete|Old|Former) .*AGENTS\.md` match — heading frames AGENTS.md positively. Count = 0.
+- (c) Body within 10 lines after heading (read lines 5–16) contains all three positive-polarity phrases inside line 7: "authoritative source of truth", "defers to AGENTS.md", and implicit "source of truth" literal. Count = 1 on the grep union.
+
+Body prose at line 7 also enumerates the concrete AGENTS.md scopes (runtime model, Go standards, error handling, logging, Charm v2 stack, Context7-first, delivery standards including 70% coverage floor, testing standards, sandbox rules, OpenAI compatibility), so the deferral is structural, not hollow.
+
+### Tech Stack Factual Cross-Check (CLAUDE.md lines 137–154 vs main/go.mod lines 5–22)
+
+Line-by-line audit of the production-deps bullet list:
+
+| CLAUDE.md claim | go.mod evidence | Verdict |
+|---|---|---|
+| `Go 1.26+` | `go 1.26.1` (line 3) | OK (claim is a lower bound consistent with actual toolchain) |
+| `charm.land/fang/v2` | line 8 | OK |
+| `charm.land/bubbletea/v2` | line 7 | OK |
+| `charm.land/lipgloss/v2` | line 9 | OK |
+| `charm.land/bubbles/v2` | line 6 | OK |
+| `github.com/spf13/cobra` | line 19 | OK |
+| `github.com/charmbracelet/log` | line 11 | OK |
+| `github.com/evanmschultz/laslig` | line 16 | OK |
+| `modernc.org/sqlite` | line 21 | OK |
+| `github.com/modelcontextprotocol/go-sdk` | line 18 | OK |
+| `github.com/BurntSushi/toml` | line 10 | OK |
+| `github.com/magefile/mage` | line 17 | OK |
+| `github.com/testcontainers/testcontainers-go` | line 20 | OK |
+| `github.com/charmbracelet/x/exp/teatest/v2` | line 13 | OK |
+| `github.com/charmbracelet/x/exp/golden` | line 12 | OK |
+| `github.com/creack/pty/v2` | line 15 | OK |
+| `mvdan.cc/gofumpt` dev tool | line 137 `tool mvdan.cc/gofumpt` | OK |
+| "no Go Docker SDK dependency" | `docker/docker` v28.5.2 appears only as indirect (line 56), not in direct `require (` block lines 5–22 | OK |
+
+Every production dep named in CLAUDE.md is a direct require in go.mod. No fabricated deps. "No Docker SDK" claim holds — the `exec.Command("docker", …)` pattern is observable in magefile.go lines 213 (`docker image rm`) and 634 (`docker image ls`). Zero factual drift.
+
+### Mage Targets Factual Cross-Check (CLAUDE.md lines 168–183 vs main/magefile.go)
+
+| CLAUDE.md row | magefile.go evidence | Verdict |
+|---|---|---|
+| `mage build` → `go build -o ./valv ./cmd/valv` | line 57: `runGo("build", "-o", "./valv", "./cmd/valv")` | OK |
+| `mage test` = gofumpt + `-race -cover -count=1 ./...` + 70% gate | lines 71–90 (Test) + 166–177 (runRepoTests) + line 23 `coverageThreshold = 70.0` + line 172 `"-count=1", "-race", "-cover", "./..."` | OK |
+| `mage testPkg <pkg>` = gofumpt + `-race -cover -count=1 <pkg>` + gate | lines 93–119: line 114 `"-count=1", "-race", "-cover", pkg` + line 118 `renderCoverage(…, coverageThreshold)` | OK |
+| `mage integration` = `-tags=integration -count=1 ./internal/cli` | line 123: `runGoTest("-tags=integration", "-count=1", "./internal/cli")` | OK |
+| `mage golden` = tracked Bubble Tea + external Codex transcript | lines 127–140: `./internal/output ./internal/tui/manage` (tracked) + `-tags=integration … ./internal/cli -run TestCodexInteractiveMCPGolden` (external) | OK |
+| `mage goldenUpdate` = same packages with `-args -update` | lines 151–164: same invocations with `-args -update` appended | OK |
+| `mage run "..."` = `mage build` then run `./valv <args>` | lines 143–148 | OK |
+| `mage dev:home` | line 183 `func (Dev) Home()` | OK |
+| `mage dev:reset` | line 192 `func (Dev) Reset()` | OK |
+| `mage dev:clean` | line 201 `func (Dev) Clean()` | OK |
+| `mage dev:run "..."` = build + run under disposable `$HOME` with host Docker config preserved | lines 217–235: sets `HOME=` + `DOCKER_CONFIG=` + `VALV_REAL_HOME=` + `VALV_CODEX_IMAGE=` | OK |
+
+Every target described in the CLAUDE.md table maps to an exported function (or `Dev` namespace method) in magefile.go with the described behavior. No phantom targets, no misdescribed flags. The claim that `mage test` already enforces the 70% per-package coverage floor inline is correct — `runRepoTests` chains `renderCoverage(…, coverageThreshold)` where `coverageThreshold = 70.0`.
+
+### BUILDER_WORKLOG.md Field-Set Audit (lines 108–148)
+
+Required fields present in the `## Unit 0.2 — Round 1` section:
+
+- **Scope** (line 110): present — describes the rewrite, names the ground-truth files cross-referenced.
+- **Files changed** (line 111): present — single-file rewrite via `Write`.
+- **Mage targets run** (line 112): present — none (docs-only), rationale noted.
+- **Acceptance self-check** (lines 113–136): present — all 15 criteria with observed values, 27 sub-checks covered.
+- **Design notes** (lines 137–146): present — ten substantive design decisions documented including AGENTS.md deferral shape, cli/tui handling, package map grounding, tech stack grounding, mage targets grounding, preserved sections, deleted sections, commit-format example rebranding (with self-caught regression bug: initial draft used `rebrand … from rak to Valv` which would have failed criterion 3; caught on re-check and reworded).
+- **Hylla Feedback** (line 147): present — `N/A — task touched non-Go files only.` — matches CLAUDE.md Hylla-Feedback rule for non-Go files.
+- **Unknowns** (line 148): present — "none" with explicit justification (all 15 criteria numerically verified, post-fix re-checks on criteria 2 and 3 both returned 0).
+
+All self-reported observed counts match my independent on-disk counts. Zero drift.
+
+### Additional Invariants Checked
+
+- **Encoding / BOM / markdown-only** — `file(1)` reports `Unicode text, UTF-8 text`; first three bytes `# V` (no U+FEFF BOM); no `<html>`/`<script>`/HTML-tag content scanned via markdown content inspection.
+- **H1 pinned to line 1** — `head -1` grep returns 1; deliberate per spec because a later Document-conventions section quoting the H1 would otherwise regress a file-wide count check. Verified line 1 text is exactly `# Valv — Project CLAUDE.md (main worktree)`.
+- **AGENTS.md target exists** — `ls main/AGENTS.md` reports 19k file. The deferral is not a dangling pointer.
+- **Valv package roots exist** — `ls main/internal/` shows `adapters api cli config domain logging output pathutil progress project services tui` — every package named in the CLAUDE.md Package Map (lines 119–128) resolves to a real directory.
+- **Rak-only packages absent** — `internal/counting`, `internal/fileset`, `internal/lang`, `internal/render`, `internal/summary`, `internal/tokens`, `internal/ignore` — none appear on disk (nor in CLAUDE.md, per criterion 8).
+
+### Hylla Feedback
+
+N/A — reviewed file is `main/CLAUDE.md` (markdown), cross-check targets are `main/go.mod` (Go module manifest, not Go source) and `main/magefile.go` (which is Go but with `//go:build mage` tag — readable via `Read`, not indexed by Hylla in the same way as non-build-tagged Go). No Hylla queries attempted for this round because (a) the U0.2 spec is entirely grep-driven on a markdown file, (b) the Tech Stack and Mage Targets cross-checks are direct reads of well-structured files where `Read` + `Grep` is the right tool. No fallback occurred because no Hylla-appropriate query was needed.
+
+### Proof Certificate
+
+- **Premises** — (1) Every one of the 15 U0.2 acceptance criteria (27 sub-checks) returns the expected count. (2) `main/CLAUDE.md` is UTF-8, BOM-free, markdown-only. (3) Line 1 is exactly `# Valv — Project CLAUDE.md (main worktree)`. (4) Every dep in the Tech Stack bullet list (lines 137–154) is a direct require in `main/go.mod`. No phantom deps. (5) Every target described in the Mage Targets table (lines 168–183) maps to an exported function in `main/magefile.go` with the described command and behavior. (6) `main/AGENTS.md` exists on disk at the claimed path. (7) Every package in the Package Map (lines 119–128) resolves to a real directory under `main/internal/`. (8) BUILDER_WORKLOG.md `## Unit 0.2 — Round 1` carries every required field (Scope / Files changed / Mage targets run / Acceptance self-check / Design notes / Hylla Feedback / Unknowns) and zero self-report-vs-observed drift.
+- **Evidence** — 22 `Grep` MCP queries covering all 27 sub-checks across the 15 criteria. `Read` on CLAUDE.md (all 293 lines), `main/go.mod` (all 137 lines), `main/magefile.go` (all 662 lines), BUILDER_WORKLOG.md lines 108–148, drop PLAN.md lines 39–71 (U0.2 spec). Filesystem probes for AGENTS.md existence, internal package directory enumeration, CLAUDE.md encoding/BOM inspection. Every factual claim in CLAUDE.md's Tech Stack and Mage Targets sections mapped to a specific go.mod line number or magefile.go line number.
+- **Trace or cases** — For each of the 15 acceptance criteria (27 sub-checks including multi-part), executed the exact grep the criterion specifies, recorded observed, compared to expected, recorded PASS. For criterion 9b, enumerated the four distinct Charm v2 imports and cross-matched to go.mod requires. For criterion 11, confirmed both arrow-chain regex match and polarity-phrase window (same line satisfies both). For criterion 13, verified the three sub-parts (heading shape, absence of negative-polarity words, positive-polarity body within 10-line window) one-by-one with explicit phrase quotation. Tech Stack and Mage Targets cross-checks traced every prose claim to a line-number citation in the source file. Worklog field audit walked each required field to its line number and content.
+- **Conclusion** — All 15 U0.2 acceptance criteria pass (27 of 27 sub-checks green, verified numerically via `Grep` MCP, all counts match builder's self-report exactly). Tech Stack is factually accurate against `main/go.mod` — every listed dep is a direct require, no phantom deps, "no Docker SDK" claim holds. Mage Targets table is factually accurate against `main/magefile.go` — every target maps to an exported function with the described behavior and flags. AGENTS.md deferral is structural, positive-polarity, and names the concrete scopes AGENTS.md owns. File is UTF-8, BOM-free, markdown-only, with the required H1 pinned to line 1. Builder PASS claim holds. Unit 0.2 Round 1 proof-QA verdict: **PASS**.
+- **Unknowns** — (1) The parallel `BUILDER_QA_FALSIFICATION.md` Round 1 section (if any) may surface counterexamples this proof pass does not anticipate — routed to orchestrator for Phase 5 synthesis between the two asymmetric passes. (2) PLAN.md state flip to `done` at the drop-dir `PLAN.md` level is Phase 5 exit / orchestrator scope, not proof-QA — not verified here. (3) The CLAUDE.md claim "Go 1.26+" in the Tech Stack is a floor, not an exact-pin; go.mod pins `go 1.26.1`. The floor claim is accurate and defensible forever. No action required, noted for transparency.
+
+### Verdict
+
+All 15 U0.2 acceptance criteria pass (27 of 27 sub-checks green, zero drift vs builder's self-report). Tech Stack section is line-accurate against `main/go.mod` — every production dep, every dev tool, and the explicit "no Docker SDK" claim map to the correct go.mod evidence. Mage Targets table is line-accurate against `main/magefile.go` — every target, flag, and coverage-gate claim maps to the correct magefile.go evidence. AGENTS.md deferral is structural (dedicated section heading + positive-polarity body + concrete scope enumeration). `main/CLAUDE.md` is 293 lines, UTF-8, BOM-free, markdown-only; line 1 is the required H1. BUILDER_WORKLOG.md `## Unit 0.2 — Round 1` carries every required field with no self-report-vs-observed drift. Prior BUILDER_QA_PROOF.md sections (U0.4, U0.6, U0.1, U0.5, U0.3) preserved intact. Proof-QA verdict: **PASS**.
