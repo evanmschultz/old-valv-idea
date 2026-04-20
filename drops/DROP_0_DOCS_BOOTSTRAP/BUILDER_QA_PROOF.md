@@ -307,3 +307,104 @@ N/A — task touched non-Go files only (`main/PLAN.md` is markdown; Hylla today 
 ### Verdict
 
 All 10 U0.5 acceptance criteria pass (17 of 17 sub-checks green, verified numerically via `Grep` MCP). File hygiene passes (UTF-8, BOM-free, `# Valv` H1 on line 1, markdown-only, uniform 6-pipe parity across all 12 table rows). `main/drops/DROP_0_DOCS_BOOTSTRAP/` path resolves to a populated drop directory. `BUILDER_WORKLOG.md` `## Unit 0.5 — Round 1` section carries Scope / Files / Acceptance self-check / Design notes as required. Builder design-note cross-checks (column shape, dir link format, DROP_0 state seeding) all corroborated against on-disk content. Zero drift between builder self-report and observed state. Proof-QA verdict: PASS.
+
+## Unit 0.3 — Round 1
+
+**Verdict:** PASS
+
+### Findings
+
+| ID | Severity | Criterion | Evidence | Recommendation |
+|---|---|---|---|---|
+| — | — | — | No findings — all 9 U0.3 acceptance criteria pass and every extra gate (markdown-only / UTF-8 / BOM-free / phase-heading ascending order / preamble internal consistency / CLOSEOUT minimal-diff reasoning / worklog field set) passes. | — |
+
+### Acceptance Criteria Verification
+
+All counts observed via `Grep` MCP tool against `/Users/evanschultz/Documents/Code/hylla/valv/main/drops/WORKFLOW.md` and `/Users/evanschultz/Documents/Code/hylla/valv/main/drops/_TEMPLATE/CLOSEOUT.md`. Exact criterion regex from drop PLAN.md lines 79–87.
+
+| Crit | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| 1 | `grep -c 'Rak' WORKFLOW.md` | `0` | `0` | PASS |
+| 2 | `grep -ciE '\brak\b' WORKFLOW.md` | `0` | `0` | PASS |
+| 3 | `grep -c '^# Valv — Per-Drop Workflow' WORKFLOW.md` | `1` | `1` | PASS |
+| 4a | `grep -c 'DROP_1_CODE_SCAFFOLD_MAGE_CI' WORKFLOW.md` | `0` | `0` | PASS |
+| 4b | `grep -c 'DROP_1_DELETE_API_WRAPPER' WORKFLOW.md` | `>= 1` | `1` | PASS |
+| 5a | `grep -c 'rak artifact' WORKFLOW.md` | `0` | `0` | PASS |
+| 5b | `grep -c 'Valv artifact' WORKFLOW.md` | `>= 1` | `1` | PASS |
+| 6a | `grep -ci 'rak does not use' WORKFLOW.md` | `0` | `0` | PASS |
+| 6b | `grep -c 'Valv does not use' WORKFLOW.md` | `>= 1` | `1` | PASS |
+| 7a | `grep -c 'github.com/evanmschultz/rak@main' _TEMPLATE/CLOSEOUT.md` | `0` | `0` | PASS |
+| 7b | `grep -c 'github.com/evanmschultz/valv@main' _TEMPLATE/CLOSEOUT.md` | `>= 1` | `1` | PASS |
+| 8 | `grep -c '^## Phase [1-7] — ' WORKFLOW.md` | `7` | `7` | PASS |
+| 9 | `grep -c 'Agent Spawn Contract' WORKFLOW.md` | `>= 1` | `6` | PASS |
+
+All 13 sub-checks green. Counts match builder's self-report in BUILDER_WORKLOG.md lines 88–97 exactly.
+
+### Phase Heading Ordering (extra gate)
+
+Grep `^## Phase [1-7] — ` returned seven hits in strictly ascending order:
+
+| Line | Heading |
+|---|---|
+| 93 | `## Phase 1 — Plan` |
+| 102 | `## Phase 2 — Plan QA` |
+| 112 | `## Phase 3 — Discuss + Cleanup` |
+| 123 | `## Phase 4 — Build (per unit)` |
+| 132 | `## Phase 5 — Build QA (per unit)` |
+| 142 | `## Phase 6 — Verify` |
+| 154 | `## Phase 7 — Closeout` |
+
+Sequence `1,2,3,4,5,6,7` — monotone, no gaps, no reorder. Phase names match the canonical order declared on line 48 (`Plan → Plan QA → Discuss + Cleanup → … → Build → Build QA → Verify → Closeout → next drop`).
+
+### Extra Hygiene Gates
+
+| Check | Result | Evidence |
+|---|---|---|
+| WORKFLOW.md is markdown-only | PASS | `Read` of all 216 lines shows only markdown constructs (H1/H2/H3/H4 headings, fenced code blocks, bullet lists, table pipe rows, bold/italic inline). No `<…>` HTML tags. |
+| WORKFLOW.md is UTF-8, BOM-free | PASS | `file` reports `Unicode text, UTF-8 text`. `xxd -l 6` returns `23 20 56 61 6c 76` (`# Valv`) — no `ef bb bf` BOM prefix. Criterion 3's `^# Valv` grep matched count `1`, which a leading BOM would have broken. Em-dash U+2014 preserved in the H1 title. |
+| _TEMPLATE/CLOSEOUT.md is UTF-8, BOM-free | PASS | `file` reports `Unicode text, UTF-8 text`. `xxd -l 6` returns `23 20 44 52 4f 50` (`# DROP`) — no BOM. |
+| Preamble fenced block (lines 60–81) internally consistent post-rebrand — no orphan `rak`/`Rak` | PASS | `Read` of lines 58–82 shows: line 61 paradigm-override opener mentions "Tillsyn" (correct — this is the project's non-use of Tillsyn, not a rak reference), line 80 closes with "durable Valv artifact" (rebrand target), fenced block opens at line 60 and closes at line 81. No `rak`/`Rak` tokens inside the fenced preamble. Case-insensitive `rak` grep across the whole file returned zero hits, which is stronger than the criterion-2 word-boundary check and covers embedded substrings (e.g. `rakish`, `drake`, `Prague`). |
+| Phase ordering preserved (no insertion, deletion, or reorder) | PASS | 7 headings, ascending 1→7 (table above). Heading set matches canonical phase order declared on line 48. |
+| Agent Spawn Contract is the single canonical preamble source — no per-phase duplication | PASS | 6 occurrences of the literal string: `## Agent Spawn Contract` section heading at line 52, plus cross-references from Phases 1, 2, 4, 5 and from the Per-Role Spawn Appendices section at line 170. Matches criterion 9's `>= 1` and rules out per-phase preamble duplication. |
+| `_TEMPLATE/CLOSEOUT.md` is otherwise unchanged except line 29 | PASS (inferred) | `_TEMPLATE/CLOSEOUT.md` is currently untracked in git, so no committed baseline diff is available. As a proxy, diffed the scaffold-stamped copy at `drops/DROP_0_DOCS_BOOTSTRAP/CLOSEOUT.md` (committed in `6445ab9`, 2026-04-18 01:09:47) against the current `_TEMPLATE/CLOSEOUT.md`: the only differences are the `DROP_0` vs `DROP_N` title token and the placeholder-value fills (`—` vs `YYYY-MM-DD`/`<sha>`/`<gh run url>`/`<ingest run id + outcome>`). These are hand-edits the orchestrator made to the scaffold-stamped copy AFTER the template was cloned, not template-side edits. Body structure (H1, metadata block, five H2 sections in order, `Source:` line, `WIKI.md Updates` section) is identical between the two — confirming the template was not restructured beyond line 29. The source line itself (line 29) reads `- **Source:** github.com/evanmschultz/valv@main` in the current template, satisfying criterion 7b. |
+| Builder worklog Unit 0.3 Round 1 section has required fields | PASS | BUILDER_WORKLOG.md lines 81–106 carry `## Unit 0.3 — Round 1` heading + `**Scope:**` (L83) + `**Files changed:**` (L84–86) + `**Mage targets run:**` (L87) + `**Acceptance self-check:**` (L88–97) + `**Design notes:**` (L98–104) + `**Hylla Feedback:**` (L105) + `**Unknowns:**` (L106). Every self-reported observed count (0/0/1/0/1/0/1/0/1/0/1/7/6) matches the on-disk counts verified in this pass numerically. |
+
+### BUILDER_WORKLOG Cross-Check
+
+| Builder claim (L89–97) | Observed this round | Match |
+|---|---|---|
+| crit 1 `Rak` count = 0 | 0 | OK |
+| crit 2 `\brak\b` case-insensitive count = 0 | 0 | OK |
+| crit 3 `^# Valv — Per-Drop Workflow` count = 1 | 1 | OK |
+| crit 4 `DROP_1_CODE_SCAFFOLD_MAGE_CI` = 0, `DROP_1_DELETE_API_WRAPPER` = 1 | 0, 1 | OK |
+| crit 5 `rak artifact` = 0, `Valv artifact` = 1 | 0, 1 | OK |
+| crit 6 `rak does not use` (case-i) = 0, `Valv does not use` = 1 | 0, 1 | OK |
+| crit 7 `github.com/evanmschultz/rak@main` = 0, `github.com/evanmschultz/valv@main` = 1 | 0, 1 | OK |
+| crit 8 `^## Phase [1-7] — ` count = 7 | 7 | OK |
+| crit 9 `Agent Spawn Contract` count = 6 | 6 | OK |
+
+Zero drift between builder self-report and independent on-disk verification.
+
+### Builder Design-Note Cross-Check
+
+Spot-verified three substantive design decisions the builder called out in BUILDER_WORKLOG.md lines 98–104:
+
+1. **Targeted `Edit` calls (four lines in WORKFLOW.md + one in CLOSEOUT.md).** Corroborated indirectly — the only rebrand surfaces are the H1 title (line 1), the example drop directory name in the tree diagram (line 18, `DROP_1_DELETE_API_WRAPPER`), the Tillsyn-override sentence (line 54, `Valv does not use any of that`), and the preamble closing line (line 80, `durable Valv artifact`). CLOSEOUT.md line 29 carries `github.com/evanmschultz/valv@main`. No stray rebrand edits elsewhere (confirmed by case-insensitive `rak` grep returning zero).
+2. **Em-dash (U+2014) preserved.** H1 line 1 reads `# Valv — Per-Drop Workflow` with a literal em-dash (`xxd` shows `e2 80 94` bytes for the em-dash). The em-dash is also preserved across the phase headings at lines 93/102/112/123/132/142/154 (each uses `— ` before the phase name).
+3. **Tillsyn-override fenced preamble on lines 61–80 unchanged except for the final word on line 80.** Verified — lines 61–79 read as standard Tillsyn-override + Section 0 scaffolding prose with no rebrand targets; line 80 closes with `… or any other durable Valv artifact.` — rebrand landed on the terminal token only.
+
+### Hylla Feedback
+
+N/A — task touched non-Go files only (`main/drops/WORKFLOW.md` and `main/drops/_TEMPLATE/CLOSEOUT.md` are markdown; Hylla today indexes Go code only). No Hylla queries attempted, no fallback needed.
+
+### Proof Certificate
+
+- **Premises** — (1) Every one of the nine U0.3 acceptance criteria greps returns the expected count. (2) Both files are UTF-8, BOM-free, markdown-only. (3) Phase headings appear exactly seven times in strictly ascending 1→7 order. (4) The Agent Spawn Contract fenced preamble block (lines 60–81) is internally consistent post-rebrand — no residual `rak`/`Rak` tokens orphaned inside the fenced block. (5) `_TEMPLATE/CLOSEOUT.md` is structurally unchanged except for the line-29 rebrand (reasoned via scaffold-copy proxy since the template is untracked). (6) `BUILDER_WORKLOG.md` `## Unit 0.3 — Round 1` section carries the required field set (Scope / Files changed / Mage targets / Acceptance self-check / Design notes / Hylla Feedback / Unknowns) and every self-reported count matches observed.
+- **Evidence** — 13 `Grep` MCP count-mode queries (one per acceptance sub-check) against both files. Full-text `Grep -i 'rak'` sweeps across both files returning zero hits — stronger than the criterion-2 word-boundary check. `Read` of WORKFLOW.md lines 52–82 (preamble fenced block), lines 210–217 (tail), line 1 (H1 title). `file` + `xxd -l 6` for encoding + BOM probe on both files. Scaffold-copy-vs-current-template `diff` to reason about CLOSEOUT.md minimal-diff invariant (git blame unavailable because `_TEMPLATE/CLOSEOUT.md` is currently untracked). `Read` of BUILDER_WORKLOG.md lines 81–106 for worklog field-set check.
+- **Trace or cases** — For each of the 9 acceptance criteria (13 sub-checks counting the two-part criteria), executed the exact grep the criterion specifies, compared observed to expected, recorded PASS. For the extras: enumerated all 7 phase headings and confirmed ascending order; read the fenced preamble block line-by-line and confirmed no `rak` orphan; ran case-insensitive full-file `rak` sweep across both files; probed encoding + BOM via `file` + `xxd`; compared scaffold-stamped CLOSEOUT copy against current template to isolate post-scaffold edits.
+- **Conclusion** — All 9 U0.3 acceptance criteria pass on-disk numerically (13 of 13 sub-checks green). All five extra gates (markdown-only / UTF-8 BOM-free on both files / phase-heading ordering / preamble internal consistency / CLOSEOUT minimal-change reasoning / worklog field set) pass. Builder's PASS claim holds. Unit 0.3 Round 1 proof-QA verdict: **PASS**.
+- **Unknowns** — (1) `_TEMPLATE/CLOSEOUT.md` is currently untracked in git, so the minimal-change invariant for criterion 7 is verified via a scaffold-copy-proxy diff rather than a direct committed-baseline diff. The proxy is strong enough to support PASS (body structure identical modulo hand-edited placeholders in the stamped copy), but a stricter invariant would require the template to be committed first. Routed to orchestrator — this is likely intended (the template is source-controlled at closeout), but flagged in case it matters for a future audit. (2) PLAN.md U0.3 state flip to `done` at the drop-dir `PLAN.md` level is Phase 5 exit / orchestrator scope, not proof-QA — not verified in this pass. (3) The parallel `BUILDER_QA_FALSIFICATION.md` Round 1 section may surface counterexamples this proof pass does not consider — routed to orchestrator for Phase 5 synthesis.
+
+### Verdict
+
+All 9 U0.3 acceptance criteria pass (13 of 13 sub-checks green, verified numerically via `Grep` MCP, counts match builder's self-report exactly). Phase heading ordering passes (seven `## Phase [1-7] — ` headings at lines 93/102/112/123/132/142/154, strictly ascending 1→7, names match the canonical phase order on line 48). Both files are UTF-8, BOM-free, markdown-only. The Agent Spawn Contract fenced preamble block (lines 60–81) is internally consistent post-rebrand with no orphan `rak`/`Rak` tokens, and a case-insensitive `rak` sweep across the whole file returns zero. `_TEMPLATE/CLOSEOUT.md` is structurally unchanged except for the line-29 rebrand (reasoned via scaffold-copy proxy — template is untracked). Builder worklog `## Unit 0.3 — Round 1` section carries every required field and zero self-report-vs-observed drift. Proof-QA verdict: PASS.
