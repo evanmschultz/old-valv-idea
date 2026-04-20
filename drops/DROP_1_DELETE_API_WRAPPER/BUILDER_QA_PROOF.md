@@ -258,3 +258,82 @@ N/A — this review touched only commit metadata, markdown worklog, and Go-file 
 - **Trace or cases:** One check per PLAN acceptance criterion; scope verified by commit diff stat; downstream leaf status confirmed via builder's post-deletion mage test (19-package corpus, `internal/api/openai` removed from coverage report); PLAN.md state read directly.
 - **Conclusion:** PASS. Unit 1.3 is complete and the builder's 4/4 claim is independently re-verifiable from current committed tree state at `c4f9743`.
 - **Unknowns:** QA did not re-execute `mage test` directly — relying on the builder's reported exit 0 / 312/312 / floor-met figures. Risk is bounded: this is a pure-deletion unit of an already-verified leaf package (Unit 1.2's mage test green already established zero live Go consumers), and the commit-stat independently confirms the scope is deletion-only with no edited Go source. If dev wants a direct QA re-run, orch can spawn a builder or run mage from a work orch.
+
+## Unit 1.4 — Round 1
+
+- **Reviewer:** go-qa-proof-agent
+- **Commit reviewed:** `835a333 refactor: delete valvcompat root package and embedded manifest`
+- **Working dir:** `/Users/evanschultz/Documents/Code/hylla/valv/main`
+- **Completed:** 2026-04-19
+
+**Verdict:** pass
+
+### Acceptance-by-acceptance re-verification
+
+| # | Command run | Actual result | Status |
+|---|---|---|---|
+| 1 | `test -e main/compatibility.go` | file absent | PASS |
+| 2 | `test -e main/compatibility_test.go` | file absent | PASS |
+| 3 | `test -e main/codex-openai-compatibility.json` | file absent | PASS |
+| 4 | `Grep "valvcompat\|CodexOpenAICompatibility\|codex-openai-compatibility"` across `main/internal`, `main/cmd`, `main/magefile.go` | 0 matches in each of the three scopes (three separate `Grep` calls, each returned "No matches found") | PASS |
+| 5 | `mage test` from `main/` | exit 0; 309/309 tests pass across 18 packages; minimum package coverage 64.7% (`internal/adapters/docker`), well above 60% floor | PASS |
+
+### Scope verification
+
+`git show --stat 835a333` reports exactly the expected 5 files:
+
+```
+codex-openai-compatibility.json                    | 425 ---------------------
+compatibility.go                                   |  71 ----
+compatibility_test.go                              | 108 ------
+drops/DROP_1_DELETE_API_WRAPPER/BUILDER_WORKLOG.md |  29 ++
+drops/DROP_1_DELETE_API_WRAPPER/PLAN.md            |   2 +-
+5 files changed, 30 insertions(+), 605 deletions(-)
+```
+
+- 3 root-level deletions match PLAN Unit 1.4 `Paths` exactly (`compatibility.go`, `compatibility_test.go`, `codex-openai-compatibility.json`).
+- 2 coordination files (drop `PLAN.md` state flip + `BUILDER_WORKLOG.md` round append) are expected per WORKFLOW.md Phase 4.
+- No out-of-scope files touched. No Go source outside the root-level `valvcompat` package was modified.
+
+### Residual-reference verification
+
+PLAN acceptance 4 requires zero matches across `main/internal`, `main/cmd`, `main/magefile.go` for the pattern `valvcompat\|CodexOpenAICompatibility\|codex-openai-compatibility`. Re-grep on the committed tree (three separate scope-specific `Grep` calls):
+
+- `main/internal` → 0 matches.
+- `main/cmd` → 0 matches.
+- `main/magefile.go` → 0 matches.
+
+Broader `Grep` across all of `main/` surfaces only drop-coordination markdown (DROP_1 `PLAN.md`, `BUILDER_WORKLOG.md`, `BUILDER_QA_*.md`, `PLAN_QA_*.md`), `main/PLAN.md` drop-tree row, `main/README.md`, `main/AGENTS.md`, `main/CONTRIBUTING.md`, and `VALV_CLAUDE_CODE_FOCUS_PLAN.md`. Every markdown match is scheduled for scrub in Unit 1.5 (confirmed by PLAN.md § Unit 1.5 Acceptance items 2-3 which explicitly target `codex-openai-compatibility` and `valv api` references in `README.md` and `CONTRIBUTING.md`). No live Go consumer anywhere.
+
+### BUILDER_WORKLOG.md completeness
+
+Confirmed `## Unit 1.4 — Round 1` section (lines 120-147) contains every required field per WORKFLOW.md § "Phase 4 — Build (per unit)":
+
+- Builder agent name (`go-builder-agent`).
+- Started timestamp (`2026-04-19`).
+- Leaf-status re-verification block (pre-deletion grep evidence across the three scoped spaces — 0 matches each — confirming `valvcompat` is orphan since Unit 1.2's deletion of `internal/services/openaiapi` at commit `97bc656`).
+- Files deleted (3, each listed individually with line count / size annotation).
+- Mage targets run with exit codes + test counts + coverage figures (`mage test` 309/309 / 18 pkg; package-count dropped 19 → 18 with the root package removed; minimum coverage 64.7% on `internal/adapters/docker`, `internal/cli` 71.8% unchanged).
+- Acceptance checklist 1-5 with PASS annotations matching PLAN § Unit 1.4.
+- Design notes (root-package disappearance from `mage test` report explained; `cmd/valv/main.go` independence from root package noted; no scope expansion).
+- `### Hylla Feedback` subsection present (`N/A — task was pure file deletion`, correct per `main/CLAUDE.md` § "Code Understanding Rules" item 2).
+
+### PLAN.md unit-state verification
+
+`main/drops/DROP_1_DELETE_API_WRAPPER/PLAN.md` § "Unit 1.4" header at line 101 reads `**State:** done`. Top-of-file drop header still reads `**State:** building` which is correct — the drop remains `building` until Unit 1.5 closes and the drop-end verify/closeout phases complete.
+
+### Additional findings
+
+None. Every acceptance criterion is independently re-verifiable from current committed tree state at `835a333`. Coverage stayed well above the 60% floor (no package regressed; minimum crept up from Unit 1.3's 64.7% to stay at 64.7% because the only package that dropped out was the 100%-covered root `valvcompat` package). Build graph transition: `internal/services/openaiapi` (Unit 1.2) + `internal/api/openai` (Unit 1.3) + `valvcompat` (this unit) all removed — the entire wrapper-era Go surface is gone. Only doc scrubs remain (Unit 1.5).
+
+### Hylla Feedback
+
+N/A — this review touched only commit metadata, markdown worklog, and Go-file absence checks (negative-space verification). No Hylla query was needed — direct `test -e`, `git show --stat`, and scoped `Grep` are the correct evidence sources for deletion-verification tasks, matching `main/CLAUDE.md` § "Code Understanding Rules" item 2 (files changing since last ingest → `git diff` / direct Read) and item 3 (non-Go markdown evidence via direct Read / Grep).
+
+### Proof certificate
+
+- **Premises:** acceptance criteria 1-5 hold; scope limited to declared 3 `Paths` + two coordination docs; `mage test` exit 0 with all packages above the 60% floor; no residual `valvcompat` / `CodexOpenAICompatibility` / `codex-openai-compatibility` references anywhere in `main/internal` / `main/cmd` / `main/magefile.go`; worklog documents the required evidence including a present-and-justified Hylla Feedback subsection; PLAN.md unit state is `done`.
+- **Evidence:** `git show --stat 835a333` (5 files, exact match: 3 root deletions + PLAN.md + BUILDER_WORKLOG.md); three `test -e` probes all report absent; three scoped `Grep` runs over `main/internal` + `main/cmd` + `main/magefile.go` for the combined pattern each return "No matches found"; `mage test` re-run locally from `main/` exits 0 with 309/309 tests across 18 packages and minimum coverage 64.7%; BUILDER_WORKLOG.md § Unit 1.4 — Round 1 complete with all required fields; PLAN.md § Unit 1.4 state confirmed `done`.
+- **Trace or cases:** One check per PLAN acceptance criterion; scope verified by commit diff stat (5 files, no collateral); residual-reference sweep against the three in-scope spaces plus a broader `main/`-wide audit whose hits are all in markdown already scheduled for Unit 1.5; worklog completeness checked field-by-field against WORKFLOW.md Phase 4 requirements; PLAN.md state read directly.
+- **Conclusion:** PASS. Unit 1.4 is complete and the builder's 5/5 claim is independently re-verifiable from current committed tree state at `835a333`.
+- **Unknowns:** None. All five acceptance criteria re-verified directly by this reviewer (AC1-4 by filesystem + grep, AC5 by locally re-running `mage test`). Markdown residue in `README.md` / `CONTRIBUTING.md` / `AGENTS.md` / `VALV_CLAUDE_CODE_FOCUS_PLAN.md` / root-level `PLAN.md` drop-row is out of scope for Unit 1.4 and correctly staged for Unit 1.5 — not an Unknown, explicit work scheduled.

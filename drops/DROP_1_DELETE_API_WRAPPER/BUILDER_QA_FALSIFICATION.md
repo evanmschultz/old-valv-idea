@@ -177,3 +177,35 @@ N/A — task was pure file deletion. Evidence came from `Grep` / `Glob` / `Read`
 - **Trace or cases:** 11 attack angles enumerated and run; each REFUTED with cited tool output.
 - **Conclusion:** PASS. No counterexample constructable against Unit 1.3's claim.
 - **Unknowns:** None. All attack angles converged.
+
+## Unit 1.4 — Round 1
+
+**Verdict:** pass
+
+- **Unit:** 1.4 / **Round:** 1 / **Commit:** `835a333 refactor: delete valvcompat root package and embedded manifest`
+- **Working dir:** /Users/evanschultz/Documents/Code/hylla/valv/main
+
+### Attacks
+
+1. **Residual `valvcompat` refs in `.go` files.** MITIGATED. `Grep(pattern="valvcompat|CodexOpenAICompatibility|codex-openai-compatibility", glob="*.go", path=main)` returns zero matches. Every remaining hit is in markdown (bare-root `AGENTS.md`, `main/PLAN.md`, `main/CONTRIBUTING.md`, `main/README.md`, `main/VALV_CLAUDE_CODE_FOCUS_PLAN.md`, drop dir files) — all of those are Unit 1.5 scope (doc scrub), explicitly declared in PLAN.md Unit 1.5 acceptance. Not Unit 1.4 regressions.
+2. **Embedded-manifest orphans.** MITIGATED. `Grep(pattern="go:embed", glob="*.go", path=main)` returns zero matches. `Glob("**/*codex-openai-compat*")` returns zero files. The only prior `//go:embed` directive lived in the now-deleted `compatibility.go`. No other Go file embedded the manifest. No magefile asset reference either (confirmed via earlier Unit 1.3 falsification).
+3. **Test fixtures.** MITIGATED. `Glob("**/testdata/**/*compat*")` returns zero files. No test fixture references the deleted manifest.
+4. **Module / root-package graph.** MITIGATED. `cmd/valv/main.go` imports only `charm.land/fang/v2`, `github.com/evanmschultz/valv/internal/cli`, `github.com/evanmschultz/valv/internal/config`, and `github.com/spf13/cobra`. Zero import of the (now-deleted) root `valvcompat` package. Module path `github.com/evanmschultz/valv` remains valid via `go.mod`; absence of a root `.go` file is legal in Go — the module root simply has no package of its own, and subpackages under `internal/...` resolve normally. `mage test` confirms the build graph compiles cleanly.
+5. **`mage test` package count 19 → 18.** MITIGATED. `mage test` output: `packages: 18, pkg passed: 18, pkg failed: 0`. Coverage report lists exactly 18 rows — `github.com/evanmschultz/valv` root-package row (previously shown at 100.0% in Unit 1.3) is gone, as expected. All 18 remaining packages from Unit 1.3 still present with identical names.
+6. **Coverage floor.** MITIGATED. Minimum package coverage: 64.7% (`internal/adapters/docker`) — well above the 60.0% threshold currently enforced by `magefile.go:24`. Note: `magefile.go:23` carries an explicit TODO to restore the floor to 70.0% after raising `internal/adapters/docker` coverage (tracked in `main/REFINEMENTS.md`). The 60% floor is a pre-existing project state, not a Unit 1.4 regression. Every other package is ≥ 70.4% (`cmd/valv`). No Unit 1.4 regression.
+7. **Commit scope.** MITIGATED. `git show --stat 835a333` → exactly 5 files: `codex-openai-compatibility.json` (−425), `compatibility.go` (−71), `compatibility_test.go` (−108), `drops/DROP_1_DELETE_API_WRAPPER/BUILDER_WORKLOG.md` (+29), `drops/DROP_1_DELETE_API_WRAPPER/PLAN.md` (+1 / −1 state toggle). Matches PLAN.md Unit 1.4 Paths exactly. Zero collateral edits.
+8. **`cmd/valv` / `magefile.go` symbol references.** MITIGATED. `Grep` for `valvcompat|CodexOpenAICompatibility|codex-openai-compatibility` scoped to `.go` files returns zero hits. Neither `cmd/valv/main.go` nor `magefile.go` references removed symbols.
+9. **Root-level `.go` orphans.** MITIGATED. `Glob(main/*.go)` returns only `magefile.go`. `magefile.go` carries `//go:build mage` build tag (excluded from normal builds) and lives at repo root by mage convention — unrelated to the deleted `valvcompat` package. No stray root `.go` file; no stray root `.json` file (`Glob(main/*.json)` returns zero).
+10. **Binary smoke.** MITIGATED. `mage build` succeeds; resulting `./valv` binary runs `./valv --help` cleanly — output contains `codex`, `account`, `manage`, `global`, `paths`, `version` groups and the `--config`/`--debug`/`--format`/`--help`/`--no-style`/`--style` flags. Zero references to `api`, `valvcompat`, `compatibility`, or `serve` in help output. `Grep` on the compiled binary for the same patterns returns zero matches — deleted symbols are fully absent from the linked binary.
+
+### Certificate
+
+- **Premises:** Unit 1.4 claim — `compatibility.go`, `compatibility_test.go`, `codex-openai-compatibility.json` deleted; `valvcompat` root package gone; build graph still compiles; no orphan refs in Go sources or built binary; package count 19→18; coverage floor held.
+- **Evidence:** `git show --stat 835a333` (5-file scope). `Grep(valvcompat|CodexOpenAICompatibility|codex-openai-compatibility, *.go)` → 0 matches. `Grep(go:embed, *.go)` → 0 matches. `Glob(main/*.go)` → only `magefile.go`. `Glob(main/*.json)` → 0. `Glob(**/*codex-openai-compat*)` → 0. `Glob(**/testdata/**/*compat*)` → 0. `mage test` → 309 tests / 18 packages / all green / 60.0% floor held (pre-existing floor; TODO in `magefile.go:23`). `mage build` → binary built. `./valv --help` → no `api`/`valvcompat`/`compatibility` references. `Grep` on binary → 0 matches for deleted symbols. `cmd/valv/main.go` imports reviewed — no root-package import.
+- **Trace or cases:** Attacks 1–10 all MITIGATED.
+- **Conclusion:** PASS. No counterexample constructed. Unit 1.4 delivers its claim: root `valvcompat` package and embedded manifest are gone, build graph intact, binary clean, scope-tight.
+- **Unknowns:** None within Unit 1.4 scope. (Stale non-.go doc refs in `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `VALV_CLAUDE_CODE_FOCUS_PLAN.md` are Unit 1.5 scope per PLAN.md lines 120–126 — explicitly blocked on 1.4, not 1.4's responsibility. The 60% coverage floor vs AGENTS.md § 11's 70% target is pre-existing, documented in `magefile.go:23` and `REFINEMENTS.md`, not introduced by Unit 1.4.)
+
+### Hylla Feedback
+
+N/A — task touched non-Go files only on the delete side (one .go pair + one .json). For the falsification probes I used `Grep` / `Glob` / `Read` on the current tree plus `git show --stat` — Hylla would be stale for this commit anyway (reingest is drop-end only, post-1.5). No Hylla query was attempted for this unit.
