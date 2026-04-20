@@ -98,7 +98,7 @@ Evidence sources: Hylla ingest at commit `1bd5f98` (queryable but not needed for
 
 ### Unit 1.4 — Delete root-level `valvcompat` package and embedded manifest
 
-- **State:** todo
+- **State:** done
 - **Paths:**
   - `compatibility.go` (DELETE, `package valvcompat`)
   - `compatibility_test.go` (DELETE, `package valvcompat`)
