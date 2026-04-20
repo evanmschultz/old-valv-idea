@@ -1,17 +1,50 @@
-# DROP_N — Builder Worklog
+# DROP_1 — Builder Worklog
 
 Append a `## Unit N.M — Round K` section per build attempt. See `main/drops/WORKFLOW.md` § "Phase 4 — Build (per unit)" for what each section should contain.
 
-## Unit N.1 — Round 1
+## Unit 1.1 — Round 1
 
 - **Builder:** go-builder-agent
-- **Started:** YYYY-MM-DD HH:MM
-- **Files touched:** <list>
-- **Mage targets run:** mage build (pass), mage test (pass), …
-- **Notes:** <design choices, surprises, library quirks>
+- **Started:** 2026-04-19 21:07
+- **Pre-change coverage (`internal/cli`):** 72.1% (`mage testPkg ./internal/cli`, 103 tests pass).
+- **Post-change coverage (`internal/cli`):** 71.8% (`mage testPkg ./internal/cli`, 97 tests pass). Well above the 60% floor; 0.3 pp drop from removing 6 tests (5 wrapper tests + 1 orphan sweeper test) while deleting ~237 lines of production code + dependent test fixtures.
+- **Files touched:**
+  - `internal/cli/api.go` — DELETED (237 lines).
+  - `internal/cli/root.go` — removed `valv api serve --runtime-ttl 2m` from root `Example` block; removed `apiCmd := newAPICommand(paths, opts)` + `apiCmd.GroupID = "runtime"` + `apiCmd` entry in `cmd.AddCommand(...)`.
+  - `internal/cli/operator_helpers.go` — removed imports `openaihandler "github.com/evanmschultz/valv/internal/api/openai"`, `openaiapiservice "github.com/evanmschultz/valv/internal/services/openaiapi"`, and `time` (only referenced by `newOpenAIAPIService`); removed the 22-line `newOpenAIAPIService` function; removed the dangling `var _ = openaihandler.ChatCompletionsPath`.
+  - `internal/cli/extended_test.go` — removed imports `net`, `time`, `openaiapi "github.com/evanmschultz/valv/internal/api/openai"` (`net` and `time` were only referenced by the deleted tests, `openaiapi` by `apiServeStubService.Complete`); removed `apiServeStubService` type + 5 methods (28 lines); removed `installStubOpenAIAPIServiceFactory` helper (10 lines); removed the 5 PLAN-listed tests `TestRunAPIServeStartsAndStopsCleanly` / `TestRunAPIServeReturnsShutdownError` / `TestRunAPIServeReturnsBindErrorBeforeAnnouncingSuccess` / `TestRunAPIServeRejectsNonPositiveRuntimeTTL` / `TestNewOpenAIAPIServiceCreatesService`; ALSO removed `pruneRecorder` type (8 lines, 53-60) and `TestRunAPIRuntimeSweeperPrunesUntilContextCancel` (18 lines, 781-798) — see plan-gap note above. Both exist solely to test symbols in the deleted `api.go` and leaving them in place yields `undefined: runAPIRuntimeSweeper` at compile time.
+- **Mage targets run:**
+  - `mage testPkg ./internal/cli` (pre-edit): exit 0, 103 tests, 72.1% coverage.
+  - `mage testPkg ./internal/cli` (post-edit): exit 0, 97 tests, 71.8% coverage.
+  - `mage test` (post-edit): exit 0, 353 tests across 21 packages; all packages ≥ 60% floor.
+  - `mage build` (post-edit): exit 0, produced `./valv`.
+  - `./valv --help`: zero occurrences of `api` anywhere (no `RUNTIME COMMANDS` entry, no `Example` mention, no mention in body).
+- **Acceptance checklist (PLAN § Unit 1.1):**
+  1. `test ! -e internal/cli/api.go` → PASS.
+  2. `grep -n "valv api serve" internal/cli/root.go` → 0 matches. PASS.
+  3. `grep -n "newAPICommand\|apiCmd" internal/cli/root.go` → 0 matches. PASS.
+  4. `grep -n "openaihandler\|openaiapiservice\|newOpenAIAPIService\|ChatCompletionsPath" internal/cli/operator_helpers.go` → 0 matches. PASS.
+  5. `grep -n "openaiapi\|apiServeStub\|installStubOpenAIAPIServiceFactory\|TestRunAPIServe\|TestNewOpenAIAPIServiceCreatesService" internal/cli/extended_test.go` → 0 matches. PASS.
+  6. Non-API helpers preserved: `grep -cE "^func openManageService|^func openGlobalSwitchService|^func openImagesService|^func newCleanupService|^func runManageHome|^func pickProfile|^func readAccountIdentity" internal/cli/operator_helpers.go` → exactly 7. PASS.
+  7. Non-API tests preserved: `grep -c "^func Test" internal/cli/extended_test.go` → 32 (≥ 15 lower bound). PASS.
+  8. Pre/post coverage captured (72.1% → 71.8%); post ≥ 60% floor, no escalation. PASS.
+  9. `mage test` exits 0. PASS.
+  10. `mage build` exits 0 and `./valv --help` has no `api` group. PASS.
+- **Design notes:**
+  - The six deleted tests and one deleted helper (`pruneRecorder`) are all fixture-level — behavior coverage they provided was for `runAPIServe` / `runAPIRuntimeSweeper`, both deleted in this unit. Nothing in the remaining production code references them.
+  - `internal/api/openai` package still exists and remains imported by `internal/services/openaiapi/service.go`; its tests still run green on post-change `mage test`. Units 1.2 and 1.3 will remove those packages in subsequent commits, at which point coverage for those packages disappears from the report entirely.
+  - Left untouched as per PLAN: `cmd.AddGroup(..., "runtime", ...)` declaration stays because `codex` still uses the `runtime` group.
+
+### Plan gap flagged
+
+The PLAN § Scope spec lists the 5 `TestRunAPIServe*` / `TestNewOpenAIAPIServiceCreatesService` tests for deletion but misses two other symbols that become orphans once `api.go` is deleted:
+
+- `TestRunAPIRuntimeSweeperPrunesUntilContextCancel` (`extended_test.go:781-798`) calls `runAPIRuntimeSweeper`, which only lived in `api.go`.
+- `pruneRecorder` type (`extended_test.go:53-60`) is the stub used only by that sweeper test.
+
+Leaving either in place makes `mage test` fail with an undefined-symbol compile error. Neither matches the acceptance-5 grep regex `TestRunAPIServe|TestNewOpenAIAPIServiceCreatesService`. Per agent instructions ("report any additional files or packages you needed to touch back to the orchestrator via comment (don't silently expand scope)"): the builder is deleting both as compile-necessity collateral of the `api.go` deletion called out in the PLAN, and flagging this to the orch for PLAN refinement / QA awareness. No code outside the four listed `internal/cli` files is touched.
 
 ### Hylla Feedback
 
-<Optional. Record any case where Hylla MCP missed and a fallback (LSP / Read / Grep) was needed. Aggregated into HYLLA_FEEDBACK.md at closeout.>
+N/A — no Hylla query issued. All evidence came from Read/Grep/LSP against uncommitted + committed state in the four target files, which is correct per main/CLAUDE.md § "Code Understanding Rules" item 2 (`git diff` / direct Read for files changed / changing since last ingest).
 
-<…repeat per unit + per round…>

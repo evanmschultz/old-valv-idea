@@ -39,7 +39,7 @@ Evidence sources: Hylla ingest at commit `1bd5f98` (queryable but not needed for
 
 ### Unit 1.1 — Detach `valv api` wiring from CLI
 
-- **State:** todo
+- **State:** done
 - **Paths:**
   - `internal/cli/api.go` (DELETE entire file, 237 lines)
   - `internal/cli/root.go` (EDIT)

@@ -60,7 +60,6 @@ valv manage update
 valv manage account add codex
 valv manage account add codex work
 valv codex --help
-valv api serve --runtime-ttl 2m
 `),
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -123,8 +122,6 @@ valv api serve --runtime-ttl 2m
 	versionCmd.GroupID = "inspect"
 	codexCmd := newCodexCommand(paths, nil)
 	codexCmd.GroupID = "runtime"
-	apiCmd := newAPICommand(paths, opts)
-	apiCmd.GroupID = "runtime"
 	accountCmd := newManageAccountCommand(paths, opts)
 	accountCmd.GroupID = "manage"
 	manageCmd := newManageCommand(paths, opts)
@@ -132,7 +129,7 @@ valv api serve --runtime-ttl 2m
 	globalCmd := newGlobalCommand(paths, opts)
 	globalCmd.GroupID = "manage"
 
-	cmd.AddCommand(pathsCmd, versionCmd, codexCmd, apiCmd, accountCmd, manageCmd, globalCmd)
+	cmd.AddCommand(pathsCmd, versionCmd, codexCmd, accountCmd, manageCmd, globalCmd)
 	installBranchHelpCommands(cmd)
 
 	return cmd, nil

@@ -7,14 +7,12 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/spf13/cobra"
 
 	dockeradapter "github.com/evanmschultz/valv/internal/adapters/docker"
 	codexprovider "github.com/evanmschultz/valv/internal/adapters/providers/codex"
-	openaihandler "github.com/evanmschultz/valv/internal/api/openai"
 	"github.com/evanmschultz/valv/internal/config"
 	"github.com/evanmschultz/valv/internal/domain"
 	"github.com/evanmschultz/valv/internal/output"
@@ -22,7 +20,6 @@ import (
 	globalswitchservice "github.com/evanmschultz/valv/internal/services/globalswitch"
 	imagesservice "github.com/evanmschultz/valv/internal/services/images"
 	manageservice "github.com/evanmschultz/valv/internal/services/manage"
-	openaiapiservice "github.com/evanmschultz/valv/internal/services/openaiapi"
 	managetui "github.com/evanmschultz/valv/internal/tui/manage"
 )
 
@@ -102,29 +99,6 @@ func newCleanupService(cmd *cobra.Command, paths config.Paths) (cleanupservice.S
 		Runner: dockeradapter.NewQuietRunner("docker", LoggerFromContext(cmd.Context())),
 		Logger: LoggerFromContext(cmd.Context()),
 	})
-}
-
-func newOpenAIAPIService(cmd *cobra.Command, paths config.Paths, projectPath string, workspaceAccess bool, idleTTL time.Duration) (openaiapiservice.Service, func(), error) {
-	store, err := openStore(paths)
-	if err != nil {
-		return openaiapiservice.Service{}, nil, err
-	}
-	service, err := openaiapiservice.New(openaiapiservice.Options{
-		Store:           store,
-		Executor:        dockeradapter.NewExecutor(dockeradapter.NewQuietRunner("docker", LoggerFromContext(cmd.Context()))),
-		Image:           codexImageRef(),
-		User:            currentContainerUser(),
-		TempRoot:        paths.TempCacheDir,
-		StartPath:       projectPath,
-		WorkspaceAccess: workspaceAccess,
-		IdleTTL:         idleTTL,
-		Logger:          LoggerFromContext(cmd.Context()),
-	})
-	if err != nil {
-		_ = store.Close()
-		return openaiapiservice.Service{}, nil, err
-	}
-	return service, func() { _ = store.Close() }, nil
 }
 
 func runManageHome(cmd *cobra.Command, paths config.Paths, opts *rootOptions) error {
@@ -311,5 +285,3 @@ func parseOptionalProvider(args []string, fallback domain.Provider) (domain.Prov
 func requireProjectPath(value string) string {
 	return strings.TrimSpace(value)
 }
-
-var _ = openaihandler.ChatCompletionsPath
