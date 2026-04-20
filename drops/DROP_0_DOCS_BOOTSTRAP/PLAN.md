@@ -1,13 +1,13 @@
 # DROP_0 — DOCS BOOTSTRAP
 
-**State:** building
+**State:** done
 **Blocked by:** —
 **Paths (expected):** `CLAUDE.md` (bare-root), `main/CLAUDE.md`, `main/drops/WORKFLOW.md`, `main/drops/_TEMPLATE/CLOSEOUT.md`, `main/PLAN.md`, `main/WIKI.md` (new), `main/LEDGER.md` (new), `main/REFINEMENTS.md` (new), `main/HYLLA_FEEDBACK.md` (new), `main/HYLLA_REFINEMENTS.md` (new), `main/WIKI_CHANGELOG.md` (new), `main/.worklog/.FROZEN` (new)
 **Packages (expected):** none — docs-only drop, no Go packages touched
 **PLAN.md ref:** main/PLAN.md → DROP_0 row (U0.5 will create the row in this same drop; until then this drop is self-seeded from dev direction)
 **Workflow:** main/drops/WORKFLOW.md
 **Started:** 2026-04-18
-**Closed:** —
+**Closed:** 2026-04-19
 
 ## Scope
 
