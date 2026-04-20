@@ -13,16 +13,14 @@ main/drops/
 ├── WORKFLOW.md                     # this file
 ├── _TEMPLATE/                      # orch copies this for each new drop
 │   ├── PLAN.md
-│   ├── BUILDER_WORKLOG.md
-│   └── CLOSEOUT.md
+│   └── BUILDER_WORKLOG.md
 ├── DROP_1_DELETE_API_WRAPPER/
 │   ├── PLAN.md                     # durable
 │   ├── PLAN_QA_PROOF.md            # transient — git rm between rounds
 │   ├── PLAN_QA_FALSIFICATION.md    # transient — git rm between rounds
 │   ├── BUILDER_WORKLOG.md          # durable
 │   ├── BUILDER_QA_PROOF.md         # durable
-│   ├── BUILDER_QA_FALSIFICATION.md # durable
-│   └── CLOSEOUT.md                 # durable
+│   └── BUILDER_QA_FALSIFICATION.md # durable
 └── DROP_2_…/
     └── …
 ```
@@ -37,7 +35,6 @@ main/drops/
 | `BUILDER_WORKLOG.md` | **durable** — append `## Unit N.M — Round K` per build attempt | builder subagent appends |
 | `BUILDER_QA_PROOF.md` | **durable** — append `## Unit N.M — Round K` per QA attempt | qa-proof subagent appends |
 | `BUILDER_QA_FALSIFICATION.md` | **durable** — append `## Unit N.M — Round K` per QA attempt | qa-falsification subagent appends |
-| `CLOSEOUT.md` | **durable** — written once at drop close | orch (or `Role: commit` builder) writes |
 
 **Transient = audit via `git log -- <path>`.** The `git rm` records the deletion and the prior file content stays recoverable. Transient files signal active state by their presence — absent files mean "phase complete, no findings outstanding".
 
@@ -45,7 +42,7 @@ main/drops/
 
 ## Phase Order
 
-Plan → Plan QA → Discuss + Cleanup → (loop until plan good) → Build (per unit) → Build QA (per unit) → (loop until unit good) → Verify → Closeout → next drop.
+Plan → Plan QA → Discuss + Cleanup → (loop until plan good) → Build (per unit) → Build QA (per unit) → (loop until unit good) → Verify → Close → next drop.
 
 ---
 
@@ -77,7 +74,7 @@ orchestrator. If any fail, loop back before Convergence.
 
 Section 0 reasoning stays in the orchestrator-facing response only — do NOT
 write Section 0 into PLAN.md, BUILDER_WORKLOG.md, BUILDER_QA_*.md,
-PLAN_QA_*.md, CLOSEOUT.md, or any other durable Valv artifact.
+PLAN_QA_*.md, or any other durable Valv artifact.
 ```
 
 ### Per-role appendix (concatenated after the preamble)
@@ -95,7 +92,7 @@ If `~/.claude/agents/go-*.md` change in a way that conflicts with the override (
 **Goal:** turn the PLAN.md row into atomic units of work with paths, packages, acceptance criteria, and `blocked_by` ordering.
 
 1. Orch copies `main/drops/_TEMPLATE/` → `main/drops/DROP_N_<NAME>/`. Sets `PLAN.md` header `state: planning`. Commits (`docs(drop-N): scaffold drop dir from template`).
-2. Orch spawns `go-planning-agent` with the spawn preamble from § "Agent Spawn Contract" + the planner appendix from § "Per-Role Spawn Appendices". The planner reads `main/PLAN.md`, the drop's `PLAN.md`, `main/CLAUDE.md`, `main/WIKI.md`, this file.
+2. Orch spawns `go-planning-agent` with the spawn preamble from § "Agent Spawn Contract" + the planner appendix from § "Per-Role Spawn Appendices". The planner reads `main/PLAN.md`, the drop's `PLAN.md`, `main/CLAUDE.md`, this file.
 3. Planner fills `## Planner` section in the drop's `PLAN.md`: scope confirmation, atomic units (`N.1`, `N.2`, …), each with `paths`, `packages`, `acceptance`, `blocked_by`, `state: todo`. Returns control.
 4. Orch commits the plan (`docs(drop-N): planner decompose into N units`). Move to Phase 2.
 
@@ -151,19 +148,15 @@ If `~/.claude/agents/go-*.md` change in a way that conflicts with the override (
 3. `gh run watch --exit-status` until CI green.
 4. If any step fails, treat as build-QA fail on whichever unit owns the breakage — back to Phase 5 for that unit.
 
-## Phase 7 — Closeout
+## Phase 7 — Close
 
-**Goal:** durable record of the drop, propagate findings, advance PLAN.md.
+**Goal:** advance PLAN.md, refresh Hylla, move on. Git history + CI run + per-drop dir are the audit trail. No aggregation docs.
 
-1. Orch (or `Role: commit` builder, spawned for this) writes `CLOSEOUT.md`:
-   - Aggregate `## Hylla Feedback` subsections from `BUILDER_WORKLOG.md` → append entry to `main/HYLLA_FEEDBACK.md`.
-   - Aggregate usage findings → append entry to `main/REFINEMENTS.md` (or `main/HYLLA_REFINEMENTS.md` if Hylla-specific).
-   - Append entry to `main/LEDGER.md`.
-   - Append one-liner to `main/WIKI_CHANGELOG.md`.
-   - Run `hylla_ingest` (full enrichment, from remote, **only after CI green**). Record result.
-   - If anything in the drop changed best practice: update relevant section(s) of `main/WIKI.md` **in place** (no `2026-XX-XX update:` notes — git history is the audit).
-2. Flip drop's `PLAN.md` header `state: done`. Flip the drop's row in `main/PLAN.md` to `state: done`. Commit both in one commit (`docs(drop-N): closeout, advance plan`).
+1. Flip drop's `PLAN.md` header `state: done`. Flip the drop's row in `main/PLAN.md` to `state: done`. One commit covers both (`docs(drop-N): close, advance plan`); subject may include CI run URL.
+2. Run `hylla_ingest` (full enrichment, from remote, pinned to the final commit hash, **only after CI green**).
 3. Move to next drop (back to Phase 1 for `DROP_N+1`).
+
+No `CLOSEOUT.md`, no `LEDGER.md` entry, no `REFINEMENTS.md` entry, no `WIKI_CHANGELOG.md` line, no `HYLLA_FEEDBACK.md` aggregation, no `WIKI.md` update. The drop dir + git log + CI run + Hylla ingest task id record everything a future reader needs.
 
 ---
 
@@ -184,7 +177,7 @@ No Tillsyn calls. Recovery is filesystem + git:
 2. `git log --oneline -20` — recent commits.
 3. Read `main/PLAN.md` — container states (which drop is `in_progress`).
 4. List `main/drops/*/PLAN.md` headers — per-drop phase state (`planning` / `building` / `done` / `blocked`).
-5. Per active drop: presence of `PLAN_QA_*.md` files = mid-plan-QA loop (Phase 2 or 3); absence + `BUILDER_WORKLOG.md` exists = mid-build (Phase 4 or 5); `CLOSEOUT.md` exists with `state: done` = drop closed.
+5. Per active drop: presence of `PLAN_QA_*.md` files = mid-plan-QA loop (Phase 2 or 3); absence + `BUILDER_WORKLOG.md` exists = mid-build (Phase 4 or 5); drop's `PLAN.md` header `state: done` = drop closed.
 6. Per active unit: scan latest `## Unit N.M — Round K` heading in `BUILDER_WORKLOG.md` + both `BUILDER_QA_*.md` to figure out whether build, build-QA, or fix is next.
 
 ## File State Diagrams

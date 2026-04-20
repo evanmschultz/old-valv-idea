@@ -10,8 +10,4 @@ Append a `## Unit N.M — Round K` section per build attempt. See `main/drops/WO
 - **Mage targets run:** mage build (pass), mage test (pass), …
 - **Notes:** <design choices, surprises, library quirks>
 
-### Hylla Feedback
-
-<Optional. Record any case where Hylla MCP missed and a fallback (LSP / Read / Grep) was needed. Aggregated into HYLLA_FEEDBACK.md at closeout.>
-
 <…repeat per unit + per round…>
