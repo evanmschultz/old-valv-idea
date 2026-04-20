@@ -119,9 +119,8 @@ Small, Go-idiomatic layout. Every internal package is an implementation detail �
 - `internal/domain/` — pure domain types and consumer-side interfaces. Zero dependencies on other internal packages.
 - `internal/adapters/` — concrete implementations of domain interfaces (SQLite store, Docker runtime adapter, provider-process launcher, filesystem). Depends on `internal/domain`.
 - `internal/services/` — orchestration/use-case layer composing adapters to fulfill domain operations. Depends on `internal/domain` and `internal/adapters`.
-- `internal/cli/` — cobra command implementations (`valv codex`, `valv api serve`, `valv manage …`) plus pass-through launcher for attached subprocesses. Depends on `internal/services`.
+- `internal/cli/` — cobra command implementations (`valv codex`, `valv manage …`) plus pass-through launcher for attached subprocesses. Depends on `internal/services`.
 - `internal/tui/` — Bubble Tea v2 surfaces for the management views (selectors, status, account admin). Depends on `internal/services`.
-- `internal/api/` — OpenAI- and Anthropic-compatible HTTP handler surfaces (called from `internal/cli/api`). Depends on `internal/services`.
 - `internal/config/` — config loading and defaults (TOML via `BurntSushi/toml`).
 - `internal/logging/` — `charmbracelet/log` setup and log-path policy.
 - `internal/output/` — output/error rendering contracts shared across CLI and TUI.
@@ -130,7 +129,7 @@ Small, Go-idiomatic layout. Every internal package is an implementation detail �
 
 ### Import DAG
 
-Linear layered flow: `internal/domain → internal/adapters → internal/services → (internal/cli | internal/tui)`. `internal/api` sits at the same consumer tier as `cli`/`tui`. `cmd/valv` wires `cli` (and its sub-commands that mount `tui` / `api`) at the top. No cycles — strictly layered.
+Linear layered flow: `internal/domain → internal/adapters → internal/services → (internal/cli | internal/tui)`. `cmd/valv` wires `cli` (and its sub-commands that mount `tui`) at the top. No cycles — strictly layered.
 
 ## Tech Stack
 

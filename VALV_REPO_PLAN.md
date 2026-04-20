@@ -74,8 +74,6 @@ valv/
 │   ├── adapters/        # provider adapters (claude/codex/gemini)
 │   ├── runtime/         # sandbox/container runtime integration
 │   └── config/          # config loading/validation
-├── api/
-│   └── openapi/         # optional public API descriptions
 ├── docs/
 │   ├── architecture/
 │   ├── decisions/

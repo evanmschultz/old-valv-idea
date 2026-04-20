@@ -114,7 +114,7 @@ Evidence sources: Hylla ingest at commit `1bd5f98` (queryable but not needed for
 
 ### Unit 1.5 — Delete `API_COMPAT_EXECUTION_PLAN.md` and scrub doc prose
 
-- **State:** todo
+- **State:** done
 - **Paths:**
   - `API_COMPAT_EXECUTION_PLAN.md` (DELETE)
   - `README.md` (EDIT — drop §"API Compatibility Matrix" and §"API Smoke Test Flow", lines ~69-129)

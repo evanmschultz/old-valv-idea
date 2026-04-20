@@ -146,3 +146,54 @@ N/A — task was pure file deletion. Evidence came entirely from `Grep` over the
 
 N/A — task was pure file deletion. Evidence came from `Grep` over the current uncommitted local state (file set is changing relative to the latest ingest, so per `main/CLAUDE.md` § "Code Understanding Rules" item 2, direct `Grep` / `Read` is the correct evidence source). No Hylla query was attempted or needed.
 
+## Unit 1.5 — Round 1
+
+- **Builder:** go-builder-agent
+- **Started:** 2026-04-19
+- **Files touched (docs-only, zero `.go` / `magefile.go` edits):**
+  - `API_COMPAT_EXECUTION_PLAN.md` — DELETED (3935 bytes, 76 lines).
+  - `README.md` — dropped §"API Compatibility Matrix" + its surrounding manifest-review/metadata prose (~22 lines removed, between `mage test` / `mage build` block and `Additional targeted commands`). No §"API Smoke Test Flow" section existed as a distinct heading; the matrix block was the only API-wrapper prose in the file.
+  - `CONTRIBUTING.md` — dropped the "Compatibility change policy:" heading + its two bullets (4 lines removed, between the AGENTS.md/PLAN.md reader-direction line and the `## Tooling` heading).
+  - `AGENTS.md` — four scrubs:
+    1. §1 Product Direction: removed `valv/v1/api is the canonical API namespace` bullet (1 line).
+    2. §4 Runtime Model: removed the entire `For API compatibility surfaces:` block including heading, blank line, and the 3 OpenAI/Anthropic handler bullets (6 lines).
+    3. §8 CLI And TUI Stack output policy: removed the two `api serve` bullets (the "must not announce success before the real runtime boundary" bullet and the "must stop their Valv-managed containers on shutdown" bullet, 2 lines).
+    4. Bottom-of-file: removed the entire `## OpenAI Compatibility Contract` section (13 lines including the heading, trailing blank line, and 8 bullets). PRESERVED §11 line 272 `cheapest viable OpenAI-compatible model` — Codex-as-OpenAI-product testing-cost guidance.
+  - `CLAUDE.md` — two scrubs:
+    1. § "Package Map": removed the `internal/api/` — OpenAI- and Anthropic-compatible HTTP handler surfaces` bullet and dropped `valv api serve` from the `internal/cli/` bullet parenthetical (now reads `(valv codex, valv manage …)` ).
+    2. § "Import DAG" paragraph: rewrote to drop the `internal/api` consumer-tier sentence and the `api` reference in the `cmd/valv` wiring clause (now `cmd/valv wires cli (and its sub-commands that mount tui) at the top`).
+  - `VALV_REPO_PLAN.md` — dropped both `├── api/` parent line and `│   └── openapi/` child line from the repo-layout tree (2 lines, since `api/` had only `openapi/` as a child and became orphaned).
+  - `valv_architecture_notes.md` — added one-line blockquote supersede note above §"Public API shape" at line 250 pointing at `VALV_CLAUDE_CODE_FOCUS_PLAN.md`. The section itself is PRESERVED per focus plan §2.12.
+- **Mage targets run:**
+  - `mage test` (post-edit): exit 0, 309 tests across 18 packages, all packages ≥ 60% floor. Package count + coverage identical to Unit 1.4's post run (no `.go` files changed — acceptance 8 guard satisfied).
+  - `mage build` (post-edit): exit 0, produced `./valv`.
+  - `./valv --help` (post-edit): output shows `RUNTIME COMMANDS: codex`, `MANAGEMENT COMMANDS: account / global / manage`, `INSPECT COMMANDS: paths / version`; zero `api` group anywhere (acceptance 9 satisfied).
+- **Acceptance checklist (PLAN § Unit 1.5):**
+  1. `test ! -e main/API_COMPAT_EXECUTION_PLAN.md` → PASS.
+  2. `grep -n "API Compatibility Matrix\|API Smoke Test Flow\|valv api serve" main/README.md` → 0 matches. PASS.
+  3. `grep -n "Compatibility change policy\|codex-openai-compatibility\|valv api" main/CONTRIBUTING.md` → 0 matches. PASS.
+  4. AGENTS.md scrubs:
+     - `grep -n "valv/v1/api" main/AGENTS.md` → 0 matches. PASS.
+     - `grep -nE "For API compatibility surfaces|OpenAI-compatible handler surface|Anthropic-compatible handler surface" main/AGENTS.md` → 0 matches. PASS.
+     - `grep -n "api serve" main/AGENTS.md` → 0 matches. PASS.
+     - `grep -n "^## OpenAI Compatibility Contract" main/AGENTS.md` → 0 matches. PASS.
+     - PRESERVED: `grep -n "cheapest viable OpenAI-compatible model" main/AGENTS.md` → 1 match at line 272. PASS.
+  5. CLAUDE.md scrubs:
+     - `grep -n "valv api serve" main/CLAUDE.md` → 0 matches. PASS.
+     - `grep -nE "internal/api\b" main/CLAUDE.md` → 0 matches. PASS.
+  6. VALV_REPO_PLAN.md scrubs:
+     - `grep -n "api/openapi/\|openapi/" main/VALV_REPO_PLAN.md` → 0 matches. PASS.
+  7. valv_architecture_notes.md supersede note:
+     - `grep -n "Superseded by VALV_CLAUDE_CODE_FOCUS_PLAN" main/valv_architecture_notes.md` → 1 match at line 250 (directly above §"Public API shape" at line 252). PASS.
+  8. `mage test` from `main/` exits 0 — no `.go` files changed, test suite unchanged from Unit 1.4's 309/309 baseline. PASS.
+  9. `mage build` from `main/` exits 0; `./valv --help` shows `codex` runtime command and `account / manage / global` management commands but no `api` group. PASS.
+- **Design notes:**
+  - Unit is pure docs — zero code impact, zero test deltas, zero coverage change.
+  - The supersede-note approach on `valv_architecture_notes.md` (rather than section deletion) follows focus-plan §2.12's explicit instruction to defer full deletion to a later doc sweep. The section itself (lines 252-276 post-edit, previously 250-274) is left intact.
+  - `VALV_REPO_PLAN.md` parent `├── api/` line was orphaned after child removal, so both were dropped per PLAN § Unit 1.5 path directive.
+  - No scope expansion. Only the 7 files listed in the PLAN (6 edits + 1 delete) were touched. No plan gap flagged.
+
+### Hylla Feedback
+
+N/A — task touched non-Go files only (markdown doc scrubs + one markdown-file deletion). Per `main/CLAUDE.md` § "Code Understanding Rules" item 3 ("Non-Go code (markdown, TOML, YAML, magefile, SQL): use `Read`, `Grep`, `Glob`, `Bash` directly"), Hylla is not the correct evidence source for this work and no query was attempted.
+

@@ -66,24 +66,6 @@ mage test
 mage build
 ```
 
-### API Compatibility Matrix
-
-`valv api serve` uses the compatibility contract in [codex-openai-compatibility.json](./codex-openai-compatibility.json), including how streaming and field mappings are currently handled.
-
-If Codex changes CLI flags that should affect API payload handling, add them to this manifest and open an issue for any missing endpoint mappings.
-
-The manifest is strict by default:
-
-- unknown request fields are rejected with `unsupported_feature`,
-- supported fields are either implemented or intentionally mapped as `accepted`/`unsupported`,
-- and runtime issues are surfaced as explicit errors with issue guidance.
-
-Manifest review metadata:
-
-- `generated_at_utc` and `last_reviewed_utc` track when the contract was authored/reviewed.
-- `review_interval_days` sets the normal check cadence.
-- if a dev asks for compatibility verification or you observe mismatches, raise an issue before adjusting behavior.
-
 Additional targeted commands:
 
 ```bash

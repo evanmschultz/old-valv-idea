@@ -9,7 +9,6 @@ Scope: this repository root and every child path beneath it.
 
 Current product direction:
 
-- `valv/v1/api` is the canonical API namespace
 - Codex is the first primary provider target
 - `valv codex` is a pass-through containerized Codex launcher
 - Valv management flows live outside the direct `valv codex` pass-through path
@@ -57,12 +56,6 @@ For `valv codex`:
 - do not reinterpret normal Codex CLI semantics unless the user explicitly asks
 - avoid replacing Codex session/resume logic with Valv-specific logic
 - let Valv provide runtime isolation, project/profile resolution, and logging
-
-For API compatibility surfaces:
-
-- route OpenAI-compatible providers through the OpenAI-compatible handler surface
-- route Anthropic-compatible providers through a separate Anthropic-compatible handler surface
-- do not conflate provider identity with protocol compatibility
 
 ## 5) Go Standards
 
@@ -213,8 +206,6 @@ Output policy:
 - disposable dev-mode commands should clearly mark temp-home paths and dev-only artifacts as disposable and explain how to clean them up
 - cleanup commands must target Valv-managed artifacts by label or equivalent authoritative metadata; a visible `valv-...` name prefix is for operator clarity, not by itself enough authority to delete containers
 - normal cleanup flows must not remove anonymous Docker volumes or unrelated unlabeled containers unless the user explicitly asks for destructive host cleanup
-- long-running commands such as `api serve` must not announce success before the real runtime boundary is established, and user-visible flag values must not silently disagree with internal effective values
-- long-running commands that own warm provider runtimes, such as `api serve`, must stop their Valv-managed containers on shutdown instead of leaving cleanup to TTL expiry alone
 - the main process entrypoint must use a signal-aware root context so command shutdown hooks run on `Ctrl-C` and `SIGTERM`
 
 ## 9) Context7 First
@@ -316,16 +307,3 @@ Required behavior:
 - use the normal system Go cache and normal local command paths
 - keep Mage targets correct rather than wrapping them in sandbox workarounds
 - if a Go command or test run fails because of sandbox restrictions, stop, report that clearly, and let the user run it or decide the next step
-
-## OpenAI Compatibility Contract
-
-- canonical compatibility mapping for the `valv api` OpenAI surface is [`codex-openai-compatibility.json`](./codex-openai-compatibility.json) in repo root
-- manifest updates are expected to include timestamp metadata:
-  - `generated_at_utc`
-  - `last_reviewed_utc`
-  - `review_interval_days`
-- if Codex adds or changes flags/semantics that the endpoint uses, update this manifest in the same change and open a follow-up issue so the missing mapping is tracked
-- unsupported or removed OpenAI fields in this manifest must be explicit and documented before merge
-- unknown request fields are not passed through silently; they should be rejected in compatibility checks so behavior is explicit
-- keep manifest drift low: before skipping manual checks, compare `last_reviewed_utc` and `review_interval_days` and only defer checks when no runtime/API regressions are observed
-- if a mapping is incomplete and request payloads are correct, return `unsupported_feature` with an explicit pointer to filing an issue in this repo
