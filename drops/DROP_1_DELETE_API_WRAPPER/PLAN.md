@@ -61,7 +61,7 @@ Evidence sources: Hylla ingest at commit `1bd5f98` (queryable but not needed for
 
 ### Unit 1.2 — Delete `internal/services/openaiapi/` package
 
-- **State:** todo
+- **State:** done
 - **Paths:**
   - `internal/services/openaiapi/codex_events.go` (DELETE)
   - `internal/services/openaiapi/codex_models.go` (DELETE)

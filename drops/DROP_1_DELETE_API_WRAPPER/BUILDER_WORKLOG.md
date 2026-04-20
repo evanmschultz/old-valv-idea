@@ -48,3 +48,39 @@ Leaving either in place makes `mage test` fail with an undefined-symbol compile 
 
 N/A — no Hylla query issued. All evidence came from Read/Grep/LSP against uncommitted + committed state in the four target files, which is correct per main/CLAUDE.md § "Code Understanding Rules" item 2 (`git diff` / direct Read for files changed / changing since last ingest).
 
+## Unit 1.2 — Round 1
+
+- **Builder:** go-builder-agent
+- **Started:** 2026-04-19
+- **Leaf-status re-verification:**
+  - `Grep openaiapi *.go` across `main/` — all matches confined to `internal/services/openaiapi/*.go` (self-refs only: the 5 files' own `package openaiapi` declarations, `service.go`/`service_test.go`/`codex_models.go` importing the leaf `internal/api/openai` package under the alias `openaiapi`).
+  - `Grep openaiapi|services/openaiapi main/cmd` — 0 matches.
+  - `Grep openaiapi|services/openaiapi main/magefile.go` — 0 matches.
+  - `Grep openaiapi|openai|api serve main/internal/cli/codex_integration_test.go` — 0 matches (acceptance-4 precondition).
+  - Conclusion: `internal/services/openaiapi` is a leaf consumer of `internal/api/openai` + `valvcompat`, with zero outgoing edges into Codex runtime/provider/adapter packages. Safe to delete as specified.
+- **Files deleted (5):**
+  - `internal/services/openaiapi/codex_events.go`
+  - `internal/services/openaiapi/codex_models.go`
+  - `internal/services/openaiapi/service.go`
+  - `internal/services/openaiapi/service_test.go`
+  - `internal/services/openaiapi/service_integration_test.go`
+  - Empty parent directory `internal/services/openaiapi/` also removed via `rmdir` (no leftover artifacts).
+- **Mage targets run:**
+  - `mage test` (post-edit): exit 0, 334 tests across 20 packages, all packages ≥ 60% floor. Package count dropped from 21 → 20 (openaiapi removed). Notable cover figures: `internal/cli` 71.8% (unchanged from Unit 1.1 post), `internal/api/openai` 72.3% (still green, to be removed in Unit 1.3), `internal/services/codex` 75.2%.
+  - `mage integration` (post-edit): exit 0, 100 tests across `./internal/cli`.
+- **Acceptance checklist (PLAN § Unit 1.2):**
+  1. `test ! -d main/internal/services/openaiapi` → PASS.
+  2. `grep -rn "openaiapi\|services/openaiapi" main/internal main/cmd main/magefile.go` → 0 matches (verified via `Grep` over each scope separately). PASS.
+  3. `mage test` from `main/` exits 0 (334/334 passed, coverage floor met). PASS.
+  4. `mage integration` from `main/` exits 0 (100/100 passed). PASS.
+- **Design notes:**
+  - No production code remained to delete beyond the 5 files — no callers, no interface impls elsewhere.
+  - `internal/api/openai` package is still present and compiles (its own tests pass, 72.3% cover). Scheduled for deletion in Unit 1.3.
+  - `valvcompat` root package still present (its sole importer was `internal/services/openaiapi/service.go`, now gone). Scheduled for deletion in Unit 1.4.
+  - No scope expansion — only the 5 listed files were touched. No plan gap flagged for this unit.
+
+### Hylla Feedback
+
+N/A — task touched Go-file deletion only; evidence came entirely from Grep over uncommitted local state (the file set is changing relative to the latest ingest, so per main/CLAUDE.md § "Code Understanding Rules" item 2, direct Grep/Read is the correct evidence source).
+
+
