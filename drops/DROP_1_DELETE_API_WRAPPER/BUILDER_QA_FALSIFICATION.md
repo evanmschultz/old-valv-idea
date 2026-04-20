@@ -209,3 +209,80 @@ N/A — task was pure file deletion. Evidence came from `Grep` / `Glob` / `Read`
 ### Hylla Feedback
 
 N/A — task touched non-Go files only on the delete side (one .go pair + one .json). For the falsification probes I used `Grep` / `Glob` / `Read` on the current tree plus `git show --stat` — Hylla would be stale for this commit anyway (reingest is drop-end only, post-1.5). No Hylla query was attempted for this unit.
+
+## Unit 1.5 — Round 1
+
+**Verdict:** pass
+
+### Evidence base
+
+- `git show --stat c5ff0b8` — 9 files, zero `.go` / `magefile.go` / test file entries, zero out-of-scope files (no `TOS_COMPLIANCE.md`, no DROP_0 artifacts, no bare-root `AGENTS.md`).
+- `git show c5ff0b8` full diff reviewed against PLAN § Scope and § Unit 1.5 paths.
+- Grep + Read over committed state at `c5ff0b8`.
+- Filesystem confirmation that deleted paths no longer exist (`internal/api/`, `internal/services/openaiapi/`, `internal/cli/api.go`, `API_COMPAT_EXECUTION_PLAN.md`).
+
+### Attack-by-attack findings
+
+**A1 — Over-scrub (PRESERVES violated):** MITIGATED.
+- `grep -n "cheapest viable OpenAI-compatible model" main/AGENTS.md` → exactly 1 match at line 272. PRESERVED as specified.
+- `valv_architecture_notes.md` § "Public API shape" still present at line 252 (heading intact, body lines 254-265 intact). Section NOT deleted — defer-to-later per focus plan §2.12 respected.
+- Supersede note present at line 250 as a one-line blockquote directly above the section.
+
+**A2 — Under-scrub (bare `internal/api` refs survive):** MITIGATED.
+- `grep -nE "internal/api\b" main/CLAUDE.md` → 0 matches.
+- `grep -nE "internal/api\b"` across `AGENTS.md`, `README.md`, `VALV_REPO_PLAN.md`, `CONTRIBUTING.md`, `valv_architecture_notes.md` → 0 matches in every live doc in scope.
+- Residual `internal/api` mentions only in narrative contexts: `main/PLAN.md:24` (DROP_1 drop-tree row describing the removal), `VALV_CLAUDE_CODE_FOCUS_PLAN.md` (§2 specification that authored the removal), and drop-artifact markdown under `drops/` (QA/builder worklogs documenting historical state). All are narrative/spec describing the removal, not live claims that `internal/api` is a current package — acceptable and out-of-scope for Unit 1.5 per PLAN § Scope.
+
+**A3 — `valv api` command-name residue:** MITIGATED.
+- Only residual `valv api\b` across `main/*.md` appears inside the `valv_architecture_notes.md` supersede-note blockquote at line 250 (`the valv api wrapper was removed in DROP_1`) — intentional, describes the removal in past tense. All other matches live in PLAN.md drop-tree row, focus plan §2 spec, and drop-artifact markdown — narrative only.
+
+**A4 — Broken cross-reference links:** MITIGATED.
+- `grep "\]\(#.*api"` and `grep "\]\(#.*compat"` and `grep "\]\(\./API_COMPAT"` across `main/*.md` → 0 matches. No dangling anchors or dead file links pointing at deleted sections.
+- No markdown file (outside drop artifacts) links to `codex-openai-compatibility.json` or to the old `## API Compatibility Matrix` / `## OpenAI Compatibility Contract` / `## Public API shape` anchors.
+
+**A5 — `.go` edit sneaked in:** MITIGATED.
+- `git show --stat c5ff0b8 -- '*.go'` → empty output. Zero `.go` files in the commit.
+- `magefile.go` also not in the commit stat.
+
+**A6 — Commit scope bloat:** MITIGATED.
+- Exactly 9 files, matching PLAN § Unit 1.5 exactly (6 edits + 1 delete + 2 drop-artifact updates for state flip + worklog):
+  - 6 edits: `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`, `README.md`, `VALV_REPO_PLAN.md`, `valv_architecture_notes.md`.
+  - 1 delete: `API_COMPAT_EXECUTION_PLAN.md`.
+  - 2 drop-artifact: `drops/DROP_1_DELETE_API_WRAPPER/PLAN.md` (state flip `todo` → `done`), `drops/DROP_1_DELETE_API_WRAPPER/BUILDER_WORKLOG.md` (Round 1 append).
+
+**A7 — Codex branding over-scrub:** MITIGATED.
+- `internal/services/images/service.go:27` — `defaultCodexLatestURL = "https://api.github.com/repos/openai/codex/releases/latest"` PRESERVED.
+- `internal/services/images/service.go:542` — `@openai/codex@${CODEX_VERSION}` Dockerfile line PRESERVED.
+- `OPENAI_API_KEY` present in `internal/adapters/providers/codex/account.go` and `account_test.go` — PRESERVED.
+- `"OpenAI Codex"` present in `internal/cli/testdata/TestCodexInteractiveMCPGolden.golden` and `internal/cli/testdata/codex-fixture/codex-fixture.sh` — PRESERVED.
+
+**A8 — `TOS_COMPLIANCE.md` untouched:** MITIGATED.
+- Not in `git show --stat c5ff0b8` file list.
+
+**A9 — Bare-root `AGENTS.md` untouched:** MITIGATED.
+- `git show --stat c5ff0b8` file paths are all repo-relative under `main/`; bare-root `AGENTS.md` at `/Users/evanschultz/Documents/Code/hylla/valv/AGENTS.md` (one level up) is not in any worktree's diff surface. PLAN § Notes explicitly routes this to the steward.
+
+**A10 — Import DAG paragraph sanity:** MITIGATED.
+- Rewritten paragraph at `CLAUDE.md:132` reads: `Linear layered flow: internal/domain → internal/adapters → internal/services → (internal/cli | internal/tui). cmd/valv wires cli (and its sub-commands that mount tui) at the top. No cycles — strictly layered.`
+- Coherent without `internal/api`: the DAG correctly describes the current 4-tier flow (`domain → adapters → services → (cli|tui)`), `cmd/valv` wires `cli` at the top, `cli`'s sub-commands mount `tui`. No orphan references, no syntactically truncated sentences.
+
+**A11 — Supersede note placement:** MITIGATED.
+- `valv_architecture_notes.md:250` — one-line blockquote: `> Superseded by VALV_CLAUDE_CODE_FOCUS_PLAN.md — the valv api wrapper was removed in DROP_1. This section remains as an architecture note and will be fully scrubbed in a later doc sweep per focus plan §2.12.`
+- Directly above §"Public API shape" heading at line 252 (one blank line separator at 251).
+- The §"Public API shape" section itself (lines 252-265 covering the `/v1/chat/completions` + `/anthropic/v1/messages` body and routing bullets) is intact — not deleted, per focus plan §2.12.
+
+**A12 — Help binary output (verified via source):** MITIGATED.
+- Falsifier is read-only; did not invoke `mage build` or run `./valv --help`. Verified via `root.go` source instead:
+  - `internal/cli/root.go` has zero `apiCmd` / `newAPICommand` references.
+  - Command tree (`root.go:132`): `cmd.AddCommand(pathsCmd, versionCmd, codexCmd, accountCmd, manageCmd, globalCmd)`.
+  - Group IDs (`root.go:120-130`): `inspect` (paths, version), `runtime` (codex), `manage` (account, manage, global). No `api` group exists.
+- `internal/cli/api.go` deleted; `internal/api/` deleted; `internal/services/openaiapi/` deleted. Source-level impossibility of an `api` group rendering.
+- Builder worklog records the actual `./valv --help` invocation: "output shows RUNTIME COMMANDS: codex, MANAGEMENT COMMANDS: account / global / manage, INSPECT COMMANDS: paths / version; zero api group anywhere."
+
+### Plan refinements
+
+None — the PLAN § Unit 1.5 acceptance list was exhaustive and correctly calibrated. No attack angle surfaced a gap in the plan.
+
+### Hylla Feedback
+
+N/A — unit touched non-Go files only (6 markdown doc scrubs + 1 markdown delete + 1 markdown supersede note). Per `main/CLAUDE.md` § "Code Understanding Rules" item 3, Hylla is not the correct evidence source for non-Go files; no query was attempted. Cross-check grep used `Grep` over the repo-local markdown state directly, which is the canonical path for this kind of work.
