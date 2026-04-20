@@ -32,7 +32,7 @@ Extend the `Provider` domain type with `ProviderClaude` and thread compile-safe 
 
 ### Unit 2.1 — Add `ProviderClaude` enum value + parser branch + domain test updates
 
-- `state`: `todo`
+- `state`: `done`
 - `paths`:
   - `internal/domain/types.go` (edit)
   - `internal/domain/types_test.go` (edit — flip the "claude" case from `wantErr: true` to `wantErr: false` with `want: ProviderClaude`, add a "trimmed claude" case for parity with the existing " Codex " case, and — if no other "invalid" case exists after the flip — add a fresh unambiguously-invalid input such as `"openai"` to keep the `wantErr: true` branch exercised)

@@ -84,7 +84,9 @@ func TestParseProvider(t *testing.T) {
 	}{
 		{name: "codex", input: "codex", want: ProviderCodex},
 		{name: "trimmed", input: " Codex ", want: ProviderCodex},
-		{name: "invalid", input: "claude", wantErr: true},
+		{name: "claude", input: "claude", want: ProviderClaude},
+		{name: "claude trimmed", input: " Claude ", want: ProviderClaude},
+		{name: "invalid", input: "openai", wantErr: true},
 	}
 
 	for _, tt := range tests {

@@ -8,12 +8,15 @@ import (
 type Provider string
 
 const (
-	ProviderCodex Provider = "codex"
+	ProviderCodex  Provider = "codex"
+	ProviderClaude Provider = "claude"
 )
 
 func ParseProvider(value string) (Provider, error) {
 	switch normalized := Provider(strings.ToLower(strings.TrimSpace(value))); normalized {
 	case ProviderCodex:
+		return normalized, nil
+	case ProviderClaude:
 		return normalized, nil
 	default:
 		return "", fmt.Errorf("parse provider %q: unsupported value", value)
