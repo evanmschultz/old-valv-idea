@@ -1,13 +1,13 @@
 # DROP_1 — DELETE API WRAPPER
 
-**State:** building
+**State:** done
 **Blocked by:** —
 **Paths (expected):** `internal/api/openai/`, `internal/services/openaiapi/`, `internal/cli/api.go`, `internal/cli/root.go` (edit), `internal/cli/operator_helpers.go` (edit), `internal/cli/extended_test.go` (edit), `compatibility.go`, `compatibility_test.go`, `codex-openai-compatibility.json`, `API_COMPAT_EXECUTION_PLAN.md`, plus doc scrubs in `README.md`, `AGENTS.md`, `CLAUDE.md`, `VALV_REPO_PLAN.md`, `valv_architecture_notes.md`, `CONTRIBUTING.md`
 **Packages (expected):** `internal/api/openai` (deleted), `internal/services/openaiapi` (deleted), `valvcompat` (root package, deleted); `internal/cli` (edits only — remove wiring + stubs + tests, keep the rest)
 **PLAN.md ref:** main/PLAN.md → DROP_1_DELETE_API_WRAPPER row
 **Workflow:** main/drops/WORKFLOW.md
 **Started:** 2026-04-19
-**Closed:** —
+**Closed:** 2026-04-19
 
 ## Scope
 
