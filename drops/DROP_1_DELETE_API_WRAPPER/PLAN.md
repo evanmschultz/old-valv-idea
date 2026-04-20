@@ -78,7 +78,7 @@ Evidence sources: Hylla ingest at commit `1bd5f98` (queryable but not needed for
 
 ### Unit 1.3 — Delete `internal/api/openai/` package
 
-- **State:** todo
+- **State:** done
 - **Paths:**
   - `internal/api/openai/doc.go` (DELETE)
   - `internal/api/openai/encode.go` (DELETE)

@@ -83,4 +83,37 @@ N/A — no Hylla query issued. All evidence came from Read/Grep/LSP against unco
 
 N/A — task touched Go-file deletion only; evidence came entirely from Grep over uncommitted local state (the file set is changing relative to the latest ingest, so per main/CLAUDE.md § "Code Understanding Rules" item 2, direct Grep/Read is the correct evidence source).
 
+## Unit 1.3 — Round 1
+
+- **Builder:** go-builder-agent
+- **Started:** 2026-04-19
+- **Leaf-status re-verification:**
+  - `Grep "internal/api/openai|openaihandler|openai.ChatCompletionsPath"` across `main/internal`, `main/cmd`, `main/magefile.go` → 0 matches in each scope (three separate `Grep` calls).
+  - Broader `main/` grep surfaces only the 8 target files themselves plus drop-artifact markdown (PLAN.md, BUILDER_WORKLOG.md, BUILDER_QA_*.md, PLAN_QA_*.md, focus plan, bare-root PLAN.md) and the root PLAN.md drop-tree row — expected documentation residue, no live Go consumer. `internal/services/openaiapi` (the only Go consumer) was removed in Unit 1.2 at commit `97bc656`.
+  - Directory audit: `internal/api/` had only `openai/` as a child prior to deletion, so removing `openai/` renders the parent empty and removable.
+- **Files deleted (8):**
+  - `internal/api/openai/doc.go`
+  - `internal/api/openai/encode.go`
+  - `internal/api/openai/errors.go`
+  - `internal/api/openai/handler.go`
+  - `internal/api/openai/handler_test.go`
+  - `internal/api/openai/json.go`
+  - `internal/api/openai/types.go`
+  - `internal/api/openai/types_test.go`
+  - Empty parent directory `internal/api/openai/` removed via `rmdir`; then empty grandparent `internal/api/` also removed via `rmdir` (no siblings remained).
+- **Mage targets run:**
+  - `mage test` (post-edit): exit 0, 312 tests across 19 packages, all packages ≥ 60% floor. Package count dropped 20 → 19 (`internal/api/openai` removed). Notable cover figures: `internal/cli` 71.8% (unchanged from Unit 1.2 post), `internal/adapters/docker` 64.7% (the other 60%-bend package, still within floor), `internal/services/codex` 75.2%.
+- **Acceptance checklist (PLAN § Unit 1.3):**
+  1. `test ! -d internal/api/openai` → "AC1 PASS: internal/api/openai does not exist". PASS.
+  2. `test ! -d internal/api` → "AC2 PASS: internal/api does not exist". PASS.
+  3. `Grep "internal/api/openai|openaihandler|ChatCompletionsPath"` across `main/internal`, `main/cmd`, `main/magefile.go` — three separate scopes, each returned "No matches found". PASS.
+  4. `mage test` from `main/` → exit 0, 312/312 passed, coverage floor (60%) met by every package. PASS.
+- **Design notes:**
+  - `valvcompat` root-level package (`compatibility.go`, `compatibility_test.go`, `codex-openai-compatibility.json`) is still present. Its sole importer (`internal/services/openaiapi/service.go`) is already gone as of Unit 1.2; it is now an orphan package with its own tests. Scheduled for deletion in Unit 1.4. The 3 files still compile and the `valvcompat` tests still pass green (evidenced by `mage test` showing `github.com/evanmschultz/valv` at 100.0% cover — that is the `valvcompat`-hosting root package).
+  - `mage integration` was not re-run — Unit 1.2's closing run was the last deletion of an integration-test file (`internal/services/openaiapi/service_integration_test.go`). Unit 1.3 deletes no integration files; `internal/api/openai/handler_test.go` is a unit test without a build tag. Running `mage integration` here is not an acceptance requirement per PLAN § Unit 1.3 and adds no signal the completed `mage test` doesn't already provide.
+  - No scope expansion — only the 8 listed files + the two empty parent directories were touched in source. PLAN.md (state flip) and BUILDER_WORKLOG.md (this section) edits are the drop-coordination writes called for by WORKFLOW.md Phase 4.
+
+### Hylla Feedback
+
+N/A — task was pure file deletion. Evidence came entirely from `Grep` over the current uncommitted local state (the file set is changing relative to the latest ingest, so per `main/CLAUDE.md` § "Code Understanding Rules" item 2, direct `Grep` / `Read` is the correct evidence source). No Hylla query was attempted or needed.
 
