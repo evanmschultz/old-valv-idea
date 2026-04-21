@@ -37,3 +37,39 @@ Durable append log of falsification-oriented build-QA findings. One `## Unit N.M
 ## Hylla Feedback
 
 None — Hylla was not needed for this review. Commit `ee1fc99` is post-last-ingest and stale in Hylla. Evidence came from `git show`, direct `Read` of `service.go` / `service_test.go` / `service_integration_test.go` / `ops.go` / `magefile.go`, and from a fresh `mage testPkg ./internal/services/images` run. External verification came from Context7 `/anthropics/claude-code`. No Hylla query was issued.
+
+## Unit 4.2 — Round 1
+
+- **Reviewer:** go-qa-falsification-agent
+- **Commit:** e3869f6
+- **Verdict:** pass
+
+### Attack probes
+
+1. **Store leak on error paths — REFUTED.** Traced every return in `openImagesService` at `internal/cli/operator_helpers.go:68-112`. Six paths: (a) `openStore` fail at line 71 — no store to close; (b) Codex `WriteDefaultCodexContext` fail at line 87 — `_ = store.Close()` before return; (c) Claude `WriteDefaultClaudeContext` fail at line 96 — `_ = store.Close()`; (d) unsupported provider `default` at line 104 — `_ = store.Close()`; (e) `imagesservice.New` fail at line 109 — `_ = store.Close()`; (f) success at line 112 — caller owns closer. Every error path closes the store. No leak.
+
+2. **Codex regression — REFUTED.** `Grep openImagesService(` returned three non-test call sites: `operator_helpers.go:68` (definition), `codex.go:243` (`ensureCodexImageCurrent`), `manage.go:1090` (`runManageUpdate`) — both callers pass `domain.ProviderCodex` per the commit diff. `extended_test.go:448` already references `filepath.Join(paths.BuildCacheDir, string(domain.ProviderCodex), "Dockerfile")` pre-refactor, so it resolves to the same codex-subdir path under the new layout. Fresh `mage testPkg ./internal/cli` run: 112 tests pass, 72.6% coverage, gofumpt clean. No Codex regression.
+
+3. **Build-cache subdir collision — REFUTED.** `contextDir := filepath.Join(paths.BuildCacheDir, string(provider))` at `operator_helpers.go:73` uses the provider enum as subdir key. `TestOpenImagesServiceCodexContextWritesToCodexSubdir` at `claude_image_test.go:97-117` asserts the Codex call creates `.../codex/Dockerfile` AND no `.../claude/Dockerfile` exists afterward — explicit anti-collision guard. Test passes in the fresh mage run.
+
+4. **Unused `claudeImageRepository` / `claudeImageTag` helpers — REFUTED.** Both called at `operator_helpers.go:99-100` inside the `domain.ProviderClaude` switch case. `TestOpenImagesServiceClaudeContextWritesDockerfile` at `claude_image_test.go:75-95` exercises the Claude branch and passes. The gopls "unused" flag referenced in the worklog is a false positive from switch-branch static analysis; runtime coverage confirms reachability.
+
+5. **`VALV_CLAUDE_IMAGE` env parsing — REFUTED.** `claudeImageRef()` at `claude_image.go:13-25` mirrors `codexImageRef()` at `codex.go:273-285` byte-for-byte (modulo default repo). Eight dedicated tests in `claude_image_test.go:15-73` cover: empty env → `valv-claude:dev`; `repo:tag` override → parsed; `repo` without tag → empty tag parsed; `claudeImageRepository()` default + override; `claudeImageTag()` default + override + fallback when override lacks tag. All pass.
+
+6. **Resolver-nil Claude branch — REFUTED.** `imagesservice.New` at `internal/services/images/service.go:210-213` auto-assigns a resolver only when `resolver == nil && provider == domain.ProviderCodex`. For `ProviderClaude` with `Resolver: nil`, the resolver stays nil — a valid pinned-version configuration. `TestOpenImagesServiceClaudeContextWritesDockerfile` constructs the Claude service and passes; no `imagesservice.New` error.
+
+7. **Closure double-close — REFUTED (non-regression).** The returned closure `func() { _ = store.Close() }` inherits the same double-close semantics as the pre-change `openImagesService` and the sibling `openManageService` / `openGlobalSwitchService`. `modernc.org/sqlite`'s `Close` tolerance is unchanged by Unit 4.2; no new double-close risk introduced.
+
+8. **Unsupported-provider error message — REFUTED.** `fmt.Errorf("initialize image service: unsupported provider %q", provider)` at `operator_helpers.go:104`. `TestOpenImagesServiceUnsupportedProvider` at `claude_image_test.go:119-135` asserts via `strings.Contains(err.Error(), "unsupported provider")` — substring match, future-safe. Test passes.
+
+9. **gofumpt / race / coverage — REFUTED.** Fresh `mage testPkg ./internal/cli` output: `[PKG PASS] github.com/evanmschultz/valv/internal/cli (90.39s)`, 112 tests passed, 72.6% coverage, coverage threshold met, gofumpt clean, `-race` unconditional. No Codex test deleted or silently weakened.
+
+10. **`manage.go` caller update correctness — REFUTED.** `runManageUpdate` at `manage.go:1090` now calls `openImagesService(cmd, paths, domain.ProviderCodex)`. Unit 4.3 will generalize further; Unit 4.2 preserves Codex-only behavior. Mage test confirms all existing `runManageUpdate` coverage stays green.
+
+### Summary
+
+All ten attack surfaces REFUTED. No counterexample constructed. No BLOCKER. Unit 4.2 at `e3869f6` passes falsification review.
+
+### Unknowns routed
+
+None.
