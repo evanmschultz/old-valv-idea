@@ -73,7 +73,7 @@ func (f fakeStore) UpsertProjectBinding(context.Context, domain.ProjectBinding) 
 	panic("unexpected call")
 }
 
-func (f fakeStore) BindingByProjectID(context.Context, string) (domain.ProjectBinding, error) {
+func (f fakeStore) BindingByProjectID(context.Context, string, domain.Provider) (domain.ProjectBinding, error) {
 	return f.binding, f.bindingErr
 }
 

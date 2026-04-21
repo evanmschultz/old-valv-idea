@@ -327,11 +327,12 @@ func (s *Store) UpsertProjectBinding(ctx context.Context, binding domain.Project
 	return binding, nil
 }
 
-func (s *Store) BindingByProjectID(ctx context.Context, projectID string) (domain.ProjectBinding, error) {
+func (s *Store) BindingByProjectID(ctx context.Context, projectID string, provider domain.Provider) (domain.ProjectBinding, error) {
 	row := s.db.QueryRowContext(
 		ctx,
-		`SELECT project_id, profile_id, provider, created_at, modified_at FROM project_bindings WHERE project_id = ?`,
+		`SELECT project_id, profile_id, provider, created_at, modified_at FROM project_bindings WHERE project_id = ? AND provider = ?`,
 		projectID,
+		string(provider),
 	)
 	var binding domain.ProjectBinding
 	var providerValue string

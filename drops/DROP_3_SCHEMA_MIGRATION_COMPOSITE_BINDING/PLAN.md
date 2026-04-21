@@ -34,7 +34,7 @@ Migrate the `project_bindings` table to a composite primary key `(project_id, pr
 
 ### Unit 3.1 — BindingRepository composite-key signature + call-site threading
 
-- **State:** todo
+- **State:** done
 - **Paths:**
   - `internal/domain/repository.go` (edit — `BindingRepository.BindingByProjectID` gains trailing `Provider` argument)
   - `internal/adapters/sqlite/store.go` (edit — `Store.BindingByProjectID` signature + `WHERE project_id = ? AND provider = ?` filter; do NOT touch `UpsertProjectBinding` or `Bootstrap` in this unit)

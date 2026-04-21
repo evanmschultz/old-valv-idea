@@ -79,7 +79,7 @@ func TestStoreProfileAndBindingLifecycle(t *testing.T) {
 		t.Fatalf("UpsertProjectBinding() error = %v", err)
 	}
 
-	fetched, err := store.BindingByProjectID(context.Background(), project.ID)
+	fetched, err := store.BindingByProjectID(context.Background(), project.ID, domain.ProviderCodex)
 	if err != nil {
 		t.Fatalf("BindingByProjectID() error = %v", err)
 	}
@@ -175,7 +175,7 @@ func TestStoreNotFoundErrors(t *testing.T) {
 	if _, err := store.ProfileByID(context.Background(), "missing"); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("ProfileByID() error = %v, want domain.ErrNotFound", err)
 	}
-	if _, err := store.BindingByProjectID(context.Background(), "missing"); !errors.Is(err, domain.ErrNotFound) {
+	if _, err := store.BindingByProjectID(context.Background(), "missing", domain.ProviderCodex); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("BindingByProjectID() error = %v, want domain.ErrNotFound", err)
 	}
 	if _, err := store.RuntimeByID(context.Background(), "missing"); !errors.Is(err, domain.ErrNotFound) {

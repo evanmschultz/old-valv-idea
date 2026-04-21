@@ -213,7 +213,7 @@ func (s Service) resolveBinding(ctx context.Context, cwd string) (resolvedLaunch
 		return resolvedLaunchBinding{}, fmt.Errorf("run codex launch service: lookup project %q: %w", projectResult.Root, err)
 	}
 
-	binding, err := s.store.BindingByProjectID(ctx, projectRecord.ID)
+	binding, err := s.store.BindingByProjectID(ctx, projectRecord.ID, domain.ProviderCodex)
 	if err != nil {
 		if errors.Is(err, domain.ErrNotFound) {
 			return resolvedLaunchBinding{}, fmt.Errorf("run codex launch service: project %q: %w", projectRecord.Root, domain.ErrUnboundProject)

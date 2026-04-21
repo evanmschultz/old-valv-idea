@@ -76,7 +76,7 @@ func TestManageAccountAddCreatesIsolatedNamedAccountAndBindsProject(t *testing.T
 	if err != nil {
 		t.Fatalf("ProjectByRoot() error = %v", err)
 	}
-	binding, err := store.BindingByProjectID(context.Background(), project.ID)
+	binding, err := store.BindingByProjectID(context.Background(), project.ID, domain.ProviderCodex)
 	if err != nil {
 		t.Fatalf("BindingByProjectID() error = %v", err)
 	}

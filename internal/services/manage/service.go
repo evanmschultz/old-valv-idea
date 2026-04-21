@@ -237,7 +237,7 @@ func (s Service) Status(ctx context.Context, startPath string) (StatusResult, er
 		return StatusResult{}, fmt.Errorf("manage status: lookup project %q: %w", projectResult.Root, err)
 	}
 
-	binding, err := s.store.BindingByProjectID(ctx, projectRecord.ID)
+	binding, err := s.store.BindingByProjectID(ctx, projectRecord.ID, domain.ProviderCodex)
 	if err != nil {
 		if errors.Is(err, domain.ErrNotFound) {
 			return StatusResult{}, fmt.Errorf("manage status: project %q: %w", projectRecord.Root, domain.ErrUnboundProject)
