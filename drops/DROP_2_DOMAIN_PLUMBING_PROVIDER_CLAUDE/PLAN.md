@@ -48,7 +48,7 @@ Extend the `Provider` domain type with `ProviderClaude` and thread compile-safe 
 
 ### Unit 2.2 — Explicit `ProviderClaude` branches in `internal/cli/account_auth.go` + new unit test
 
-- `state`: `todo`
+- `state`: `done`
 - `paths`:
   - `internal/cli/account_auth.go` (edit)
   - `internal/cli/account_auth_test.go` (edit — file already exists at 226 lines with Codex-path tests; extend with ProviderClaude table-driven coverage while preserving existing Codex coverage; builder must Read first, never Write-clobber)

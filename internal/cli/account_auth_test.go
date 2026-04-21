@@ -178,6 +178,51 @@ func TestSystemCodexAccountAuthRunnerLogoutUsesCODEXHOME(t *testing.T) {
 	}
 }
 
+func TestProviderClaudeAccountAuthStubs(t *testing.T) {
+	t.Parallel()
+
+	dispatchers := []struct {
+		name string
+		call func(cmd *cobra.Command, account domain.Profile) error
+	}{
+		{
+			name: "ensureManagedAccountReady",
+			call: func(cmd *cobra.Command, account domain.Profile) error {
+				return ensureManagedAccountReady(cmd, domain.ProviderClaude, account, accountAuthOptions{})
+			},
+		},
+		{
+			name: "logoutManagedAccount",
+			call: func(cmd *cobra.Command, account domain.Profile) error {
+				return logoutManagedAccount(cmd, domain.ProviderClaude, account)
+			},
+		},
+		{
+			name: "loginManagedAccount",
+			call: func(cmd *cobra.Command, account domain.Profile) error {
+				return loginManagedAccount(cmd, domain.ProviderClaude, account)
+			},
+		},
+	}
+
+	for _, tc := range dispatchers {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cmd := &cobra.Command{}
+			cmd.SetContext(context.Background())
+			cmd.SetIn(bytes.NewBuffer(nil))
+			cmd.SetOut(&bytes.Buffer{})
+			cmd.SetErr(&bytes.Buffer{})
+
+			account := domain.Profile{Provider: domain.ProviderClaude}
+			if err := tc.call(cmd, account); err != nil {
+				t.Fatalf("%s(ProviderClaude) error = %v, want nil", tc.name, err)
+			}
+		})
+	}
+}
+
 func installFakeHostCodex(t *testing.T, mode string) string {
 	t.Helper()
 

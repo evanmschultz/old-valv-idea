@@ -36,6 +36,8 @@ func ensureManagedAccountReady(cmd *cobra.Command, provider domain.Provider, acc
 	switch provider {
 	case domain.ProviderCodex:
 		return ensureCodexAccountReady(cmd, account, options)
+	case domain.ProviderClaude:
+		return nil
 	default:
 		return nil
 	}
@@ -45,6 +47,8 @@ func logoutManagedAccount(cmd *cobra.Command, provider domain.Provider, account 
 	switch provider {
 	case domain.ProviderCodex:
 		return logoutCodexAccount(cmd, account)
+	case domain.ProviderClaude:
+		return nil
 	default:
 		return nil
 	}
@@ -54,6 +58,8 @@ func loginManagedAccount(cmd *cobra.Command, provider domain.Provider, account d
 	switch provider {
 	case domain.ProviderCodex:
 		return loginCodexAccount(cmd, account)
+	case domain.ProviderClaude:
+		return nil
 	default:
 		return nil
 	}
