@@ -322,3 +322,308 @@ func mustProfile(t *testing.T, provider domain.Provider, name, home string) doma
 	}
 	return profile
 }
+
+func TestStoreCompositeBindingsCoexistByProvider(t *testing.T) {
+	t.Parallel()
+
+	store := newBootstrappedStore(t)
+	project, _ := domain.NewProject("/tmp/example/project")
+	codexProfile := mustProfile(t, domain.ProviderCodex, "codex-dev", "/tmp/valv/providers/codex/dev")
+	claudeProfile := mustProfile(t, domain.ProviderClaude, "claude-dev", "/tmp/valv/providers/claude/dev")
+
+	if _, err := store.CreateProject(context.Background(), project); err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	if _, err := store.CreateProfile(context.Background(), codexProfile); err != nil {
+		t.Fatalf("CreateProfile(codex) error = %v", err)
+	}
+	if _, err := store.CreateProfile(context.Background(), claudeProfile); err != nil {
+		t.Fatalf("CreateProfile(claude) error = %v", err)
+	}
+
+	codexBinding, err := domain.NewProjectBinding(project.ID, codexProfile.ID, domain.ProviderCodex)
+	if err != nil {
+		t.Fatalf("NewProjectBinding(codex) error = %v", err)
+	}
+	if _, err := store.UpsertProjectBinding(context.Background(), codexBinding); err != nil {
+		t.Fatalf("UpsertProjectBinding(codex) error = %v", err)
+	}
+
+	claudeBinding, err := domain.NewProjectBinding(project.ID, claudeProfile.ID, domain.ProviderClaude)
+	if err != nil {
+		t.Fatalf("NewProjectBinding(claude) error = %v", err)
+	}
+	if _, err := store.UpsertProjectBinding(context.Background(), claudeBinding); err != nil {
+		t.Fatalf("UpsertProjectBinding(claude) error = %v", err)
+	}
+
+	fetchedCodex, err := store.BindingByProjectID(context.Background(), project.ID, domain.ProviderCodex)
+	if err != nil {
+		t.Fatalf("BindingByProjectID(codex) error = %v", err)
+	}
+	if fetchedCodex.ProfileID != codexProfile.ID {
+		t.Fatalf("BindingByProjectID(codex).ProfileID = %q, want %q", fetchedCodex.ProfileID, codexProfile.ID)
+	}
+	if fetchedCodex.Provider != domain.ProviderCodex {
+		t.Fatalf("BindingByProjectID(codex).Provider = %q, want %q", fetchedCodex.Provider, domain.ProviderCodex)
+	}
+
+	fetchedClaude, err := store.BindingByProjectID(context.Background(), project.ID, domain.ProviderClaude)
+	if err != nil {
+		t.Fatalf("BindingByProjectID(claude) error = %v", err)
+	}
+	if fetchedClaude.ProfileID != claudeProfile.ID {
+		t.Fatalf("BindingByProjectID(claude).ProfileID = %q, want %q", fetchedClaude.ProfileID, claudeProfile.ID)
+	}
+	if fetchedClaude.Provider != domain.ProviderClaude {
+		t.Fatalf("BindingByProjectID(claude).Provider = %q, want %q", fetchedClaude.Provider, domain.ProviderClaude)
+	}
+}
+
+func TestStoreMigrationPreservesLegacyCodexBinding(t *testing.T) {
+	t.Parallel()
+
+	name := strings.ReplaceAll(strings.ToLower(t.Name()), "/", "-")
+	db, err := Open(OpenOptions{URI: fmt.Sprintf("file:%s?mode=memory&cache=shared", name)})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = db.Close()
+	})
+
+	ctx := context.Background()
+	legacyDDL := []string{
+		`CREATE TABLE projects (
+			id TEXT PRIMARY KEY,
+			root TEXT NOT NULL UNIQUE,
+			name TEXT NOT NULL,
+			created_at TEXT NOT NULL
+		);`,
+		`CREATE TABLE profiles (
+			id TEXT PRIMARY KEY,
+			provider TEXT NOT NULL,
+			name TEXT NOT NULL,
+			home_path TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			UNIQUE(provider, name)
+		);`,
+		`CREATE TABLE project_bindings (
+			project_id TEXT PRIMARY KEY,
+			profile_id TEXT NOT NULL,
+			provider TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			modified_at TEXT NOT NULL,
+			FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+			FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+		);`,
+	}
+	for _, statement := range legacyDDL {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			t.Fatalf("legacy DDL exec error = %v", err)
+		}
+	}
+
+	legacyProjectID := "legacy-project-id"
+	legacyProfileID := "legacy-profile-id"
+	originalCreatedAt := "2025-01-02T03:04:05Z"
+	originalModifiedAt := "2025-01-02T03:04:05Z"
+
+	if _, err := db.ExecContext(
+		ctx,
+		`INSERT INTO projects (id, root, name, created_at) VALUES (?, ?, ?, ?)`,
+		legacyProjectID,
+		"/tmp/example/legacy",
+		"legacy",
+		"2025-01-01T00:00:00Z",
+	); err != nil {
+		t.Fatalf("seed projects row error = %v", err)
+	}
+	if _, err := db.ExecContext(
+		ctx,
+		`INSERT INTO profiles (id, provider, name, home_path, created_at) VALUES (?, ?, ?, ?, ?)`,
+		legacyProfileID,
+		string(domain.ProviderCodex),
+		"legacy-codex",
+		"/tmp/valv/providers/codex/legacy",
+		"2025-01-01T00:00:00Z",
+	); err != nil {
+		t.Fatalf("seed profiles row error = %v", err)
+	}
+	if _, err := db.ExecContext(
+		ctx,
+		`INSERT INTO project_bindings (project_id, profile_id, provider, created_at, modified_at) VALUES (?, ?, ?, ?, ?)`,
+		legacyProjectID,
+		legacyProfileID,
+		string(domain.ProviderCodex),
+		originalCreatedAt,
+		originalModifiedAt,
+	); err != nil {
+		t.Fatalf("seed legacy binding row error = %v", err)
+	}
+
+	var preVersion int
+	if err := db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&preVersion); err != nil {
+		t.Fatalf("pre-bootstrap user_version error = %v", err)
+	}
+	if preVersion != 0 {
+		t.Fatalf("pre-bootstrap user_version = %d, want 0", preVersion)
+	}
+
+	store := NewStoreFromDB(db)
+	if err := store.Bootstrap(ctx); err != nil {
+		t.Fatalf("Bootstrap() error = %v", err)
+	}
+
+	var postVersion int
+	if err := db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&postVersion); err != nil {
+		t.Fatalf("post-bootstrap user_version error = %v", err)
+	}
+	if postVersion != 1 {
+		t.Fatalf("post-bootstrap user_version = %d, want 1", postVersion)
+	}
+
+	binding, err := store.BindingByProjectID(ctx, legacyProjectID, domain.ProviderCodex)
+	if err != nil {
+		t.Fatalf("BindingByProjectID() error = %v", err)
+	}
+	if binding.ProfileID != legacyProfileID {
+		t.Fatalf("BindingByProjectID().ProfileID = %q, want %q", binding.ProfileID, legacyProfileID)
+	}
+	if got, want := binding.CreatedAt.UTC().Format(time.RFC3339Nano), originalCreatedAt; got != want {
+		t.Fatalf("BindingByProjectID().CreatedAt = %q, want %q", got, want)
+	}
+	if got, want := binding.ModifiedAt.UTC().Format(time.RFC3339Nano), originalModifiedAt; got != want {
+		t.Fatalf("BindingByProjectID().ModifiedAt = %q, want %q", got, want)
+	}
+}
+
+func TestStoreBootstrapIsIdempotentAfterMigration(t *testing.T) {
+	t.Parallel()
+
+	name := strings.ReplaceAll(strings.ToLower(t.Name()), "/", "-")
+	db, err := Open(OpenOptions{URI: fmt.Sprintf("file:%s?mode=memory&cache=shared", name)})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = db.Close()
+	})
+
+	ctx := context.Background()
+	legacyDDL := []string{
+		`CREATE TABLE projects (
+			id TEXT PRIMARY KEY,
+			root TEXT NOT NULL UNIQUE,
+			name TEXT NOT NULL,
+			created_at TEXT NOT NULL
+		);`,
+		`CREATE TABLE profiles (
+			id TEXT PRIMARY KEY,
+			provider TEXT NOT NULL,
+			name TEXT NOT NULL,
+			home_path TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			UNIQUE(provider, name)
+		);`,
+		`CREATE TABLE project_bindings (
+			project_id TEXT PRIMARY KEY,
+			profile_id TEXT NOT NULL,
+			provider TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			modified_at TEXT NOT NULL,
+			FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+			FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+		);`,
+	}
+	for _, statement := range legacyDDL {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			t.Fatalf("legacy DDL exec error = %v", err)
+		}
+	}
+
+	legacyProjectID := "idempotent-project-id"
+	legacyProfileID := "idempotent-profile-id"
+	originalCreatedAt := "2025-02-03T04:05:06Z"
+	originalModifiedAt := "2025-02-03T04:05:06Z"
+
+	if _, err := db.ExecContext(
+		ctx,
+		`INSERT INTO projects (id, root, name, created_at) VALUES (?, ?, ?, ?)`,
+		legacyProjectID,
+		"/tmp/example/idempotent",
+		"idempotent",
+		"2025-01-01T00:00:00Z",
+	); err != nil {
+		t.Fatalf("seed projects row error = %v", err)
+	}
+	if _, err := db.ExecContext(
+		ctx,
+		`INSERT INTO profiles (id, provider, name, home_path, created_at) VALUES (?, ?, ?, ?, ?)`,
+		legacyProfileID,
+		string(domain.ProviderCodex),
+		"idempotent-codex",
+		"/tmp/valv/providers/codex/idempotent",
+		"2025-01-01T00:00:00Z",
+	); err != nil {
+		t.Fatalf("seed profiles row error = %v", err)
+	}
+	if _, err := db.ExecContext(
+		ctx,
+		`INSERT INTO project_bindings (project_id, profile_id, provider, created_at, modified_at) VALUES (?, ?, ?, ?, ?)`,
+		legacyProjectID,
+		legacyProfileID,
+		string(domain.ProviderCodex),
+		originalCreatedAt,
+		originalModifiedAt,
+	); err != nil {
+		t.Fatalf("seed legacy binding row error = %v", err)
+	}
+
+	store := NewStoreFromDB(db)
+	if err := store.Bootstrap(ctx); err != nil {
+		t.Fatalf("first Bootstrap() error = %v", err)
+	}
+
+	firstBinding, err := store.BindingByProjectID(ctx, legacyProjectID, domain.ProviderCodex)
+	if err != nil {
+		t.Fatalf("first BindingByProjectID() error = %v", err)
+	}
+
+	if err := store.Bootstrap(ctx); err != nil {
+		t.Fatalf("second Bootstrap() error = %v", err)
+	}
+
+	var stagingCount int
+	if err := db.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='project_bindings_new'`,
+	).Scan(&stagingCount); err != nil {
+		t.Fatalf("sqlite_master probe error = %v", err)
+	}
+	if stagingCount != 0 {
+		t.Fatalf("project_bindings_new table count = %d, want 0", stagingCount)
+	}
+
+	var bindingCount int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM project_bindings`).Scan(&bindingCount); err != nil {
+		t.Fatalf("project_bindings count error = %v", err)
+	}
+	if bindingCount != 1 {
+		t.Fatalf("project_bindings COUNT(*) = %d, want 1", bindingCount)
+	}
+
+	secondBinding, err := store.BindingByProjectID(ctx, legacyProjectID, domain.ProviderCodex)
+	if err != nil {
+		t.Fatalf("second BindingByProjectID() error = %v", err)
+	}
+	if secondBinding.ProfileID != firstBinding.ProfileID {
+		t.Fatalf("ProfileID changed across bootstrap: got %q, want %q", secondBinding.ProfileID, firstBinding.ProfileID)
+	}
+	if !secondBinding.CreatedAt.Equal(firstBinding.CreatedAt) {
+		t.Fatalf("CreatedAt changed across bootstrap: got %v, want %v", secondBinding.CreatedAt, firstBinding.CreatedAt)
+	}
+	if !secondBinding.ModifiedAt.Equal(firstBinding.ModifiedAt) {
+		t.Fatalf("ModifiedAt changed across bootstrap: got %v, want %v", secondBinding.ModifiedAt, firstBinding.ModifiedAt)
+	}
+}

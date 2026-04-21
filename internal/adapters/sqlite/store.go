@@ -55,11 +55,12 @@ func (s *Store) Bootstrap(ctx context.Context) error {
 			UNIQUE(provider, name)
 		);`,
 		`CREATE TABLE IF NOT EXISTS project_bindings (
-			project_id TEXT PRIMARY KEY,
+			project_id TEXT NOT NULL,
 			profile_id TEXT NOT NULL,
 			provider TEXT NOT NULL,
 			created_at TEXT NOT NULL,
 			modified_at TEXT NOT NULL,
+			PRIMARY KEY (project_id, provider),
 			FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
 			FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE
 		);`,
@@ -107,7 +108,103 @@ func (s *Store) Bootstrap(ctx context.Context) error {
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("bootstrap sqlite store: commit tx: %w", err)
 	}
+
+	return s.migrateProjectBindings(ctx)
+}
+
+func (s *Store) migrateProjectBindings(ctx context.Context) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("bootstrap sqlite store: migrate project_bindings: begin tx: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	var userVersion int
+	if err = tx.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&userVersion); err != nil {
+		return fmt.Errorf("bootstrap sqlite store: read user_version: %w", err)
+	}
+	if userVersion >= 1 {
+		if err = tx.Commit(); err != nil {
+			return fmt.Errorf("bootstrap sqlite store: migrate project_bindings: commit tx: %w", err)
+		}
+		return nil
+	}
+
+	legacy, err := isLegacyProjectBindingsShape(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if legacy {
+		rebuild := []string{
+			`CREATE TABLE project_bindings_new (
+				project_id TEXT NOT NULL,
+				profile_id TEXT NOT NULL,
+				provider TEXT NOT NULL,
+				created_at TEXT NOT NULL,
+				modified_at TEXT NOT NULL,
+				PRIMARY KEY (project_id, provider),
+				FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+				FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+			);`,
+			`INSERT INTO project_bindings_new (project_id, profile_id, provider, created_at, modified_at)
+			 SELECT project_id, profile_id, provider, created_at, modified_at FROM project_bindings;`,
+			`DROP TABLE project_bindings;`,
+			`ALTER TABLE project_bindings_new RENAME TO project_bindings;`,
+		}
+		for _, statement := range rebuild {
+			if _, err = tx.ExecContext(ctx, statement); err != nil {
+				return fmt.Errorf("bootstrap sqlite store: migrate project_bindings: exec rebuild: %w", err)
+			}
+		}
+	}
+
+	if _, err = tx.ExecContext(ctx, `PRAGMA user_version = 1`); err != nil {
+		return fmt.Errorf("bootstrap sqlite store: set user_version: %w", err)
+	}
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("bootstrap sqlite store: migrate project_bindings: commit tx: %w", err)
+	}
 	return nil
+}
+
+// isLegacyProjectBindingsShape returns true when project_bindings is still shaped with a
+// single-column PK on project_id (pk=1 on project_id, pk=0 on provider). A composite PK
+// reports pk>0 on both project_id and provider; treat that as already-migrated.
+func isLegacyProjectBindingsShape(ctx context.Context, tx *sql.Tx) (bool, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT name, pk FROM pragma_table_info('project_bindings')`)
+	if err != nil {
+		return false, fmt.Errorf("bootstrap sqlite store: probe project_bindings shape: %w", err)
+	}
+	defer rows.Close()
+
+	var projectIDPK, providerPK int
+	var sawProjectID, sawProvider bool
+	for rows.Next() {
+		var name string
+		var pk int
+		if err := rows.Scan(&name, &pk); err != nil {
+			return false, fmt.Errorf("bootstrap sqlite store: probe project_bindings shape: scan: %w", err)
+		}
+		switch name {
+		case "project_id":
+			projectIDPK = pk
+			sawProjectID = true
+		case "provider":
+			providerPK = pk
+			sawProvider = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("bootstrap sqlite store: probe project_bindings shape: %w", err)
+	}
+	if !sawProjectID || !sawProvider {
+		return false, nil
+	}
+	return projectIDPK == 1 && providerPK == 0, nil
 }
 
 func (s *Store) CreateProject(ctx context.Context, project domain.Project) (domain.Project, error) {
@@ -312,9 +409,8 @@ func (s *Store) UpsertProjectBinding(ctx context.Context, binding domain.Project
 		ctx,
 		`INSERT INTO project_bindings (project_id, profile_id, provider, created_at, modified_at)
 		 VALUES (?, ?, ?, ?, ?)
-		 ON CONFLICT(project_id) DO UPDATE SET
+		 ON CONFLICT(project_id, provider) DO UPDATE SET
 		   profile_id = excluded.profile_id,
-		   provider = excluded.provider,
 		   modified_at = excluded.modified_at`,
 		binding.ProjectID,
 		binding.ProfileID,

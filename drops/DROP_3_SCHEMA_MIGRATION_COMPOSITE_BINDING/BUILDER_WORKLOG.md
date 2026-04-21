@@ -34,3 +34,23 @@ Append a `## Unit N.M — Round K` section per build attempt. See `main/drops/WO
 ## Hylla Feedback
 
 N/A — task touched only Go files whose committed state was already audited by the planner in Unit 3.1's "Committed-state audit" section of `PLAN.md`. Builder used `Read` on the 9 scoped files (the planner's path list was exact: no surprise call sites, all line numbers matched). No Hylla queries attempted, no fallbacks needed.
+
+## Unit 3.2 — Round 1
+
+- **Builder:** go-builder-agent
+- **Started:** 2026-04-20
+- **Files touched:**
+  - `internal/adapters/sqlite/store.go` — (1) DDL for `project_bindings` rewritten in the existing `Bootstrap` DDL-loop statements slice to composite-PK shape (`PRIMARY KEY (project_id, provider)`, two `FOREIGN KEY` clauses preserved); (2) new `migrateProjectBindings` method invoked at the tail of `Bootstrap` after the DDL-loop transaction commits; (3) migration opens a second `BeginTx`, reads `PRAGMA user_version` via `tx.QueryRowContext` as the FIRST executed statement inside the tx, short-circuits on `user_version >= 1`, probes `pragma_table_info('project_bindings')` via `isLegacyProjectBindingsShape` helper (inspects `name` + `pk` columns: `pk=1` on `project_id` with `pk=0` on `provider` → legacy), runs the `CREATE project_bindings_new` → `INSERT … SELECT` → `DROP project_bindings` → `ALTER … RENAME` rebuild when legacy-shaped, sets `PRAGMA user_version = 1`, commits; (4) `UpsertProjectBinding` ON CONFLICT target rewritten from `(project_id)` to `(project_id, provider)` — the stale `provider = excluded.provider` SET clause removed because provider is now part of the conflict key so it never differs on update.
+  - `internal/adapters/sqlite/store_test.go` — added `TestStoreCompositeBindingsCoexistByProvider`, `TestStoreMigrationPreservesLegacyCodexBinding`, `TestStoreBootstrapIsIdempotentAfterMigration`. Legacy-preservation and idempotence tests use raw `*sql.DB` via `sqlite.Open` (connection-level `foreign_keys = ON`), pre-seed `projects` + `profiles` rows as FK prerequisites, then seed a legacy `project_bindings` row with the single-column PK shape before invoking `Store.Bootstrap`.
+- **Mage targets run:**
+  - `mage testPkg ./internal/adapters/sqlite` — pass (19 tests, 78.5% coverage; `-race -cover -count=1`)
+  - `mage test` — pass (319 tests across 18 packages; `TestStoreForeignKeysRejectInvalidBindings` still green — FK enforcement survives the rebuild; all per-package coverages ≥ 60% floor; sqlite package 78.5% clears the 70% acceptance floor)
+- **Design notes:**
+  - Migration-tx shape: a second `BeginTx` is opened AFTER the DDL-loop tx commits. The very first statement inside that second tx is `PRAGMA user_version` (via `tx.QueryRowContext`). The probe, conditional rebuild (`CREATE` + `INSERT SELECT` + `DROP` + `ALTER RENAME`), and `PRAGMA user_version = 1` all run inside this same tx. Commit completes the migration atomically. Bootstrap #2 hits the `user_version >= 1` branch on its first statement and commits a no-op tx, so the idempotence test observes no staging table and no row mutation.
+  - FK handling during rebuild: no tables reference `project_bindings` (FKs point FROM project_bindings TO projects/profiles), so `DROP TABLE project_bindings` does not violate any inbound FK even with `foreign_keys = ON` at the connection level. The rebuild runs entirely with FK on — no `PRAGMA foreign_keys = OFF` toggle needed. The `TestStoreMigrationPreservesLegacyCodexBinding` test explicitly keeps `foreign_keys = ON` throughout by pre-seeding `projects` + `profiles` rows that match the legacy binding's FKs, proving the rebuild survives FK enforcement.
+  - Legacy-shape probe via `pragma_table_info`: structured column metadata from `SELECT name, pk FROM pragma_table_info('project_bindings')` is unaffected by whitespace, column-order permutations, or DDL comment noise, so the probe is robust across any past DDL formatting. The single short comment on `isLegacyProjectBindingsShape` documents the pk-column interpretation (pk=1 on project_id alone + pk=0 on provider = legacy; pk>0 on both = already composite).
+- **Unknowns:** none routed back.
+
+## Hylla Feedback
+
+N/A — task touched only Go files whose committed state was already audited in the Unit 3.2 paths section of the drop `PLAN.md`. Builder used `Read` on `store.go`, `store_test.go`, `open.go`, and `internal/domain/model.go` (all committed; paths exact). No Hylla queries attempted, no fallbacks needed.
