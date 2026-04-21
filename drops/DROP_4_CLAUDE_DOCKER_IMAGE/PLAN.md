@@ -1,13 +1,13 @@
 # DROP_4 — CLAUDE DOCKER IMAGE
 
-**State:** building
+**State:** done
 **Blocked by:** DROP_3 (done)
 **Paths (expected):** `internal/services/images/` (edit — add Claude Dockerfile + context writer + constructor-tolerant resolver handling), `internal/cli/` (edit — `claudeImageRepository` / `claudeImageTag` helpers, extend `openImagesService` to dispatch on provider, wire `valv manage update --provider claude`), tests alongside each
 **Packages (expected):** `internal/services/images` (add `DefaultClaudeDockerfile` + `WriteDefaultClaudeContext` + make `Resolver` optional when the caller supplies a pinned version), `internal/cli` (provider-dispatch in `openImagesService` + Claude repository/tag helpers + `runManageUpdate` Claude branch)
 **PLAN.md ref:** main/PLAN.md → DROP_4_CLAUDE_DOCKER_IMAGE row
 **Workflow:** main/drops/WORKFLOW.md
 **Started:** 2026-04-20
-**Closed:** —
+**Closed:** 2026-04-21
 
 ## Scope
 
