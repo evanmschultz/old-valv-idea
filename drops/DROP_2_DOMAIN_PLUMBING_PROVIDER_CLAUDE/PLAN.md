@@ -1,13 +1,13 @@
 # DROP_2 — DOMAIN PLUMBING PROVIDER CLAUDE
 
-**State:** building
+**State:** done
 **Blocked by:** —
 **Paths (expected):** `internal/domain/provider.go` (edit), `internal/domain/account_auth.go` (edit), `internal/domain/*_test.go` (edits + new tests), `internal/cli/manage.go` (edit — `allProviders`), plus any compile-sibling touches forced by the new enum value (`ParseProvider`, `DefaultHostProfile` stub, provider switch exhaustiveness)
 **Packages (expected):** `internal/domain` (real edits — new enum value + stub), `internal/cli` (edit — `allProviders` extended), provider adapter packages NOT touched this drop (Codex unchanged, Claude adapter arrives in DROP_5)
 **PLAN.md ref:** main/PLAN.md → DROP_2_DOMAIN_PLUMBING_PROVIDER_CLAUDE row
 **Workflow:** main/drops/WORKFLOW.md
 **Started:** 2026-04-19
-**Closed:** —
+**Closed:** 2026-04-20
 
 ## Scope
 
