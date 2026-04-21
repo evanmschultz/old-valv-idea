@@ -1,13 +1,13 @@
 # DROP_3 — SCHEMA MIGRATION COMPOSITE BINDING
 
-**State:** building
+**State:** done
 **Blocked by:** —
 **Paths (expected):** `internal/adapters/sqlite/store.go` (edit — migration + `BindingRepository` methods), `internal/adapters/sqlite/store_test.go` (edit — migration and repository tests), plus any call-site updates where the binding row shape is assumed to be project-keyed
 **Packages (expected):** `internal/adapters/sqlite` (real edits — schema + repository), `internal/domain` (possible edit — if `ProjectBinding` needs a `Provider` field), plus any downstream caller (`internal/services/*`, `internal/cli/*`) that indexes bindings by `project_id` alone
 **PLAN.md ref:** main/PLAN.md → DROP_3_SCHEMA_MIGRATION_COMPOSITE_BINDING row
 **Workflow:** main/drops/WORKFLOW.md
 **Started:** 2026-04-20
-**Closed:** —
+**Closed:** 2026-04-20
 
 ## Scope
 
