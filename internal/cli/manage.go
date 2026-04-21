@@ -1066,6 +1066,7 @@ Output fields:
 		Example: strings.TrimSpace(`
 valv manage update
 valv manage update codex
+valv manage update claude
 `),
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -1080,13 +1081,21 @@ valv manage update codex
 }
 
 func runManageUpdate(cmd *cobra.Command, paths config.Paths, opts *rootOptions, provider domain.Provider) error {
-	if provider != domain.ProviderCodex {
-		return fmt.Errorf("manage update: provider %q is not supported yet", provider)
-	}
 	mode, err := commandOutputMode(cmd, opts)
 	if err != nil {
 		return fmt.Errorf("resolve output policy: %w", err)
 	}
+	switch provider {
+	case domain.ProviderCodex:
+		return runManageUpdateCodex(cmd, paths, mode)
+	case domain.ProviderClaude:
+		return runManageUpdateClaude(cmd, paths, mode)
+	default:
+		return fmt.Errorf("manage update: provider %q is not supported yet", provider)
+	}
+}
+
+func runManageUpdateCodex(cmd *cobra.Command, paths config.Paths, mode output.Mode) error {
 	service, closeImages, err := openImagesService(cmd, paths, domain.ProviderCodex)
 	if err != nil {
 		return fmt.Errorf("manage update: initialize image service: %w", err)
@@ -1115,7 +1124,35 @@ func runManageUpdate(cmd *cobra.Command, paths config.Paths, opts *rootOptions, 
 	if result.Action == imagesservice.EnsureActionUpToDate {
 		heading = "Provider image up to date"
 	}
-	return output.WriteRecord(cmd.OutOrStdout(), mode, heading, []output.Field{{Label: "provider", Value: string(provider), Muted: true}, {Label: "image", Value: result.Image.String(), Identifier: true}, {Label: "tags", Value: strings.Join(tagValues, ", "), Muted: true}, {Label: "version", Value: result.Version, Identifier: true}, {Label: "checked at", Value: result.LatestCheckedAt.Format(time.RFC3339), Muted: true}, {Label: "context", Value: result.ContextDir, Muted: true}})
+	return output.WriteRecord(cmd.OutOrStdout(), mode, heading, []output.Field{{Label: "provider", Value: string(domain.ProviderCodex), Muted: true}, {Label: "image", Value: result.Image.String(), Identifier: true}, {Label: "tags", Value: strings.Join(tagValues, ", "), Muted: true}, {Label: "version", Value: result.Version, Identifier: true}, {Label: "checked at", Value: result.LatestCheckedAt.Format(time.RFC3339), Muted: true}, {Label: "context", Value: result.ContextDir, Muted: true}})
+}
+
+func runManageUpdateClaude(cmd *cobra.Command, paths config.Paths, mode output.Mode) error {
+	service, closeImages, err := openImagesService(cmd, paths, domain.ProviderClaude)
+	if err != nil {
+		return fmt.Errorf("manage update: initialize image service: %w", err)
+	}
+	defer closeImages()
+	var result imagesservice.BuildResult
+	err = runWithCLIQuietSpinner(
+		cmd.ErrOrStderr(),
+		"Building provider image",
+		"Provider image built",
+		"Provider image build failed",
+		func() error {
+			var runErr error
+			result, runErr = service.Build(cmd.Context(), imagesservice.BuildRequest{Version: imagesservice.DefaultClaudeCLIVersion})
+			return runErr
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("manage update: %w", err)
+	}
+	tagValues := make([]string, 0, len(result.Tags))
+	for _, tag := range result.Tags {
+		tagValues = append(tagValues, tag.String())
+	}
+	return output.WriteRecord(cmd.OutOrStdout(), mode, "Provider image built", []output.Field{{Label: "provider", Value: string(domain.ProviderClaude), Muted: true}, {Label: "image", Value: result.Image.String(), Identifier: true}, {Label: "tags", Value: strings.Join(tagValues, ", "), Muted: true}, {Label: "version", Value: result.Version, Identifier: true}, {Label: "context", Value: result.ContextDir, Muted: true}})
 }
 
 func newManageCleanupCommand(paths config.Paths, opts *rootOptions) *cobra.Command {

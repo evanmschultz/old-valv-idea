@@ -5,15 +5,19 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
+
 	sqliteadapter "github.com/evanmschultz/valv/internal/adapters/sqlite"
 	"github.com/evanmschultz/valv/internal/config"
 	"github.com/evanmschultz/valv/internal/domain"
 	"github.com/evanmschultz/valv/internal/pathutil"
+	imagesservice "github.com/evanmschultz/valv/internal/services/images"
 )
 
 func TestManageAccountAddCreatesIsolatedNamedAccountAndBindsProject(t *testing.T) {
@@ -256,6 +260,121 @@ func writeTestCodexAuth(t *testing.T, homePath, email, name string) {
 	}
 	if err := os.WriteFile(filepath.Join(homePath, "auth.json"), data, 0o600); err != nil {
 		t.Fatalf("WriteFile(auth.json) error = %v", err)
+	}
+}
+
+func TestRunManageUpdateClaudeBuildsImage(t *testing.T) {
+	paths := testCodexPaths(t)
+	logPath := installFakeDocker(t)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd := newManageCommand(paths, &rootOptions{})
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"update", "claude"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v\nstderr=%s", err, stderr.String())
+	}
+
+	if !strings.Contains(stdout.String(), "Provider image built") {
+		t.Fatalf("unexpected update output: %q", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "provider=claude") {
+		t.Fatalf("unexpected update output %q missing provider=claude", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "image=valv-claude:dev") {
+		t.Fatalf("unexpected update output %q missing image=valv-claude:dev", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "version="+imagesservice.DefaultClaudeCLIVersion) {
+		t.Fatalf("unexpected update output %q missing version=%s", stdout.String(), imagesservice.DefaultClaudeCLIVersion)
+	}
+	for _, want := range []string{"Building provider image", "Provider image built"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want substring %q", stderr.String(), want)
+		}
+	}
+
+	dockerfilePath := filepath.Join(paths.BuildCacheDir, string(domain.ProviderClaude), "Dockerfile")
+	if _, err := os.Stat(dockerfilePath); err != nil {
+		t.Fatalf("Stat(%q) error = %v", dockerfilePath, err)
+	}
+
+	logContent := mustReadFile(t, logPath)
+	wantBuildArg := fmt.Sprintf("--build-arg CLAUDE_VERSION=%s", imagesservice.DefaultClaudeCLIVersion)
+	for _, want := range []string{"buildx build", wantBuildArg, "-t valv-claude:dev", "--label io.valv.provider=claude"} {
+		if !strings.Contains(logContent, want) {
+			t.Fatalf("unexpected docker log %q missing %q", logContent, want)
+		}
+	}
+}
+
+func TestRunManageUpdateCodexRegression(t *testing.T) {
+	for _, args := range [][]string{{"update"}, {"update", "codex"}} {
+		args := args
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			paths := testCodexPaths(t)
+			logPath := installFakeDocker(t)
+			stubCodexVersionResolver(t, "0.117.0")
+
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			cmd := newManageCommand(paths, &rootOptions{})
+			cmd.SetContext(context.Background())
+			cmd.SetOut(&stdout)
+			cmd.SetErr(&stderr)
+			cmd.SetArgs(args)
+
+			if err := cmd.Execute(); err != nil {
+				t.Fatalf("Execute(%v) error = %v\nstderr=%s", args, err, stderr.String())
+			}
+			if !strings.Contains(stdout.String(), "Provider image updated") {
+				t.Fatalf("args=%v unexpected update output: %q", args, stdout.String())
+			}
+			if !strings.Contains(stdout.String(), "provider=codex") {
+				t.Fatalf("args=%v output %q missing provider=codex", args, stdout.String())
+			}
+			for _, want := range []string{"Checking provider image", "Provider image check complete"} {
+				if !strings.Contains(stderr.String(), want) {
+					t.Fatalf("args=%v stderr = %q, want substring %q", args, stderr.String(), want)
+				}
+			}
+
+			dockerfilePath := filepath.Join(paths.BuildCacheDir, string(domain.ProviderCodex), "Dockerfile")
+			if _, err := os.Stat(dockerfilePath); err != nil {
+				t.Fatalf("args=%v Stat(%q) error = %v", args, dockerfilePath, err)
+			}
+
+			logContent := mustReadFile(t, logPath)
+			for _, want := range []string{"build", "--build-arg CODEX_VERSION=0.117.0", "-t valv-codex:dev"} {
+				if !strings.Contains(logContent, want) {
+					t.Fatalf("args=%v unexpected docker log %q missing %q", args, logContent, want)
+				}
+			}
+		})
+	}
+}
+
+func TestRunManageUpdateUnsupportedProvider(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+
+	err := runManageUpdate(cmd, paths, &rootOptions{}, domain.Provider("foo"))
+	if err == nil {
+		t.Fatalf("runManageUpdate(provider=foo) error = nil, want unsupported-provider error")
+	}
+	if !strings.Contains(err.Error(), "not supported yet") {
+		t.Fatalf("runManageUpdate(provider=foo) error = %q, want substring %q", err.Error(), "not supported yet")
+	}
+	if !strings.Contains(err.Error(), `"foo"`) {
+		t.Fatalf("runManageUpdate(provider=foo) error = %q, want provider name in error", err.Error())
 	}
 }
 

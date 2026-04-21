@@ -179,7 +179,7 @@ Update tests:
 
 #### Unit 4.3 — `valv manage update` Claude provider branch (cli package)
 
-**State:** todo
+**State:** done
 **Paths:** `internal/cli/manage.go`, `internal/cli/manage_test.go`
 **Packages:** `internal/cli`
 **Blocked by:** 4.2
