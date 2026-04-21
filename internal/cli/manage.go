@@ -982,7 +982,7 @@ type accountSection struct {
 }
 
 func supportedProviders() []domain.Provider {
-	return []domain.Provider{domain.ProviderCodex}
+	return []domain.Provider{domain.ProviderCodex, domain.ProviderClaude}
 }
 
 func writeNoOpRecord(cmd *cobra.Command, opts *rootOptions, heading, reason string) error {

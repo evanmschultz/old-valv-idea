@@ -64,7 +64,7 @@ Extend the `Provider` domain type with `ProviderClaude` and thread compile-safe 
 
 ### Unit 2.3 — `DefaultHostProfile` sentinel-error stub + extend `supportedProviders()` + manage-service test
 
-- `state`: `todo`
+- `state`: `done`
 - `paths`:
   - `internal/services/manage/service.go` (edit — extend `DefaultHostProfile` switch at lines 151-162)
   - `internal/services/manage/service_test.go` (edit — add a `TestDefaultHostProfileClaudeReturnsSentinelError` that asserts `DefaultHostProfile(domain.ProviderClaude)` returns `HostProfileSpec{}` plus a non-nil error with a stable sentinel substring like `"not yet available"`)

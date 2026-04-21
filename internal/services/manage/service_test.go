@@ -141,6 +141,27 @@ func TestDefaultHostProfileUsesConfiguredHomeDir(t *testing.T) {
 	}
 }
 
+func TestDefaultHostProfileClaudeReturnsSentinelError(t *testing.T) {
+	t.Parallel()
+
+	store, providerRoot := testStore(t)
+	service, err := New(Options{Store: store, ProviderRoot: providerRoot, HomeDir: "/tmp/example-home"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	spec, err := service.DefaultHostProfile(domain.ProviderClaude)
+	if err == nil {
+		t.Fatal("DefaultHostProfile(ProviderClaude) error = nil, want non-nil sentinel error")
+	}
+	if spec != (HostProfileSpec{}) {
+		t.Fatalf("DefaultHostProfile(ProviderClaude) spec = %+v, want zero HostProfileSpec", spec)
+	}
+	if !strings.Contains(err.Error(), "not yet available") {
+		t.Fatalf("DefaultHostProfile(ProviderClaude) error = %q, want substring %q", err.Error(), "not yet available")
+	}
+}
+
 func TestCreateDefaultHostProfileUsesProviderDefaultNameAndHome(t *testing.T) {
 	t.Parallel()
 

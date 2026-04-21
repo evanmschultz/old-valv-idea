@@ -156,6 +156,8 @@ func (s Service) DefaultHostProfile(provider domain.Provider) (HostProfileSpec, 
 			return HostProfileSpec{}, fmt.Errorf("resolve default host profile for provider %q: %w", provider, err)
 		}
 		return HostProfileSpec{Provider: provider, Name: name, HomePath: homePath}, nil
+	case domain.ProviderClaude:
+		return HostProfileSpec{}, fmt.Errorf("resolve default host profile for provider %q: not yet available", provider)
 	default:
 		return HostProfileSpec{}, fmt.Errorf("resolve default host profile for provider %q: unsupported provider", provider)
 	}

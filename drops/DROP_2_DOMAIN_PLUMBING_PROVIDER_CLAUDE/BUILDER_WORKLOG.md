@@ -25,3 +25,17 @@ N/A — task touched Go files only but was a small additive edit inside a single
 ### Hylla Feedback
 
 N/A — task was additive edits inside already-read Go files; every file needed was provided in the spawn appendix or confirmed via direct Read / Grep (e.g. `domain.Profile` field shape verified via `Grep` on `internal/domain/model.go`). No Hylla queries attempted, so no misses to record.
+
+## Unit 2.3 — Round 1
+
+- **Builder:** go-builder-agent
+- **Started:** 2026-04-20
+- **Files touched:** internal/services/manage/service.go, internal/services/manage/service_test.go, internal/cli/manage.go
+- **Mage targets run:**
+  - `mage testPkg ./internal/services/manage` — pass (23 tests, 76.4% coverage)
+  - `mage testPkg ./internal/cli` — pass (101 tests, 72.0% coverage)
+- **Notes:** Added `case domain.ProviderClaude:` branch in `DefaultHostProfile` returning `HostProfileSpec{}` + `fmt.Errorf("resolve default host profile for provider %q: not yet available", provider)`. Placed between the `ProviderCodex` case and the retained `default:` branch so `ProviderClaude` hits the explicit branch while any future-provider enum value continues to route through the generic `"unsupported provider"` default. Appended `TestDefaultHostProfileClaudeReturnsSentinelError` to `service_test.go` following the existing `TestDefaultHostProfileUsesConfiguredHomeDir` pattern (`testStore(t)` + `Options{Store, ProviderRoot, HomeDir: "/tmp/example-home"}`); asserts `spec == HostProfileSpec{}` via value comparison, `err != nil`, and `strings.Contains(err.Error(), "not yet available")`. `strings` already imported in `service_test.go`, so no import churn. Extended `supportedProviders()` in `internal/cli/manage.go` to return `[]domain.Provider{domain.ProviderCodex, domain.ProviderClaude}`; this is consumed only by `writeAccountsByProvider`, which iterates providers and calls `ListProfiles` — empty profile lists for Claude render cleanly as an empty section, confirmed by the 101 cli tests staying green. `seedProfileConfig` (line 448) already swallows `DefaultHostProfile` errors via `return nil`, so returning an error for Claude does not break existing Codex-path flows. Design is minimum needed to satisfy §6.2 compile-safe-stub discipline — no Claude-specific behavior, no new helpers.
+
+### Hylla Feedback
+
+N/A — task was additive edits inside files provided verbatim in the spawn appendix; every symbol touched was visible in the Read output. No Hylla queries attempted, so no misses to record.
