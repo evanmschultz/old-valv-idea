@@ -15,6 +15,7 @@ import (
 	dockeradapter "github.com/evanmschultz/valv/internal/adapters/docker"
 	codexprovider "github.com/evanmschultz/valv/internal/adapters/providers/codex"
 	"github.com/evanmschultz/valv/internal/config"
+	"github.com/evanmschultz/valv/internal/domain"
 	codexservice "github.com/evanmschultz/valv/internal/services/codex"
 	imagesservice "github.com/evanmschultz/valv/internal/services/images"
 )
@@ -239,7 +240,7 @@ func ensureCodexImageCurrent(cmd *cobra.Command, paths config.Paths) error {
 	if strings.TrimSpace(os.Getenv("VALV_CODEX_IMAGE")) != "" {
 		return ensureCodexImageAvailable(cmd.Context(), dockeradapter.NewQuietRunner("docker", LoggerFromContext(cmd.Context())), codexImageRef())
 	}
-	service, closeImages, err := openImagesService(cmd, paths)
+	service, closeImages, err := openImagesService(cmd, paths, domain.ProviderCodex)
 	if err != nil {
 		return fmt.Errorf("initialize image updater: %w", err)
 	}

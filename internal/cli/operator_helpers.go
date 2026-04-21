@@ -65,28 +65,45 @@ func openGlobalSwitchService(cmd *cobra.Command, paths config.Paths) (globalswit
 	return service, func() { _ = store.Close() }, nil
 }
 
-func openImagesService(cmd *cobra.Command, paths config.Paths) (imagesservice.Service, func(), error) {
+func openImagesService(cmd *cobra.Command, paths config.Paths, provider domain.Provider) (imagesservice.Service, func(), error) {
 	store, err := openStore(paths)
 	if err != nil {
 		return imagesservice.Service{}, nil, err
 	}
-	contextDir := filepath.Join(paths.BuildCacheDir, string(domain.ProviderCodex))
-	if _, err := imagesservice.WriteDefaultCodexContext(contextDir); err != nil {
-		_ = store.Close()
-		return imagesservice.Service{}, nil, err
-	}
-	service, err := imagesservice.New(imagesservice.Options{
+	contextDir := filepath.Join(paths.BuildCacheDir, string(provider))
+	options := imagesservice.Options{
 		Runner:     dockeradapter.NewQuietRunner("docker", LoggerFromContext(cmd.Context())),
 		StateStore: store,
-		Resolver:   codexVersionResolverFactory(nil),
-		Repository: codexImageRepository(),
 		ContextDir: contextDir,
 		Dockerfile: "Dockerfile",
-		DefaultTag: codexImageTag(),
 		UserID:     os.Getuid(),
 		GroupID:    os.Getgid(),
 		Logger:     LoggerFromContext(cmd.Context()),
-	})
+	}
+	switch provider {
+	case domain.ProviderCodex:
+		if _, err := imagesservice.WriteDefaultCodexContext(contextDir); err != nil {
+			_ = store.Close()
+			return imagesservice.Service{}, nil, err
+		}
+		options.Resolver = codexVersionResolverFactory(nil)
+		options.Repository = codexImageRepository()
+		options.DefaultTag = codexImageTag()
+		options.Provider = domain.ProviderCodex
+	case domain.ProviderClaude:
+		if _, err := imagesservice.WriteDefaultClaudeContext(contextDir); err != nil {
+			_ = store.Close()
+			return imagesservice.Service{}, nil, err
+		}
+		options.Resolver = nil
+		options.Repository = claudeImageRepository()
+		options.DefaultTag = claudeImageTag()
+		options.Provider = domain.ProviderClaude
+	default:
+		_ = store.Close()
+		return imagesservice.Service{}, nil, fmt.Errorf("initialize image service: unsupported provider %q", provider)
+	}
+	service, err := imagesservice.New(options)
 	if err != nil {
 		_ = store.Close()
 		return imagesservice.Service{}, nil, err

@@ -1087,7 +1087,7 @@ func runManageUpdate(cmd *cobra.Command, paths config.Paths, opts *rootOptions, 
 	if err != nil {
 		return fmt.Errorf("resolve output policy: %w", err)
 	}
-	service, closeImages, err := openImagesService(cmd, paths)
+	service, closeImages, err := openImagesService(cmd, paths, domain.ProviderCodex)
 	if err != nil {
 		return fmt.Errorf("manage update: initialize image service: %w", err)
 	}

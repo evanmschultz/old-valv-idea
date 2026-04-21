@@ -132,7 +132,7 @@ Add to `internal/services/images/service_integration_test.go` (behind `//go:buil
 
 #### Unit 4.2 — `openImagesService` provider dispatch + Claude image helpers (cli package)
 
-**State:** todo
+**State:** done
 **Paths:** `internal/cli/operator_helpers.go`, `internal/cli/codex.go` (refactor-only — new helpers alongside existing Codex ones), `internal/cli/extended_test.go` (augment existing fixtures to cover Claude path), new file `internal/cli/claude_image.go` permitted if builder prefers to keep Claude helpers separate from `codex.go`
 **Packages:** `internal/cli`
 **Blocked by:** 4.1
