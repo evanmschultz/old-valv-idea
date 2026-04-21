@@ -75,3 +75,39 @@ None. No CONFIRMED counterexample produced after ten attack passes.
 ### Hylla Feedback
 
 None — Hylla was not queried for this review. Unit 2.2 is a localized edit inside two files with a 6-line source diff; `git diff`, direct `Read`, and `Grep` over the just-committed tree (plus `mage testPkg` to exercise the runtime path) covered the full attack surface. Drop-end Hylla ingest has not yet run, so any Hylla query would be answering from pre-DROP_2 state and would not reflect the new `case domain.ProviderClaude:` arms. No fallback miss worth recording.
+
+## Unit 2.3 — Round 1
+
+- **Reviewer:** go-qa-falsification-agent
+- **Target commit:** 26b5a58 `feat(manage): stub DefaultHostProfile claude branch and list provider`
+- **Verdict:** pass
+
+### Attempted counterexamples
+
+1. **REFUTED** — **Sentinel error at user surface via `valv manage account add claude` / `--provider claude`.** `runManageAccountAdd` at `internal/cli/manage.go:462-491` routes `ProviderClaude` through `DefaultHostProfile(provider)` (line 479, when `name == "" && homePath != ""`) or `CreateDefaultHostProfile(ctx, provider)` (line 485, when `name == "" && homePath == ""`). Both now return the new sentinel error. Final wrapped message at the user surface is `manage account add: resolve default host profile for provider "claude": not yet available` — unambiguous, names the provider, communicates temporariness. Acceptable for the stub phase (DROP_5 flips to real). The third branch (line 488, `name != ""`) calls `CreateProfile` directly and does not hit `DefaultHostProfile`, so `valv manage account add claude explicit-name --home /some/path` would succeed and persist a Claude profile — but that's a pre-existing code path and consistent with §6.2 stub discipline; not a regression.
+2. **REFUTED** — **Internal callers of `DefaultHostProfile` that discard the error.** Three sites in `internal/services/manage/service.go` swallow the error via `_`: line 374 (`CleanupDuplicateAliases`), line 450 (`seedProfileConfig`), line 485 (`presentableProfiles`). For `ProviderClaude`, each receives `hostSpec == HostProfileSpec{}` (all zero fields). Tried to construct a counterexample where a zero `HostProfileSpec` corrupts presentation / cleanup:
+   - `CleanupDuplicateAliases(ProviderClaude)`: `shouldPreferPresentableProfile` compares `candidate.HomePath == hostSpec.HomePath` — would match any profile with empty `HomePath`. But the new `domain.Profile.HomePath` field is non-empty by construction (`CreateProfile` validates, `NewProfile` rejects empty), so no profile can match. Moreover, `ListProfilesByProvider(ctx, ProviderClaude)` returns empty slice today because no persistence path creates a Claude profile — the `for _, group := range grouped` loop has zero iterations. Unreachable corruption.
+   - `seedProfileConfig(profile)` for a `ProviderClaude` profile: error is swallowed with `return nil` at line 451-453 — existing behavior preserved. Harmless skip is exactly the documented intent.
+   - `presentableProfiles(ProviderClaude, ...)`: same `HomePath == ""` trap, same unreachability because no Claude profile exists.
+   All three are latent footguns, but none reachable in DROP_2 state. Documented here for DROP_5 awareness.
+3. **REFUTED** — **Sentinel substring stability.** `"not yet available"` is the single literal; grep in `internal/services/manage/service.go` returns one match at line 160, test at `service_test.go:160-162` asserts on the same literal via `strings.Contains`. No other downstream consumer (no `log | grep`, no TUI decoder, no other test) depends on that substring. Builder's choice of literal is free to drift in DROP_5 without cross-package breakage.
+4. **REFUTED** — **`default:` retention in `DefaultHostProfile`.** Line 161 of `service.go` retains `default: return HostProfileSpec{}, fmt.Errorf(... "unsupported provider", provider)`. A future `ProviderFoo` enum value would route through this default, not through an implicit nil-return or panic. Correct exhaustiveness posture.
+5. **REFUTED** — **`valv manage account list` (no-args) rendering.** `writeAccountsByProvider` at `internal/cli/manage.go:914-951` iterates both providers via `supportedProviders()`. For human/plain output, two sections render (`codex accounts` then `claude accounts`), each calls `output.WriteListWithKey` — `ListProfiles(ctx, ProviderClaude)` returns an empty profile slice, which renders as `(none)` (evidenced by `TestManageAccountListShowsEmptyState` at line 159-168 exercising that path for Codex). For JSON output, the `accounts_by_provider` array gains a second entry with empty `Items`. No existing test uses `strings.Contains` that would flip on this addition (reviewed `TestManageAccountListWithoutProviderGroupsByProvider` at line 112-126 — positive-only assertions; `TestManageAccountListJSONUsesCommandKey` at line 128-157 uses `account list codex` explicit provider, not no-args, so the JSON exact-match is not affected). Coverage of the new branch is indirectly proven by the 101-tests-pass, 72.0%-coverage `mage testPkg ./internal/cli` result.
+6. **REFUTED** — **Coverage gates.** Ran both targets locally:
+   - `mage testPkg ./internal/services/manage` — 23 pass, 76.4% coverage (AGENTS.md 70% floor met; `mage testPkg` internal floor is 60%, drop-end `mage test` floor is 70%).
+   - `mage testPkg ./internal/cli` — 101 pass, 72.0% coverage.
+   Builder's worklog numbers reproduced exactly.
+7. **REFUTED** — **Scope bleed outside declared paths.** `git diff 76d6bc7..26b5a58 --name-only` returns 5 files: 3 source (`internal/services/manage/service.go`, `internal/services/manage/service_test.go`, `internal/cli/manage.go`) + 2 docs (`PLAN.md` state flip + `BUILDER_WORKLOG.md` entry). No touches to `internal/adapters/providers/claude/**`, `internal/services/images/service.go`, `internal/services/globalswitch/service.go`, `internal/adapters/sqlite/store.go`, `internal/cli/root.go`, or any new `internal/cli/claude.go`. No-touch scope guard list clean.
+
+### Blocking findings
+
+None.
+
+### Mitigated / advisory notes
+
+- **Latent `HostProfileSpec{}` trap for future Claude profiles** (from attack 2). Today unreachable because no persistence path creates a `ProviderClaude` profile. When DROP_3 (schema) / DROP_5 (adapter) land, `shouldPreferPresentableProfile` will start receiving real Claude profiles and the three `_ = err` sites will suddenly have a zero `HostProfileSpec` to compare against — that's when the drift shows up. Not a DROP_2 bug; flagging so DROP_5 QA catches the flip-over.
+- **Third `runManageAccountAdd` branch (line 488, explicit `name`) does not route through `DefaultHostProfile`.** `valv manage account add claude my-name --home /some/path` would call `CreateProfile` and succeed today, persisting a Claude profile. §6.2 does not list this as a stub gate — consistent with the plan's scope ("compile-safe and test-safe for every *provider-dispatching switch*"); not a regression.
+
+### Hylla Feedback
+
+None — Hylla was not queried for this review. Unit 2.3 is a 4-line source diff across three files, plus a 20-line test. `git diff`, direct `Read`, and `Grep` over the committed tree (plus `mage testPkg` for runtime proof) covered the full attack surface. Drop-end Hylla ingest has not yet run, so any Hylla query would be answering from pre-DROP_2 state and would not reflect the new `case domain.ProviderClaude:` arm or the extended `supportedProviders()` — no fallback miss worth recording.

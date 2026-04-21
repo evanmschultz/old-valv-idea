@@ -62,3 +62,31 @@ N/A — task touched Go files only but was verifiable via direct reads of the ti
 ### Hylla Feedback
 
 N/A — task touched Go files only but was fully verifiable via the small committed diff plus one mage run; no Hylla queries issued, no fallback required.
+
+## Unit 2.3 — Round 1
+
+**Verdict:** pass
+
+**HEAD commit reviewed:** `26b5a58 feat(manage): stub DefaultHostProfile claude branch and list provider`
+
+**Diff scope:** `git diff --name-only HEAD~1..HEAD` returns `drops/DROP_2_DOMAIN_PLUMBING_PROVIDER_CLAUDE/BUILDER_WORKLOG.md`, `drops/DROP_2_DOMAIN_PLUMBING_PROVIDER_CLAUDE/PLAN.md`, `internal/cli/manage.go`, `internal/services/manage/service.go`, `internal/services/manage/service_test.go` — exactly the unit's declared `paths` plus orchestration markdown.
+
+### Findings
+
+1. **Exactly one `case domain.ProviderClaude:` in `internal/services/manage/service.go`** — pass. Single match at line 159, between `ProviderCodex` (line 153) and retained `default:` (line 161). Returns `HostProfileSpec{}` plus wrapped error.
+2. **Sentinel substring `"not yet available"` stable** — pass. Line 160: `fmt.Errorf("resolve default host profile for provider %q: not yet available", provider)`. Literal in format string, not runtime-derived.
+3. **`supportedProviders()` returns both providers** — pass. `internal/cli/manage.go:984-986` returns `[]domain.Provider{domain.ProviderCodex, domain.ProviderClaude}`.
+4. **`TestDefaultHostProfileClaudeReturnsSentinelError` exists with all three assertions** — pass. `internal/services/manage/service_test.go:144-163`. Asserts `err != nil`, `spec == HostProfileSpec{}`, `strings.Contains(err.Error(), "not yet available")`.
+5. **`mage testPkg ./internal/services/manage` passes** — pass. 23 tests / 0 failures, coverage **76.4 %** (above 60 % mage floor + 70 % AGENTS.md gate).
+6. **`mage testPkg ./internal/cli` passes** — pass. 101 tests / 0 failures, coverage **72.0 %**.
+7. **Scope clean** — pass. Five files touched: three allowed Go + two drop markdown. No out-of-scope edits.
+
+### Notes
+
+- Explicit Claude branch ordered before `default:` so Claude hits the `"not yet available"` message, not the generic `"unsupported provider"` fallback.
+- `seedProfileConfig` at line 449-453 swallows `DefaultHostProfile` errors, so Claude-path error returns do not break existing Codex flows.
+- DROP_2 still needs Phase 6 drop-end verification (`mage test`, push, CI green).
+
+### Hylla Feedback
+
+N/A — verifiable from the small committed diff plus two mage runs.
