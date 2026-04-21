@@ -45,3 +45,31 @@ Proof-oriented QA appends per `## Unit N.M — Round K` section. See `main/drops
 **Findings:** None. Verdict is unanimous PASS across all five acceptance criteria and all nine falsification attacks.
 
 **Unknowns:** None.
+
+## Unit 4.3 — Round 1
+
+**Verdict:** PASS
+
+**Evidence:**
+
+- Diff scope (`git diff HEAD~1 HEAD --stat`): `drops/DROP_4_CLAUDE_DOCKER_IMAGE/BUILDER_WORKLOG.md` (+24), `drops/DROP_4_CLAUDE_DOCKER_IMAGE/PLAN.md` (+2/-2), `internal/cli/manage.go` (+40/-5), `internal/cli/manage_test.go` (+119). Matches Unit 4.3 `Paths` (`internal/cli/manage.go`, `internal/cli/manage_test.go`) plus expected drop-md updates; zero scope leak.
+- Switch dispatch at `internal/cli/manage.go:1083-1096`: `switch provider { case domain.ProviderCodex: return runManageUpdateCodex(...); case domain.ProviderClaude: return runManageUpdateClaude(...); default: return fmt.Errorf("manage update: provider %q is not supported yet", provider) }`. Matches spec line 191. `default:` preserves the pre-diff error text verbatim.
+- Claude branch at `internal/cli/manage.go:1130-1156`: `runManageUpdateClaude` calls `openImagesService(cmd, paths, domain.ProviderClaude)` (Unit 4.2 interface), then `service.Build(cmd.Context(), imagesservice.BuildRequest{Version: imagesservice.DefaultClaudeCLIVersion})` inside `runWithCLIQuietSpinner(cmd.ErrOrStderr(), "Building provider image", "Provider image built", "Provider image build failed", func() error { ... })`. Spinner shape is line-for-line symmetric to the Codex `EnsureLatest` wrapper at `manage.go:1105-1115`.
+- Output record at `manage.go:1155`: five fields — `provider`, `image`, `tags`, `version`, `context`. Heading is `"Provider image built"`. `checked at` omitted. Omission is correct: `imagesservice.BuildResult` at `internal/services/images/service.go:94` has no `LatestCheckedAt`; that field lives only on `EnsureResult` (`service.go:117-121`) and is populated by the Codex resolver. The pinned-version Build path has no resolver-derived timestamp to render.
+- `DefaultClaudeCLIVersion` at `internal/services/images/service.go:36`: `const DefaultClaudeCLIVersion = "2.1.89"`. BUILDER_WORKLOG.md records the pin unchanged from Unit 4.1 (criterion 6).
+- Codex spinner strings unchanged at `manage.go:1107-1109`: `"Checking provider image"`, `"Provider image check complete"`, `"Provider image update failed"`. Codex output heading logic unchanged (`"Provider image updated"` / `"Provider image up to date"`). Fields unchanged (6 fields including `checked at`).
+- Cobra `Example` at `manage.go:1066-1070` now includes `valv manage update claude` on a new line alongside `valv manage update` and `valv manage update codex`. Matches spec line 194.
+- `TestRunManageUpdateClaudeBuildsImage` at `manage_test.go:266-312`: invokes `newManageCommand(paths, &rootOptions{})` with `SetArgs([]string{"update", "claude"})`; asserts stdout contains `"Provider image built"`, `provider=claude`, `image=valv-claude:dev`, `version=<DefaultClaudeCLIVersion>`; stderr contains `"Building provider image"` and `"Provider image built"`; `<BuildCacheDir>/claude/Dockerfile` exists; fake-docker log contains `buildx build`, `--build-arg CLAUDE_VERSION=2.1.89`, `-t valv-claude:dev`, `--label io.valv.provider=claude`. Covers criterion 1.
+- `TestRunManageUpdateCodexRegression` at `manage_test.go:313-367`: two subtests (`update`, `update_codex`), each with its own `testCodexPaths`, `installFakeDocker`, `stubCodexVersionResolver("0.117.0")`; asserts heading `"Provider image updated"`, field `provider=codex`, spinner substrings `"Checking provider image"` / `"Provider image check complete"`, `<BuildCacheDir>/codex/Dockerfile` exists, fake-docker log contains `--build-arg CODEX_VERSION=0.117.0` and `-t valv-codex:dev`. Covers criterion 2 (no regression in either argv shape).
+- `TestRunManageUpdateUnsupportedProvider` at `manage_test.go:369-388`: invokes `runManageUpdate(cmd, paths, &rootOptions{}, domain.Provider("foo"))` directly; asserts error contains `"not supported yet"` and `"foo"`. Exercises `default:` branch (parseOptionalProvider rejects unknown providers at the cobra boundary, so direct dispatch is the correct test vector).
+- Fresh `mage testPkg ./internal/cli`: 117 tests, 117 passed, 0 failed, 0 skipped, coverage 72.9% (above the 60% mage floor and the 70% spec floor), gofumpt clean. Runtime 83.25s. Covers criterion 3.
+- `go doc github.com/evanmschultz/valv/internal/cli`: four exported symbols — `EffectiveConfigFromContext`, `LoggerFromContext`, `NewRootCommand`, `NewRootCommandWithPaths`. Unchanged from pre-diff. `runManageUpdate`, `runManageUpdateCodex`, `runManageUpdateClaude` are unexported. Covers criterion 5.
+- BUILDER_WORKLOG.md Unit 4.3 section records `Claude CLI version pinned: 2.1.89 — unchanged from Unit 4.1. No new Context7 query needed at build time; the pin is sourced from imagesservice.DefaultClaudeCLIVersion`. Covers criterion 6.
+
+**Findings:**
+
+- None blocking. One transparency note: the Codex branch now hardcodes the output `provider` field as `string(domain.ProviderCodex)` at `manage.go:1127` rather than `string(provider)`. In the old pre-switch code path, `provider` was already guaranteed to be `ProviderCodex` by the `if provider != ProviderCodex` guard's early return, so the emitted value is bit-identical. Readability refactor, not a regression.
+
+**Unknowns:**
+
+- None material. Every acceptance criterion has a concrete citation with line numbers; fresh mage run confirms green; public API surface is unchanged; version pin is consistent with Unit 4.1.
