@@ -2,12 +2,15 @@ package images
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -468,4 +471,120 @@ func svcRecipeHashForTest(contextDir, dockerfile string) string {
 		Dockerfile: dockerfile,
 	})
 	return svc.recipeHash()
+}
+
+func TestWriteDefaultClaudeContextWritesDockerfile(t *testing.T) {
+	root := t.TempDir()
+	dockerfilePath, err := WriteDefaultClaudeContext(root)
+	if err != nil {
+		t.Fatalf("WriteDefaultClaudeContext() error = %v", err)
+	}
+	content, err := os.ReadFile(dockerfilePath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	for _, want := range []string{
+		`@anthropic-ai/claude-code@${CLAUDE_VERSION}`,
+		`CLAUDE_CONFIG_DIR=/home/valv/.claude`,
+		`ENTRYPOINT ["claude"]`,
+		"NPM_CONFIG_UPDATE_NOTIFIER=false",
+		"NPM_CONFIG_FUND=false",
+		"NPM_CONFIG_AUDIT=false",
+		`ARG VALV_UID=1000`,
+		`ARG VALV_GID=1000`,
+		`apt-get install -y --no-install-recommends bubblewrap ca-certificates git ncurses-term`,
+		`getent group "${VALV_GID}" >/dev/null || groupadd -g "${VALV_GID}" valv`,
+		`useradd -o -m -u "${VALV_UID}" -g "${VALV_GID}" -s /bin/sh valv`,
+		`mkdir -p /home/valv/.claude /workspace`,
+		`chown -R "${VALV_UID}:${VALV_GID}" /home/valv /workspace`,
+	} {
+		if !strings.Contains(string(content), want) {
+			t.Fatalf("dockerfile missing %q: %q", want, string(content))
+		}
+	}
+	if filepath.Base(dockerfilePath) != "Dockerfile" {
+		t.Fatalf("dockerfile base = %q, want Dockerfile", filepath.Base(dockerfilePath))
+	}
+}
+
+func TestDefaultClaudeCLIVersionIsNonEmpty(t *testing.T) {
+	if strings.TrimSpace(DefaultClaudeCLIVersion) == "" {
+		t.Fatal("DefaultClaudeCLIVersion is empty")
+	}
+	if !regexp.MustCompile(`^\d+\.\d+\.\d+$`).MatchString(DefaultClaudeCLIVersion) {
+		t.Fatalf("DefaultClaudeCLIVersion = %q, want MAJOR.MINOR.PATCH", DefaultClaudeCLIVersion)
+	}
+}
+
+func TestServiceBuildRecipeHashMatchesProviderDockerfile(t *testing.T) {
+	cases := []struct {
+		name        string
+		provider    domain.Provider
+		writeCtx    func(string) (string, error)
+		wantContent string
+		version     string
+	}{
+		{
+			name:        "codex",
+			provider:    domain.ProviderCodex,
+			writeCtx:    WriteDefaultCodexContext,
+			wantContent: DefaultCodexDockerfile(),
+			version:     "0.117.0",
+		},
+		{
+			name:        "claude",
+			provider:    domain.ProviderClaude,
+			writeCtx:    WriteDefaultClaudeContext,
+			wantContent: DefaultClaudeDockerfile(),
+			version:     DefaultClaudeCLIVersion,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			contextDir := t.TempDir()
+			if _, err := tc.writeCtx(contextDir); err != nil {
+				t.Fatalf("writeCtx() error = %v", err)
+			}
+			runner := &runnerRecorder{}
+			svc, err := New(Options{
+				Runner:     runner,
+				Provider:   tc.provider,
+				Repository: "ghcr.io/valv/" + tc.name,
+				ContextDir: contextDir,
+				Dockerfile: "Dockerfile",
+				DefaultTag: "dev",
+				UserID:     1000,
+				GroupID:    1000,
+			})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			if _, err := svc.Build(context.Background(), BuildRequest{Version: tc.version}); err != nil {
+				t.Fatalf("Build() error = %v", err)
+			}
+			if len(runner.calls) != 1 {
+				t.Fatalf("runner call count = %d, want 1", len(runner.calls))
+			}
+
+			sum := sha256.Sum256([]byte(tc.wantContent))
+			wantLabel := recipeHashLabel + "=" + hex.EncodeToString(sum[:])
+
+			var gotLabel string
+			args := runner.calls[0]
+			for i := 0; i < len(args)-1; i++ {
+				if args[i] == "--label" && strings.HasPrefix(args[i+1], recipeHashLabel+"=") {
+					gotLabel = args[i+1]
+					break
+				}
+			}
+			if gotLabel == "" {
+				t.Fatalf("buildx args missing %s label: %#v", recipeHashLabel, args)
+			}
+			if gotLabel != wantLabel {
+				t.Fatalf("recipe hash label = %q, want %q", gotLabel, wantLabel)
+			}
+		})
+	}
 }

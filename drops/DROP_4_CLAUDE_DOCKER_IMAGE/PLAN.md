@@ -70,7 +70,7 @@ Package-lock chain: 4.1 (images package) → 4.2 (cli package — operator_helpe
 
 #### Unit 4.1 — Claude Dockerfile + context writer + pinned-version constant (images package)
 
-**State:** todo
+**State:** done
 **Paths:** `internal/services/images/service.go` (adds `DefaultClaudeCLIVersion`, `DefaultClaudeDockerfile`, `WriteDefaultClaudeContext`, `providerDockerfileContent` helper on `Service`; edits `recipeHash()` to call the new helper — all changes confined to this single file in the images package), `internal/services/images/service_test.go`, `internal/services/images/service_integration_test.go`
 **Packages:** `internal/services/images`
 **Blocked by:** —

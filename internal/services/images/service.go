@@ -29,6 +29,12 @@ const (
 	recipeHashLabel          = "io.valv.recipe_hash"
 )
 
+// DefaultClaudeCLIVersion is the pinned version of the @anthropic-ai/claude-code
+// npm package baked into the default Claude provider image. Verified against
+// Context7 /anthropics/claude-code at build time; see drop BUILDER_WORKLOG.md
+// for the timestamped re-verification record.
+const DefaultClaudeCLIVersion = "2.1.89"
+
 var (
 	findDockerBinary = exec.LookPath
 	versionPattern   = regexp.MustCompile(`\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?`)
@@ -245,9 +251,9 @@ func (s Service) Build(ctx context.Context, request BuildRequest) (BuildResult, 
 		Tags:       tags,
 		Builder:    "auto",
 		BuildArgs: map[string]string{
-			"CODEX_VERSION": version,
-			"VALV_GID":      fmt.Sprintf("%d", s.groupID),
-			"VALV_UID":      fmt.Sprintf("%d", s.userID),
+			s.providerVersionBuildArg(): version,
+			"VALV_GID":                  fmt.Sprintf("%d", s.groupID),
+			"VALV_UID":                  fmt.Sprintf("%d", s.userID),
 		},
 		Labels: map[string]string{
 			"io.valv.managed":  "true",
@@ -439,7 +445,7 @@ func (s Service) defaultImageRef() docker.ImageRef {
 }
 
 func (s Service) recipeHash() string {
-	content := DefaultCodexDockerfile()
+	content := s.providerDockerfileContent()
 	if filepath.Base(s.dockerfile) != defaultCodexDockerfile {
 		path := filepath.Join(s.contextDir, s.dockerfile)
 		if fileContent, err := os.ReadFile(path); err == nil {
@@ -448,6 +454,26 @@ func (s Service) recipeHash() string {
 	}
 	sum := sha256.Sum256([]byte(content))
 	return hex.EncodeToString(sum[:])
+}
+
+// providerDockerfileContent returns the default-Dockerfile text for the service's
+// provider. It is the single source of truth the recipeHash default branch
+// consults; adding a new provider means adding a new case here.
+func (s Service) providerDockerfileContent() string {
+	if s.provider == domain.ProviderClaude {
+		return DefaultClaudeDockerfile()
+	}
+	return DefaultCodexDockerfile()
+}
+
+// providerVersionBuildArg returns the Docker build-arg name that the provider's
+// default Dockerfile expects for its CLI version pin. Codex uses CODEX_VERSION;
+// Claude uses CLAUDE_VERSION.
+func (s Service) providerVersionBuildArg() string {
+	if s.provider == domain.ProviderClaude {
+		return "CLAUDE_VERSION"
+	}
+	return "CODEX_VERSION"
 }
 
 func (s Service) versionImageRef(version string) docker.ImageRef {
@@ -544,6 +570,64 @@ RUN npm install --global "@openai/codex@${CODEX_VERSION}"
 USER valv
 WORKDIR /workspace
 ENTRYPOINT ["codex"]
+`) + "\n"
+}
+
+// WriteDefaultClaudeContext writes the default Claude build context (a single
+// Dockerfile) under root and returns the absolute Dockerfile path. Mirrors
+// WriteDefaultCodexContext — same directory permissions, same file permissions,
+// same error wrapping shape.
+func WriteDefaultClaudeContext(root string) (string, error) {
+	contextDir := strings.TrimSpace(root)
+	if contextDir == "" {
+		return "", fmt.Errorf("write default claude context: root is required")
+	}
+	if err := os.MkdirAll(contextDir, 0o755); err != nil {
+		return "", fmt.Errorf("write default claude context: ensure context dir %q: %w", contextDir, err)
+	}
+	dockerfilePath := filepath.Join(contextDir, defaultCodexDockerfile)
+	if err := os.WriteFile(dockerfilePath, []byte(DefaultClaudeDockerfile()), 0o644); err != nil {
+		return "", fmt.Errorf("write default claude context: write dockerfile %q: %w", dockerfilePath, err)
+	}
+	return dockerfilePath, nil
+}
+
+// DefaultClaudeDockerfile returns the default Claude provider Dockerfile text.
+// The recipe mirrors DefaultCodexDockerfile — same base image, same apt
+// packages, same valv user creation, same NPM_CONFIG env — and swaps in
+// Claude-specific bits: the @anthropic-ai/claude-code npm install, a
+// /home/valv/.claude config dir, a CLAUDE_CONFIG_DIR env var, a CLAUDE_VERSION
+// build arg, and a `claude` entrypoint.
+func DefaultClaudeDockerfile() string {
+	return strings.TrimSpace(`
+FROM node:22-bookworm-slim
+
+ARG VALV_UID=1000
+ARG VALV_GID=1000
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends bubblewrap ca-certificates git ncurses-term \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN getent group "${VALV_GID}" >/dev/null || groupadd -g "${VALV_GID}" valv \
+    && useradd -o -m -u "${VALV_UID}" -g "${VALV_GID}" -s /bin/sh valv \
+    && mkdir -p /home/valv/.claude /workspace \
+    && chown -R "${VALV_UID}:${VALV_GID}" /home/valv /workspace
+
+ENV NPM_CONFIG_UPDATE_NOTIFIER=false \
+    NPM_CONFIG_FUND=false \
+    NPM_CONFIG_AUDIT=false \
+    HOME=/home/valv \
+    LOGNAME=valv \
+    USER=valv \
+    CLAUDE_CONFIG_DIR=/home/valv/.claude
+
+ARG CLAUDE_VERSION
+RUN npm install --global "@anthropic-ai/claude-code@${CLAUDE_VERSION}"
+
+USER valv
+WORKDIR /workspace
+ENTRYPOINT ["claude"]
 `) + "\n"
 }
 
