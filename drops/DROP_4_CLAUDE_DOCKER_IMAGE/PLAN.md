@@ -34,6 +34,7 @@ Explicitly deferred (NOT in DROP_4):
 - `internal/services/claude/service.go` + `internal/cli/claude.go` — Claude launch service and pass-through CLI. DROP_6.
 - `valv account add claude` / `valv account list` / account-switch — DROP_7 per focus-plan §6.6/§6.7.
 - Any edits under `internal/adapters/docker/` — the Codex counterpart never used that package for its Dockerfile constant (the PLAN.md container row's "expected paths" note was wrong; Codex's Dockerfile/context writer live in `internal/services/images`, not `internal/adapters/docker`). Mirror that shape, do not invent a new docker-adapter package.
+- TUI home `ActionUpdate` dispatch (`internal/cli/operator_helpers.go:122-127`) remains Codex-hardcoded after DROP_4. The MVP Claude update path is `valv manage update claude` via cobra; a provider-select TUI integration is follow-up scope — not required for focus-plan §6.3.
 
 ### Committed-state audit
 
@@ -47,7 +48,7 @@ Evidence verified via Hylla `hylla_search_keyword`, Grep for line numbers, and d
 - `codexImageRepository()` / `codexImageTag()` / `codexImageRef()` at `internal/cli/codex.go:272-297`. Honors `VALV_CODEX_IMAGE` env override; falls back to `("valv-codex", "dev")`. Claude equivalent reads `VALV_CLAUDE_IMAGE` with fallback `("valv-claude", "dev")`.
 - `runManageUpdate` at `internal/cli/manage.go:1082-1119`. Line 1083-1085: `if provider != domain.ProviderCodex { return fmt.Errorf("manage update: provider %q is not supported yet", provider) }`. Calls `openImagesService(cmd, paths)` (which is Codex-hardcoded) then `service.EnsureLatest(...)`. For Claude, must (a) stop rejecting, (b) pass the provider into `openImagesService`, (c) use `Build` with the pinned version constant instead of `EnsureLatest` because there is no resolver.
 - `newManageUpdateCommand` at `manage.go:1051-1080`. `Args: cobra.MaximumNArgs(1)`; `parseOptionalProvider(args, domain.ProviderCodex)` — accepts `valv manage update claude` as the positional form today. Focus-plan §6.3 phrasing "`valv manage update --provider claude`" is shorthand; the existing positional shape is what the builder should target. Builder should extend `Example:` (manage.go:1067-1069) to include `valv manage update claude`.
-- `manage.allProviders` at `internal/cli/manage.go:985` already returns `[]domain.Provider{domain.ProviderCodex, domain.ProviderClaude}` (DROP_2 added). No change needed here.
+- `manage.supportedProviders` at `internal/cli/manage.go:984` already returns `[]domain.Provider{domain.ProviderCodex, domain.ProviderClaude}` (DROP_2 added). No change needed here.
 - `parseOptionalProvider` (`operator_helpers.go:274-283`) already accepts "claude" — DROP_2 extended `domain.ParseProvider` at `internal/domain/types.go:14-21`. Verified via Grep: `types.go:19 case ProviderClaude`, `types_test.go:87-88` covers `claude` / ` Claude `.
 - `internal/cli/extended_test.go:448` references `filepath.Join(paths.BuildCacheDir, string(domain.ProviderCodex), "Dockerfile")` in an existing Codex-only `openImagesService` fixture — no change forced on Codex tests, but the refactor to provider-dispatch MUST keep this path working. Verified test targets Codex explicitly, so Codex-branch integrity is the sole compatibility contract here.
 - `internal/cli/extended_test.go:843` computes `sha256.Sum256([]byte(imagesservice.DefaultCodexDockerfile()))` as `fakeCodexRecipeHash`. No Claude-side test fixture exists yet; the builder adds one as part of the unit tests in 4.1.
@@ -70,7 +71,7 @@ Package-lock chain: 4.1 (images package) → 4.2 (cli package — operator_helpe
 #### Unit 4.1 — Claude Dockerfile + context writer + pinned-version constant (images package)
 
 **State:** todo
-**Paths:** `internal/services/images/service.go`, `internal/services/images/service_test.go`, `internal/services/images/service_integration_test.go`
+**Paths:** `internal/services/images/service.go` (adds `DefaultClaudeCLIVersion`, `DefaultClaudeDockerfile`, `WriteDefaultClaudeContext`, `providerDockerfileContent` helper on `Service`; edits `recipeHash()` to call the new helper — all changes confined to this single file in the images package), `internal/services/images/service_test.go`, `internal/services/images/service_integration_test.go`
 **Packages:** `internal/services/images`
 **Blocked by:** —
 
@@ -88,10 +89,28 @@ Add to `internal/services/images/service.go`:
    - Everything else (base image, apt packages, valv user creation, NPM_CONFIG env, `USER valv`, `WORKDIR /workspace`) is character-identical to the Codex recipe — the apt package list `bubblewrap ca-certificates git ncurses-term` applies equally to Claude.
 3. Function `WriteDefaultClaudeContext(root string) (string, error)` mirroring `WriteDefaultCodexContext` at `service.go:503-516` — same `os.MkdirAll(root, 0o755)` + `os.WriteFile(filepath.Join(root, "Dockerfile"), []byte(DefaultClaudeDockerfile()), 0o644)` semantics, returning the dockerfile path.
 
+4. New unexported helper `providerDockerfileContent() string` on `Service`. Returns `DefaultClaudeDockerfile()` when `s.provider == domain.ProviderClaude`; returns `DefaultCodexDockerfile()` otherwise (default / Codex). Keep the switch provider-keyed so DROP_5+ providers slot in without reopening this logic.
+5. Fix `recipeHash()` at `service.go:441-451`. Current implementation seeds `content := DefaultCodexDockerfile()` unconditionally before the custom-Dockerfile fallback, so a Claude build with the default Dockerfile basename silently labels the image with `sha256(DefaultCodexDockerfile())` — a wrong recipe hash that would poison DROP_5+ ensure-latest comparisons. Replace the unconditional Codex seed with a call to the new `providerDockerfileContent()` helper. Preserve the disk-read fallback for custom `s.dockerfile` paths (`filepath.Base(s.dockerfile) != defaultCodexDockerfile` branch) unchanged — it already short-circuits to file content when a user supplies a custom Dockerfile. Resulting shape:
+   ```go
+   func (s Service) recipeHash() string {
+       content := s.providerDockerfileContent()
+       if filepath.Base(s.dockerfile) != defaultCodexDockerfile {
+           path := filepath.Join(s.contextDir, s.dockerfile)
+           if fileContent, err := os.ReadFile(path); err == nil {
+               content = string(fileContent)
+           }
+       }
+       sum := sha256.Sum256([]byte(content))
+       return hex.EncodeToString(sum[:])
+   }
+   ```
+   Builder may refine (e.g. inline the switch), provided the provider-keyed branching is preserved and verified by the test in the next block.
+
 Add to `internal/services/images/service_test.go`:
 
 - Test `TestWriteDefaultClaudeContextWritesDockerfile` mirroring `TestWriteDefaultCodexContextWritesDockerfile` at `service_test.go:353-384`. Must assert the file contains at minimum: `@anthropic-ai/claude-code@${CLAUDE_VERSION}`, `CLAUDE_CONFIG_DIR=/home/valv/.claude`, `ENTRYPOINT ["claude"]`, `NPM_CONFIG_UPDATE_NOTIFIER=false`, `ARG VALV_UID=1000`, `ARG VALV_GID=1000`, and the shared apt-install / useradd / chown lines already checked for Codex. File basename must be `Dockerfile`.
 - Test `TestDefaultClaudeCLIVersionIsNonEmpty` asserting the constant is non-empty and matches the `\d+\.\d+\.\d+` pattern of `versionPattern` (service.go:34) so recipe-hash computation stays stable.
+- Test `TestServiceBuildRecipeHashMatchesProviderDockerfile` covering the F1 fix. Table-driven with two cases (`ProviderCodex`, `ProviderClaude`). For each case: construct an `images.Service` via `New(Options{...})` with the appropriate `Provider`, `Repository`, `ContextDir` (writing the provider's default Dockerfile to that dir via the corresponding `WriteDefault*Context`), and a `runner` of type `*runnerRecorder` (existing fake runner at `service_test.go:19` — reuse, do not rewrite). Call `svc.Build(ctx, BuildRequest{Version: <pinned version const>})`, inspect the recorded `buildx build` args, extract the `--label io.valv.recipe_hash=<hex>` argument value, and assert it equals `hex.EncodeToString(sha256.Sum256([]byte(<provider-default-dockerfile-content>)))`. Codex case expects `sha256(DefaultCodexDockerfile())`; Claude case expects `sha256(DefaultClaudeDockerfile())`. No docker daemon required — the fake runner records args in memory.
 
 Add to `internal/services/images/service_integration_test.go` (behind `//go:build integration`):
 
@@ -103,6 +122,8 @@ Add to `internal/services/images/service_integration_test.go` (behind `//go:buil
 - `go doc github.com/evanmschultz/valv/internal/services/images WriteDefaultClaudeContext` returns non-empty.
 - `go doc github.com/evanmschultz/valv/internal/services/images DefaultClaudeCLIVersion` returns the pinned version string.
 - `mage testPkg ./internal/services/images` green (includes gofumpt check + 70% per-package coverage).
+- `recipeHash()` returns a provider-keyed hash: for `Provider: domain.ProviderClaude` with the default Dockerfile basename, the returned hash equals `hex(sha256(DefaultClaudeDockerfile()))`; for `Provider: domain.ProviderCodex`, it equals `hex(sha256(DefaultCodexDockerfile()))`. Verified by `TestServiceBuildRecipeHashMatchesProviderDockerfile`.
+- `providerDockerfileContent()` helper (unexported) exists on `Service` and is the single source of truth the `recipeHash()` default branch consults — no remaining unconditional `DefaultCodexDockerfile()` seed in `recipeHash()`.
 - Search in the generated Dockerfile string for `@anthropic-ai/claude-code@${CLAUDE_VERSION}`, `CLAUDE_CONFIG_DIR=/home/valv/.claude`, and `ENTRYPOINT ["claude"]` — all three present.
 - No changes to `DefaultCodexDockerfile` / `WriteDefaultCodexContext` / existing Codex tests — regression protected by `mage testPkg ./internal/services/images` still passing all prior Codex assertions.
 - Integration test intentionally gated behind `//go:build integration` so `mage testPkg` runs green on hosts without Docker; `mage integration` exercises the new test when Docker is available.
@@ -169,8 +190,8 @@ Modify `runManageUpdate` at `internal/cli/manage.go:1082-1119`:
 
 1. Replace the `if provider != domain.ProviderCodex { return fmt.Errorf("manage update: provider %q is not supported yet", provider) }` guard at manage.go:1083-1085 with a `switch provider` dispatch. `default:` returns the existing unsupported-provider error.
 2. Codex branch: preserve exact current behavior — call `openImagesService(cmd, paths, domain.ProviderCodex)` and `service.EnsureLatest(cmd.Context(), imagesservice.EnsureRequest{})`. Output fields and headings unchanged.
-3. Claude branch: call `openImagesService(cmd, paths, domain.ProviderClaude)`. Because Claude uses the pinned-version fast path with no resolver, call `service.Build(cmd.Context(), imagesservice.BuildRequest{Version: imagesservice.DefaultClaudeCLIVersion})` instead of `EnsureLatest`. Emit the output record with heading `"Provider image built"` (distinct from Codex's `"Provider image updated"`/`"Provider image up to date"` because the Claude path is not comparing-then-rebuilding yet) and fields: `provider`, `image`, `tags`, `version`, `context`. The `checked at` field is Codex-only (resolver-derived) and is omitted for Claude.
-4. Update `newManageUpdateCommand` `Example` (manage.go:1067-1069) to include `valv manage update claude` — the existing `parseOptionalProvider(args, domain.ProviderCodex)` at manage.go:1072 already accepts `"claude"`, and `allProviders` at manage.go:985 already lists it, so no flag plumbing is needed.
+3. Claude branch: call `openImagesService(cmd, paths, domain.ProviderClaude)`. Because Claude uses the pinned-version fast path with no resolver, call `service.Build(cmd.Context(), imagesservice.BuildRequest{Version: imagesservice.DefaultClaudeCLIVersion})` instead of `EnsureLatest`. Emit the output record with heading `"Provider image built"` (distinct from Codex's `"Provider image updated"`/`"Provider image up to date"` because the Claude path is not comparing-then-rebuilding yet) and fields: `provider`, `image`, `tags`, `version`, `context`. The `checked at` field is Codex-only (resolver-derived) and is omitted for Claude. The Claude branch MUST preserve the `runWithCLIQuietSpinner` wrapper pattern the Codex branch uses at `manage.go:1096-1106`. Codex's current spinner strings (`"Checking provider image"` / `"Provider image check complete"` / `"Provider image update failed"`) remain unchanged. Suggested Claude strings: `"Building provider image"` (start), `"Provider image built"` (success), `"Provider image build failed"` (failure). Wrap the `service.Build(...)` call inside the spinner closure — same shape as the Codex `EnsureLatest` wrapper.
+4. Update `newManageUpdateCommand` `Example` (manage.go:1067-1069) to include `valv manage update claude` — the existing `parseOptionalProvider(args, domain.ProviderCodex)` at manage.go:1072 already accepts `"claude"`, and `supportedProviders` at manage.go:984 already lists it, so no flag plumbing is needed.
 
 Tests in `internal/cli/manage_test.go`:
 
@@ -183,6 +204,7 @@ Tests in `internal/cli/manage_test.go`:
 - `valv manage update claude` (invoked through `newManageUpdateCommand`'s cobra command inside a test harness) produces an `EnsureResult`-equivalent output with `image` = `valv-claude:dev` and `version` = `DefaultClaudeCLIVersion`.
 - `valv manage update` (no arg) and `valv manage update codex` behavior identical to prior — no test regression in existing manage-test coverage.
 - `mage testPkg ./internal/cli` green (gofumpt + 70% coverage + all three new tests above).
+- Claude branch of `runManageUpdate` wraps the `service.Build(...)` call in `runWithCLIQuietSpinner(...)` — symmetric to Codex's `EnsureLatest` wrapper at `manage.go:1096-1106` — preserving spinner UX parity. Codex branch spinner call is unchanged.
 - `go doc github.com/evanmschultz/valv/internal/cli` does NOT expose a new unexported symbol as public API (sanity check that the change stayed internal).
 - Builder records the pinned Claude CLI version in `BUILDER_WORKLOG.md` — if it differs from `2.1.89`, the rationale + Context7 query timestamp go in the worklog.
 
@@ -194,6 +216,7 @@ Tests in `internal/cli/manage_test.go`:
 - **Pin-drift tolerance.** The constant `DefaultClaudeCLIVersion` gives one source of truth; if the dev wants to bump the pin later, it is a one-line change plus a test regeneration. No multi-file churn.
 - **`valv manage update --provider claude` vs `valv manage update claude`.** Focus-plan §6.3 uses `--provider claude` shorthand; existing CLI shape uses positional `valv manage update [provider]` via `parseOptionalProvider`. Plan targets the positional form (already wired) to keep DROP_4 strictly additive. Adding a `--provider` flag is a UX polish left for DROP_7 manage/TUI parity work.
 - **No `internal/adapters/docker/` edits.** The PLAN.md container row's "expected paths" mention of that package was incorrect — the Codex Dockerfile and context writer live in `internal/services/images`, not `internal/adapters/docker`. Mirrored shape exactly; DROP_4 does not touch `internal/adapters/docker/`.
+- **Claude CLI install path — npm deprecation fallback.** Upstream Claude Code is moving away from npm publish toward a native installer (`curl -fsSL https://claude.ai/install.sh | bash`). The npm path (`npm install --global @anthropic-ai/claude-code@${CLAUDE_VERSION}`) is still functional for `@anthropic-ai/claude-code@2.1.89` today. If the npm install step fails at build time because of upstream removal, the fallback is to switch `DefaultClaudeDockerfile` to the native installer. Builder records the pivot (Dockerfile change + Context7 recheck timestamp) in `BUILDER_WORKLOG.md`. Primary path remains npm until proven broken.
 
 ### Hylla Feedback
 
