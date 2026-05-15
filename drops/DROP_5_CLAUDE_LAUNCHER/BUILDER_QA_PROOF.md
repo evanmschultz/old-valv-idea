@@ -84,6 +84,84 @@ All seven acceptance criteria are met with primary code/test evidence. Copy-adap
 
 No findings require a builder respawn. Round 1 closes.
 
+## Unit 5.3 — Round 1
+
+**Date:** 2026-05-14
+**Reviewer role:** proof-oriented (paired with falsification subagent running in parallel)
+**Verdict:** pass
+
+### Scope
+
+Verify Unit 5.3 — `internal/cli/claude.go` (new) + `internal/cli/claude_test.go` (new) + `internal/cli/root.go` (edit) + `internal/services/manage/service.go` (stub flip) + `internal/services/manage/service_test.go` (test updated) implements the Claude CLI pass-through launcher + root wiring + manage stub flip as specified in `PLAN.md` § Unit 5.3.
+
+### Mage Verification (Re-Run Independently)
+
+| Target | Result |
+|---|---|
+| `mage testPkg ./internal/cli` | PASS — 132/132 tests, 72.3% coverage, `-race -cover` clean, gate 60% |
+| `mage testPkg ./internal/services/manage` | PASS — 23/23 tests, 76.3% coverage, gate 60% |
+| `mage build` | PASS — `./valv` binary produced |
+
+All three targets re-run by this reviewer. Output matches worklog claims line-for-line on counts and percentages.
+
+### Findings — Acceptance Criteria
+
+| # | Acceptance Criterion (PLAN.md § Unit 5.3) | Status | Evidence |
+|---|---|---|---|
+| A1 | `mage testPkg ./internal/cli` green (gofumpt + 70% coverage; magefile-effective gate 60%) | met | 132/132 pass, 72.3% > both effective gates. |
+| A2 | `mage testPkg ./internal/services/manage` green | met | 23/23 pass, 76.3% > effective gate. |
+| A3 | `mage build` produces a binary | met | `./valv` built; mage output `[SUCCESS] Built valv (./valv)`. |
+| A4 | `./valv --help` shows `claude` in Runtime Commands group | met (by code inspection) | `root.go:109-113` adds `runtime` group (`Title: "Runtime Commands"`); `root.go:127-128` `claudeCmd := newClaudeCommand(paths, nil)` + `claudeCmd.GroupID = "runtime"`; `root.go:136` `cmd.AddCommand(..., claudeCmd, ...)`. Cobra renders grouped commands under the group title — mechanical. (Sandbox blocked running the built binary; substituted with code-level evidence + worklog smoke output `claude appears under RUNTIME COMMANDS group alongside codex`.) |
+| A5 | `./valv claude --help` exits 0 with usage text including "claude" | met | `claude.go:29` `Use: "claude"`; `claude.go:31-39` `Long` contains "claude" (multiple) and "Docker"; `claude_test.go:22-44` `TestNewClaudeCommandHelp` verifies `cmd.Use == "claude"`, `cmd.Long` contains both required substrings, and `cmd.Help()` returns nil. |
+| A6 | `./valv claude --version` triggers `runClaudeImageOnlyCommand` via `claudeArgsSkipProjectBinding(["--version"]) == true` | met | `claude.go:58-60` dispatches to `runClaudeImageOnlyCommand` when `claudeArgsSkipProjectBinding(args)` is true; `claude.go:172-177` returns true for `["--version"]` (single-element); `claude_test.go:171-198` `TestClaudeArgsSkipProjectBinding` table includes `{name: "version flag", args: ["--version"], want: true}`; `claude_test.go:50-101` `TestNewClaudeCommandVersion` actually exercises `runClaudeImageOnlyCommand` end-to-end with a fake docker script and verifies `CLAUDE_CONFIG_DIR=/home/valv/.claude`, `HOME=/home/valv`, `USER=valv`, container-name prefix `valv-claude-info-`, and `--version` arg pass-through. |
+| A7 | `manage.Service.DefaultHostProfile(domain.ProviderClaude)` returns non-stub `HostProfileSpec{Name: "default", HomePath: "...valv/providers/claude/profiles/default"}` | met | `service.go:160-165` flipped to call `claudeprovider.DefaultHostProfile(s.homeDir)`; `service.go:15` adds `claudeprovider` import; `service_test.go:144-166` `TestDefaultHostProfileClaudeReturnsIsolatedPath` asserts `spec.Name == "default"`, `strings.Contains(spec.HomePath, ".valv/providers/claude/profiles/default")`, and `spec.Provider == domain.ProviderClaude`. Old stub-error test removed. |
+| A8 | No reference to `ensureCodexBindingReady` or `runCodexFirstRunSetup` in `claude.go` | met | Inspected `claude.go` lines 1-215 — neither identifier present. The deliberate omission is documented in claude.go:67-69 comment. |
+| A9 (audit) | `claude.go` does NOT define `sharedClaudeStateHome`; service construction passes `SharedHome: ""` via `claudeservice.Service.Run` | met | Inspected `claude.go` lines 1-215 — `sharedClaudeStateHome` not defined; `SharedHome` not referenced in `claude.go` at all. SharedHome plumbing lives entirely inside `internal/services/claude/service.go` (Unit 5.2 scope, already passed QA). `claudeservice.Options` struct in claude.go:93-104 has no `SharedHome` field passed. |
+
+### Worklog-to-Code Consistency
+
+| Claim | Reality | Status |
+|---|---|---|
+| `claude.go` ~175 prod LOC | actual 214 LOC (+22%) | drift — exceeds ±10% guidance |
+| `claude_test.go` ~185 test LOC | actual 227 LOC (+22%) | drift — exceeds ±10% guidance |
+| 6 tests in `claude_test.go` | confirmed: `TestNewClaudeCommandHelp`, `TestNewClaudeCommandVersion`, `TestRunClaudeCommandUnboundProject`, `TestRunClaudeCommandRejectsWrongProvider`, `TestClaudeArgsSkipProjectBinding`, `TestClaudeCommandPassesArgsThroughUnchanged` | match |
+| 1 test replaced in `service_test.go` | confirmed: `TestDefaultHostProfileClaudeReturnsSentinelError` replaced by `TestDefaultHostProfileClaudeReturnsIsolatedPath` at line 144-166 | match |
+| Red→green moment: `TestNewClaudeCommandHelp` initially checked runtime output, fixed to check `cmd.Long` | verified — `claude_test.go:22-44` checks `cmd.Use`, `cmd.Long`, then `cmd.Help()` — not runtime stdout | match |
+| `internal/cli/claude_image.go` (DROP_4) NOT touched | verified — `git log --oneline -- internal/cli/claude_image.go` last touched in `e3869f6` (DROP_4 work); not in Unit 5.3 commit `87f8cdd` | match |
+| `internal/cli/account_auth.go` (DROP_2) NOT touched | verified — last touched in `15df905` (DROP_2 work); existing `ProviderClaude: return nil` no-op branches confirmed at lines 39-40, 50-51, 61-62 | match |
+| `internal/cli/operator_helpers.go` (DROP_4) NOT touched | verified — last touched in `e3869f6` (DROP_4 work); not in Unit 5.3 commit | match |
+| Commit `87f8cdd` files: claude.go (new), claude_test.go (new), root.go (edit), manage/service.go (edit), manage/service_test.go (edit), + 2 drop-dir mds | matches exactly per `git show 87f8cdd --stat` (538 insertions, 10 deletions) | match |
+
+### Idiomatic Go Discipline
+
+- **Doc comments on exported identifiers:** `claudeRunFunc` (line 19) and `newClaudeCommand` (line 21) are unexported — no doc-comment requirement (AGENTS.md § 5 applies to exported). All exported test names (`TestNewClaudeCommandHelp`, etc.) carry leading doc comments — `claude_test.go:18-21`, `claude_test.go:46-49`, etc.
+- **Error wrapping `%w`:** every error path in `claude.go` wraps with `fmt.Errorf("run claude command: ...: %w", err)` or similar — verified at lines 64, 89, 106, 111, 114, 118, 131, 158, 187, 209, 211. AGENTS.md § 6 satisfied.
+- **Mage-only build/test:** worklog explicitly enumerates only `mage testPkg`, `mage build` — no raw `go test`, `go build`, `go vet`, or `gofumpt` invocations. AGENTS.md § 13 satisfied.
+- **Context propagation:** `runClaudeCommand` receives `*cobra.Command` and pulls `cmd.Context()` at the boundary (line 110, 117). `ensureClaudeImageAvailable` takes `ctx context.Context` as first param (line 199). AGENTS.md § 7 / Go std satisfied.
+- **`defer store.Close()`:** line 91 — resource acquisition followed by `defer` on the next line, per project rule.
+- **gofumpt:** `mage testPkg` runs gofumpt check inside the test target; both targets passed, confirming format clean.
+
+### Observations (Non-Blocking)
+
+(Out of scope for this round — record-only, no fix required.)
+
+- **Worklog LOC drift.** Worklog reports ~175 prod / ~185 test LOC; actual files are 214 / 227 LOC (+22% each). Same hygiene observation as Unit 5.2 round 1. Recommend builder use `wc -l` rather than estimates in future worklogs. Non-blocking — code itself works and matches spec functionally.
+- **`TestRunClaudeCommandRejectsWrongProvider` exercises the no-Claude-binding path, not the wrong-Claude-binding-provider path.** The test (line 135-167) sets up a project with a Codex binding only, then invokes the Claude command; the service returns `domain.ErrUnboundProject` because no Claude binding exists. The "provider mismatch" rejection inside `resolveBinding` (asserting `binding.Provider == domain.ProviderClaude`) is covered separately in `internal/services/claude/service_test.go` `TestRunRejectsWrongBindingProvider` / `TestRunRejectsWrongProfileProvider` (Unit 5.2, already passed QA). The test name is slightly misleading; the test itself is correct and verifies a real failure mode (Claude command refusing a project that has only Codex bound). Non-blocking — naming could be tightened to e.g. `TestRunClaudeCommandNoClaudeBindingOnCodexBoundProject` in a future drop.
+- **`./valv --help` not exercised by this reviewer at runtime.** Sandbox blocked executing the freshly built binary. Substituted with: (a) code inspection of `root.go:109-113, 127-128, 136` confirming `claudeCmd` is registered under group `runtime` titled "Runtime Commands"; (b) `mage build` succeeded; (c) builder worklog smoke-output line `claude appears under RUNTIME COMMANDS group alongside codex`. Cobra grouped-help rendering is mechanical given the registration; non-blocking. Recommend orchestrator/dev run `./valv --help` manually once before drop close.
+- **`runClaudeImageOnlyCommand` exit-status semantics.** When `./valv claude --help` is invoked, the wrapper calls `ensureClaudeImageCurrent` then runs `docker run ... --help` against the in-container claude binary. If the container image is missing AND `VALV_CLAUDE_IMAGE` is unset, the wrapper triggers a docker build before help — meaning `valv claude --help` can be slow on first run. This is a UX observation, not a correctness defect — pinned-version fast path (`service.Build` not `EnsureLatest`) is per spec.
+- **Coverage threshold note.** PLAN.md § Unit 5.3 A1 states "70% coverage gate"; `magefile.go:22` TODO comment documents the effective gate is 60% pending adapters/docker coverage uplift. 72.3% (cli) and 76.3% (manage) exceed both thresholds. Same observation as Unit 5.1 / 5.2.
+
+### Verdict
+
+**pass**
+
+All 9 acceptance criteria (including the shared-home audit A9) from PLAN.md § Unit 5.3 are met with primary code+test evidence at file:line granularity. Mage targets independently re-run by this reviewer match worklog claims exactly. DROP_4 and DROP_2 files (`claude_image.go`, `operator_helpers.go`, `account_auth.go`) confirmed untouched per `git log` and per commit `87f8cdd --stat` showing only the 5 expected source files (plus 2 drop-dir mds). Idiomatic Go discipline (doc comments, `%w` wrapping, mage-only, context-first, `defer` cleanup) is honored throughout. Worklog LOC numbers drift +22% from actual file sizes — recorded as a non-blocking hygiene observation matching the Unit 5.2 pattern.
+
+No findings require a builder respawn. Round 1 closes.
+
+### Hylla Feedback
+
+N/A — Unit 5.3 verification was a copy-adapt audit + mage re-run + git-log inventory. Hylla was not queried; all Go-symbol evidence was gathered via direct `Read` of the changed files (claude.go, claude_test.go, root.go, manage/service.go, manage/service_test.go) and adjacent untouched files (account_auth.go), plus mage target re-runs and `git show 87f8cdd --stat`. For this class of "verify a 5-file changeset already on HEAD" QA, direct `Read` + git inspection is faster than Hylla vector/keyword search. No Hylla miss to record.
 ## Unit 5.2 — Round 1
 
 **Date:** 2026-05-14

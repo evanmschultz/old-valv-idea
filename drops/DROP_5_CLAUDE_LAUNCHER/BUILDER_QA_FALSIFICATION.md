@@ -195,3 +195,102 @@ None.
 ### Hylla Feedback
 
 N/A for this unit. The QA review was conducted via direct `Read` of the two Claude service files (`service.go` 346 LOC, `service_test.go` 550 LOC), the Codex template file (`codex/service.go` 347 LOC), the adapter `runtime.go` for the `SharedHome` collapse path, and a partial read of `codex/service_test.go` for fakeStore shape comparison. Bash grep was permission-denied; manual content scan of the cat-n output was a complete substitute given the file sizes. Hylla was not queried because (a) the files under review are post-ingest (Hylla index is stale relative to HEAD), and (b) the Codex template is short enough that direct Read is more efficient than Hylla summarization for structural-diff review of this class.
+
+## Unit 5.3 — Round 1
+
+**Date:** 2026-05-14
+**Verdict:** pass
+
+### Summary
+
+No unmitigated counterexample found across 15 spawn-prompt attacks plus 8 self-derived attacks. The `valv claude` pass-through CLI, root-command registration, and manage stub flip are structurally correct and faithful to the dev-confirmed isolated-first model. `EnsureLatest` → `Build` substitution is correctly applied. No first-run gating, no shared-home helper in `claude.go`, no Codex-provider leakage. The Unit 5.3 commit (`87f8cdd`) touches exactly the planned files; DROP_4 files (`claude_image.go`, `account_auth.go`, `operator_helpers.go`) remain untouched. One soft finding on `TestRunClaudeCommandRejectsWrongProvider` test-name semantics (test exercises "no Claude binding" path, not the direct provider-mismatch guard at `services/claude/service.go:222`). Test passes for the correct behavioral reason; the direct-mismatch path is exercised at the service-test layer (`services/claude/service_test.go::TestRunRejectsWrongBindingProvider`). Independent re-execution of `mage testPkg`, `mage build`, and `./valv --help` was blocked by tool permission in this session, so the worklog's green status is accepted on code-evidence grounds (no contradictions found between the worklog and the file contents).
+
+### Attack Attempts
+
+| # | Attack | Result |
+|---|---|---|
+| 1 | `EnsureLatest` vs `Build` mistake — copy-paste leftover that would fail at runtime because Claude has no Resolver | REFUTED — `claude.go:192` reads `service.Build(cmd.Context(), imagesservice.BuildRequest{Version: imagesservice.DefaultClaudeCLIVersion})` |
+| 2 | First-run setup leakage (`ensureClaudeBindingReady`, `ensureBoundClaudeAccountReady`, `errClaudeSetupCanceled`, `runClaudeFirstRunSetup`) | REFUTED — `claude.go:53-121` contains none of these; comment at `:67-69` documents the deliberate omission |
+| 3 | `SharedHome` literal at service construction (any non-empty `SharedHome` would trigger the adapter's shared-home branch) | REFUTED — `claude.go:93-104` constructs `claudeservice.Options` which has no `SharedHome` field (`services/claude/service.go:42-55`); `SharedHome: ""` is set inside the service at `service.go:129` (literal empty string in struct literal) |
+| 4 | `ProviderCodex` passed somewhere in `claude.go` | REFUTED — only `domain.ProviderClaude` appears (`claude.go:185`); zero `ProviderCodex` references |
+| 5 | `runClaudeImageOnlyCommand` env keys wrong (`CODEX_HOME` instead of `CLAUDE_CONFIG_DIR`) or mount target wrong | REFUTED — `claude.go:144-149` reads `CLAUDE_CONFIG_DIR: claudeprovider.ContainerClaudeDir`, `HOME: claudeprovider.ContainerHomeDir`; no `CODEX_HOME` key. The image-only path is mountless by design (Codex equivalent at `codex.go:143-165` also has no profile mount) |
+| 6 | Container image fallback uses `codexImageRef()` | REFUTED — `claude.go:96, 133, 183, 192` all call `claudeImageRef()` |
+| 7 | Root.go edit correctness (declared but not added, missing GroupID, missing Example) | REFUTED — `root.go:127` declares `claudeCmd := newClaudeCommand(paths, nil)`, `:128` sets `GroupID = "runtime"`, `:136` adds `claudeCmd` to `cmd.AddCommand(...)`, `:63-64` adds `valv claude --help` and `valv claude --version` to root `Example` |
+| 8 | Manage stub flip correctness (sentinel error remaining, wrong import alias, wrong error wrap) | REFUTED — `services/manage/service.go:160-165` switches `case domain.ProviderClaude:` to `claudeprovider.DefaultHostProfile(s.homeDir)` with `%w` wrap; import at `:15` is `claudeprovider "github.com/evanmschultz/valv/internal/adapters/providers/claude"`; no "not yet available" text in this case |
+| 9 | Manage test update — leftover sentinel-error expectation | REFUTED — `services/manage/service_test.go:144-166` `TestDefaultHostProfileClaudeReturnsIsolatedPath` asserts non-stub return with path containing `.valv/providers/claude/profiles/default` and provider equality; no sentinel-error expectation |
+| 10 | `claudeArgsSkipProjectBinding` correctness (wrong return values for documented patterns) | REFUTED — `claude.go:163-179` returns false for empty args; true for any arg `--help`/`-h`; true for single-arg `--version`/`-V`; true when `args[0] == "help"`; matches Codex template |
+| 11 | Test reads runtime stdout (brittle, Cobra-version-dependent) | REFUTED — `claude_test.go:22-44` inspects `cmd.Use`, `cmd.Long`, and calls `cmd.Help()` for non-error invocation; does NOT execute the binary or parse stdout. Matches builder's red→green fix |
+| 12 | Coverage gaming — assertion-light tests pushed package coverage to 72.3% | REFUTED — `TestClaudeArgsSkipProjectBinding` (`claude_test.go:171-198`) is 9-case table-driven with explicit `t.Fatalf`; `TestRunClaudeCommandUnboundProject` (`:106-130`) uses `errors.Is(err, domain.ErrUnboundProject)` at `:127`, not string match |
+| 13 | `mage build` real output — `claude` silently absent from Runtime Commands | EXHAUSTED — independent re-execution of `./valv --help` was permission-denied in this session; `mage build` was permission-denied. The code path is mechanically sound (`root.go:127-128, 136` correctly registers `claudeCmd` with `GroupID="runtime"` and adds it to `AddCommand`). Worklog claim accepted on code-evidence grounds; no contradiction between worklog and file contents |
+| 14 | DROP_4 files touched by Unit 5.3 commit | REFUTED — `git show --stat 87f8cdd` shows only `claude.go`, `claude_test.go`, `root.go`, `services/manage/service.go`, `services/manage/service_test.go`, drop docs. `claude_image.go`, `account_auth.go`, `operator_helpers.go` are NOT in the Unit 5.3 commit; their last commit hashes are `e3869f6` and `15df905` (both DROP_4) |
+| 15 | Mage discipline violation (raw `go test`/`go build` in worklog) | REFUTED — worklog § "Mage Targets Run" lists only `mage testPkg ./internal/cli`, `mage testPkg ./internal/services/manage`, `mage build`; no raw `go` invocations |
+| 16 (self) | `cmd.Execute()` with `DisableFlagParsing: true` strips args before reaching RunE | REFUTED — `claude.go:46-47` declares `DisableFlagParsing: true` and `Args: cobra.ArbitraryArgs`; `TestClaudeCommandPassesArgsThroughUnchanged` (`claude_test.go:202-227`) confirms args pass through unchanged including `--resume`, `--model`, positional `session-123`, `claude-opus-4-5` |
+| 17 (self) | `defer store.Close()` ordering hazard — store opened, deferred close registered, then service-construction failure leaves store open | REFUTED — `claude.go:87-91` opens store and immediately registers `defer store.Close()` at `:91` before any later call that could fail. Service construction at `:93-104` either succeeds (deferred close fires on function exit) or returns an error (deferred close still fires). Safe |
+| 18 (self) | `runClaudeImageOnlyCommand` calls `ValidateBinding` (which would fail for unbound projects in help/version paths) | REFUTED — `runClaudeImageOnlyCommand` at `claude.go:123-161` does not call `ValidateBinding`; the spec explicitly omits it because help/version shouldn't need a binding |
+| 19 (self) | `TestNewClaudeCommandVersion` doesn't actually exercise image-only env wiring | REFUTED — `claude_test.go:50-101` invokes `runClaudeImageOnlyCommand` directly with a fake `docker` script and asserts the captured args contain `CLAUDE_CONFIG_DIR=/home/valv/.claude`, `HOME=/home/valv`, `USER=valv`, container name prefix `valv-claude-info-`, image `valv-claude-dev:dev`, and `--version`. End-to-end env wiring is verified |
+| 20 (self) | `TestRunClaudeCommandRejectsWrongProvider` test-name accuracy — does it exercise the direct provider-mismatch guard at `services/claude/service.go:222`? | SOFT FINDING — test at `claude_test.go:135-167` sets up a project with a Codex binding (no Claude binding), then runs `claude`. Since the SQLite-backed `BindingByProjectID(projectID, ProviderClaude)` query filters by provider, it returns `ErrNotFound`, and the service returns wrapped `domain.ErrUnboundProject` — same path as "no project record." The direct `binding.Provider != domain.ProviderClaude` guard at `services/claude/service.go:222-224` is NOT exercised by this CLI-layer test. It IS exercised at the service-test layer by `TestRunRejectsWrongBindingProvider` in `services/claude/service_test.go`. Test passes for the right behavioral reason (no Claude binding exists for that project) but the test name implies a different path than what it actually exercises. Not unit-breaking — production behavior is correct; the guard at the service layer is independently tested |
+| 21 (self) | `findDockerBinary` reference at `claude.go:204` is undefined | REFUTED — `findDockerBinary` is a package-level var declared at `codex.go:25` (`var findDockerBinary = exec.LookPath`); same package, valid reference. Comment at `claude.go:203` documents the delegation |
+| 22 (self) | `dockerImageMissingError` reference at `claude.go:208` is undefined | REFUTED — `dockerImageMissingError` is declared at `codex.go:258-263`; same package, valid reference |
+| 23 (self) | `timeNowUnixNano` reference at `claude.go:137` is undefined | REFUTED — `timeNowUnixNano` is a package-level var declared at `codex.go:172` (`var timeNowUnixNano = func() int64 { return time.Now().UTC().UnixNano() }`); same package, valid reference |
+
+### Evidence Trace
+
+Files read in full and cross-checked:
+
+| Claude artifact | Codex counterpart | Comparison result |
+|---|---|---|
+| `internal/cli/claude.go` (215 LOC) | `internal/cli/codex.go` (303 LOC) | Net delta: removed `ensureCodexBindingReady` (first-run gate), removed `ensureBoundCodexAccountReady` (host-side auth gate), removed `codexArgsSkipAccountReady` (no equivalent — Claude auth runs in-container), removed `codexImageVersionRef` (no dynamic version compare in v1). `EnsureLatest` → `Build` swap at `:192`. `claude.go` is correctly leaner than `codex.go` by ~90 LOC. Reuses `findDockerBinary`, `dockerImageMissingError`, `timeNowUnixNano` from `codex.go` (same package) |
+| `internal/cli/claude_test.go` (227 LOC) | `internal/cli/codex_test.go` (15K reference) | 6 tests covering: command metadata (`TestNewClaudeCommandHelp`), image-only env wiring (`TestNewClaudeCommandVersion`), unbound-project error wrap (`TestRunClaudeCommandUnboundProject`), no-claude-binding rejection (`TestRunClaudeCommandRejectsWrongProvider`), 9-case args-skip table (`TestClaudeArgsSkipProjectBinding`), args-pass-through (`TestClaudeCommandPassesArgsThroughUnchanged`) |
+| `internal/cli/root.go` (264 LOC) | n/a — edit only | 6-line edit: `:127-128` declares `claudeCmd` + sets `GroupID`, `:136` includes `claudeCmd` in `AddCommand`, `:63-64` adds two `valv claude` lines to root `Example` |
+| `internal/services/manage/service.go` (550 LOC) | n/a — edit only | Stub flip at `:160-165`: switch case `domain.ProviderClaude` now calls `claudeprovider.DefaultHostProfile(s.homeDir)` with `%w` wrap (mirrors `:154-159` Codex branch). Import added at `:15`: `claudeprovider "..."` |
+| `internal/services/manage/service_test.go` (705 LOC) | n/a — edit only | Replaced `TestDefaultHostProfileClaudeReturnsSentinelError` with `TestDefaultHostProfileClaudeReturnsIsolatedPath` (`:144-166`) — asserts non-stub return, provider equality, and path containing `.valv/providers/claude/profiles/default` |
+
+Key code sites verified by direct read:
+
+- `claude.go:67-69` — comment explicitly documents the omission of `ensureClaudeBindingReady` (deliberate, not oversight)
+- `claude.go:93-104` — service construction uses `claudeservice.Options` with no `SharedHome` field present in the struct; `RealHome: realHomeDir()` is passed for structural parity but unused in v1 service body
+- `claude.go:108-115` — `ValidateBinding` is called before `ensureClaudeImageCurrent` (deliberate deviation from Codex order; ensures unbound errors surface without triggering docker build)
+- `claude.go:141-143` — labels include `"io.valv.provider": "claude"`, `"io.valv.scope": "info"` (image-only path)
+- `claude.go:144-149` — env map: `CLAUDE_CONFIG_DIR`, `HOME`, `LOGNAME`, `USER`; no `CODEX_HOME`
+- `claude.go:163-179` — `claudeArgsSkipProjectBinding` returns false for empty, true for any `--help`/`-h`, true for single-arg `--version`/`-V`, true for `args[0] == "help"`
+- `claude.go:182-197` — `ensureClaudeImageCurrent` checks `VALV_CLAUDE_IMAGE` env first, then dispatches `openImagesService(cmd, paths, domain.ProviderClaude)` and calls `service.Build(ctx, BuildRequest{Version: DefaultClaudeCLIVersion})`. The `_, err = service.Build(...)` pattern discards the unused `BuildResult` cleanly
+- `claude.go:204-213` — `ensureClaudeImageAvailable` reuses `findDockerBinary` and `dockerImageMissingError` from `codex.go`; error message says "valv manage update claude" (Claude-specific)
+- `root.go:55-65` — `Example` block contains `valv claude --help` and `valv claude --version` (lines 63-64)
+- `root.go:109-113` — `AddGroup` declares `runtime` group at index 1; `claudeCmd.GroupID = "runtime"` at `:128` is valid
+- `services/manage/service.go:152-169` — `DefaultHostProfile` switch covers `ProviderCodex` and `ProviderClaude` cases plus `default` unsupported-provider fallback; no leftover sentinel error
+- `services/manage/service_test.go:144-166` — assertion includes `Provider == domain.ProviderClaude`, `Name == "default"`, and `strings.Contains(spec.HomePath, ".valv/providers/claude/profiles/default")`
+
+### Soft Findings (not unit-breaking)
+
+1. **`TestRunClaudeCommandRejectsWrongProvider` test-name accuracy.** The test name implies it exercises the `binding.Provider != domain.ProviderClaude` guard at `services/claude/service.go:222-224`. In practice, it sets up a project with a Codex binding (no Claude binding), and the test passes because `BindingByProjectID(projectID, ProviderClaude)` returns `ErrNotFound` — same path as "no project record" (test #3 in the same file). The direct provider-mismatch guard remains untested at the CLI layer (it IS tested at the service layer by `services/claude/service_test.go::TestRunRejectsWrongBindingProvider`). Suggestion: rename to `TestRunClaudeCommandNoBoundClaudeAccount` for clarity, or add a separate test that injects a fake store returning a binding with `Provider: domain.ProviderCodex` to exercise the guard at the CLI layer. Not unit-breaking; production behavior is correct.
+2. **`TestNewClaudeCommandVersion` short-circuits via `VALV_CLAUDE_IMAGE` env-set path.** The test sets `VALV_CLAUDE_IMAGE`, which takes the `ensureClaudeImageAvailable` branch at `claude.go:183` rather than the `service.Build` branch at `:192`. The `service.Build` branch (env unset) is not exercised by any unit test in `claude_test.go`. The Codex equivalent `runCodexImageOnlyCommand` test pattern has the same gap, so this matches the established template. Worth a follow-up test once the dogfooded `valv claude --version` smoke command runs the env-unset path in CI. Not breaking; v1 dogfood workflow exercises this path manually.
+3. **Independent re-execution of mage targets blocked.** `mage build`, `mage testPkg ./internal/cli`, `mage testPkg ./internal/services/manage`, and `./valv --help` were all permission-denied in this QA session. The worklog claims green status for all four. Verdict is based on code evidence (file reads + git diff) showing the implementation is structurally correct and consistent with the worklog claims. If a counterexample exists in mage output, it would surface in CI after push.
+
+### Acceptance Criteria Verification
+
+All 10 acceptance criteria from PLAN.md § Unit 5.3 verified:
+
+| # | Criterion | Verified by |
+|---|---|---|
+| 1 | `mage testPkg ./internal/cli` green (72.3% > 60%) | Worklog § "Mage Targets Run" claims 132/132 tests pass; code review of test functions shows behavior-oriented assertions. Independent re-execution blocked by permission |
+| 2 | `mage testPkg ./internal/services/manage` green (76.3% > 60%) | Worklog § "Mage Targets Run" claims 23/23 tests pass. Independent re-execution blocked by permission |
+| 3 | `mage build` produces binary | Worklog § "Mage Targets Run" claims success; code path is mechanically sound. Independent re-execution blocked by permission |
+| 4 | `./valv --help` shows `claude` in Runtime Commands group | `root.go:127-128, 136` correctly registers `claudeCmd` with `GroupID="runtime"` and includes in `AddCommand`. Independent invocation blocked by permission; worklog claims success |
+| 5 | `./valv claude --help` exits 0 with usage text including "claude" | `claude.go:29-39` Long description contains "claude" and "Docker"; `TestNewClaudeCommandHelp` verifies `cmd.Help()` exits without error |
+| 6 | `claudeArgsSkipProjectBinding(["--version"]) == true` | `claude.go:172-177` switch case `"--version"` returns true; `TestClaudeArgsSkipProjectBinding` table case "version flag" asserts true |
+| 7 | `manage.DefaultHostProfile(ProviderClaude)` returns real path (not stub error) | `service.go:160-165` direct read confirms call to `claudeprovider.DefaultHostProfile(s.homeDir)`; `TestDefaultHostProfileClaudeReturnsIsolatedPath` asserts the contract |
+| 8 | No reference to `ensureCodexBindingReady` or `runCodexFirstRunSetup` in `claude.go` | Direct read of `claude.go` end-to-end — no such identifiers present |
+| 9 | No `sharedClaudeStateHome` in `claude.go` | Direct read of `claude.go` end-to-end — no such identifier present |
+| 10 | `SharedHome: ""` passed to `PrepareRuntime` (inside service, not cli) | `services/claude/service.go:127-133` `PrepareRequest` struct literal has `SharedHome: ""` (literal empty string); `claude.go` does not have a `SharedHome` field in its `claudeservice.Options` construction (correct — the option doesn't exist) |
+
+### Counterexamples
+
+None.
+
+### Verdict
+
+**pass** — no unmitigated counterexample to the unit's claim that `internal/cli/claude.go`, `internal/cli/root.go`, `internal/services/manage/service.go`, and their tests correctly implement the Claude pass-through launcher per the dev-confirmed isolated-first model and copy-adapt template. All 10 acceptance criteria verified by direct code read; the 3 mage-execution criteria (1, 2, 3) and the `./valv --help` runtime criterion (4) are accepted on worklog evidence because independent re-execution was permission-denied in this QA session. One soft finding on test-name accuracy (`TestRunClaudeCommandRejectsWrongProvider` exercises "no Claude binding," not the direct provider-mismatch guard); the guard itself is tested at the service-test layer. Two additional soft observations on coverage scope (env-unset `service.Build` branch not exercised by claude unit test; matches Codex test pattern).
+
+### Hylla Feedback
+
+N/A for this unit. The QA review was conducted via direct `Read` of all five changed files (`claude.go`, `claude_test.go`, `root.go`, `services/manage/service.go`, `services/manage/service_test.go`), the Codex CLI template (`codex.go`, `codex_test.go`), the Claude service implementation (`services/claude/service.go`) for the `SharedHome: ""` verification, and the supporting CLI helpers (`claude_image.go`, `account_auth.go`, `operator_helpers.go`) for the DROP_4-files-untouched check. `git log` and `git show --stat` were used to confirm DROP_4 files were not in the Unit 5.3 commit. Hylla was not queried because (a) the files under review are post-ingest (Hylla index is stale relative to HEAD), and (b) the structural-diff review of a copy-adapt unit is more efficiently done via direct `Read` than Hylla vector/keyword search. Bash was permission-denied for `mage` and `./valv` execution.
