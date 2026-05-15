@@ -164,7 +164,7 @@ Tests in `runtime_test.go`:
 
 #### Unit 5.2 — Claude launch service package (new package)
 
-**State:** todo
+**State:** done
 **Paths:**
 - `internal/services/claude/service.go` (new)
 - `internal/services/claude/service_test.go` (new)

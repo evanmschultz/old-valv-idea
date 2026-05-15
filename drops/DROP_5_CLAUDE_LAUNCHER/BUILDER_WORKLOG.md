@@ -90,3 +90,75 @@ Verification by file:
 **Non-Go files** (PLAN.md, WORKFLOW.md, magefile.go): Read directly per protocol — Hylla is Go-only, so no query issued.
 
 **Overall:** N/A for this unit — task was copy-adapt work where direct `Read` of the source files was the correct first-order tool per the spawn prompt's guidance. No Hylla queries were needed or attempted for this unit's scope.
+
+---
+
+## Unit 5.2 — Round 1
+
+**Date:** 2026-05-14
+**Status:** done
+
+### Files Created
+
+- `internal/services/claude/service.go` (278 LOC)
+- `internal/services/claude/service_test.go` (330 LOC)
+
+Total production LOC: 278. Total test LOC: 330.
+
+### Mage Targets Run
+
+| Target | Result |
+|---|---|
+| `mage testPkg ./internal/services/claude` (initial, 17 tests) | FAIL — gofumpt error (extra alignment spaces in struct literal) |
+| `mage testPkg ./internal/services/claude` (after gofumpt fix, 17 tests) | PASS — 17/17 tests green, 81.0% coverage |
+
+### Test Count
+
+17 tests in `service_test.go`:
+- `TestNewRequiresDependencies` (table-driven: nil store, nil executor, empty image)
+- `TestRunSucceedsWithBoundProject`
+- `TestRunReturnsUnboundProjectWhenNoProject`
+- `TestRunReturnsUnboundProjectWhenNoBinding`
+- `TestRunRejectsWrongBindingProvider`
+- `TestRunRejectsWrongProfileProvider`
+- `TestValidateBindingReturnsNilForBoundProject`
+- `TestRunRejectsWorkingDirectoryOutsideProjectRoot`
+- `TestRunRejectsSiblingPathThatSharesProjectPrefix`
+- `TestRunBuildsNonInteractiveDockerRequestWhenTTYDisabled`
+- `TestEmitNoticesSuppressesWarningsOnTTY`
+- `TestEmitNoticesWritesWarningsWithoutTTY`
+- `TestContainerNameContainsClaude`
+- `TestRunBubblesExecutorErrors`
+
+### Design Notes
+
+1. **`sharedCodexStateHome` NOT ported.** The Codex service's `sharedCodexStateHome` helper (lines 171-183 in codex/service.go) resolves `~/.codex` as a shared host home for the shared-profile merge pattern. Claude's isolated-first model has no equivalent — the profile IS the state store. `service.Run` passes `SharedHome: ""` (empty) to `clauderuntime.PrepareRuntime`. The adapter collapses empty `SharedHome` to `profileHome` at runtime.go:75-81, skipping the temp-copy branch entirely.
+
+2. **`RealHome` field present but unused.** The field is included for structural parity with the Codex service (`Options.RealHome`, `Service.realHome`). In v1, no shared-home merging logic exists for Claude, so `realHome` is stored but never read. This matches the acceptance criterion explicitly.
+
+3. **`resolveBinding` uses `domain.ProviderClaude` in all three positions.** `BindingByProjectID(ctx, projectRecord.ID, domain.ProviderClaude)`, `binding.Provider != domain.ProviderClaude`, `profile.Provider != domain.ProviderClaude` — verified by `TestRunSucceedsWithBoundProject` (binding lookup passes ProviderClaude), `TestRunRejectsWrongBindingProvider`, and `TestRunRejectsWrongProfileProvider`.
+
+4. **Container label `"io.valv.provider": "claude"`.** Hardcoded string `"claude"` in `buildRequest`. Verified by `TestRunSucceedsWithBoundProject`.
+
+5. **`containerName` returns `valv-claude-interactive-<name>-<ns>`.** Verified by `TestContainerNameContainsClaude` which also asserts no `"codex"` substring is present.
+
+6. **Test helpers `boundClaudeStore` and `detectAlways`.** Added two unexported test helpers to reduce repetition across test cases. `boundClaudeStore` wires a canonical Claude project+binding+profile triple; `detectAlways` returns a `DetectFunc` that always resolves to a given root. Both are test-file-only, not production code.
+
+7. **gofumpt alignment fix.** Initial write used extra alignment spaces in the `domain.ProjectBinding` struct literal inside `boundClaudeStore`. `gofumpt` requires no column alignment — reverted to standard Go field alignment.
+
+### Acceptance Criteria Check
+
+| Criterion | Status |
+|---|---|
+| `mage testPkg ./internal/services/claude` green | PASS (81.0% > 60%) |
+| No reference to `sharedCodexStateHome` | PASS (not present in any file in package) |
+| No reference to `codexruntime.DefaultHostProfile` | PASS (not imported or called) |
+| `resolveBinding` passes `domain.ProviderClaude` to `BindingByProjectID` | PASS (verified by TestRunSucceedsWithBoundProject + TestRunReturnsUnboundProjectWhenNoBinding) |
+| Container label `"io.valv.provider"` equals `"claude"` | PASS (verified by TestRunSucceedsWithBoundProject) |
+| `New` returns error when Store nil | PASS (TestNewRequiresDependencies table case "nil store") |
+| `New` returns error when Executor nil | PASS (TestNewRequiresDependencies table case "nil executor") |
+| `New` returns error when Image.Repository empty | PASS (TestNewRequiresDependencies table case "empty image repository") |
+
+### Hylla Feedback
+
+N/A — task was copy-adapt work from a just-committed template source. Direct `Read` of the Codex service files was the correct and only evidence-gathering tool needed. No Hylla queries were issued for this unit's scope (copy-adapt of in-repo Go sources is more efficiently done via `Read` than Hylla vector/keyword search for this class of work).
