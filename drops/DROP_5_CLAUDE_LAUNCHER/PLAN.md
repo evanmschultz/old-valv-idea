@@ -86,7 +86,7 @@ Package-lock chain:
 
 #### Unit 5.1 — Claude provider adapter package (new package)
 
-**State:** todo
+**State:** done
 **Paths:**
 - `internal/adapters/providers/claude/profile.go` (new)
 - `internal/adapters/providers/claude/profile_test.go` (new)
