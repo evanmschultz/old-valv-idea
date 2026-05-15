@@ -91,3 +91,89 @@ None blocking.
 - **Non-Go reads (PLAN.md, BUILDER_WORKLOG.md):** Read directly via the `Read` tool per Hylla's Go-only scope. No miss to log.
 
 Net: 1 miss (visibility default), 1 hit, plus expected `Read`-tool fallback for non-Go content.
+
+---
+
+## Unit 6.2 — Round 2
+
+**Date:** 2026-05-14
+**Reviewer:** go-qa-proof-agent
+**Verdict:** PASS
+
+### Mage gate re-run
+
+`mage testPkg ./internal/cli` — re-run by reviewer:
+- tests: 137 passed / 0 failed
+- coverage: 71.2% (≥ 60% gate, ≥ 70% AGENTS.md § 11 floor)
+- duration: ~90.73s with `-race -cover -count=1`
+
+Matches worklog claim exactly (137 / 71.2%). Gate green.
+
+### Fixes — evidence
+
+#### C1 — `options.SkipLogin` threaded to Claude path
+
+| Sub-criterion | Evidence | Status |
+|---|---|---|
+| Dispatcher forwards full `options` | `internal/cli/account_auth.go:42` — `return ensureClaudeAccountReady(cmd, account, options)` (no longer `options.Paths`) | ✓ |
+| `ensureClaudeAccountReady` signature accepts `options accountAuthOptions` | `claude_auth.go:63` — `func ensureClaudeAccountReady(cmd *cobra.Command, account domain.Profile, options accountAuthOptions) error` | ✓ |
+| First statement is `if options.SkipLogin { return nil }` | `claude_auth.go:64-66` — opens with `if options.SkipLogin { return nil }` immediately after the function header (no intervening statements) | ✓ |
+| Test exercises `SkipLogin=true` path | `claude_auth_test.go:88-116` — `TestEnsureClaudeAccountReadyRespectsSkipLogin` pre-writes creds, calls with `SkipLogin: true`, asserts: `err == nil` (line 103-105), `stub.containerHits == 0` (line 106-108), `stub.imageHits == 0` (line 109-111), and creds file still exists on disk (line 112-115) | ✓ |
+
+#### C2 — TTY check ordered before credential wipe
+
+| Sub-criterion | Evidence | Status |
+|---|---|---|
+| Order is SkipLogin → TTY → wipe (NOT wipe → TTY) | `claude_auth.go:63-75` — `if options.SkipLogin { return nil }` (line 64), then `if !commandHasTTY(cmd.InOrStdin()) { return fmt.Errorf(...) }` (lines 67-72), then `wipeClaudeCredentials(account.HomePath)` (line 73). Wipe is third, after both short-circuits. | ✓ |
+| Non-TTY caller preserves pre-existing creds | `claude_auth_test.go:121-146` — `TestEnsureClaudeAccountReadyNonTTYDoesNotWipe` writes creds, calls non-TTY, asserts error contains `"TTY"` (line 139-141) AND `os.Stat(credPath)` reports the file still exists (line 143-145) | ✓ |
+| `loginClaudeAccount` has NO TTY guard (Round 1 contract preserved) | `claude_auth.go:103-130` — `loginClaudeAccount` function body contains no `commandHasTTY` call. First statement is `wipeClaudeCredentials` (line 104), proceeding directly to image/container/verify. | ✓ |
+
+#### C3 — Test renames + genuine no-creds test
+
+| Sub-criterion | Evidence | Status |
+|---|---|---|
+| `TestEnsureClaudeAccountReadySucceedsAfterContainerWrite` removed/renamed | `claude_auth_test.go:151` — replaced by `TestBuildClaudeAuthContainerRequestShape` (now matches what the body actually exercises: `buildClaudeAuthContainerRequest` shape assertions on `Mounts`, `Args`, `Interactive`, `TTY`) | ✓ |
+| `TestEnsureClaudeAccountReadyFailsWhenNoCreds` removed/renamed | `claude_auth_test.go:179` — replaced by `TestReadAccountIdentityReturnsLoggedOutWhenNoCreds`. Body calls `claudeprovider.ReadAccountIdentity(dir)` directly (line 188) — the real adapter, not a local shadow | ✓ |
+| Local shadow `claudeproviderReadAccountIdentity` removed | Searched `claude_auth_test.go` — no `claudeproviderReadAccountIdentity` definition anywhere in the file. Only the real `claudeprovider.ReadAccountIdentity` is referenced (line 188) | ✓ |
+| New `TestLoginClaudeAccountFailsWhenNoCredsAfterContainer` exists and exercises full chain | `claude_auth_test.go:228-249` — calls `loginClaudeAccount` (line 239) with a `stubClaudeAuthRunner{writeCreds: false}` (line 235), then asserts error contains `"no credentials file found after login"` (line 243-245) AND `stub.containerHits == 1` (line 246-248). This drives the full wipe→image→container→verify body and lands in the no-creds error branch at `claude_auth.go:126-128` | ✓ |
+
+### Round 1 functionality preserved
+
+- **`mage testPkg ./internal/cli` re-run by reviewer**: 137 tests / 71.2% coverage. Matches worklog. ✓
+- **`ensureManagedAccountReady` Claude dispatch**: `account_auth.go:41-42` — `case domain.ProviderClaude: return ensureClaudeAccountReady(cmd, account, options)`. Still dispatches; now with full options. ✓
+- **`loginManagedAccount` Claude dispatch**: `account_auth.go:63-64` — `case domain.ProviderClaude: return loginClaudeAccount(cmd, account, paths)`. Unchanged from Round 1. ✓
+- **`logoutManagedAccount` Claude case**: `account_auth.go:52-53` — `case domain.ProviderClaude: return wipeClaudeCredentials(account.HomePath)`. Pure file-wipe, no container. Unchanged from Round 1. ✓
+- **`TestLogoutManagedAccountWipesClaudeCredentials`**: still present at `claude_auth_test.go:251-269`, still asserts post-logout `.credentials.json` is gone. ✓
+- **`TestWipeClaudeCredentialsMissingFileIsOK`**: still present at `claude_auth_test.go:271-278`. ✓
+- **`TestLoginClaudeAccountSkipsNonTTYGuard`**: still present at `claude_auth_test.go:197-221`; confirms `loginClaudeAccount` reaches `RunContainer` (line 218-220) on non-TTY input. ✓
+- **`TestEnsureClaudeAccountReadyRejectsNonTTY`**: still present at `claude_auth_test.go:65-83`, confirms non-TTY rejection + `stub.containerHits == 0`. ✓
+
+### Worklog Round 2 entry
+
+- Documents all three fixes with file:line cites + test names: `account_auth.go:42`, `claude_auth.go:63-66`, `claude_auth.go:67-75`, and the three test renames (`BUILDER_WORKLOG.md` Round 2 § "Fix C1/C2/C3"). ✓
+- Notes the anticipated Round 1 test removal `TestEnsureClaudeAccountReadyWipesExistingCredentials` (its assertion was inverted by C2) — see worklog § "Fix C2 — Secondary effect" and § "Design decisions — `TestEnsureClaudeAccountReadyWipesExistingCredentials` removal". ✓
+- Test-count table (135 → 137, +2). ✓ Verified: 7 Round 1 tests − 1 removed (`TestEnsureClaudeAccountReadyWipesExistingCredentials`) + 3 added (`TestEnsureClaudeAccountReadyRespectsSkipLogin`, `TestEnsureClaudeAccountReadyNonTTYDoesNotWipe`, `TestLoginClaudeAccountFailsWhenNoCredsAfterContainer`) + 2 renamed (no count change) = 9 tests in `claude_auth_test.go` total. `claude_auth_test.go` test functions counted: `TestEnsureClaudeAccountReadyRejectsNonTTY`, `TestEnsureClaudeAccountReadyRespectsSkipLogin`, `TestEnsureClaudeAccountReadyNonTTYDoesNotWipe`, `TestBuildClaudeAuthContainerRequestShape`, `TestReadAccountIdentityReturnsLoggedOutWhenNoCreds`, `TestLoginClaudeAccountSkipsNonTTYGuard`, `TestLoginClaudeAccountFailsWhenNoCredsAfterContainer`, `TestLogoutManagedAccountWipesClaudeCredentials`, `TestWipeClaudeCredentialsMissingFileIsOK` = 9. Package total went from 135 to 137 (+2), consistent with `claude_auth_test.go` going from 7 to 9. ✓
+
+### Findings
+
+None blocking. All three Round 1 counterexamples (C1, C2, C3) are fixed with concrete code + test evidence.
+
+### Gaps (non-blocking)
+
+- **G1 (new).** `loginClaudeAccount` body is structurally identical to `ensureClaudeAccountReady`'s body from line 73 onward (wipe → image → notice → container → verify). The duplication is consistent with the Round 1 spec ("same flow … minus the non-TTY guard") and Round 2 did not refactor it. The new `TestLoginClaudeAccountFailsWhenNoCredsAfterContainer` (claude_auth_test.go:228-249) covers the no-creds branch via `loginClaudeAccount` and the worklog § "Why test 'no creds after container' via `loginClaudeAccount`" explicitly documents this as covering the same production-code branch. Acceptable. A future refactor could extract `wipeAndLaunchClaudeAuth(...) error` to fold the duplication; not blocking.
+
+- **G2 (non-blocking).** Round 1's G1/G2 gaps (mis-named tests) are now resolved by C3. Round 1's G3 (real end-to-end auth deferred to dev manual smoke) is unchanged — still a documented Unknown routed to the orchestrator.
+
+### Observations (non-blocking)
+
+- **O1.** `claude_auth.go:74` wipe error message is `"prepare claude account %q: wipe credentials: %w"`. The dual colon structure is consistent with the `loginClaudeAccount` analog (`claude_auth.go:105` — `"prepare claude login for account %q: wipe credentials: %w"`). Symmetric and clear.
+- **O2.** The `ensureClaudeAccountReady` doc comment (claude_auth.go:52-62) explicitly documents both Round 2 invariants: "SkipLogin short-circuits before any credential mutation" and "A non-TTY guard is enforced before the credential wipe". Doc comment matches behavior — good.
+- **O3.** The `TestReadAccountIdentityReturnsLoggedOutWhenNoCreds` test (claude_auth_test.go:179-195) tests `claudeprovider.ReadAccountIdentity` rather than `ensureClaudeAccountReady` itself. This is the *correct* rename per C3 — the test now matches its assertion. The function-under-test is the adapter, not the dispatcher. ✓
+- **O4.** Round 1 worklog claimed 7 new tests; Round 1 review counted 7 (matched). Round 2 worklog claims 137 - 135 = +2 tests in the package; verified by reviewer's mage run output (`tests: 137`). Test-count accounting checks out.
+- **O5.** Code structure: `ensureClaudeAccountReady` body (claude_auth.go:63-99) now mirrors `ensureCodexAccountReady`'s SkipLogin → TTY-guard → main-flow ordering (compare with `account_auth.go:70-86`). The Codex precedent for "SkipLogin first, TTY guard second" is now matched in the Claude path. ✓
+
+### Hylla Feedback
+
+None — Hylla not needed for this review. All evidence is `Read`-tool inspection of `internal/cli/account_auth.go`, `internal/cli/claude_auth.go`, `internal/cli/claude_auth_test.go`, plus `mage testPkg ./internal/cli` rerun. No Go symbol resolution required cross-package navigation — every changed symbol is in `internal/cli`, and the only adapter reference (`claudeprovider.ReadAccountIdentity`) is a name-only check (not behavior). Non-Go files (`PLAN.md`, `BUILDER_WORKLOG.md`, `BUILDER_QA_FALSIFICATION.md`) were read directly per Hylla's Go-only scope.
+
+---

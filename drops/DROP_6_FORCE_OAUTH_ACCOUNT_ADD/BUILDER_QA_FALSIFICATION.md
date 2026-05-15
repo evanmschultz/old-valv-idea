@@ -192,3 +192,58 @@ No Hylla miss on currently-committed Go that warrants a feedback entry. The
 stale-summary issue is the expected pre-reingest state, not a real miss.
 
 ---
+
+## Unit 6.2 — Round 2
+
+**Date:** 2026-05-14
+**Verdict:** pass
+**Mage target re-run:** `mage testPkg ./internal/cli` — PASS (137 tests, 71.2% coverage, matches worklog)
+
+### Summary
+
+All three Round 1 counterexamples (C1 SkipLogin drop, C2 wipe-before-TTY-check,
+C3 misnamed tests) are fully repaired. The fixes are concrete, ordered
+correctly, and backed by tests that actually exercise the production code path
+they claim. Coverage delta (71.1% → 71.2%, +2 tests net) is internally
+consistent with the scope of changes (small refactor + test swap + one new
+short-circuit). No new counterexamples constructed across 14 attack vectors.
+
+### Counterexamples
+
+None.
+
+### Attack Attempts
+
+| # | Vector | Outcome | Note |
+|---|---|---|---|
+| 1 | C1 fix — `SkipLogin` check is the first executable statement of `ensureClaudeAccountReady`, no mutation before it | REFUTED | `claude_auth.go:63-66`: `func ensureClaudeAccountReady(cmd, account, options accountAuthOptions) error { if options.SkipLogin { return nil }` — literal first statement; clean `return nil`. |
+| 2 | C1 fix — dispatcher forwards the FULL `accountAuthOptions` (not selected fields) so future field additions don't silently drop | REFUTED | `account_auth.go:42`: `return ensureClaudeAccountReady(cmd, account, options)`. `manage.go:493,600` both build `accountAuthOptions{SkipLogin: skipLogin, Paths: paths}` end-to-end. |
+| 3 | `loginClaudeAccount` should NOT check `SkipLogin` (explicit user-initiated login always attempts) | REFUTED | `claude_auth.go:103`: signature is `(cmd, account, paths config.Paths)` — no `options`, no SkipLogin gate. Correct by design. Worklog § "Non-TTY guard placement" matches. |
+| 4 | C2 fix — exact ordering SkipLogin → TTY check → wipe → image → container → verify | REFUTED | `claude_auth.go:63-98`: SkipLogin (63-66) → TTY (67-72) → wipe (73-75) → EnsureImage (76-79) → notice (80-87) → RunContainer (88-90) → ReadAccountIdentity verify (91-97). Strict order. |
+| 5 | C2 fix — non-TTY error string mentions "TTY" / interactive terminal | REFUTED | `claude_auth.go:69`: `"account %q is not logged in; rerun in a TTY to complete Claude device-code login"`. Mentions TTY + action. |
+| 6 | C2 test (`TestEnsureClaudeAccountReadyNonTTYDoesNotWipe`) writes creds BEFORE the call, asserts file presence AFTER | REFUTED | `claude_auth_test.go:124-128` writes `.credentials.json` before call; lines 135-141 call function + assert error contains "TTY"; lines 143-145 `os.Stat(credPath)` + assert NOT `IsNotExist`. Genuine, not theater. |
+| 7 | Renamed `TestBuildClaudeAuthContainerRequestShape` preserves the assertion surface of the old `*SucceedsAfterContainerWrite` test | REFUTED | `claude_auth_test.go:151-173` asserts mount count=1, mount source=tempdir, args=`[auth, login]`, Interactive=true, TTY=true. Same surface as the old test; name now matches behavior. |
+| 8 | `TestLoginClaudeAccountFailsWhenNoCredsAfterContainer` stub does NOT write creds → exercises the genuine no-creds branch | REFUTED | `claude_auth_test.go:235` constructs stub with `writeCreds: false`; line 239 calls `loginClaudeAccount`; lines 243-244 assert error contains `"no credentials file found after login"`; lines 246-247 assert `containerHits == 1`. Drives the production branch at `claude_auth.go:126-128`. |
+| 9 | Removed wipe-positive test — is the TTY-positive wipe path STILL covered through `loginClaudeAccount`? | REFUTED | `TestLoginClaudeAccountSkipsNonTTYGuard` (claude_auth_test.go:197-221) drives the wipe→image→container→verify path with `writeCreds: true`. `loginClaudeAccount` shares the identical body as the TTY-positive branch of `ensureClaudeAccountReady` (sans the TTY guard). Production wipe behavior IS covered via the symmetric path. Worklog § "Why test no creds after container via `loginClaudeAccount`" calls this out explicitly. |
+| 10 | Coverage delta 71.1% → 71.2% is too small to be real progress | REFUTED | Removed 3 tests, added 5. New tests all have real assertions tied to production paths: SkipLogin short-circuit (new code, new test), C2 reordering (no new lines, replaced one test 1:1), C3 rename + one added test for the genuine no-creds branch. 0.1pp delta is internally consistent with the +2 net test count and the small SkipLogin code addition. No padding observed. |
+| 11 | `mage testPkg ./internal/cli` re-run matches worklog | REFUTED | Re-ran in QA session: 137 tests pass, 0 failures, 71.2% coverage, 60.0% gate met. Exact match. |
+| 12 | No raw `go test` / `go build` / `go vet` / `go run` in worklog or build instructions | REFUTED | Worklog cites `mage testPkg ./internal/cli` only. No raw `go` invocations. |
+| 13 | Signature change of `ensureClaudeAccountReady` to `(cmd, account, options accountAuthOptions)` — no orphan caller compiles broken | REFUTED | Sole production caller is dispatcher at `account_auth.go:42` (already updated). Test callers (`claude_auth_test.go:73, 102, 135`) all use the new `accountAuthOptions{...}` form. Compile clean per `mage testPkg`. |
+| 14 | Logout regression — `logoutManagedAccount` Claude case still pure wipe (not affected by SkipLogin refactor) | REFUTED | `account_auth.go:52-53`: `case domain.ProviderClaude: return wipeClaudeCredentials(account.HomePath)`. Still wipe-only, no container, no signature change. `TestLogoutManagedAccountWipesClaudeCredentials` (claude_auth_test.go:251-269) covers. |
+
+**Side checks (self-attack):** error wrapping at every `%w` boundary
+(claude_auth.go:74, 78, 86, 89, 93, 96 + 105, 109, 117, 120, 124, 127) — all
+wrap with context. No concurrency surface (no goroutines, no shared mutable
+state). Test isolation good (`t.TempDir()` + `t.Parallel()` everywhere). End-to-end
+SkipLogin plumbing intact from `manage.go` flag → `accountAuthOptions{}` →
+dispatcher → `ensureClaudeAccountReady` first-statement short-circuit.
+
+### Hylla Feedback
+
+None — Hylla was not queried for this round. All evidence came from `Read` on
+the touched Go files (`claude_auth.go`, `claude_auth_test.go`, `account_auth.go`,
+`account_auth_test.go`, `manage.go`) plus a `mage testPkg ./internal/cli`
+re-run. Hylla ingest happens at drop-end, so Round 2's edits aren't in the
+index yet — fall-through is expected, not a miss.
+
+---
