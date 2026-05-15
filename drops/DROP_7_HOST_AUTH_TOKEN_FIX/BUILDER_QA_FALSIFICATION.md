@@ -240,3 +240,127 @@ None CONFIRMED.
   - **Suggestion:** None — this was an ideal Hylla hit.
 
 - **Mid-drop staleness note:** Unit 7.2's `readClaudeAuthToken` was committed in `c3642f3` AFTER snapshot 8 ingested. Hylla would not have found the new symbol if I had searched for it. I did not need to — direct `Read` was the right tool for the implementation-under-review. This is the same drop-end-only reingest pattern noted in Unit 7.1's feedback, not a Hylla bug.
+
+---
+
+## Unit 7.3 — Round 1
+
+**Date:** 2026-05-15
+**Verdict:** pass (one minor test-coverage gap; not a counterexample)
+
+### Attack Attempts
+
+Each of the 14 spawn-prompt vectors is enumerated, plus 6 additional adversarial probes (V15-V20). CONFIRMED = counterexample produced. REFUTED = attack tried, evidence rules it out. EXHAUSTED = honest attempt, no counterexample constructable.
+
+1. **TTY-guard widening regression.** REFUTED with a minor test-coverage gap. Production guard at `claude_auth.go:111` reads `!commandHasTTY(cmd.InOrStdin()) || !commandHasTTY(cmd.OutOrStdout())` — byte-for-byte identical to `account_auth.go:85` (Codex twin). Structural identity confirmed. **However:** `TestEnsureClaudeAccountReadyRejectsNonTTY` (line 94) and `TestEnsureClaudeAccountReadyNonTTYDoesNotWipe` (line 147) both use `newTestClaudeCmd()` which sets BOTH stdin (`bytes.NewBuffer(nil)`) AND stdout (`&bytes.Buffer{}`) — both non-TTY. The `||` short-circuits on the first failing clause, so the new `|| !commandHasTTY(cmd.OutOrStdout())` branch is NEVER exclusively exercised. No test covers "stdin-TTY-but-stdout-pipe". A future regression that reverts the stdout half of the OR would pass all current tests. This is a test-coverage gap, not a production bug.
+
+2. **Empty-token sentinel error message clarity.** REFUTED. Error message at `claude_auth.go:140-142` reads `"extract claude token for account %q: keychain returned empty token"`. Reasonable diagnostic clarity — names the account, the operation (extract), and the failure mode (empty token). Not maximally actionable ("re-run setup-token" guidance is not present), but acceptable for v0.1.0. The deeper keychain-side message at `:77` says `"empty token returned by security command"` and would be visible if the call path went through there. The orchestration sentinel at `:140-142` exists for defensive completeness (a future runner that returns `("", nil)` from `ExtractKeychainToken`). Both messages are descriptive enough.
+
+3. **`%w` wrap regression on `exec.LookPath`.** REFUTED. `runClaudeHostCommand` at `:232-237` now reads:
+   ```go
+   return "", fmt.Errorf(
+       "claude CLI not found on PATH; install with: npm install -g @anthropic-ai/claude-code@2.1.89: %w",
+       err,
+   )
+   ```
+   `%w` wrap present. Test `TestRunClaudeHostCommandPreflightFailsWhenClaudeMissing` (`:419-436`) asserts BOTH the actionable string AND `errors.Is(err, exec.ErrNotFound)` at line 433. The `errors.Is` assertion is the load-bearing check — string-match alone would not catch a regression that drops `%w`. Verified clean.
+
+4. **`TestSystemClaudeAccountAuthRunnerRunSetupTokenUsesCLAUDE_CONFIG_DIR` fake binary verification.** REFUTED:
+   - Fake binary at `:71-81` is a real shell script (chmod 0o755 at `:82`) that writes `args:%s` and `CLAUDE_CONFIG_DIR=%s` to a log file. Not just a no-op exit.
+   - Test reads log at `:461-464` and asserts BOTH `strings.Contains(content, "CLAUDE_CONFIG_DIR="+homePath)` (`:465-467`) AND `strings.Contains(content, "args:setup-token")` (`:468-470`). Both assertions are observable behavior checks, not "did it crash" smoke tests.
+   - Cleanup: `t.TempDir()` (`:68`) auto-removes via testing.T's lifecycle. `t.Setenv("PATH", ...)` (`:86`) auto-restores on test exit.
+
+5. **Test naming honesty.** REFUTED across all 14 test functions in the file. Walked each name against its body:
+   - `TestEnsureClaudeAccountReadyRejectsNonTTY` — non-TTY cmd, asserts TTY-mention error AND `setupTokenHits == 0`. ✓
+   - `TestEnsureClaudeAccountReadyRespectsSkipLogin` — SkipLogin=true, asserts `setupTokenHits == 0` AND pre-existing creds file preserved. ✓
+   - `TestEnsureClaudeAccountReadyNonTTYDoesNotWipe` — non-TTY + pre-existing creds, asserts error AND file present after. ✓
+   - `TestLoginClaudeAccountWipesAndRunsSetupTokenAndExtractsAndWrites` — 4 behaviors named, all asserted (wipe pre-existing, setup hit==1, extract hit==1, fresh token in file). ✓
+   - `TestLoginClaudeAccountFailsWhenRunSetupTokenErrors` — setupTokenErr injected, asserts `errors.Is` AND `extractHits == 0`. ✓
+   - `TestLoginClaudeAccountFailsWhenExtractTokenErrors` — extractTokenErr injected, asserts wrap. ✓
+   - `TestLoginClaudeAccountFailsOnEmptyToken` — extractToken="" (zero), asserts error AND no file. ✓
+   - `TestLoginClaudeAccountSkipsNonTTYGuard` — non-TTY cmd, asserts `setupTokenHits == 1` (proves no guard). ✓
+   - `TestWipeClaudeCredentialsRemovesFile` — file written then wiped, asserts gone. ✓
+   - `TestWipeClaudeCredentialsMissingFileIsNoError` — wipes empty dir, asserts nil err. ✓
+   - `TestLogoutManagedAccountWipesClaudeCredentials` — integration with logout dispatch. ✓
+   - `TestReadAccountIdentityReturnsLoggedOutWhenNoCreds` — adapter integration. ✓
+   - `TestRunClaudeHostCommandPreflightFailsWhenClaudeMissing` — empty PATH, asserts npm install hint AND `errors.Is(err, exec.ErrNotFound)`. ✓
+   - `TestSystemClaudeAccountAuthRunnerRunSetupTokenUsesCLAUDE_CONFIG_DIR` — fake binary, asserts env + args. ✓
+
+   No name-vs-behavior drift. DROP_6's naming-honesty issue does not recur here.
+
+6. **Coverage genuineness — 70.3% vs 68.4% baseline.** REFUTED. The +1.9 percentage points are achieved by:
+   - `TestSystemClaudeAccountAuthRunnerRunSetupTokenUsesCLAUDE_CONFIG_DIR` exercises the production `systemClaudeAccountAuthRunner.RunSetupToken` AND `runClaudeHostCommand` happy path (stdin/stdout streaming branch).
+   - `TestRunClaudeHostCommandPreflightFailsWhenClaudeMissing` exercises `runClaudeHostCommand`'s LookPath-failure branch with the new `%w` wrap.
+   - `TestLoginClaudeAccountWipesAndRunsSetupTokenAndExtractsAndWrites` exercises the full success pipeline: `wipeClaudeCredentials` → `writeCLINotice` → `RunSetupToken` → `user.Current` → `ExtractKeychainToken` → `writeClaudeCredentials` → `ReadAccountIdentity` verification.
+   - `TestLoginClaudeAccountFailsWhenRunSetupTokenErrors`, `TestLoginClaudeAccountFailsWhenExtractTokenErrors`, `TestLoginClaudeAccountFailsOnEmptyToken` exercise the three failure branches in the orchestration pipeline.
+
+   These are real production paths, not trivial helpers or padding. No tautological assertions, no `if true` patterns.
+
+7. **Codex/Claude TTY symmetry.** REFUTED. Post-widening, both guards read identically (`!commandHasTTY(cmd.InOrStdin()) || !commandHasTTY(cmd.OutOrStdout())`). The previous Unit 7.1 falsification finding (Vector 6) flagged this asymmetry; Unit 7.3 closed it. Symmetry achieved.
+
+8. **`TestLoginClaudeAccountSkipsNonTTYGuard` correctness.** REFUTED. Test (`:316-338`) uses `newTestClaudeCmd()` (non-TTY) and injects an `extractTokenErr` so the function terminates after `ExtractKeychainToken`. Asserts:
+   - `err != nil` (some error returned)
+   - `!strings.Contains(err.Error(), "TTY")` — error is NOT the TTY guard
+   - `stub.setupTokenHits == 1` — setup-token WAS reached (proves no upstream guard blocked)
+
+   Reading `loginClaudeAccount` source (`claude_auth.go:158-196`): zero TTY checks anywhere. The widening of `ensureClaudeAccountReady`'s guard does NOT propagate to `loginClaudeAccount` (verified by source inspection). Correct.
+
+9. **`TestRunOmitsClaudeCodeOAuthTokenWhenCredentialsMalformed` rigor.** REFUTED. `service_test.go:607-642`:
+   - Writes `[]byte("NOT VALID JSON")` to `<profileHome>/.credentials.json` BEFORE calling `service.Run` (`:611-614`).
+   - Calls real `service.Run` (`:635`) — not `readClaudeAuthToken` directly.
+   - Asserts `err == nil` (graceful skip, NOT propagated error) (`:635-637`).
+   - Asserts `executor.got.Env["CLAUDE_CODE_OAUTH_TOKEN"]` is absent or empty (`:639-641`).
+
+   Goes through the full `Run` → `buildRequest` → `readClaudeAuthToken` → `json.Unmarshal` pipeline. Pins the AC4 graceful-skip behavior the Unit 7.2 falsification round flagged as un-pinned (V16 in that round).
+
+10. **Production fix audit — line-by-line.** REFUTED. The 3 production changes (`git show c33da3c -- internal/cli/claude_auth.go`):
+    - Line 111: TTY guard widened from single-stream to dual-stream. Identical to Codex template. No new bug surface.
+    - Lines 140-142 (`ensureClaudeAccountReady`) and 182-184 (`loginClaudeAccount`): empty-token sentinel. Token IS empty by definition in this branch — no leak risk. Wipe at line 117 already happened upstream, so failing here leaves the user without credentials (pre-existing wiped, new one never written) — this matches the documented contract that wipe-first-fail-cleanly is the consistent failure mode for ALL post-wipe failures (setup-token error, extract error, write error, identity-verify error). Not a new behavior; consistent with the existing pipeline.
+    - Lines 232-237: `%w` added to LookPath error wrap. Strict improvement — `errors.Is(err, exec.ErrNotFound)` now works for callers. No callers currently type-assert, so behaviorally neutral; test pins the new contract.
+
+    SkipLogin behavior: `ensureClaudeAccountReady:108-110` is the first statement, returns nil before any wipe or extract. The empty-token sentinel at `:140-142` is downstream and cannot fire when SkipLogin=true. No interaction. Verified by `TestEnsureClaudeAccountReadyRespectsSkipLogin`.
+
+11. **`mage testPkg` re-runs.** REFUTED. Re-ran all three packages:
+    - `mage testPkg ./internal/cli` → 151/151 pass, 70.3% coverage. Matches worklog exactly.
+    - `mage testPkg ./internal/services/claude` → 20/20 pass, 82.3% coverage. Matches.
+    - `mage testPkg ./internal/adapters/providers/claude` → 21/21 pass, 78.4% coverage. Matches.
+
+    No flakes, no race detector hits.
+
+12. **No raw `go` invocations.** REFUTED. Worklog Round 1 (lines 112-114) cites only `mage testPkg ./internal/cli`, `mage testPkg ./internal/services/claude`, `mage testPkg ./internal/adapters/providers/claude`. No `go test`, `go build`, `go run`, `go vet`, `gofumpt` invocations.
+
+13. **`account_test.go` regression.** REFUTED. `git log --oneline -5 internal/adapters/providers/claude/account_test.go` shows last commit was `a0eda74 feat: Claude credentials parsing and account-list display` (DROP 6.3 era) and `557bad3 feat(adapters): add Claude provider adapter package` (initial). Unit 7.3 commit `c33da3c` does NOT appear. `git show --stat c33da3c` confirms only `claude_auth.go`, `claude_auth_test.go`, `service_test.go`, and drop docs were touched — no `account_test.go`.
+
+14. **Hylla feedback honesty.** REFUTED. Worklog Round 1 line 146: `"None — Hylla answered everything needed. ... all Go code reads went directly via Read tool per mid-drop evidence protocol."` Builder claims no Hylla queries; reads via `Read` directly. This matches the documented mid-drop staleness pattern (Unit 7.1 falsification round documented the same protocol at this file's lines 114-122). Honest about not using Hylla. The `## Hylla Feedback` section is present as required by CLAUDE.md.
+
+### Additional Adversarial Probes
+
+15. **Widening only differentiated by stdin in the test suite.** MINOR FINDING — not a counterexample. The new `|| !commandHasTTY(cmd.OutOrStdout())` branch in `ensureClaudeAccountReady` (`:111`) is structurally correct, but no test exercises the "stdin-TTY-but-stdout-pipe" case where ONLY the stdout half would fire. `newTestClaudeCmd()` sets both to `bytes.Buffer` (both non-TTY), so the OR short-circuits on the first failing clause. A future regression that reverts ONLY the stdout half (`|| !commandHasTTY(cmd.OutOrStdout())` → deleted) would pass all current tests. **Recommendation:** add a future test that wraps `cmd.SetIn(os.Stdin)` (potential real TTY) or otherwise sets stdin TTY-like while stdout is a pipe, then asserts the guard still fires. Not blocking for Unit 7.3 because the Codex twin is the structural ground truth and matches byte-for-byte; the widening is correct by construction.
+
+16. **Empty-token sentinel is defensive-only with current production runner.** REFUTED (accepted as defensive). `systemClaudeAccountAuthRunner.ExtractKeychainToken` at `:75-78` already errors on empty token rather than returning `("", nil)`. So the orchestration-level `if token == ""` check at `:140-142` and `:182-184` is unreachable under the production runner. It IS reachable under a stub runner that returns `("", nil)` — which is exactly what `TestLoginClaudeAccountFailsOnEmptyToken` (`:289-308`) exercises. Belt-and-suspenders defensive coding; the sentinel is correct.
+
+17. **Test count claim (12) vs file content (14).** MINOR FINDING — not a counterexample. Builder worklog (line 96-107) describes "12 test functions covering: TTY rejection, SkipLogin, non-TTY-preserves-creds, success path, setup-token error propagation, extract error propagation, empty-token failure, login no-TTY-guard, wipe-existing, wipe-missing, preflight-missing-claude, CLAUDE_CONFIG_DIR env verification". That enumerates 12 categories. The file contains 14 test functions; the worklog's prose count groups the 2 wipe tests and 2 integration tests slightly. Empirically 151 tests pass in mage — the count is internally consistent. Builder's "12" is a category count, not a function count. Not load-bearing.
+
+18. **Wipe-then-fail leaves user without credentials.** REFUTED (intentional). On any post-wipe failure (`RunSetupToken` error, `user.Current` error, `ExtractKeychainToken` error, empty-token sentinel, `writeClaudeCredentials` error, or `ReadAccountIdentity` verify failure), `wipeClaudeCredentials` at `:117` has ALREADY removed the pre-existing creds file. The user is left logged-out. This is the consistent contract across Unit 7.1's full pipeline; the empty-token addition does NOT change the failure-mode shape. Tests `TestLoginClaudeAccountFailsOnEmptyToken` (`:289-308`) and `TestLoginClaudeAccountFailsWhenRunSetupTokenErrors` (`:234-259`) both assert "no `.credentials.json` written after failure" — confirming the intentional failure mode.
+
+19. **`installFakeHostClaude` PATH ordering.** REFUTED. `:86` prepends the fake dir to PATH: `t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))`. Order matters because `exec.LookPath` returns the FIRST match. Prepending guarantees the fake `claude` wins over any real one on the host. Correct.
+
+20. **`TestRunClaudeHostCommandPreflightFailsWhenClaudeMissing` PATH isolation.** REFUTED. `:421-422`: `emptyDir := t.TempDir(); t.Setenv("PATH", emptyDir)` — PATH is set to ONLY the empty dir for this test. No `claude` binary anywhere on PATH. `exec.LookPath("claude")` MUST fail. `t.Setenv` auto-restores at test end. Test cannot accidentally pick up a host-installed claude.
+
+### Counterexamples
+
+None CONFIRMED.
+
+### Findings Summary
+
+- **V1 / V15 (TTY-widening test-coverage gap)** — MINOR. The new `|| !commandHasTTY(cmd.OutOrStdout())` branch in `ensureClaudeAccountReady` is structurally correct (matches Codex twin byte-for-byte) but is not exclusively exercised by any test. All current TTY tests use `newTestClaudeCmd()` where BOTH stdin and stdout are `bytes.Buffer` (both non-TTY), so the OR short-circuits on the first clause and the new clause is effectively shadowed. Future-regression risk: a builder who reverts ONLY the stdout half would pass all tests. **Recommendation for a follow-up:** add a focused test (or split the existing widened tests) that exercises a stdin-TTY-stdout-pipe configuration to pin the stricter guard. Not blocking Unit 7.3 because the Codex template fidelity is the structural ground truth.
+- **V2 (empty-token error message UX)** — MINOR. Error message is descriptive but not maximally actionable. Acceptable for v0.1.0; a future polish pass could add "re-run `valv account add claude <name>`" guidance.
+- **V17 (test count claim 12 vs file content 14)** — TRIVIAL prose-counting wobble; not load-bearing because mage's 151-test count is the authoritative measure.
+
+### Verdict
+
+**pass.** Unit 7.3 holds against all 14 spawn-prompt vectors plus 6 additional adversarial probes. Three production hardening fixes (TTY widening, empty-token sentinel, `%w` wrap) are byte-for-byte correct and each is pinned by a behavior-asserting test (`errors.Is` for `%w`, fake-binary for env var, empty-extractToken stub for sentinel). Coverage genuinely restored from 68.4% to 70.3% via real production-path exercise. Codex/Claude TTY symmetry achieved. No `account_test.go` regression. No raw `go` invocations. The one minor finding — that the widened TTY guard is not exclusively differentiated by any current test — is a test-coverage gap, not a production defect: the Codex twin remains the structural ground truth and the widening matches it byte-for-byte.
+
+## Hylla Feedback
+
+None — Hylla was not queried for this Unit 7.3 falsification round. All evidence came from direct `Read` of files committed AFTER snapshot 8 (`c33da3c` and `c3642f3` are both post-ingest), so Hylla would have served stale results for the symbols-under-review. The mid-drop staleness pattern documented in Unit 7.1's falsification round (this file's lines 114-122) and Unit 7.2's (lines 242) continues to apply: any "is the code currently shaped this way?" question goes to `git diff` / direct file read, not Hylla, until drop-end reingest. Not a Hylla bug.
