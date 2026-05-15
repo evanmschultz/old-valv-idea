@@ -1,13 +1,13 @@
 # DROP_5 — CLAUDE LAUNCHER
 
-**State:** building
+**State:** done
 **Blocked by:** DROP_4 (done)
 **Paths (expected):** `internal/adapters/providers/claude/` (new package — `profile.go`, `account.go`, `runtime.go` + tests), `internal/services/claude/` (new package — `service.go` + tests), `internal/cli/claude.go` (new), `internal/cli/claude_test.go` (new), `internal/cli/root.go` (edit — register `newClaudeCommand` in the `runtime` group + add Claude examples to root `Example` string), `internal/services/manage/service.go` (edit — flip the DROP_2 `DefaultHostProfile(ProviderClaude)` sentinel stub to `claudeprovider.DefaultHostProfile(homeDir)`), `internal/cli/account_auth.go` (edit — flip the DROP_2 `case domain.ProviderClaude: return nil` no-op stubs to real Claude-aware bodies where the design calls for it; expectation is mostly still no-op for v1 since the focus plan §3.2 specifies device-code auth happens inside the container at launch time), `magefile.go` (edit — add small `Install` target)
 **Packages (expected):** `internal/adapters/providers/claude` (new), `internal/services/claude` (new), `internal/cli` (edits)
 **PLAN.md ref:** main/PLAN.md → DROP_5_CLAUDE_LAUNCHER row
 **Workflow:** main/drops/WORKFLOW.md
 **Started:** 2026-05-14
-**Closed:** —
+**Closed:** 2026-05-15
 
 ## Scope
 
