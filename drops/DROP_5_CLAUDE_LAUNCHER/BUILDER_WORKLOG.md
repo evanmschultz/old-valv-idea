@@ -237,3 +237,50 @@ Edited:
 ### Hylla Feedback
 
 N/A — task was copy-adapt work from in-repo sources read directly. Hylla was not queried. All Go symbol evidence was gathered via `Read` of the template files (`codex.go`, `codex_test.go`, `root.go`, `services/manage/service.go`) and the already-landed Unit 5.1/5.2 sources (`claude_image.go`, `services/claude/service.go`, `adapters/providers/claude/profile.go`). For this class of copy-adapt work, direct `Read` is faster and more precise than Hylla vector/keyword search.
+
+---
+
+## Unit 5.4 — Round 1
+
+**Date:** 2026-05-14
+**Status:** done
+
+### Files Edited
+
+- `magefile.go` — added `Install` mage target (~22 LOC including doc comment and blank lines)
+
+### Mage Targets Run
+
+| Target | Result |
+|---|---|
+| `mage -l` (magefile compile + target listing) | PASS — `install` appears in target list |
+| `mage test` (full regression — 388 tests, 20 packages) | PASS — all green, coverage threshold met |
+
+`mage install` was NOT run — doing so would clobber the dev's existing `valv` binary in `$GOBIN`. The target was verified by `mage -l` (magefile compiles, target listed) and direct code inspection confirming `runGo("install", "./cmd/valv")` with no `-o` flag.
+
+### Design Notes
+
+1. **Placement after `Build`.** The file uses a logical topic grouping rather than strict alphabetical order for top-level exported targets. `Install` is a binary-artifact target like `Build` — placing it immediately after `Build` (before `Test`) groups both binary-creation targets together and is the most ergonomic placement for discoverability.
+
+2. **`runGo` helper used.** `Install` calls `runGo("install", "./cmd/valv")` — the existing helper at line 341 that prepends `GOFLAGS=-buildvcs=false` via `goEnv()`. No direct `exec.Command("go", ...)` was added.
+
+3. **No `-o` flag.** `go install` does not accept `-o`. The only argument after `"install"` is the package path `"./cmd/valv"`.
+
+4. **`Detail: "$GOBIN"`.** The success status line uses the static string `"$GOBIN"` as the Detail value. This is documentation-only — it is not shell-expanded at runtime. The planner suggested `"$(go env GOBIN)"` but `"$GOBIN"` is cleaner in the output context since the value is never evaluated.
+
+5. **Status-line shape mirrors `Build`.** Both start and success status lines use `printer.StatusLine` with `laslig.NoticeInfoLevel` / `laslig.NoticeSuccessLevel` respectively, and error-wrap both printer calls with `fmt.Errorf("write install start/success: %w", err)`. This is identical to the `Build` function's pattern.
+
+6. **No new imports.** `Install` uses only `os`, `fmt`, and `laslig` symbols already imported in `magefile.go`. No import block changes were needed.
+
+### Acceptance Criteria Check
+
+| Criterion | Status |
+|---|---|
+| `mage -l` shows `install` in target list | PASS |
+| Target calls `runGo("install", "./cmd/valv")` — no `-o` flag | PASS (verified by code inspection) |
+| `mage install` NOT run (protects dev binary) | PASS — explicitly not run; documented here |
+| `mage test` remains green post-change | PASS (388 tests, 20 packages, all green) |
+
+### Hylla Feedback
+
+N/A — this unit touched only `magefile.go`, which is a non-Go mage build file (excluded from Hylla indexing by protocol). All evidence was gathered via direct `Read` of `magefile.go`. No Hylla queries were needed or issued.

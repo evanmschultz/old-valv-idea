@@ -68,6 +68,29 @@ func Build() error {
 	return nil
 }
 
+// Install installs the valv binary to $GOBIN (or $GOPATH/bin).
+func Install() error {
+	printer := newMagePrinter(os.Stdout)
+	if err := printer.StatusLine(laslig.StatusLine{
+		Level:  laslig.NoticeInfoLevel,
+		Text:   "Installing valv",
+		Detail: "./cmd/valv",
+	}); err != nil {
+		return fmt.Errorf("write install start: %w", err)
+	}
+	if err := runGo("install", "./cmd/valv"); err != nil {
+		return err
+	}
+	if err := printer.StatusLine(laslig.StatusLine{
+		Level:  laslig.NoticeSuccessLevel,
+		Text:   "Installed valv",
+		Detail: "$GOBIN",
+	}); err != nil {
+		return fmt.Errorf("write install success: %w", err)
+	}
+	return nil
+}
+
 // Test runs the canonical local verification gate.
 func Test() error {
 	printer := newMagePrinter(os.Stdout)

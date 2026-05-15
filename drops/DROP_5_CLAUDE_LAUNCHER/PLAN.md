@@ -280,7 +280,7 @@ Mirror `internal/cli/codex_test.go` (15.2K). Key cases:
 
 #### Unit 5.4 — `mage install` target
 
-**State:** todo
+**State:** done
 **Paths:** `magefile.go`
 **Packages:** (mage build system — not a Go package)
 **Blocked by:** 5.3
