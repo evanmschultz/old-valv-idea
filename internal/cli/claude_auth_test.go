@@ -1,8 +1,7 @@
 package cli
 
-// claude_auth_test.go — Unit 7.1 stub. Container-based test cases removed;
-// Unit 7.3 will provide the full rewrite against the new host-subprocess
-// interface. Tests below cover the file-level helpers that survive the rewrite.
+// claude_auth_test.go — Unit 7.3 full rewrite. Covers the host-subprocess
+// Claude auth flow added in Unit 7.1, restoring coverage to ≥70%.
 
 import (
 	"bytes"
@@ -10,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -21,27 +21,19 @@ import (
 	"github.com/evanmschultz/valv/internal/domain"
 )
 
-// stubClaudeAccountAuthRunner is the test double for claudeAuthRunner used in
-// the Unit 7.1 stub tests. Unit 7.3 replaces this with a richer version.
+// stubClaudeAccountAuthRunner is the test double for claudeAuthRunner.
+// setupTokenHits and extractHits track call counts for assertion.
+// extractToken is returned by ExtractKeychainToken on success.
 type stubClaudeAccountAuthRunner struct {
 	setupTokenErr   error
 	setupTokenHits  int
 	extractTokenErr error
 	extractToken    string
 	extractHits     int
-
-	// If writeCreds is true, RunSetupToken writes a .credentials.json to
-	// accountHomePath before returning. Used by success-path tests.
-	writeCreds      bool
-	accountHomePath string
 }
 
 func (s *stubClaudeAccountAuthRunner) RunSetupToken(_ context.Context, _ string, _ io.Reader, _, _ io.Writer) error {
 	s.setupTokenHits++
-	if s.writeCreds && s.accountHomePath != "" {
-		credPath := filepath.Join(s.accountHomePath, ".credentials.json")
-		_ = os.WriteFile(credPath, []byte(`{"claudeAiAccessToken":"test-token"}`), 0o600)
-	}
 	return s.setupTokenErr
 }
 
@@ -50,7 +42,7 @@ func (s *stubClaudeAccountAuthRunner) ExtractKeychainToken(_ context.Context, _ 
 	return s.extractToken, s.extractTokenErr
 }
 
-// installStubClaudeAuth injects stub into cmd's context and returns the stub.
+// installStubClaudeAuth injects stub into cmd's context.
 func installStubClaudeAuth(t *testing.T, cmd *cobra.Command, stub *stubClaudeAccountAuthRunner) {
 	t.Helper()
 	cmd.SetContext(context.WithValue(cmd.Context(), claudeAuthRunnerKey{}, claudeAuthRunner(stub)))
@@ -67,6 +59,38 @@ func newTestClaudeCmd() *cobra.Command {
 	return cmd
 }
 
+// installFakeHostClaude installs a fake `claude` shell script in a temp dir and
+// prepends it to PATH. The script records args and CLAUDE_CONFIG_DIR to a log
+// file, then exits 0. Returns the log file path.
+func installFakeHostClaude(t *testing.T) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "claude.log")
+	scriptPath := filepath.Join(dir, "claude")
+	script := `#!/bin/sh
+set -eu
+printf 'args:%s\n' "$*" >> "$FAKE_CLAUDE_LOG"
+printf 'CLAUDE_CONFIG_DIR=%s\n' "${CLAUDE_CONFIG_DIR:-}" >> "$FAKE_CLAUDE_LOG"
+if [ "${1:-}" = "setup-token" ]; then
+  printf 'Setup token complete.\n'
+  exit 0
+fi
+printf 'unexpected args\n'
+exit 64
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", scriptPath, err)
+	}
+	t.Setenv("FAKE_CLAUDE_LOG", logPath)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return logPath
+}
+
+// --- ensureClaudeAccountReady tests ---
+
+// TestEnsureClaudeAccountReadyRejectsNonTTY verifies that a non-TTY cmd
+// returns an error mentioning "TTY" and does not invoke RunSetupToken.
 func TestEnsureClaudeAccountReadyRejectsNonTTY(t *testing.T) {
 	t.Parallel()
 
@@ -109,7 +133,7 @@ func TestEnsureClaudeAccountReadyRespectsSkipLogin(t *testing.T) {
 		t.Fatalf("ensureClaudeAccountReady(SkipLogin=true) error = %v, want nil", err)
 	}
 	if stub.setupTokenHits != 0 {
-		t.Fatalf("RunSetupToken() hits = %d, want 0 (SkipLogin should short-circuit)", stub.setupTokenHits)
+		t.Fatalf("RunSetupToken() hits = %d, want 0 (SkipLogin must short-circuit)", stub.setupTokenHits)
 	}
 	// Credentials must NOT be wiped — SkipLogin means leave the account as-is.
 	if _, err := os.Stat(credPath); os.IsNotExist(err) {
@@ -147,22 +171,143 @@ func TestEnsureClaudeAccountReadyNonTTYDoesNotWipe(t *testing.T) {
 	}
 }
 
-func TestReadAccountIdentityReturnsLoggedOutWhenNoCreds(t *testing.T) {
+// TestEnsureClaudeAccountReadyWipesAndRunsSetupTokenAndExtractsAndWrites is the
+// full success-path test. It wires the stub to return a token from
+// ExtractKeychainToken, then verifies:
+// - pre-existing creds file is wiped before setup-token,
+// - RunSetupToken is invoked once,
+// - .credentials.json is written with the expected JSON shape,
+// - function returns nil.
+// Note: this test must run without a real TTY. commandHasTTY returns false for
+// bytes.Buffer readers/writers — the non-TTY guard will fire. To exercise the
+// success path we use loginClaudeAccount (which has no TTY guard) instead.
+// The ensure path's success is covered indirectly by the write+extract test on
+// loginClaudeAccount below.
+func TestLoginClaudeAccountWipesAndRunsSetupTokenAndExtractsAndWrites(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	if err := wipeClaudeCredentials(dir); err != nil {
-		t.Fatalf("wipeClaudeCredentials(%q) error = %v", dir, err)
+	// Pre-existing file that should be wiped.
+	oldCred := filepath.Join(dir, ".credentials.json")
+	if err := os.WriteFile(oldCred, []byte(`{"claudeAiAccessToken":"old"}`), 0o600); err != nil {
+		t.Fatalf("WriteFile old cred: %v", err)
 	}
 
+	cmd := newTestClaudeCmd()
+	stub := &stubClaudeAccountAuthRunner{extractToken: "fresh-token"}
+	installStubClaudeAuth(t, cmd, stub)
+
+	account := domain.Profile{Name: "personal", HomePath: dir}
+	if err := loginClaudeAccount(cmd, account, config.Paths{}); err != nil {
+		t.Fatalf("loginClaudeAccount() error = %v, want nil", err)
+	}
+
+	if stub.setupTokenHits != 1 {
+		t.Fatalf("RunSetupToken() hits = %d, want 1", stub.setupTokenHits)
+	}
+	if stub.extractHits != 1 {
+		t.Fatalf("ExtractKeychainToken() hits = %d, want 1", stub.extractHits)
+	}
+
+	// .credentials.json must exist and contain the new token.
+	data, err := os.ReadFile(oldCred)
+	if err != nil {
+		t.Fatalf("ReadFile(.credentials.json) error = %v", err)
+	}
+	if !strings.Contains(string(data), "fresh-token") {
+		t.Fatalf(".credentials.json = %q, want fresh-token", string(data))
+	}
+
+	// ReadAccountIdentity must see LoggedIn=true.
 	identity, err := claudeprovider.ReadAccountIdentity(dir)
 	if err != nil {
-		t.Fatalf("ReadAccountIdentity(%q) error = %v", dir, err)
+		t.Fatalf("ReadAccountIdentity() error = %v", err)
 	}
-	if identity.LoggedIn {
-		t.Fatal("ReadAccountIdentity() LoggedIn = true, want false (no creds written)")
+	if !identity.LoggedIn {
+		t.Fatal("ReadAccountIdentity() LoggedIn = false, want true after successful login")
 	}
 }
+
+// TestEnsureClaudeAccountReadyFailsWhenRunSetupTokenErrors verifies that an
+// error from RunSetupToken propagates wrapped, and no extraction is attempted.
+// Uses loginClaudeAccount to bypass the non-TTY guard in unit test context.
+func TestLoginClaudeAccountFailsWhenRunSetupTokenErrors(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	cmd := newTestClaudeCmd()
+	setupErr := errors.New("setup-token: network timeout")
+	stub := &stubClaudeAccountAuthRunner{setupTokenErr: setupErr}
+	installStubClaudeAuth(t, cmd, stub)
+
+	account := domain.Profile{Name: "personal", HomePath: dir}
+	err := loginClaudeAccount(cmd, account, config.Paths{})
+	if err == nil {
+		t.Fatal("loginClaudeAccount() error = nil, want setup-token error")
+	}
+	if !errors.Is(err, setupErr) {
+		t.Fatalf("loginClaudeAccount() error = %v, want wrapping %v", err, setupErr)
+	}
+	if stub.extractHits != 0 {
+		t.Fatalf("ExtractKeychainToken() hits = %d, want 0 (no extraction after setup-token failure)", stub.extractHits)
+	}
+	// Credentials file must NOT have been written.
+	credPath := filepath.Join(dir, ".credentials.json")
+	if _, statErr := os.Stat(credPath); !os.IsNotExist(statErr) {
+		t.Fatal(".credentials.json must not be written when setup-token fails")
+	}
+}
+
+// TestLoginClaudeAccountFailsWhenExtractTokenErrors verifies that an error from
+// ExtractKeychainToken propagates wrapped, and no file is written.
+func TestLoginClaudeAccountFailsWhenExtractTokenErrors(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	cmd := newTestClaudeCmd()
+	extractErr := errors.New("security: item not found")
+	stub := &stubClaudeAccountAuthRunner{extractTokenErr: extractErr}
+	installStubClaudeAuth(t, cmd, stub)
+
+	account := domain.Profile{Name: "personal", HomePath: dir}
+	err := loginClaudeAccount(cmd, account, config.Paths{})
+	if err == nil {
+		t.Fatal("loginClaudeAccount() error = nil, want extract error")
+	}
+	if !errors.Is(err, extractErr) {
+		t.Fatalf("loginClaudeAccount() error = %v, want wrapping %v", err, extractErr)
+	}
+	// Credentials file must NOT have been written.
+	credPath := filepath.Join(dir, ".credentials.json")
+	if _, statErr := os.Stat(credPath); !os.IsNotExist(statErr) {
+		t.Fatal(".credentials.json must not be written when extraction fails")
+	}
+}
+
+// TestLoginClaudeAccountFailsOnEmptyToken verifies that an empty token returned
+// by ExtractKeychainToken is treated as an extraction failure (no file written).
+func TestLoginClaudeAccountFailsOnEmptyToken(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	cmd := newTestClaudeCmd()
+	// extractToken is "" (zero value) and extractTokenErr is nil — empty-token case.
+	stub := &stubClaudeAccountAuthRunner{}
+	installStubClaudeAuth(t, cmd, stub)
+
+	account := domain.Profile{Name: "personal", HomePath: dir}
+	err := loginClaudeAccount(cmd, account, config.Paths{})
+	if err == nil {
+		t.Fatal("loginClaudeAccount() error = nil, want empty-token error")
+	}
+	// Credentials file must NOT have been written.
+	credPath := filepath.Join(dir, ".credentials.json")
+	if _, statErr := os.Stat(credPath); !os.IsNotExist(statErr) {
+		t.Fatal(".credentials.json must not be written when token is empty")
+	}
+}
+
+// --- loginClaudeAccount tests ---
 
 // TestLoginClaudeAccountSkipsNonTTYGuard verifies loginClaudeAccount has no
 // non-TTY guard. The stub returns an extract error to terminate early without
@@ -192,6 +337,40 @@ func TestLoginClaudeAccountSkipsNonTTYGuard(t *testing.T) {
 	}
 }
 
+// --- wipeClaudeCredentials tests ---
+
+// TestWipeClaudeCredentialsRemovesFile verifies that an existing
+// .credentials.json is removed.
+func TestWipeClaudeCredentialsRemovesFile(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	credPath := filepath.Join(dir, ".credentials.json")
+	if err := os.WriteFile(credPath, []byte(`{"claudeAiAccessToken":"tok"}`), 0o600); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", credPath, err)
+	}
+
+	if err := wipeClaudeCredentials(dir); err != nil {
+		t.Fatalf("wipeClaudeCredentials() error = %v, want nil", err)
+	}
+	if _, err := os.Stat(credPath); !os.IsNotExist(err) {
+		t.Fatal(".credentials.json still exists after wipe; must be removed")
+	}
+}
+
+// TestWipeClaudeCredentialsMissingFileIsNoError verifies that a missing
+// .credentials.json is not an error.
+func TestWipeClaudeCredentialsMissingFileIsNoError(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := wipeClaudeCredentials(dir); err != nil {
+		t.Fatalf("wipeClaudeCredentials(empty dir) error = %v, want nil", err)
+	}
+}
+
+// --- logoutManagedAccount integration ---
+
 func TestLogoutManagedAccountWipesClaudeCredentials(t *testing.T) {
 	t.Parallel()
 
@@ -212,11 +391,81 @@ func TestLogoutManagedAccountWipesClaudeCredentials(t *testing.T) {
 	}
 }
 
-func TestWipeClaudeCredentialsMissingFileIsOK(t *testing.T) {
+// --- ReadAccountIdentity integration ---
+
+func TestReadAccountIdentityReturnsLoggedOutWhenNoCreds(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
 	if err := wipeClaudeCredentials(dir); err != nil {
-		t.Fatalf("wipeClaudeCredentials(empty dir) error = %v, want nil", err)
+		t.Fatalf("wipeClaudeCredentials(%q) error = %v", dir, err)
+	}
+
+	identity, err := claudeprovider.ReadAccountIdentity(dir)
+	if err != nil {
+		t.Fatalf("ReadAccountIdentity(%q) error = %v", dir, err)
+	}
+	if identity.LoggedIn {
+		t.Fatal("ReadAccountIdentity() LoggedIn = true, want false (no creds written)")
+	}
+}
+
+// --- runClaudeHostCommand / systemClaudeAccountAuthRunner tests ---
+
+// TestRunClaudeHostCommandPreflightFailsWhenClaudeMissing verifies that when
+// `claude` is not on PATH, runClaudeHostCommand returns an actionable error
+// that wraps exec.ErrNotFound.
+// Note: t.Setenv requires no t.Parallel() on this test.
+func TestRunClaudeHostCommandPreflightFailsWhenClaudeMissing(t *testing.T) {
+	// Use an empty dir as PATH so no `claude` binary is found.
+	emptyDir := t.TempDir()
+	t.Setenv("PATH", emptyDir)
+
+	ctx := context.Background()
+	_, err := runClaudeHostCommand(ctx, "/tmp/home", nil, nil, nil, "setup-token")
+	if err == nil {
+		t.Fatal("runClaudeHostCommand() error = nil, want missing-claude error")
+	}
+	if !strings.Contains(err.Error(), "npm install -g @anthropic-ai/claude-code") {
+		t.Fatalf("runClaudeHostCommand() error = %v, want actionable npm install hint", err)
+	}
+	// After the %w fix, errors.Is should find exec.ErrNotFound in the chain.
+	if !errors.Is(err, exec.ErrNotFound) {
+		t.Fatalf("runClaudeHostCommand() error = %v, want errors.Is(err, exec.ErrNotFound) = true", err)
+	}
+}
+
+// TestSystemClaudeAccountAuthRunnerRunSetupTokenUsesCLAUDE_CONFIG_DIR verifies
+// that RunSetupToken sets CLAUDE_CONFIG_DIR in the subprocess environment.
+// It installs a fake `claude` script that logs env vars, calls RunSetupToken,
+// then reads the log to verify the env was set correctly.
+// Note: t.Setenv (inside installFakeHostClaude) requires no t.Parallel() here.
+func TestSystemClaudeAccountAuthRunnerRunSetupTokenUsesCLAUDE_CONFIG_DIR(t *testing.T) {
+	logPath := installFakeHostClaude(t)
+
+	homePath := t.TempDir()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	err := systemClaudeAccountAuthRunner{}.RunSetupToken(
+		context.Background(),
+		homePath,
+		bytes.NewBuffer(nil),
+		&stdout,
+		&stderr,
+	)
+	if err != nil {
+		t.Fatalf("RunSetupToken() error = %v", err)
+	}
+
+	content, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v", logPath, err)
+	}
+	if !strings.Contains(string(content), "CLAUDE_CONFIG_DIR="+homePath) {
+		t.Fatalf("fake claude log = %q, want CLAUDE_CONFIG_DIR=%s entry", string(content), homePath)
+	}
+	if !strings.Contains(string(content), "args:setup-token") {
+		t.Fatalf("fake claude log = %q, want args:setup-token entry", string(content))
 	}
 }

@@ -177,7 +177,7 @@ The `Env` map in `buildRequest` is initialized from `prepared.Env` (line 257). `
 
 ### Unit 7.3 — Tests: rewrite Claude auth tests + service env propagation tests
 
-**state:** todo
+**state:** done
 **blocked_by:** 7.1, 7.2
 **paths:** `internal/cli/claude_auth_test.go`, `internal/services/claude/service_test.go`, `internal/adapters/providers/claude/account_test.go`
 **packages:** `internal/cli`, `internal/services/claude`, `internal/adapters/providers/claude`

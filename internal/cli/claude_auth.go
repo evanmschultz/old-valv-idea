@@ -108,7 +108,7 @@ func ensureClaudeAccountReady(cmd *cobra.Command, account domain.Profile, option
 	if options.SkipLogin {
 		return nil
 	}
-	if !commandHasTTY(cmd.InOrStdin()) {
+	if !commandHasTTY(cmd.InOrStdin()) || !commandHasTTY(cmd.OutOrStdout()) {
 		return fmt.Errorf(
 			"account %q is not logged in; rerun in a TTY to complete Claude setup-token login",
 			account.Name,
@@ -136,6 +136,9 @@ func ensureClaudeAccountReady(cmd *cobra.Command, account domain.Profile, option
 	token, err := runner.ExtractKeychainToken(cmd.Context(), u.Username)
 	if err != nil {
 		return fmt.Errorf("extract claude token for account %q: %w", account.Name, err)
+	}
+	if token == "" {
+		return fmt.Errorf("extract claude token for account %q: keychain returned empty token", account.Name)
 	}
 	if err := writeClaudeCredentials(account.HomePath, token); err != nil {
 		return fmt.Errorf("write claude credentials for account %q: %w", account.Name, err)
@@ -175,6 +178,9 @@ func loginClaudeAccount(cmd *cobra.Command, account domain.Profile, _ config.Pat
 	token, err := runner.ExtractKeychainToken(cmd.Context(), u.Username)
 	if err != nil {
 		return fmt.Errorf("extract claude token for account %q: %w", account.Name, err)
+	}
+	if token == "" {
+		return fmt.Errorf("extract claude token for account %q: keychain returned empty token", account.Name)
 	}
 	if err := writeClaudeCredentials(account.HomePath, token); err != nil {
 		return fmt.Errorf("write claude credentials for account %q: %w", account.Name, err)
@@ -226,7 +232,8 @@ func runClaudeHostCommand(ctx context.Context, homePath string, stdin io.Reader,
 	binary, err := exec.LookPath("claude")
 	if err != nil {
 		return "", fmt.Errorf(
-			"claude CLI not found on PATH; install with: npm install -g @anthropic-ai/claude-code@2.1.89",
+			"claude CLI not found on PATH; install with: npm install -g @anthropic-ai/claude-code@2.1.89: %w",
+			err,
 		)
 	}
 	cmd := exec.CommandContext(ctx, binary, args...)

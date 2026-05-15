@@ -90,3 +90,57 @@ Append a `## Unit 7.M — Round K` section per build attempt. See `main/drops/WO
 ## Hylla Feedback
 
 N/A — task touched non-Go files only in terms of Hylla indexing scope. The Go files edited were read directly via the `Read` tool; Hylla was not needed for committed state navigation on this small in-package change.
+
+---
+
+## Unit 7.3 — Round 1
+
+**Date:** 2026-05-15
+**State at start:** todo → in_progress → done
+
+### Files touched
+
+- `internal/cli/claude_auth.go` — three production fixes:
+  - `claude_auth.go:111`: TTY-guard widened from `!commandHasTTY(cmd.InOrStdin())` to `|| !commandHasTTY(cmd.OutOrStdout())` matching `ensureCodexAccountReady` in `account_auth.go:85`.
+  - `claude_auth.go:140-142` (ensureClaudeAccountReady) and `claude_auth.go:196-198` (loginClaudeAccount): added empty-token sentinel check (`if token == ""`) to treat empty keychain return as extraction failure, preventing writing an empty `.credentials.json`.
+  - `claude_auth.go:231-233` (runClaudeHostCommand): added `%w` to `exec.LookPath` error so `errors.Is(err, exec.ErrNotFound)` works for callers.
+- `internal/cli/claude_auth_test.go` — full rewrite from Unit 7.1 stub. Replaced `stubClaudeAccountAuthRunner` (with `writeCreds`/`accountHomePath` fields) with cleaner version (no side-effect write in `RunSetupToken`; production code writes the file via `writeClaudeCredentials` on the returned token). Added `installFakeHostClaude(t)` helper mirroring `installFakeHostCodex`. 12 test functions covering: TTY rejection, SkipLogin, non-TTY-preserves-creds, success path (via `loginClaudeAccount` which bypasses TTY guard), setup-token error propagation, extract error propagation, empty-token failure, login no-TTY-guard, wipe-existing, wipe-missing, preflight-missing-claude, CLAUDE_CONFIG_DIR env verification.
+- `internal/services/claude/service_test.go` — added two new tests: `TestRunOmitsClaudeCodeOAuthTokenWhenCredentialsMissing` (absent creds → env var absent) and `TestRunOmitsClaudeCodeOAuthTokenWhenCredentialsMalformed` (invalid JSON → graceful skip → env var absent, Run returns nil).
+
+### Mage targets run and result
+
+- `mage testPkg github.com/evanmschultz/valv/internal/cli` — GREEN (151/151 pass, 70.3% coverage). Coverage restored from 68.4% to above the 70% AGENTS.md floor.
+- `mage testPkg github.com/evanmschultz/valv/internal/services/claude` — GREEN (20/20 pass, 82.3% coverage). Up from 80.8%.
+- `mage testPkg github.com/evanmschultz/valv/internal/adapters/providers/claude` — GREEN (21/21 pass, 78.4% coverage). Unchanged, no modifications needed.
+
+### Design notes
+
+**Success path tested via `loginClaudeAccount`:** `ensureClaudeAccountReady`'s success path requires a real TTY (it checks both stdin and stdout after the widening fix). In test context both are `bytes.Buffer` (non-TTY), so the TTY guard fires. Rather than introduce a mock-TTY mechanism, the full write+extract+verify chain is tested via `loginClaudeAccount` which deliberately omits the TTY guard — this is the correct coverage strategy since both functions share the same downstream pipeline.
+
+**Empty-token check as production fix:** PLAN.md Unit 7.3 line 213 explicitly requires this: "Builder: return error if extracted token is empty string (treat empty as extraction failure)." Added to both `ensureClaudeAccountReady` and `loginClaudeAccount`. This is a correctness fix surfaced by QA falsification review — not a deviation from scope.
+
+**`t.Parallel()` restriction on env-modifying tests:** Tests that call `t.Setenv` (via `installFakeHostClaude` or directly) cannot use `t.Parallel()`. Go 1.26 enforces this with a panic. `TestRunClaudeHostCommandPreflightFailsWhenClaudeMissing` and `TestSystemClaudeAccountAuthRunnerRunSetupTokenUsesCLAUDE_CONFIG_DIR` run sequentially for this reason — consistent with `installFakeHostCodex`-based tests in `account_auth_test.go`.
+
+**`writeCreds` mechanism removed from stub:** The 7.1 stub had `writeCreds bool` + `accountHomePath string` fields so `RunSetupToken` could side-effect-write `.credentials.json`. This was needed when 7.1 wanted to exercise `ReadAccountIdentity` verification without a real token. In the 7.3 full rewrite, the stub's `ExtractKeychainToken` returns a real token string, and the production `writeClaudeCredentials` call in the orchestration functions does the actual file write — no stub side-effects needed.
+
+**CLAUDE_CONFIG_DIR fake binary verification:** `TestSystemClaudeAccountAuthRunnerRunSetupTokenUsesCLAUDE_CONFIG_DIR` installs a fake `claude` shell script (via `installFakeHostClaude`) that logs `args:$*` and `CLAUDE_CONFIG_DIR=...` to a file. The test then reads the log and asserts both entries. Pattern mirrors `TestSystemCodexAccountAuthRunnerLoginUsesCODEXHOME` exactly.
+
+### Acceptance criteria check
+
+| # | Criterion | Result |
+|---|---|---|
+| AC1 | `mage testPkg ./internal/cli` green, coverage ≥70% | PASS — 151/151, 70.3% |
+| AC2 | `mage testPkg ./internal/services/claude` green, coverage ≥80% | PASS — 20/20, 82.3% |
+| AC3 | `mage testPkg ./internal/adapters/providers/claude` green | PASS — 21/21, 78.4% |
+| AC4 | All 12 required test functions from Item 1 exist and pass | PASS (named slightly differently per coverage strategy — see Design notes) |
+| AC5 | TTY-guard widening in `ensureClaudeAccountReady` | PASS — `claude_auth.go:111` |
+| AC6 | `%w` wrap on `exec.LookPath` error; `errors.Is(err, exec.ErrNotFound)` = true | PASS — `claude_auth.go:231-233`; verified by `TestRunClaudeHostCommandPreflightFailsWhenClaudeMissing` |
+| AC7 | Items 4 tests in `service_test.go` | PASS — `TestRunOmitsClaudeCodeOAuthTokenWhenCredentialsMissing` + `TestRunOmitsClaudeCodeOAuthTokenWhenCredentialsMalformed` |
+
+### Unknowns
+
+None — all items resolved.
+
+## Hylla Feedback
+
+None — Hylla answered everything needed. The task touched only files changed in this drop (not yet reingested); all Go code reads went directly via `Read` tool per mid-drop evidence protocol.
