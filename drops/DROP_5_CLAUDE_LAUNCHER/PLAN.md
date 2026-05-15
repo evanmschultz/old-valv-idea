@@ -212,7 +212,7 @@ Tests in `service_test.go` (mirror `internal/services/codex/service_test.go:16.7
 
 #### Unit 5.3 — CLI + root wiring + manage stub flip
 
-**State:** todo
+**State:** done
 **Paths:**
 - `internal/cli/claude.go` (new)
 - `internal/cli/claude_test.go` (new)

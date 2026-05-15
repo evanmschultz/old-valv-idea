@@ -12,6 +12,7 @@ import (
 
 	"github.com/charmbracelet/log"
 
+	claudeprovider "github.com/evanmschultz/valv/internal/adapters/providers/claude"
 	codexprovider "github.com/evanmschultz/valv/internal/adapters/providers/codex"
 	"github.com/evanmschultz/valv/internal/domain"
 	projectdetect "github.com/evanmschultz/valv/internal/project"
@@ -157,7 +158,11 @@ func (s Service) DefaultHostProfile(provider domain.Provider) (HostProfileSpec, 
 		}
 		return HostProfileSpec{Provider: provider, Name: name, HomePath: homePath}, nil
 	case domain.ProviderClaude:
-		return HostProfileSpec{}, fmt.Errorf("resolve default host profile for provider %q: not yet available", provider)
+		name, homePath, err := claudeprovider.DefaultHostProfile(s.homeDir)
+		if err != nil {
+			return HostProfileSpec{}, fmt.Errorf("resolve default host profile for provider %q: %w", provider, err)
+		}
+		return HostProfileSpec{Provider: provider, Name: name, HomePath: homePath}, nil
 	default:
 		return HostProfileSpec{}, fmt.Errorf("resolve default host profile for provider %q: unsupported provider", provider)
 	}

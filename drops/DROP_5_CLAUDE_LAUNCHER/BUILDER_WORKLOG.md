@@ -162,3 +162,78 @@ Total production LOC: 278. Total test LOC: 330.
 ### Hylla Feedback
 
 N/A — task was copy-adapt work from a just-committed template source. Direct `Read` of the Codex service files was the correct and only evidence-gathering tool needed. No Hylla queries were issued for this unit's scope (copy-adapt of in-repo Go sources is more efficiently done via `Read` than Hylla vector/keyword search for this class of work).
+
+---
+
+## Unit 5.3 — Round 1
+
+**Date:** 2026-05-14
+**Status:** done
+
+### Files Created / Edited
+
+Created:
+- `internal/cli/claude.go` (~175 LOC production)
+- `internal/cli/claude_test.go` (~185 LOC tests)
+
+Edited:
+- `internal/cli/root.go` — inserted `claudeCmd := newClaudeCommand(paths, nil)` + `claudeCmd.GroupID = "runtime"` after codexCmd; added claudeCmd to `cmd.AddCommand(...)`; added `valv claude --help` and `valv claude --version` to root `Example` string.
+- `internal/services/manage/service.go` — flipped `case domain.ProviderClaude:` stub to call `claudeprovider.DefaultHostProfile(s.homeDir)`; added `claudeprovider` import.
+- `internal/services/manage/service_test.go` — replaced `TestDefaultHostProfileClaudeReturnsSentinelError` (expected "not yet available" error) with `TestDefaultHostProfileClaudeReturnsIsolatedPath` (expects real `HostProfileSpec` with `.valv/providers/claude/profiles/default` path).
+
+### Mage Targets Run
+
+| Target | Result |
+|---|---|
+| `mage testPkg ./internal/cli` (initial compile + first test run) | FAIL — `TestNewClaudeCommandHelp` expected "Docker" in actual claude binary output (wrong test approach) |
+| `mage testPkg ./internal/cli` (after fix: test checks cmd.Long not runtime output) | PASS — 132/132 tests green, 72.3% coverage |
+| `mage testPkg ./internal/services/manage` | PASS — 23/23 tests green, 76.3% coverage |
+| `mage build` | PASS — binary built at `./valv` |
+
+### Smoke Command Outputs
+
+- `./valv --help` — `claude` appears under `RUNTIME COMMANDS` group alongside `codex`. Examples section includes `valv claude --help` and `valv claude --version`.
+- `./valv claude --help` — routes through `runClaudeImageOnlyCommand` (since `claudeArgsSkipProjectBinding(["--help"]) == true`), runs `VALV_CLAUDE_IMAGE` unset path which calls `service.Build`, then passes `--help` to the claude container. Exit 0.
+
+### Test Count
+
+6 tests in `claude_test.go`:
+- `TestNewClaudeCommandHelp` — verifies `cmd.Use == "claude"`, `cmd.Long` contains "claude" and "Docker", `cmd.Help()` exits 0.
+- `TestNewClaudeCommandVersion` — fake docker script captures `--version` invocation; verifies `CLAUDE_CONFIG_DIR=/home/valv/.claude`, `HOME=/home/valv`, `USER=valv`, container name prefix `valv-claude-info-`, image `valv-claude-dev:dev`, arg `--version`.
+- `TestRunClaudeCommandUnboundProject` — temp dir with no project record; verifies `domain.ErrUnboundProject` is returned.
+- `TestRunClaudeCommandRejectsWrongProvider` — project with Codex binding (no Claude binding); verifies `domain.ErrUnboundProject` (no Claude binding exists for that project).
+- `TestClaudeArgsSkipProjectBinding` — 9-case table-driven: `--help`, `-h`, `help`, `resume --help`, `--version`, `-V` → true; `nil`, `--prompt foo`, `run` → false.
+- `TestClaudeCommandPassesArgsThroughUnchanged` — custom run func captures args; verifies pass-through unchanged.
+
+### Design Notes
+
+1. **`ValidateBinding` before `ensureClaudeImageCurrent`.** Unlike `runCodexCommand` (which calls `ensureCodexBindingReady` first — a blocking interactive flow that exits early for unbound projects), `runClaudeCommand` has no first-run setup. Placing `ValidateBinding` before `ensureClaudeImageCurrent` ensures unbound-project errors surface quickly without triggering a docker build. This is a deliberate deviation from the codex ordering.
+
+2. **`service.Build` not `EnsureLatest`.** `ensureClaudeImageCurrent` calls `service.Build(ctx, BuildRequest{Version: DefaultClaudeCLIVersion})` rather than `EnsureLatest`. Reason: Claude uses a pinned-version fast path; `EnsureLatest` requires a resolver which the Claude image service has `nil` for (DROP_4 confirmed, visible in `openImagesService`). This matches the spec requirement exactly.
+
+3. **`SharedHome: ""`** in `runClaudeCommand`'s service construction. The `claudeservice.Options.RealHome` is passed (for structural parity) but `SharedHome` in `PrepareRequest` is set to `""` inside the service (see `service.Run` line 129 in `services/claude/service.go`). No `sharedClaudeStateHome` helper was created in `claude.go`.
+
+4. **`ensureClaudeImageAvailable` parallels `ensureCodexImageAvailable`.** Both use the `findDockerBinary` package var declared in `codex.go`. No redeclaration needed — same package. Error message changed to mention `valv manage update claude` instead of `valv manage update`.
+
+5. **`TestNewClaudeCommandHelp` approach.** Initial test ran `cmd.Execute()` with `--help`, which with `DisableFlagParsing: true` routes to the real claude binary. The real claude binary's help doesn't include "Docker". Fixed by checking `cmd.Long` directly (which is the valv-level description mentioning Docker). The smoke command `./valv claude --help` confirms the end-to-end invocation works.
+
+6. **Shared-home audit (per acceptance criterion).** `claude.go` does NOT contain `sharedClaudeStateHome` or any mention of `SharedHome`. The `claudeservice.Options` struct does not have a `SharedHome` field — `SharedHome: ""` is set inside `claudeservice.Service.Run` when constructing the `PrepareRequest`. `claude.go` is clean of any shared-home logic.
+
+### Acceptance Criteria Check
+
+| Criterion | Status |
+|---|---|
+| `mage testPkg ./internal/cli` green (72.3% > 60%) | PASS |
+| `mage testPkg ./internal/services/manage` green (76.3% > 60%) | PASS |
+| `mage build` produces binary | PASS |
+| `./valv --help` shows `claude` in Runtime Commands group | PASS |
+| `./valv claude --help` exits 0 with usage text including "claude" | PASS |
+| `claudeArgsSkipProjectBinding(["--version"]) == true` | PASS (TestClaudeArgsSkipProjectBinding) |
+| `manage.DefaultHostProfile(ProviderClaude)` returns real path (not stub error) | PASS (TestDefaultHostProfileClaudeReturnsIsolatedPath) |
+| No reference to `ensureCodexBindingReady` or `runCodexFirstRunSetup` in `claude.go` | PASS (verified by inspection) |
+| No `sharedClaudeStateHome` in `claude.go` | PASS |
+| `SharedHome: ""` passed to `PrepareRuntime` (inside service, not cli) | PASS |
+
+### Hylla Feedback
+
+N/A — task was copy-adapt work from in-repo sources read directly. Hylla was not queried. All Go symbol evidence was gathered via `Read` of the template files (`codex.go`, `codex_test.go`, `root.go`, `services/manage/service.go`) and the already-landed Unit 5.1/5.2 sources (`claude_image.go`, `services/claude/service.go`, `adapters/providers/claude/profile.go`). For this class of copy-adapt work, direct `Read` is faster and more precise than Hylla vector/keyword search.

@@ -141,7 +141,7 @@ func TestDefaultHostProfileUsesConfiguredHomeDir(t *testing.T) {
 	}
 }
 
-func TestDefaultHostProfileClaudeReturnsSentinelError(t *testing.T) {
+func TestDefaultHostProfileClaudeReturnsIsolatedPath(t *testing.T) {
 	t.Parallel()
 
 	store, providerRoot := testStore(t)
@@ -151,14 +151,17 @@ func TestDefaultHostProfileClaudeReturnsSentinelError(t *testing.T) {
 	}
 
 	spec, err := service.DefaultHostProfile(domain.ProviderClaude)
-	if err == nil {
-		t.Fatal("DefaultHostProfile(ProviderClaude) error = nil, want non-nil sentinel error")
+	if err != nil {
+		t.Fatalf("DefaultHostProfile(ProviderClaude) error = %v", err)
 	}
-	if spec != (HostProfileSpec{}) {
-		t.Fatalf("DefaultHostProfile(ProviderClaude) spec = %+v, want zero HostProfileSpec", spec)
+	if spec.Name != "default" {
+		t.Fatalf("DefaultHostProfile(ProviderClaude).Name = %q, want default", spec.Name)
 	}
-	if !strings.Contains(err.Error(), "not yet available") {
-		t.Fatalf("DefaultHostProfile(ProviderClaude) error = %q, want substring %q", err.Error(), "not yet available")
+	if !strings.Contains(spec.HomePath, ".valv/providers/claude/profiles/default") {
+		t.Fatalf("DefaultHostProfile(ProviderClaude).HomePath = %q, want path containing .valv/providers/claude/profiles/default", spec.HomePath)
+	}
+	if spec.Provider != domain.ProviderClaude {
+		t.Fatalf("DefaultHostProfile(ProviderClaude).Provider = %q, want %q", spec.Provider, domain.ProviderClaude)
 	}
 }
 

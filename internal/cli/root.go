@@ -60,6 +60,8 @@ valv manage update
 valv manage account add codex
 valv manage account add codex work
 valv codex --help
+valv claude --help
+valv claude --version
 `),
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -122,6 +124,8 @@ valv codex --help
 	versionCmd.GroupID = "inspect"
 	codexCmd := newCodexCommand(paths, nil)
 	codexCmd.GroupID = "runtime"
+	claudeCmd := newClaudeCommand(paths, nil)
+	claudeCmd.GroupID = "runtime"
 	accountCmd := newManageAccountCommand(paths, opts)
 	accountCmd.GroupID = "manage"
 	manageCmd := newManageCommand(paths, opts)
@@ -129,7 +133,7 @@ valv codex --help
 	globalCmd := newGlobalCommand(paths, opts)
 	globalCmd.GroupID = "manage"
 
-	cmd.AddCommand(pathsCmd, versionCmd, codexCmd, accountCmd, manageCmd, globalCmd)
+	cmd.AddCommand(pathsCmd, versionCmd, codexCmd, claudeCmd, accountCmd, manageCmd, globalCmd)
 	installBranchHelpCommands(cmd)
 
 	return cmd, nil
