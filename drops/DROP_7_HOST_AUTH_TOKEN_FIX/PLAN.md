@@ -65,7 +65,7 @@ Three atomic units. Units 7.1 and 7.2 may run in parallel (disjoint packages). U
 
 ### Unit 7.1 — Rewrite `claude_auth.go`: new host-subprocess runner + reworked orchestration
 
-**state:** in_progress
+**state:** done
 **blocked_by:** —
 **paths:** `internal/cli/claude_auth.go`
 **packages:** `internal/cli`

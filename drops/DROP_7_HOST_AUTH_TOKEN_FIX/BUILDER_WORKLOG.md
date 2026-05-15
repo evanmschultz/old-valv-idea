@@ -4,6 +4,55 @@ Append a `## Unit 7.M — Round K` section per build attempt. See `main/drops/WO
 
 <!-- units filled in by planner, then by builder during Phase 4 -->
 
+## Unit 7.1 — Round 1
+
+**Date:** 2026-05-15
+**State at start:** todo → in_progress → done
+
+### Files touched
+
+- `internal/cli/claude_auth.go` — full rewrite (~210 LOC). Replaced DROP_6.2 container-launch interface (`EnsureImage`/`RunContainer`) with new host-subprocess interface (`RunSetupToken`/`ExtractKeychainToken`). New `systemClaudeAccountAuthRunner` struct. New `runClaudeHostCommand` helper with inline `exec.LookPath("claude")` preflight. New `writeClaudeCredentials` helper. Rewrote `ensureClaudeAccountReady` and `loginClaudeAccount`. Preserved `wipeClaudeCredentials` unchanged. Deleted `buildClaudeAuthContainerRequest` and all dockeradapter imports.
+- `internal/cli/claude_auth_test.go` — replaced container-based stub and tests with new `stubClaudeAccountAuthRunner` implementing the new interface. Ported three TTY guard tests. Added `TestLoginClaudeAccountSkipsNonTTYGuard` (confirms no TTY guard in `loginClaudeAccount`). Preserved `TestReadAccountIdentityReturnsLoggedOutWhenNoCreds`, `TestLogoutManagedAccountWipesClaudeCredentials`, `TestWipeClaudeCredentialsMissingFileIsOK` unchanged. Removed `TestBuildClaudeAuthContainerRequestShape` and `TestLoginClaudeAccountFailsWhenNoCredsAfterContainer` (container-era tests; Unit 7.3 replaces them).
+
+### Mage targets run and result
+
+- `mage testPkg github.com/evanmschultz/valv/internal/cli` — GREEN (144/144 pass, 68.4% coverage).
+
+### Design notes
+
+**`.credentials.json` schema chosen:** `{"claudeAiAccessToken": "<token>"}` — single-key JSON, field name `claudeAiAccessToken`. Evidence: PLAN.md Design decisions locked by planner (line 57: `{"claudeAiAccessToken":"<raw-token>"}`) + existing `claude_auth_test.go` fixture (line 43: same format) + Unit 7.2 `readClaudeAuthToken` helper already reads `claudeAiAccessToken`. Confirmed consistent across all three sources.
+
+**Keychain service name:** `claudeKeychainService = "Claude Code-credentials"` — a package-level constant. Evidence: PLAN.md Dev-Confirmed Findings item 3 (2026-05-15 real test: service name confirmed). Builder cannot run live verification as subagent; constant set to planner-confirmed value; PLAN.md Open Design Q4 accepts this as "expected" and asks builder to update if `setup-token` differs.
+
+**Preflight placement:** `exec.LookPath("claude")` is inside `runClaudeHostCommand` — not a separate step in `ensureClaudeAccountReady`. This matches PLAN.md § "Preflight inline" locked decision and mirrors `runCodexHostCommand` at line 166 of `account_auth.go`. The preflight fires naturally when `RunSetupToken` is called.
+
+**`loginClaudeAccount` signature:** Third parameter is `config.Paths` (unused, kept for call-site compatibility with `account_auth.go` line 64). Not dropped to avoid changing the caller.
+
+**`ExtractKeychainToken` stderr:** The `security` command's error messages go to stderr. Rather than pass a caller-supplied writer (which would require changing the interface), stderr is captured into a local `bytes.Buffer` and appended to the error message. This matches the spec note "letting stderr go to the wrapped writer for visibility" — interpreted as: visible in the returned error string, not as a separate writer. The interface spec does not include a stderr writer for ExtractKeychainToken.
+
+**Test file scope:** The container-based tests (`TestBuildClaudeAuthContainerRequestShape`, `TestLoginClaudeAccountFailsWhenNoCredsAfterContainer`) required `dockeradapter` import and `buildClaudeAuthContainerRequest` which no longer exist. Per spec authority they were removed and stubbed. Unit 7.3 provides the full rewrite.
+
+**LOC count:** Production file ~210 LOC (planner projected 160-180; excess is primarily doc comments and the new `writeClaudeCredentials` helper). Within the planner-approved exception for full-file rewrites.
+
+### Unknowns
+
+- **Q4 (keychain service name for `setup-token`):** Cannot verify in subagent context. `claudeKeychainService = "Claude Code-credentials"` set per planner confirmation. Builder during smoke testing should verify `security find-generic-password -s "Claude Code-credentials" -a "$USER" -w` returns a token post `claude setup-token`. If the service name differs, update the constant.
+- **`loginClaudeAccount` test coverage:** `TestLoginClaudeAccountSkipsNonTTYGuard` confirms `RunSetupToken` is reached but terminates at `ExtractKeychainToken` (stub returns error). Full success-path test (extract + write + verify) is Unit 7.3's responsibility.
+
+## Hylla Feedback
+
+- **Query:** `hylla_search_keyword` for `timeNowUnixNano currentContainerUser` — zero results.
+  - **Missed because:** These are var/func declarations in `codex.go`; Hylla may not index package-level `var` declarations with function literals, or the tail_symbol search mode didn't match.
+  - **Worked via:** `Read` tool on `internal/cli/codex.go` directly.
+  - **Suggestion:** Index `var <name> = func() ...` declarations as blocks with their var name as the tail_symbol.
+
+- **Query:** `hylla_search_keyword` for `ensureClaudeImageCurrent` — only returned the `EnsureImage` method that delegates to it; the function definition itself was not found.
+  - **Missed because:** `ensureClaudeImageCurrent` is defined in `claude.go` (not `claude_auth.go`); the method summary mentioned it but the function node itself wasn't returned.
+  - **Worked via:** Not needed — the function is deleted entirely in this unit, so only confirming it was NOT in `claude_auth.go` mattered.
+  - **Suggestion:** None needed (the lookup was confirmatory only).
+
+---
+
 ## Unit 7.2 — Round 1
 
 **Date:** 2026-05-15
