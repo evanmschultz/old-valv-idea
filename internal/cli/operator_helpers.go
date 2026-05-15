@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	dockeradapter "github.com/evanmschultz/valv/internal/adapters/docker"
+	claudeprovider "github.com/evanmschultz/valv/internal/adapters/providers/claude"
 	codexprovider "github.com/evanmschultz/valv/internal/adapters/providers/codex"
 	"github.com/evanmschultz/valv/internal/config"
 	"github.com/evanmschultz/valv/internal/domain"
@@ -230,6 +231,18 @@ func readAccountIdentity(profile domain.Profile) accountDisplayIdentity {
 			authDisplay:  codexAuthDisplay(identity),
 			emailDisplay: codexEmailDisplay(identity),
 		}
+	case domain.ProviderClaude:
+		identity, err := claudeprovider.ReadAccountIdentity(profile.HomePath)
+		if err != nil {
+			return accountDisplayIdentity{
+				authDisplay:  "unavailable",
+				emailDisplay: "(unavailable)",
+			}
+		}
+		return accountDisplayIdentity{
+			authDisplay:  claudeAuthDisplay(identity),
+			emailDisplay: claudeEmailDisplay(identity),
+		}
 	default:
 		return accountDisplayIdentity{
 			authDisplay:  "unknown",
@@ -258,6 +271,27 @@ func codexEmailDisplay(identity codexprovider.AccountIdentity) string {
 	switch strings.ToLower(strings.TrimSpace(identity.AuthMode)) {
 	case "api_key":
 		return "(api key login)"
+	}
+	if identity.LoggedIn {
+		return "(identity unavailable)"
+	}
+	return "(not logged in)"
+}
+
+// claudeAuthDisplay returns a human-readable auth state string for a Claude
+// account identity. It mirrors the shape of codexAuthDisplay.
+func claudeAuthDisplay(identity claudeprovider.AccountIdentity) string {
+	if identity.LoggedIn {
+		return "logged in"
+	}
+	return "not logged in"
+}
+
+// claudeEmailDisplay returns a human-readable email string for a Claude account
+// identity. It mirrors the shape of codexEmailDisplay.
+func claudeEmailDisplay(identity claudeprovider.AccountIdentity) string {
+	if email := strings.TrimSpace(identity.Email); email != "" {
+		return email
 	}
 	if identity.LoggedIn {
 		return "(identity unavailable)"

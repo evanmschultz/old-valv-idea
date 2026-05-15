@@ -127,3 +127,58 @@ None — Hylla answered all queries; no misses. Non-Go files (PLAN.md, WORKFLOW.
 Hylla returned 0 results for `ensureClaudeAccountReady` keyword search (`visibility_mode=include_private`) — expected, as this symbol was introduced in Round 1 and Hylla is ingest-at-drop-end. All symbol lookups done via `Read` on the production files. No unexpected misses.
 
 N/A for cross-package references — all changes are within `internal/cli`.
+
+---
+
+## Unit 6.3 — Round 1
+
+**Date:** 2026-05-15
+**State result:** done
+**Mage targets:** `mage testPkg ./internal/adapters/providers/claude`, `mage testPkg ./internal/cli`
+**Mage result:** both PASS
+- `internal/adapters/providers/claude`: 21 tests, 78.4% coverage (up from 76.2% post-DROP_5 baseline; +5 tests for credential parsing)
+- `internal/cli`: 146 tests, 71.1% coverage (up from 137 post-6.2; +9 tests for display wiring)
+
+**Note on wrap-up:** Round 1's code work landed cleanly on disk (Part A adapter parsing + Part B CLI display + tests in both packages + PLAN.md state flip to `in_progress`), but the builder subagent hit its session token limit before appending this worklog entry and flipping state to `done`. Orchestrator wrote this Round 1 worklog entry retroactively from `git diff` + file reads against the on-disk code (mage targets re-run by orchestrator: both green). No code edits by orchestrator — only this markdown entry + the PLAN.md state flip `in_progress` → `done`. Future Round 2 (if needed after QA) goes through a fresh builder agent.
+
+### Files touched
+
+- `internal/adapters/providers/claude/account.go` — **edited** (+61 LOC, total 85 LOC). New unexported types `claudeConfigFile` + `claudeOAuthAccount` for JSON unmarshaling. `ReadAccountIdentity` still presence-checks `.credentials.json` for `LoggedIn`, then reads `.config.json` (preferred) or `.claude.json` (fallback) from the same dir to extract `OAuthAccount.EmailAddress`. Graceful fallback: any read/parse failure on the config file returns empty email while preserving `LoggedIn: true` (presence is truth; parse is best-effort).
+- `internal/adapters/providers/claude/account_test.go` — **edited** (+155 LOC restructured, total 144 LOC). Test fixtures cover: credentials-present + config has email → email extracted; credentials-present + no config → email empty + LoggedIn=true; credentials-present + config malformed → email empty + LoggedIn=true (graceful); credentials-absent → LoggedIn=false; both config filenames covered (`.config.json` priority over `.claude.json`).
+- `internal/cli/operator_helpers.go` — **edited** (+34 LOC, total 338 LOC). Added `case domain.ProviderClaude:` to `readAccountIdentity` (which previously fell to `default` returning `"unknown"`/`"(unavailable)"`). New helpers `claudeAuthDisplay` (returns `"logged in"`/`"not logged in"`) and `claudeEmailDisplay` (returns email if present, `"(identity unavailable)"` if logged-in-no-email, `"(not logged in)"` otherwise) — symmetric shape with Codex equivalents.
+- `internal/cli/operator_helpers_test.go` — **new** (84 LOC). Table-driven coverage for both display helpers across logged-in/logged-out × email-present/absent matrix.
+- `drops/DROP_6_FORCE_OAUTH_ACCOUNT_ADD/PLAN.md` — Unit 6.3 state: `todo` → `in_progress` (by failed builder) → `done` (by orchestrator wrap-up).
+
+### Credentials-format resolution
+
+**Resolution: email lives in `oauthAccount.emailAddress` inside `.config.json` (or `.claude.json` fallback), NOT in `.credentials.json` itself.**
+
+The previous (failed) builder agent's resolution path:
+- `.credentials.json` is the access-token file (single field `claudeAiAccessToken` confirmed via DROP_5's test fixture and DROP_6.2's `docker run` exploration).
+- The Claude CLI separately maintains a config file (`.config.json` or `.claude.json` depending on version) in the same directory that records the OAuth account identity, including `oauthAccount.emailAddress`.
+- Adapter parse-extract logic reads from the config file, not the credentials file. Credentials-file existence still gates `LoggedIn`.
+
+This separation is structurally correct because the credentials file contains short-lived bearer tokens that rotate; the config file persists user identity across token rotations. Mirrors how the Claude CLI itself organizes state on disk.
+
+### Design decisions
+
+- **Two filename fallback (`.config.json` first, `.claude.json` second).** Claude Code has used both filenames across versions. Try the newer one first, fall back to the legacy.
+- **Graceful parse failure → empty email, NOT error.** A malformed config file means we can't extract email — but the user IS still logged in (credentials file exists). Failing the whole `ReadAccountIdentity` would mark the account as broken when really just one optional metadata path is unreadable.
+- **No mutation.** Read-only access to config files. Never write or modify them.
+- **No new dependencies.** Uses stdlib `encoding/json` only.
+
+### Acceptance criteria check
+
+| Criterion | Status |
+|---|---|
+| `mage testPkg ./internal/adapters/providers/claude` green | PASS (78.4% > 60% gate; > 70% AGENTS.md target) |
+| `mage testPkg ./internal/cli` green | PASS (71.1% > 60% gate; > 70% AGENTS.md target) |
+| `ReadAccountIdentity` returns non-empty `Email` when config has it | PASS (tested) |
+| `ReadAccountIdentity` returns empty `Email` + `LoggedIn=true` on parse failure | PASS (tested — graceful fallback) |
+| `readAccountIdentity` no longer falls to `default` for Claude | PASS (Claude case added) |
+| `claudeAuthDisplay` / `claudeEmailDisplay` mirror Codex shape | PASS (tested) |
+
+### Hylla Feedback
+
+N/A — code work was direct file reads + edits across two known packages. No Hylla queries issued. Adapter package + CLI display layer are well-trodden territory; the only research question (credentials format) was answered by the failed builder agent via the Claude CLI's documented config layout, not via Hylla.
+

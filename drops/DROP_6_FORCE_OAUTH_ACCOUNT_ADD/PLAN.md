@@ -266,7 +266,7 @@ Tests in `claude_auth.go` (or `claude_auth_test.go`):
 
 #### Unit 6.3 — Claude credentials parsing + display wiring
 
-**State:** todo  
+**State:** done  
 **Paths:** `internal/adapters/providers/claude/account.go`,
   `internal/adapters/providers/claude/account_test.go`,
   `internal/cli/operator_helpers.go`,
