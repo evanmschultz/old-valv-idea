@@ -247,3 +247,80 @@ re-run. Hylla ingest happens at drop-end, so Round 2's edits aren't in the
 index yet — fall-through is expected, not a miss.
 
 ---
+
+## Unit 6.3 — Round 1
+
+**Date:** 2026-05-15
+**Verdict:** pass
+**Mage targets re-run:**
+- `mage testPkg ./internal/adapters/providers/claude` — PASS (21 tests, 78.4% coverage, matches worklog)
+- `mage testPkg ./internal/cli` — PASS (146 tests, 71.1% coverage, matches worklog)
+
+### Summary
+
+Sixteen attack vectors run against Unit 6.3's two-part change (Claude credentials
+parsing in the adapter + CLI display wiring). No counterexamples constructed.
+The implementation is structurally clean: presence-only `LoggedIn` semantics
+preserved, optional email best-effort with graceful degradation, dispatcher
+explicit-case (no fallthrough), Codex case untouched, no new dependencies, doc
+comments on exported identifiers. Worklog numbers (21/78.4% adapter, 146/71.1%
+CLI) re-confirmed in this session.
+
+Two soft observations recorded but not promoted to counterexamples: (a) the
+real-world `.config.json` / `oauthAccount.emailAddress` field layout is asserted
+from CLI documentation rather than from a live auth run; if Anthropic's CLI ever
+writes the email under a different path, tests will still pass under the wrong
+assumption (this is acknowledged in the worklog's "Credentials-format
+resolution" note); (b) `readClaudeConfigEmail` short-circuits on non-`IsNotExist`
+read errors without trying the second filename, but per the documented "any
+read/parse failure → empty email" graceful-degradation spec this is intended,
+not a defect. Neither rises to a counterexample.
+
+### Counterexamples
+
+None.
+
+### Attack Attempts
+
+| # | Vector | Outcome | Note |
+|---|---|---|---|
+| 1 | Credentials-format assumption (`oauthAccount.emailAddress` in `.config.json`/`.claude.json`) | EXHAUSTED | Cannot construct a counterexample without a real Claude auth run. Builder acknowledged in worklog "Credentials-format resolution" section that the field name + location are based on documented CLI behavior, not a live capture. Test fixtures assume the documented shape — if shape is wrong, the parsing still degrades gracefully (empty email, LoggedIn=true). Honest unknown, not falsifiable here. |
+| 2 | File-fallback ordering + permission-denied early-return | REFUTED (order) / SOFT-FINDING (permission-denied) | `account.go:63` iterates `[.config.json, .claude.json]` — matches worklog claim. Permission-denied on `.config.json` returns `""` immediately (line 71) without trying `.claude.json`. Per spec "any read/parse failure → empty email" this is documented graceful degradation, not a bug. Soft finding only — not a counterexample. |
+| 3 | `LoggedIn` semantics on non-`IsNotExist` stat error | REFUTED | `account.go:47`: returns `fmt.Errorf("read claude credentials %q: %w", credPath, err)` — does NOT swallow into `LoggedIn=false`. Caller (`operator_helpers.go:236-240`) treats non-nil error as "unavailable", separate from "not logged in". Correct. |
+| 4 | Symlink credentials file (to file / to directory) | REFUTED | `os.Stat` follows symlinks. Symlink-to-file: stat succeeds, `IsDir()=false`, `LoggedIn=true`. Symlink-to-dir: `IsDir()=true`, `LoggedIn=false` per line 49-51. Both correct. |
+| 5 | Empty `homePath` footgun | REFUTED | `strings.TrimSpace("")="" `, `filepath.Join("", ".credentials.json")=".credentials.json"` (relative). `os.Stat` on relative path uses test CWD. Production callers: only `listItemsForAccounts` / `listItemsForBindings` in `operator_helpers.go:180-213`, both pass `profile.HomePath` from a `domain.Profile` returned by the manage store — never empty in practice. No production footgun. |
+| 6 | `readClaudeConfigEmail` silent failures | REFUTED | Lines 66-77: every error path (`os.IsNotExist`, other read error, JSON unmarshal error) returns `""` per spec. No `log.Error`, no fail-stop. Matches "graceful degradation" intent. |
+| 7 | `claudeEmailDisplay` returning email when `LoggedIn=false` is inconsistent with Codex | REFUTED | Cross-check: `codexEmailDisplay` (operator_helpers.go:267-279) first checks `if email := strings.TrimSpace(identity.Email); email != "" { return email }` — returns email regardless of LoggedIn flag. `claudeEmailDisplay` (line 292-300) mirrors exactly: `if email := ...; email != "" { return email }` first. Behavior is symmetric with Codex. Not an inconsistency. |
+| 8 | Test fixtures realistic vs actual Claude CLI output | EXHAUSTED | Same root cause as #1 — cannot verify without real auth. Worklog acknowledges the resolution is documentation-based. Adapter package has 78.4% coverage from real file I/O via `t.TempDir()` — the parsing logic itself is exercised; only the assumed JSON shape is unverified. |
+| 9 | No new dependencies in `account.go` import block | REFUTED | Imports (lines 3-9): `encoding/json`, `fmt`, `os`, `path/filepath`, `strings`. All stdlib. No new third-party imports. |
+| 10 | `readAccountIdentity` dispatcher Claude case correctly added | REFUTED | `operator_helpers.go:234-245`: explicit `case domain.ProviderClaude:` calling `claudeprovider.ReadAccountIdentity`; error path returns `unavailable`; success path returns `claudeAuthDisplay` + `claudeEmailDisplay`. No fallthrough to `default`. |
+| 11 | `claudeprovider` import present in `operator_helpers.go` | REFUTED | Line 15: `claudeprovider "github.com/evanmschultz/valv/internal/adapters/providers/claude"`. Aliased import in place. |
+| 12 | Coverage gaming — new tests in `operator_helpers_test.go` | REFUTED | `TestClaudeAuthDisplay` (3 cases) and `TestClaudeEmailDisplay` (4 cases) each call the helper under test and assert with `if got != tc.want { t.Errorf(...) }`. Adapter tests (`account_test.go`) use `t.TempDir()` + real `os.WriteFile` + real `os.Mkdir` + real `ReadAccountIdentity` calls — genuine file I/O, not stubs. No coverage padding. |
+| 13 | `mage testPkg ./internal/adapters/providers/claude` re-run matches worklog | REFUTED | Re-ran in QA session: 21 tests pass, 0 failures, 78.4% coverage, 60.0% gate met. Exact match to worklog's "21 tests, 78.4%". |
+| 14 | `mage testPkg ./internal/cli` re-run matches worklog | REFUTED | Re-ran in QA session: 146 tests pass, 0 failures, 71.1% coverage, 60.0% gate met. Exact match to worklog's "146 tests, 71.1%". |
+| 15 | Codex behavior unchanged (no inadvertent edit to codex case in dispatcher or codex account.go) | REFUTED | `git diff a0eda74~1 a0eda74 -- internal/adapters/providers/codex/account.go` returns empty diff (only file header line). `readAccountIdentity` Codex case (operator_helpers.go:222-233) and `codexAuthDisplay`/`codexEmailDisplay` (lines 254-279) are textually unchanged from pre-Unit-6.3 state. |
+| 16 | Doc comments on exported identifiers | REFUTED | `AccountIdentity` documented (account.go:11-14); `ReadAccountIdentity` doc starts with "ReadAccountIdentity" (lines 34-39); `claudeAuthDisplay` doc starts with "claudeAuthDisplay" (lines 281-282); `claudeEmailDisplay` doc starts with "claudeEmailDisplay" (lines 290-291). Per Go convention. |
+
+**Supplemental Go-falsification families:**
+
+- **Concurrency.** No new goroutines, no shared mutable state, no channels, no mutex. EXHAUSTED, no counterexample.
+- **Interface misuse.** No new type assertions, no new interface declarations. EXHAUSTED, no counterexample.
+- **Error swallowing.** Every error from `os.Stat` / `os.ReadFile` / `json.Unmarshal` is either wrapped with `%w` and returned (line 47), or deliberately collapsed to `""` per documented "graceful degradation → empty email" spec (lines 66-77). No swallowed `_ = err` patterns. REFUTED.
+- **Goroutine leaks.** N/A — no goroutines. EXHAUSTED.
+- **Raw `go` commands.** Worklog cites `mage testPkg` only. No `go test`/`go build`/`go vet`/`go run` invocations. REFUTED.
+- **`mage install`.** Not invoked. REFUTED.
+- **Hidden dependencies / init side effects.** No `init()` functions, no package-level state mutation, no test-order coupling (all tests use `t.TempDir()` + `t.Parallel()`). REFUTED.
+- **File/package gating.** Paths touched (`internal/adapters/providers/claude/account.go` + `_test.go`, `internal/cli/operator_helpers.go` + `_test.go`) match `Paths` declared in PLAN.md Unit 6.3. No edits outside declared paths. REFUTED.
+
+### Hylla Feedback
+
+None — Hylla was not queried for this round. All evidence came from `Read` on
+the touched files plus `mage testPkg` re-runs and one `git diff a0eda74~1
+a0eda74 -- codex/account.go` to confirm Codex untouched. Hylla ingest happens
+at drop-end, so Unit 6.3's edits aren't in the index yet — fall-through to
+`Read` is expected, not a miss.
+
+N/A for cross-package references — both changed packages were small and fully
+readable in-session.
+
+---

@@ -177,3 +177,65 @@ None blocking. All three Round 1 counterexamples (C1, C2, C3) are fixed with con
 None — Hylla not needed for this review. All evidence is `Read`-tool inspection of `internal/cli/account_auth.go`, `internal/cli/claude_auth.go`, `internal/cli/claude_auth_test.go`, plus `mage testPkg ./internal/cli` rerun. No Go symbol resolution required cross-package navigation — every changed symbol is in `internal/cli`, and the only adapter reference (`claudeprovider.ReadAccountIdentity`) is a name-only check (not behavior). Non-Go files (`PLAN.md`, `BUILDER_WORKLOG.md`, `BUILDER_QA_FALSIFICATION.md`) were read directly per Hylla's Go-only scope.
 
 ---
+
+## Unit 6.3 — Round 1
+
+**Date:** 2026-05-15
+**Reviewer:** go-qa-proof-agent (subagent)
+**Verdict:** **pass**
+**Mage targets re-run:**
+- `mage testPkg ./internal/adapters/providers/claude` — 21 tests / 0 fail / 78.4% coverage (matches worklog)
+- `mage testPkg ./internal/cli` — 146 tests / 0 fail / 71.1% coverage (matches worklog)
+
+### Acceptance criteria coverage
+
+| # | Criterion | Status | Evidence |
+|---|---|---|---|
+| A1 | `mage testPkg ./internal/adapters/providers/claude` green; 21 tests / 78.4% | PASS | re-run by reviewer; both numbers identical to worklog |
+| A2 | `ReadAccountIdentity` returns non-empty `Email` when creds + `oauthAccount.emailAddress` present | PASS | `account.go:53-55` + `readClaudeConfigEmail` `account.go:62-85`; test "credentials present with email in config" (`account_test.go:46-55`, `wantEmail:"user@example.com"`) |
+| A3 | Returns `Email=""` + `LoggedIn=true` on malformed config JSON | PASS | `account.go:74-77` (`json.Unmarshal` error → return `""`); test "credentials present config has invalid JSON" (`account_test.go:76-86`, asserts `wantEmail:""` + `wantLoggedIn:true`) |
+| A4 | Returns `Email=""` + `LoggedIn=true` when config file absent (creds present) | PASS | `account.go:66-69` (`os.IsNotExist(err)` → `continue`, falls off loop → `""`); test "credentials present no config file" (`account_test.go:67-74`) |
+| A5 | Returns `LoggedIn=false` when credentials file absent | PASS | `account.go:43-46` (`os.IsNotExist` on `.credentials.json` → `AccountIdentity{}` zero value); test "no credentials file" (`account_test.go:87-95`) — also covered by "credentials path is a directory" (`account.go:49-51`, `account_test.go:96-106`) |
+| A6 | Filename fallback: `.config.json` checked before `.claude.json` | PASS | `account.go:63` — `for _, name := range []string{".config.json", ".claude.json"}` literal slice ordering; test "config uses legacy .config.json key" (`account_test.go:107-122`) writes only `.config.json` and confirms email extracted from that path |
+| A7 | `mage testPkg ./internal/cli` green; 146 tests / 71.1% | PASS | re-run by reviewer; both numbers identical to worklog |
+| A8 | `readAccountIdentity` has `case domain.ProviderClaude:` (no longer falls to `default`) | PASS | `operator_helpers.go:234-245` — full Claude case with `claudeprovider.ReadAccountIdentity` call and `claudeAuthDisplay` / `claudeEmailDisplay` wiring |
+| A9 | `claudeAuthDisplay` returns `"logged in"` / `"not logged in"`; tested both | PASS | `operator_helpers.go:283-288`; `TestClaudeAuthDisplay` (`operator_helpers_test.go:9-43`) covers `LoggedIn=true`, `LoggedIn=false`, and `LoggedIn=true + Email present` |
+| A10 | `claudeEmailDisplay` three branches: email / `"(identity unavailable)"` / `"(not logged in)"` | PASS | `operator_helpers.go:292-300`; `TestClaudeEmailDisplay` (`operator_helpers_test.go:45-84`) covers all three branches plus a 4th "not-logged-in-but-email-present shows email" edge case |
+
+### Idiomatic Go
+
+- Doc comments on every exported identifier present: `AccountIdentity` (`account.go:11-15`), `ReadAccountIdentity` (`account.go:34-39`), `claudeAuthDisplay` (`operator_helpers.go:281-282`), `claudeEmailDisplay` (`operator_helpers.go:290-291`). Unexported helpers `claudeConfigFile` / `claudeOAuthAccount` / `readClaudeConfigEmail` also carry comments where they need them (`account.go:22-28`, `account.go:58-61`).
+- Error wrapping uses `fmt.Errorf("...: %w", err)` at the boundary in `account.go:47` (`"read claude credentials %q: %w"`). Inside `readClaudeConfigEmail` the contract is intentionally non-error-returning (best-effort), so `os.ReadFile` / `json.Unmarshal` errors are swallowed by design and documented in the function comment (`account.go:58-61`) and the parent doc comment (`account.go:34-39`). Acceptable — matches A3/A4 graceful-degradation contract.
+- No new external dependencies. `account.go` imports stdlib only (`encoding/json`, `fmt`, `os`, `path/filepath`, `strings`). `operator_helpers.go` adds zero imports beyond what was already present — `claudeprovider` was already imported at line 15.
+
+### LOC consistency with worklog
+
+| File | Worklog claim | On-disk LOC | Status |
+|---|---|---|---|
+| `internal/adapters/providers/claude/account.go` | ~85 (was 38, +61) | 85 | exact |
+| `internal/adapters/providers/claude/account_test.go` | ~144 | 144 | exact |
+| `internal/cli/operator_helpers.go` | +34 LOC (total 338) | 338; diff shows `+34 -0` | exact |
+| `internal/cli/operator_helpers_test.go` | new, 84 LOC | 84 | exact |
+
+### Findings (blocking)
+
+None.
+
+### Gaps (non-blocking)
+
+- **G1.** `claudeEmailDisplay`'s "not logged in but email present shows email" branch (tested at `operator_helpers_test.go:69-72`) is technically reachable only via a logic bug in the adapter (`ReadAccountIdentity` would never produce `LoggedIn=false, Email="X"` because Email is only populated after the LoggedIn gate at `account.go:52-55`). The test guards against future refactors that might decouple the two fields. Defensive but not load-bearing. Acceptable.
+- **G2.** Real end-to-end auth verification — same Unknown the Unit 6.2 reviewer flagged: device-code URL rendered, browser OAuth, `.credentials.json` lands on disk, then `account list` shows the real email. Defer to dev manual smoke after CI green (also the next unit closes the loop end-to-end).
+
+### Observations (non-blocking)
+
+- **O1.** Two-filename precedence (`.config.json` before `.claude.json`) is a literal slice-ordering invariant in `account.go:63`. A test that writes BOTH files and asserts `.config.json`'s email wins over `.claude.json`'s would lock the precedence harder. Current test ("config uses legacy .config.json key") only writes `.config.json`. The slice-ordering claim is correct from code inspection — adequate proof — but a precedence-collision test would be a stronger invariant. Non-blocking; G-level rather than F-level.
+- **O2.** `readClaudeConfigEmail` swallows non-`IsNotExist` `os.ReadFile` errors (e.g. permission-denied) and returns `""` (`account.go:66-72`). Documented in the function comment as "Unreadable for some other reason — skip gracefully." Consistent with the A3/A4 graceful-degradation contract. Acceptable.
+- **O3.** `claudeprovider.AccountIdentity` exposes `Name` and `AuthMode` fields (`account.go:16-19`) that are never populated by Round 1 code. Mirrors the Codex shape (the Codex adapter populates `Name` from JWT claims at `codex/account.go:60`). The Claude config file's `oauthAccount` block could conceivably carry a `name` field — out of scope here. Non-blocking.
+- **O4.** Codex parses an `id_token` JWT for email (`codex/account.go:55-61`); Claude reads a plain JSON config field (`account.go:62-85`). Different mechanism, same observable behavior at the display layer. Symmetric `claudeAuthDisplay` / `claudeEmailDisplay` shape mirrors Codex helpers — the asymmetry is correctly hidden behind the adapter boundary.
+- **O5.** Wrap-up note in BUILDER_WORKLOG.md (lines 142) explicitly records the retroactive worklog authoring path (builder hit token limit; orchestrator wrote MD only, no Go edits, mage re-run by orchestrator). Mage targets re-run again here by this reviewer match the worklog — provenance chain is intact.
+
+### Hylla Feedback
+
+None — Hylla not needed for this review. All evidence came from `Read`-tool inspection of the four target files plus `internal/adapters/providers/codex/account.go` (the structural template). Both mage targets re-run via `mage testPkg`. Non-Go files (`PLAN.md`, `BUILDER_WORKLOG.md`, this file) were read directly per Hylla's Go-only scope. No misses to report.
+
+---
