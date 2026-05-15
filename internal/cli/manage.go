@@ -490,7 +490,7 @@ func runManageAccountAdd(cmd *cobra.Command, paths config.Paths, opts *rootOptio
 	if err != nil {
 		return fmt.Errorf("manage account add: %w", err)
 	}
-	if err := ensureManagedAccountReady(cmd, provider, profile, accountAuthOptions{SkipLogin: skipLogin}); err != nil {
+	if err := ensureManagedAccountReady(cmd, provider, profile, accountAuthOptions{SkipLogin: skipLogin, Paths: paths}); err != nil {
 		return fmt.Errorf("manage account add: %w", err)
 	}
 	identity := readAccountIdentity(profile)
@@ -597,7 +597,7 @@ func runManageAccountSwitch(cmd *cobra.Command, paths config.Paths, opts *rootOp
 		}
 		return fmt.Errorf("manage account switch: resolve account %q: %w", profileName, err)
 	}
-	if err := ensureManagedAccountReady(cmd, provider, account, accountAuthOptions{SkipLogin: skipLogin}); err != nil {
+	if err := ensureManagedAccountReady(cmd, provider, account, accountAuthOptions{SkipLogin: skipLogin, Paths: paths}); err != nil {
 		return fmt.Errorf("manage account switch: %w", err)
 	}
 	return runManageBind(cmd, paths, opts, provider, profileName, projectPath)
@@ -617,7 +617,7 @@ func runManageAccountLogin(cmd *cobra.Command, paths config.Paths, opts *rootOpt
 	if err != nil {
 		return fmt.Errorf("manage account login: %w", err)
 	}
-	if err := loginManagedAccount(cmd, profile.Provider, profile); err != nil {
+	if err := loginManagedAccount(cmd, profile.Provider, profile, paths); err != nil {
 		return fmt.Errorf("manage account login: %w", err)
 	}
 	identity := readAccountIdentity(profile)

@@ -172,7 +172,7 @@ Tests to add in `manage_test.go`:
 
 #### Unit 6.2 — Claude container auth flow
 
-**State:** todo  
+**State:** done  
 **Paths:** `internal/cli/claude_auth.go` (new), `internal/cli/account_auth.go`  
 **Packages:** `internal/cli`  
 **Blocked by:** —

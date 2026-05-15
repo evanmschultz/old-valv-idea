@@ -13,6 +13,7 @@ import (
 	"github.com/evanmschultz/laslig"
 	"github.com/spf13/cobra"
 
+	"github.com/evanmschultz/valv/internal/config"
 	"github.com/evanmschultz/valv/internal/domain"
 )
 
@@ -24,6 +25,7 @@ type codexAccountAuthRunner interface {
 
 type accountAuthOptions struct {
 	SkipLogin bool
+	Paths     config.Paths
 }
 
 type codexAccountAuthRunnerKey struct{}
@@ -37,7 +39,7 @@ func ensureManagedAccountReady(cmd *cobra.Command, provider domain.Provider, acc
 	case domain.ProviderCodex:
 		return ensureCodexAccountReady(cmd, account, options)
 	case domain.ProviderClaude:
-		return nil
+		return ensureClaudeAccountReady(cmd, account, options.Paths)
 	default:
 		return nil
 	}
@@ -48,18 +50,18 @@ func logoutManagedAccount(cmd *cobra.Command, provider domain.Provider, account 
 	case domain.ProviderCodex:
 		return logoutCodexAccount(cmd, account)
 	case domain.ProviderClaude:
-		return nil
+		return wipeClaudeCredentials(account.HomePath)
 	default:
 		return nil
 	}
 }
 
-func loginManagedAccount(cmd *cobra.Command, provider domain.Provider, account domain.Profile) error {
+func loginManagedAccount(cmd *cobra.Command, provider domain.Provider, account domain.Profile, paths config.Paths) error {
 	switch provider {
 	case domain.ProviderCodex:
 		return loginCodexAccount(cmd, account)
 	case domain.ProviderClaude:
-		return nil
+		return loginClaudeAccount(cmd, account, paths)
 	default:
 		return nil
 	}
