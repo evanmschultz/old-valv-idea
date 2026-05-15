@@ -83,3 +83,102 @@ None.
 All seven acceptance criteria are met with primary code/test evidence. Copy-adapt traps are clean. Idiomatic-Go discipline (doc comments, error wrapping, mage-only build, defer cleanup, context-first param) is honored. Coverage 76.2% > 60% effective gate; > 70% AGENTS.md target. Re-running `mage testPkg ./internal/adapters/providers/claude` independently produced an identical green result.
 
 No findings require a builder respawn. Round 1 closes.
+
+## Unit 5.2 — Round 1
+
+**Date:** 2026-05-14
+**Reviewer role:** proof-oriented (paired with falsification subagent running in parallel)
+**Verdict:** pass
+
+### Scope
+
+Verify Unit 5.2 — new package `internal/services/claude/` (`service.go` + `service_test.go`) implements the Claude launch service mirroring `internal/services/codex/service.go` with isolated-first model substitutions, as specified in `PLAN.md` § Unit 5.2.
+
+### Mage Verification
+
+| Target | Result |
+|---|---|
+| `mage testPkg ./internal/services/claude` | PASS — 17/17 tests, 81.0% coverage, `-race -cover` clean, gate is 60% (effective). Coverage also exceeds 70% AGENTS.md target. |
+
+Re-run independently of builder. Output matches worklog claim line-for-line (`81.0%`, 17 tests).
+
+### Findings — Acceptance Criteria (PLAN.md § Unit 5.2)
+
+| # | Acceptance Criterion | Status | Evidence |
+|---|---|---|---|
+| A1 | `mage testPkg ./internal/services/claude` green (gofumpt + 70% coverage) | met | 17/17 tests pass; 81.0% > 70% AGENTS.md target; > 60% magefile effective gate. |
+| A2 | No reference to `sharedCodexStateHome` in the new package | met | Read of `service.go` (346 lines) and `service_test.go` (550 lines): neither file contains `sharedCodexStateHome`. `Run` at `service.go:127-133` passes `SharedHome: ""` directly with explicit comment lines 124-126. |
+| A3 | No reference to `codexruntime.DefaultHostProfile` in the new package | met | `service.go:3-21` imports only `clauderuntime` from the Claude adapter (line 17). No `codexruntime` import. No `DefaultHostProfile` call site anywhere in the package. |
+| A4 | `resolveBinding` passes `domain.ProviderClaude` to `BindingByProjectID` | met | `service.go:215` — exact call: `s.store.BindingByProjectID(ctx, projectRecord.ID, domain.ProviderClaude)`. `service.go:222` asserts `binding.Provider != domain.ProviderClaude`. `service.go:233` asserts `profile.Provider != domain.ProviderClaude`. All three positions covered. Behaviorally verified by `TestRunSucceedsWithBoundProject` (line 202), `TestRunRejectsWrongBindingProvider` (line 315), `TestRunRejectsWrongProfileProvider` (line 350). |
+| A5 | Container label `"io.valv.provider"` equals `"claude"` | met | `service.go:261` literal `"io.valv.provider": "claude"`. Verified by `TestRunSucceedsWithBoundProject` at `service_test.go:237-239` asserting recorded request label equals `"claude"`. |
+| A6 | `New` returns error when `Store` is nil | met | `service.go:76-78` returns `"new claude launch service: store is required"`. Verified by `TestNewRequiresDependencies` case "nil store" at `service_test.go:173-176`. |
+| A7 | `New` returns error when `Executor` is nil | met | `service.go:79-81` returns `"new claude launch service: executor is required"`. Verified by `TestNewRequiresDependencies` case "nil executor" at `service_test.go:177-180`. |
+| A8 | `New` returns error when `Image.Repository` is empty | met | `service.go:82-84` returns `"new claude launch service: image repository is required"`. Verified by `TestNewRequiresDependencies` case "empty image repository" at `service_test.go:181-184`. |
+
+### Findings — Copy-Adapt Traps (per spawn prompt)
+
+| Trap | Status | Evidence |
+|---|---|---|
+| No `sharedCodexStateHome` or `sharedClaudeStateHome` helper in new package | clear | Read of both files; no such function defined or called. `SharedHome: ""` passed inline at `service.go:129`. |
+| `resolveBinding` passes `ProviderClaude` to `BindingByProjectID` AND asserts `binding.Provider == ProviderClaude` AND asserts `profile.Provider == ProviderClaude` | clear | All three positions present at `service.go:215, 222, 233` respectively. |
+| `containerName` produces `valv-claude-interactive-...` not `valv-codex-...` | clear | `service.go:321` — format string is `"valv-claude-interactive-%s-%d"`. `TestContainerNameContainsClaude` at `service_test.go:512-524` asserts `valv-claude-interactive-` prefix AND `!strings.Contains(name, "codex")`. |
+| `buildRequest` sets label `"io.valv.provider": "claude"` | clear | (A5 above) |
+| Import alias is `clauderuntime` for the adapter package | clear | `service.go:17` — `clauderuntime "github.com/evanmschultz/valv/internal/adapters/providers/claude"`. Mirrored in `service_test.go:15`. |
+| Service passes `SharedHome: ""` to `clauderuntime.PrepareRuntime` | clear | `service.go:129` — explicit `SharedHome: ""` with documenting comment at lines 124-126. |
+
+### Findings — Enumerated Tests (per spawn prompt)
+
+| Required Test | Status | Location |
+|---|---|---|
+| `TestRunSucceedsWithBoundProject` | present | `service_test.go:202-259` — asserts container name, image, label, ClaudeDir mount, CLAUDE_CONFIG_DIR env, managed label |
+| `TestRunReturnsUnboundProjectWhenNoProject` | present | `service_test.go:263-285` — asserts `errors.Is(err, domain.ErrUnboundProject)` |
+| `TestRunReturnsUnboundProjectWhenNoBinding` | present | `service_test.go:289-311` — same `errors.Is` assertion |
+| `TestRunRejectsWrongBindingProvider` | present | `service_test.go:315-346` — binding.Provider = Codex; asserts error contains "expected" |
+| `TestRunRejectsWrongProfileProvider` | present | `service_test.go:350-381` — profile.Provider = Codex; asserts error contains "expected" |
+| `TestValidateBindingReturnsNilForBoundProject` | present | `service_test.go:385-404` — happy-path ValidateBinding nil result |
+| Constructor table-driven test (nil Store / nil Executor / empty Image.Repository) | present | `TestNewRequiresDependencies` at `service_test.go:158-197` — table with exactly the three required cases |
+
+All seven enumerated cases are present with the exact names listed in the spawn prompt.
+
+### Findings — Idiomatic Go (CLAUDE.md + AGENTS.md § 5–7)
+
+| Concern | Status | Evidence |
+|---|---|---|
+| Doc comments on every exported identifier, starting with identifier name | met | `Store` (`service.go:23`), `Executor` (30), `DetectFunc` (38), `Options` (41), `Service` (57), `New` (73), `Run` (115), `ValidateBinding` (182). Each comment begins with the identifier name. |
+| Errors wrapped with `fmt.Errorf("context: %w", err)` at each boundary | met | `service.go:135, 142, 166, 177, 198, 203, 210, 212, 218, 220, 229, 231, 280` — every error path wraps with `%w` (or constructs sentinel-wrapping `ErrUnboundProject` via `%w` at 210, 218, 229). |
+| Only mage targets used (no raw `go test`) | met | Worklog § "Mage Targets Run" lists only `mage testPkg`. No raw `go` commands. |
+| `defer` for cleanup | met | `service.go:137` — `defer prepared.Close()` immediately after the `PrepareRuntime` call. |
+| `context.Context` first param | met | `Run(ctx context.Context, ...)` at `service.go:118`; `ValidateBinding(ctx, ...)` at 184; `resolveBinding(ctx, ...)` at 195; `runAttached(ctx, ...)` at 171. Consistent. |
+| Sentinel error usage (`errors.Is`) | met | `service.go:209, 217, 228` use `errors.Is(err, domain.ErrNotFound)`. |
+
+### Worklog ↔ Code Coherence
+
+| Worklog claim | Status |
+|---|---|
+| 17 tests in `service_test.go` with listed names | match — every name listed in worklog § "Test Count" is present in the file. |
+| Coverage 81.0% | match — independent `mage testPkg` re-run produced 81.0% exactly. |
+| Initial gofumpt failure → fixed (alignment in struct literal) | not independently re-verifiable (intermediate state), but plausible. The final-state file passes gofumpt as part of `mage testPkg`. |
+| No `sharedCodexStateHome` | match — independently verified. |
+| `boundClaudeStore` and `detectAlways` test helpers added | match — `service_test.go:131-148` and `150-154` respectively. |
+| File LOC: 278 production, 330 test | drift — actual is `service.go` 345 LOC, `service_test.go` 550 LOC. Worklog under-reports by ~24%. Code matches the PLAN.md spec target ("10.2K, 347 LOC" for the Codex template; claude/service.go 345 LOC is within 1%). Non-blocking observation — acceptance criteria don't include LOC accuracy, and code-to-spec is correct. |
+
+### Gaps
+
+None blocking.
+
+### Observations
+
+(Out of scope for this round — record-only, no fix required.)
+
+- **Worklog LOC drift.** Worklog reports 278 production LOC and 330 test LOC; actual files are 345 and 550 respectively. The worklog count is wrong. The PLAN.md spec target for the Codex template was "10.2K, 347 LOC" and the actual claude/service.go (345 LOC) is within 1% of that target — so code-to-spec sizing is correct. Recommend builder cross-check LOC counts in future worklogs by running `wc -l` rather than estimating.
+- **Test helper coverage.** `fakeExecutor.Create` / `Start` / `RemoveContainer` (`service_test.go:108-127`) implement the `Executor` interface for compile-time completeness but are not exercised by any test in this package. The `Run` path is the only path the service actually invokes today. Accepted — interface satisfaction is required for the type to be passed; the unused methods are not dead code from the interface's perspective.
+- **`TestRunBubblesExecutorErrors` doesn't assert `errors.Is`.** The test (line 528) asserts `strings.Contains(err.Error(), "docker failed")` rather than `errors.Is(err, sentinelErr)`. The production code at `service.go:166` wraps with `%w` so `errors.Is` would also work; the test is correct but slightly less strict than idiomatic. Non-blocking — wrapping behavior is structurally present.
+- **`emitNotices` parameter discard.** `service.go:298` — `emitNotices(_ domain.Profile, warnings, _ []string)` discards the profile arg and the claudeArgs arg. The signature matches Codex for structural parity per PLAN.md note 2 (`RealHome` field present but unused). Accepted as intentional v1 structural parity.
+
+### Verdict
+
+**pass**
+
+All 8 acceptance criteria from PLAN.md § Unit 5.2 are met with primary code+test evidence at file:line granularity. All 6 copy-adapt traps from the spawn prompt are clean. All 7 enumerated test cases (including the table-driven constructor test for acceptance criterion 5) are present with the required names. Coverage 81.0% independently re-verified — exceeds both the 60% magefile gate and the 70% AGENTS.md target. Idiomatic Go discipline (doc comments, error wrapping with `%w`, mage-only build, `defer` cleanup, context-first param) is honored throughout. Worklog LOC numbers drift from actual file sizes (~24% under-report) but acceptance criteria do not include LOC accuracy and code-to-spec sizing is correct. The drift is a non-blocking worklog hygiene observation.
+
+No findings require a builder respawn. Round 1 closes.

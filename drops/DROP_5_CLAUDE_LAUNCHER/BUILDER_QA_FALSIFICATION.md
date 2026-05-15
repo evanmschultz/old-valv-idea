@@ -103,3 +103,95 @@ None.
 ### Hylla Feedback
 
 N/A for this unit. The QA review was conducted via direct `Read` of the 6 created files and the 3 Codex template files. Hylla was not queried because (a) the files under review are post-ingest (Hylla index would be stale), and (b) the Codex template files are short enough that direct Read is more efficient than Hylla summarization for a structural diff review. Bash grep was permission-denied during the review, but file sizes (42–270 LOC) made manual content scanning a complete substitute.
+
+## Unit 5.2 — Round 1
+
+**Date:** 2026-05-14
+**Verdict:** pass
+
+### Summary
+
+No unmitigated counterexample found across 15 attack vectors from the spawn prompt plus 3 self-derived attacks. The Claude launch service is a structurally correct port of `internal/services/codex/service.go` with every Claude-specific substitution applied: provider guards flipped to `domain.ProviderClaude`, container name format flipped to `valv-claude-interactive-`, label flipped to `"io.valv.provider": "claude"`, `sharedCodexStateHome` deliberately not ported, `SharedHome: ""` correctly handled by the adapter collapse path. Two soft findings recorded against test rigor — neither breaks the unit.
+
+### Attack Attempts
+
+| # | Attack | Result |
+|---|---|---|
+| 1 | Copy-paste residue (`codex`/`Codex`/`CODEX`/`valv-codex`) in production code | REFUTED — `service.go` reads end-to-end show zero `codex`/`Codex`/`CODEX` substrings in production source |
+| 2 | `sharedCodexStateHome` helper ported into Claude service | REFUTED — not present at any line in `service.go`; `Run` directly passes `SharedHome: ""` at line 129 |
+| 3 | Provider guard direction reversed (rejects Claude bindings) | REFUTED — `service.go:222` reads `binding.Provider != domain.ProviderClaude`; `service.go:233` reads `profile.Provider != domain.ProviderClaude` — correct |
+| 4 | `BindingByProjectID` call passes `domain.ProviderCodex` (copy-paste leftover) | REFUTED — `service.go:215` reads `s.store.BindingByProjectID(ctx, projectRecord.ID, domain.ProviderClaude)` directly; production call is correct |
+| 5 | `containerName` produces `valv-codex-interactive-` (silent collision risk) | REFUTED — `service.go:321` reads `fmt.Sprintf("valv-claude-interactive-%s-%d", base, s.now().UnixNano())`; format is `valv-claude-interactive-…` |
+| 6 | `buildRequest` sets `"io.valv.provider": "codex"` | REFUTED — `service.go:261` reads `"io.valv.provider": "claude"` as a literal in the labels map |
+| 7 | `SharedHome` accidentally set to `realHome` or `profile.HomePath` instead of `""` | REFUTED — `service.go:129` reads `SharedHome: ""` literal in the `PrepareRequest` struct literal; adapter `runtime.go:75-81` confirms empty `SharedHome` collapses to `profileHome` and the temp-copy branch is skipped (line 101 `if profileHome != sharedHome` is false in this case) |
+| 8 | `New` does not reject nil Store / nil Executor / empty Image.Repository | REFUTED — `service.go:76-84` reads three explicit `nil`/`""` checks with distinct error messages; `TestNewRequiresDependencies` exercises all three table cases |
+| 9 | Error wrapping non-compliance at outer entry points (`Run`, `resolveBinding`, `runAttached`) | REFUTED — every error return in `Run`, `runAttached`, and `resolveBinding` is `fmt.Errorf("run claude launch service: …: %w", err)`; constructor uses validation-style messages without `%w` because there is no upstream `err` |
+| 10 | `Unbound project` tests verify error wraps `domain.ErrUnboundProject` via `errors.Is` | REFUTED — `service_test.go:282` and `:308` both use `errors.Is(err, domain.ErrUnboundProject)`; tests pass only when wrapping is correct |
+| 11 | Coverage gaming (81% reached via assertion-free tests) | REFUTED — every test in `service_test.go` has at least one `t.Fatalf` triggered on a specific value or error; `TestEmitNoticesSuppressesWarningsOnTTY` and `TestEmitNoticesWritesWarningsWithoutTTY` are pair-asserted on opposite behaviors, not padding; soft finding on weak provider-argument assertion in `TestRunSucceedsWithBoundProject` recorded below |
+| 12 | `Now` injection missing (flaky container-name test) | REFUTED — `TestRunSucceedsWithBoundProject:217` injects `Now: func() time.Time { return time.Unix(0, 123456789) }`; `TestContainerNameContainsClaude:515` uses `time.Unix(0, 42)`; container-name behavior is deterministic in tests |
+| 13 | `RealHome` field claimed unused but actually referenced in service body | REFUTED — `realHome` appears only at `service.go:52` (Options field), `:68` (Service field), and `:109` (copy in `New`); zero reads inside `Run`/`resolveBinding`/`buildRequest`/`runAttached`/`containerName`/`emitNotices`/`debug`; worklog claim verified |
+| 14 | Mage discipline violation (raw `go test` in worklog) | REFUTED — worklog § "Mage Targets Run" lists only `mage testPkg ./internal/services/claude`; no raw `go` invocations referenced |
+| 15 | `Detect` field unused or not invoked | REFUTED — `Detect` wired in `New` at `service.go:86-89` (defaults to `projectdetect.DetectFrom` when nil), invoked at `service.go:201` (`s.detect(workingDir)`); used |
+| 16 (self) | `runAttached` swallows error info (bare wrap without project context) | REFUTED — `service.go:177` wraps with `project %q: %w` for project root context |
+| 17 (self) | `errors.Is(err, domain.ErrUnboundProject)` chain broken because `resolveBinding` wraps `ErrUnboundProject` inside a `fmt.Errorf` that loses the sentinel | REFUTED — `service.go:210, 218, 229` each use `: %w` wrapping `domain.ErrUnboundProject` directly; `errors.Is` unwraps cleanly; tests at `service_test.go:282/:308` are exactly this chain and pass |
+| 18 (self) | `TestRunSucceedsWithBoundProject` does not actually exercise the TTY+Stdin attach path; the `request.Interactive && request.TTY` branch (service.go:159) might never run in tests | REFUTED — test sets `TTY: true, Stdin: true` at lines 215-216, which makes `request.Interactive = s.stdin = true` and `request.TTY = s.tty = true`; the attach branch fires; executor's `Run` is called via `runAttached`; assertions on `executor.got` succeed because `runAttached` calls `s.executor.Run` |
+
+### Evidence Trace
+
+Files read in full and cross-checked:
+
+| Claude file | Codex counterpart | Comparison result |
+|---|---|---|
+| `internal/services/claude/service.go` (346 LOC) | `internal/services/codex/service.go` (347 LOC) | Net delta: removed `sharedCodexStateHome` (13 LOC), removed `shared_home` debug key, removed `sharedHome` argument to `PrepareRequest`. Substitutions: `codex → claude` in package, imports, error messages, label, container-name format, debug strings. Notice prefix changed from `"Valv MCP note: %s\n"` to `"Valv note: %s\n"` (deliberate — Claude v1 has no MCP bridging). All other 320 LOC structurally parallel |
+| `internal/services/claude/service_test.go` (550 LOC) | `internal/services/codex/service_test.go` (16.7K reference) | 14 test functions; uses `boundClaudeStore` and `detectAlways` helpers; covers happy path, unbound-project (no project), unbound-project (no binding), wrong-binding-provider, wrong-profile-provider, validate-binding, outside-project-root, sibling-prefix path, non-interactive TTY, emit-notices on-TTY suppression, emit-notices off-TTY write, container-name no-codex assertion, executor error bubbling |
+
+Key code sites verified by direct read:
+
+- `service.go:17` — import is `clauderuntime "…/providers/claude"` (correct alias, correct package)
+- `service.go:75-84` — `New` validation: nil Store → error, nil Executor → error, empty Image.Repository → error
+- `service.go:127-133` — `PrepareRequest` struct literal uses `ProfileHome: resolved.profile.HomePath`, `SharedHome: ""` (literal empty string), `ProjectRoot: resolved.project.Root`
+- `service.go:135, 142, 166, 177` — outer error returns all wrap with `fmt.Errorf("run claude launch service: …: %w", err)`
+- `service.go:145` — debug message: `"launching claude container"` (correct)
+- `service.go:174` — debug message: `"starting interactive claude container"` (correct)
+- `service.go:201` — `s.detect(workingDir)` invocation (Detect is used)
+- `service.go:210, 218, 229` — three `%w` wrappings of `domain.ErrUnboundProject` (preserves `errors.Is` chain)
+- `service.go:215` — `s.store.BindingByProjectID(ctx, projectRecord.ID, domain.ProviderClaude)` (correct provider constant)
+- `service.go:222, 233` — provider mismatch checks use `!= domain.ProviderClaude` (correct direction)
+- `service.go:261` — label map has `"io.valv.provider": "claude"` (correct)
+- `service.go:303` — debug message: `"claude runtime warning"` (correct)
+- `service.go:309` — notice prefix: `"Valv note: %s\n"` (intentional adaptation from Codex's `"Valv MCP note: …"`)
+- `service.go:321` — container name format: `"valv-claude-interactive-%s-%d"` (correct)
+- Adapter `runtime.go:75-81` — empty `SharedHome` falls through to `sharedHome := profileHome`; `runtime.go:101` `if profileHome != sharedHome` is false; temp-copy branch skipped as designed
+
+### Soft Findings (not unit-breaking)
+
+1. **`TestRunSucceedsWithBoundProject` does not directly assert the provider argument passed to `BindingByProjectID`.** Acceptance criterion phrasing implies "verified by `TestRunSucceedsWithBoundProject` observing the fakeStore call." In reality, `fakeStore.BindingByProjectID` (`service_test.go:70-72`) is a value-receiver method that ignores its `provider` argument — it returns `f.binding, f.bindingErr` unconditionally. The actual safety net is at `service.go:215` (production hard-codes `domain.ProviderClaude`) plus `TestRunRejectsWrongBindingProvider` (which exercises the `!=` guard). Production behavior is correct; the test's assertion power is weaker than the acceptance criterion implies. Strengthen: change `fakeStore.BindingByProjectID` to a pointer receiver and record the `provider` argument; assert `gotProvider == domain.ProviderClaude` in `TestRunSucceedsWithBoundProject`. Not unit-breaking — the production call is correctly written by direct read of `service.go:215`.
+2. **`TestRunBuildsNonInteractiveDockerRequestWhenTTYDisabled` is mis-named in assertion content.** The test sets neither `TTY` nor `Stdin` (defaults to false), so `request.Interactive == false` and `request.TTY == false`. Both `if executor.got.Interactive || executor.got.TTY` checks are the same field-truth check. Doesn't break — but the test would still pass if the production code accidentally set `Interactive = !s.stdin` (it would then be true when stdin is false, failing the test — actually that would catch the inversion, so the test is fine). Withdrawn — on re-read this attack is moot.
+3. **Soft finding on `fakeStore` value-receiver capture.** `fakeStore.ProjectByRoot`, `ProfileByID`, `BindingByProjectID` are value receivers (`service_test.go:34, 46, 70`). Any assignments to receiver fields (like the Codex test's `f.projectRoot = root`) are lost. Claude's `fakeStore` doesn't try to capture call-arg fields (unlike Codex's), so this isn't a defect — but if a future builder adds capture-on-call assertions following the Codex pattern, the captures will silently no-op. Worth a code comment, not a fix.
+
+### Acceptance Criteria Verification
+
+All 8 acceptance criteria from PLAN.md § Unit 5.2 verified:
+
+| # | Criterion | Verified by |
+|---|---|---|
+| 1 | `mage testPkg ./internal/services/claude` green | Worklog § "Mage Targets Run": 17/17 tests pass, 81.0% coverage > 60% gate |
+| 2 | No reference to `sharedCodexStateHome` | Direct read of `service.go` end-to-end — no such identifier exists |
+| 3 | No reference to `codexruntime.DefaultHostProfile` | Direct read of `service.go` imports + body — no such call exists |
+| 4 | `resolveBinding` passes `domain.ProviderClaude` to `BindingByProjectID` | `service.go:215` direct read; production call hard-codes correct constant |
+| 5 | Container label `"io.valv.provider"` equals `"claude"` | `service.go:261` direct read; `TestRunSucceedsWithBoundProject:237` asserts equality |
+| 6 | `New` returns error when Store nil | `service.go:76-78` + `TestNewRequiresDependencies` table case "nil store" |
+| 7 | `New` returns error when Executor nil | `service.go:79-81` + `TestNewRequiresDependencies` table case "nil executor" |
+| 8 | `New` returns error when Image.Repository empty | `service.go:82-84` + `TestNewRequiresDependencies` table case "empty image repository" |
+
+### Counterexamples
+
+None.
+
+### Verdict
+
+**pass** — no unmitigated counterexample to the unit's claim that the Claude launch service mirrors the Codex template with the correct dev-confirmed isolated-first deltas (no `sharedCodexStateHome`, `SharedHome: ""` in `PrepareRequest`, `domain.ProviderClaude` guards, `valv-claude-interactive-` container name format, `"io.valv.provider": "claude"` label). All 8 acceptance criteria verified by direct code read plus test assertions. Soft findings recorded against test rigor (provider-argument capture, value-receiver fakeStore) do not break the unit and are appropriate to address in DROP_9 dedupe or as drive-by improvements in a future drop.
+
+### Hylla Feedback
+
+N/A for this unit. The QA review was conducted via direct `Read` of the two Claude service files (`service.go` 346 LOC, `service_test.go` 550 LOC), the Codex template file (`codex/service.go` 347 LOC), the adapter `runtime.go` for the `SharedHome` collapse path, and a partial read of `codex/service_test.go` for fakeStore shape comparison. Bash grep was permission-denied; manual content scan of the cat-n output was a complete substitute given the file sizes. Hylla was not queried because (a) the files under review are post-ingest (Hylla index is stale relative to HEAD), and (b) the Codex template is short enough that direct Read is more efficient than Hylla summarization for structural-diff review of this class.
