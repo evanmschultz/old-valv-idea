@@ -260,3 +260,83 @@ None blocking.
 All 8 acceptance criteria from PLAN.md § Unit 5.2 are met with primary code+test evidence at file:line granularity. All 6 copy-adapt traps from the spawn prompt are clean. All 7 enumerated test cases (including the table-driven constructor test for acceptance criterion 5) are present with the required names. Coverage 81.0% independently re-verified — exceeds both the 60% magefile gate and the 70% AGENTS.md target. Idiomatic Go discipline (doc comments, error wrapping with `%w`, mage-only build, `defer` cleanup, context-first param) is honored throughout. Worklog LOC numbers drift from actual file sizes (~24% under-report) but acceptance criteria do not include LOC accuracy and code-to-spec sizing is correct. The drift is a non-blocking worklog hygiene observation.
 
 No findings require a builder respawn. Round 1 closes.
+
+## Unit 5.4 — Round 1
+
+**Date:** 2026-05-14
+**Reviewer role:** proof-oriented (paired with falsification subagent running in parallel)
+**Verdict:** pass
+
+### Scope
+
+Verify Unit 5.4 — `magefile.go` (edit) adds an `Install` mage target that calls `go install ./cmd/valv` via the existing `runGo` helper, as specified in `PLAN.md` § Unit 5.4.
+
+### Mage Verification (Re-Run Independently)
+
+| Target | Result |
+|---|---|
+| `mage -l` | PASS — `install` listed as `installs the valv binary to $GOBIN (or $GOPATH/bin).` |
+| `mage test` | PASS — 388/388 tests across 20 packages, all packages at or above 60.0% coverage |
+
+Both targets re-run by this reviewer. Output matches worklog claims exactly: 388 tests, 20 packages, all green. Coverage gate met for every package (Claude adapter 76.2%, Claude service 81.0%, CLI 72.3%, manage 76.3% — consistent with prior unit verifications).
+
+`mage install` was intentionally NOT run by this reviewer either, for the same reason the builder did not: it would clobber the dev's existing `valv` binary in `$GOBIN`. Acceptance criterion verification for `mage install` correctness is by code inspection plus `mage -l` discovery (the target compiles and registers).
+
+### Findings — Acceptance Criteria (PLAN.md § Unit 5.4)
+
+| # | Acceptance Criterion | Status | Evidence |
+|---|---|---|---|
+| A1 | `mage -l` output includes `install` in the target list | met | Live `mage -l` output shows `install   installs the valv binary to $GOBIN (or $GOPATH/bin).` |
+| A2 | `Install` body calls `runGo("install", "./cmd/valv")` — no `-o` flag | met | `magefile.go:81` — exact line `if err := runGo("install", "./cmd/valv"); err != nil {`. No `-o` flag present; `go install` rejects `-o` so its absence is required. |
+| A3 | `Install` uses existing `runGo` helper (not direct `exec.Command`) | met | `magefile.go:81` uses `runGo`. The helper itself is defined at `magefile.go:364-366` and prepends `GOFLAGS=-buildvcs=false` via `goEnv()`. No `exec.Command("go", ...)` call was added in the new function. |
+| A4 | `mage test` continues to pass after `Install` is added | met | Independent re-run by reviewer: 388/388 tests pass, all 20 packages at or above 60.0% coverage. New target does not affect existing targets — orthogonal addition. |
+| A5 | Worklog notes builder did NOT run `mage install` (to avoid clobbering dev's binary) | met | `BUILDER_WORKLOG.md` § "Mage Targets Run" for Unit 5.4 line 259: `mage install was NOT run — doing so would clobber the dev's existing valv binary in $GOBIN. The target was verified by mage -l (magefile compiles, target listed) and direct code inspection confirming runGo("install", "./cmd/valv") with no -o flag.` |
+
+### Findings — Idiomatic Go (CLAUDE.md + AGENTS.md § 5–7)
+
+| Concern | Status | Evidence |
+|---|---|---|
+| Doc comment starts with identifier name | met | `magefile.go:71` — `// Install installs the valv binary to $GOBIN (or $GOPATH/bin).` — begins with `Install`. Matches Go doc convention and `Build`'s comment style at line 48. |
+| Status-line shape mirrors `Build` for visual consistency | met | Side-by-side: `Build` (49-69) and `Install` (71-92) both: (a) construct `printer := newMagePrinter(os.Stdout)`, (b) call `printer.StatusLine` with `NoticeInfoLevel` start, (c) call `runGo(...)` for the work, (d) call `printer.StatusLine` with `NoticeSuccessLevel` for the success line, (e) wrap printer errors with `fmt.Errorf("write {build,install} {start,success}: %w", err)`. Structural mirror is exact. |
+| Natural file placement (planner suggested after `Build`) | met | `Install` at lines 71-92 sits immediately after `Build` (49-69) and before `Test` (95-114). Groups binary-artifact targets (`Build`, `Install`) together. Matches planner's suggestion in PLAN.md § Unit 5.4. |
+| Error wrapping with `%w` | met | `magefile.go:79, 89` both wrap printer errors with `%w`. `runGo` return is bubbled unchanged (line 82) — its own error path inside `runGo` (line 392) already wraps with `%w`. |
+| `runGo` helper reuse (not raw `exec.Command`) | met | (A3 above) |
+| No new imports | met | `os`, `fmt`, `laslig` all already imported. Import block at lines 5-20 unchanged. |
+
+### Worklog ↔ Code Coherence
+
+| Worklog claim | Status |
+|---|---|
+| `magefile.go` edited — `Install` mage target added (~22 LOC including doc comment and blank lines) | match — actual function spans lines 71-92 (22 LOC including doc comment, signature, body, closing brace). Exact. |
+| `mage -l` shows `install` in target list | match — independently re-verified. |
+| `mage test` PASS (388 tests, 20 packages, coverage met) | match — independently re-verified line-for-line. |
+| `mage install` NOT run (protects dev binary) | match — verified by absence from worklog § "Mage Targets Run" and explicit prose at worklog line 259. |
+| Placement after `Build` | match — verified at `magefile.go:71-92`. |
+| `runGo("install", "./cmd/valv")` with no `-o` | match — verified at `magefile.go:81`. |
+| `Detail: "$GOBIN"` is documentation-only static string | match — `magefile.go:87` uses literal string `"$GOBIN"`. Worklog note 4 explains rationale: never shell-expanded at runtime. |
+| Status-line shape mirrors `Build` | match — verified by side-by-side inspection. |
+| No new imports | match — import block (lines 5-20) unchanged from prior commit. |
+
+### Gaps
+
+None.
+
+### Observations (Non-Blocking)
+
+(Out of scope for this round — record-only, no fix required.)
+
+- **`$GOBIN` detail string is static documentation.** Worklog note 4 explicitly addresses this — `"$GOBIN"` is never shell-expanded; it's a label in the status-line output. The planner suggested `"$(go env GOBIN)"` but the builder chose the cleaner static form. Both are valid; the choice is purely cosmetic. Non-blocking.
+- **`mage install` not executed by reviewer or builder.** This is deliberate and correct per the appendix instruction. The target's correctness is established by (a) `mage -l` proving it compiles and registers; (b) code inspection confirming the body shape; (c) `go install` semantics being a stable, well-known stdlib tool behavior. The dev will exercise `mage install` once post-drop-close to put `valv` on PATH for dogfooding (per PLAN.md § Scope line 18).
+- **Coverage threshold note (consistent with Units 5.1/5.2/5.3).** `magefile.go:22` TODO comment documents the effective gate is currently 60% pending adapters/docker uplift. All packages in `mage test` re-run exceed 60% (effective gate); most exceed the AGENTS.md 70% target except `internal/adapters/docker` at 64.7% (the documented exception that the TODO comment addresses). Unit 5.4 adds no Go code under test, so it cannot affect any per-package coverage number. Non-blocking.
+
+### Verdict
+
+**pass**
+
+All 5 acceptance criteria from PLAN.md § Unit 5.4 are met with primary evidence: live `mage -l` output, file-line code inspection at `magefile.go:71-92`, and an independent green `mage test` re-run (388/388 tests, 20 packages, coverage gate met). Idiomatic Go discipline (doc comment with leading identifier name, error wrapping with `%w`, `runGo` helper reuse, status-line shape mirroring `Build`) is honored throughout. Placement immediately after `Build` is the planner-suggested location. Builder correctly avoided running `mage install` to protect the dev's existing binary; the worklog records this explicitly.
+
+No findings require a builder respawn. Round 1 closes.
+
+### Hylla Feedback
+
+N/A — Unit 5.4 verification covered only `magefile.go`, a non-Go mage build file (excluded from Hylla indexing by protocol). All evidence was gathered via direct `Read` of `magefile.go` and live execution of `mage -l` + `mage test`. No Hylla queries were needed or issued for this unit's scope.
