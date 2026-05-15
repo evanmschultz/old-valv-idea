@@ -1,13 +1,13 @@
 # DROP_6 — FORCE OAUTH ACCOUNT ADD
 
-**State:** building
+**State:** done
 **Blocked by:** DROP_5 (done)
 **Paths (expected):** `internal/cli/account_auth.go` (edit — flip `ensureManagedAccountReady` `case domain.ProviderClaude` no-op stub to real `ensureClaudeAccountReady` call; audit `ensureCodexAccountReady` for credential-reuse path), `internal/cli/claude_auth.go` (new — Claude-side container-based device-code auth flow; or fold into `account_auth.go` if small), `internal/adapters/providers/claude/account.go` (edit — bump `ReadAccountIdentity` from presence-only to parse-and-extract email from `.credentials.json`), `internal/adapters/providers/codex/account.go` (audit — verify JWT email extraction is using the actual file in the managed dir, not a cached/inherited identity), `internal/cli/manage.go` and/or `internal/cli/account.go` (edit — `account add` clears any pre-existing creds in target home before launching auth; add `--force-relogin` flag to `account login`), tests alongside each.
 **Packages (expected):** `internal/cli` (edits + possible new file), `internal/adapters/providers/claude` (edit), `internal/adapters/providers/codex` (audit + possible edit).
 **PLAN.md ref:** main/PLAN.md → DROP_6_FORCE_OAUTH_ACCOUNT_ADD row
 **Workflow:** main/drops/WORKFLOW.md
 **Started:** 2026-05-15
-**Closed:** —
+**Closed:** 2026-05-15
 
 ## Scope
 
