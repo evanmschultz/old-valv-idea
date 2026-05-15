@@ -74,3 +74,68 @@ PASS. All 10 acceptance criteria verified by file:line citation. mage rerun conf
 ### Hylla Feedback
 
 N/A — review touched non-Go files (`PLAN.md`, `BUILDER_WORKLOG.md`) and Go files navigated directly via `Read` based on the spawn brief's explicit file pointers. No Hylla query was needed for committed-state lookup on this small in-package review.
+
+---
+
+## Unit 7.2 — Round 1
+
+**Date:** 2026-05-15
+**Reviewer:** go-qa-proof-agent
+**Verdict:** pass
+
+### Acceptance criteria verification
+
+| # | Criterion | Evidence (file:line) | Result |
+|---|---|---|---|
+| 1 | `mage testPkg ./internal/services/claude` green; 18 tests; 80.8% coverage | Re-run produced `tests: 18`, `passed: 18`, `cover 80.8%`, `Minimum package coverage: 60.0%`. Exact match with worklog. | pass |
+| 2 | Helper `readClaudeAuthToken(homePath string) (string, error)` exists with doc comment starting with identifier name | `internal/services/claude/service.go:300` signature; doc comment `:291-299` starts with `readClaudeAuthToken` | pass |
+| 3a | Reads `<homePath>/.credentials.json` via `os.ReadFile` | `service.go:301` — `os.ReadFile(filepath.Join(homePath, ".credentials.json"))` | pass |
+| 3b | Parses JSON, extracts `claudeAiAccessToken` key | `service.go:309-312` — anonymous struct with tag `json:"claudeAiAccessToken"` unmarshaled via `json.Unmarshal(data, &creds)` | pass |
+| 3c | Returns `"", nil` when file absent | `service.go:303-305` — `if os.IsNotExist(err) { return "", nil }` | pass |
+| 3d | Returns `"", wrapped error` on read/parse failure | `service.go:306` (read err) `fmt.Errorf("read claude credentials: %w", err)`; `:313` (parse err) `fmt.Errorf("parse claude credentials: %w", err)` | pass |
+| 4a | After `PrepareRuntime` succeeds, helper called with `profile.HomePath` | `service.go:280` inside `buildRequest`, called after the `ContainerRunRequest{...}` literal at `:254-274` (which itself runs only after `PrepareRuntime` returned nil at `:128-137`) | pass |
+| 4b | Non-empty token → env map gets `CLAUDE_CODE_OAUTH_TOKEN` | `service.go:282-283` — `else if token != "" { request.Env["CLAUDE_CODE_OAUTH_TOKEN"] = token }` | pass |
+| 4c | Empty token → env var NOT set (container claude fails loudly) | `service.go:284-286` — `else { s.debug("no claude credentials file found, container will run unauthed", ...) }`. No assignment to env. | pass |
+| 4d | Helper-returned error → graceful skip + debug log (per PLAN.md AC4, not spawn-prompt's "return error") | `service.go:280-281` — `if token, err := readClaudeAuthToken(...); err != nil { s.debug("claude auth token unreadable", "home", profile.HomePath, "err", err) }`. Matches PLAN.md Design Decisions line 58 "log a debug message and omit ... Do NOT fail Run". Builder's deviation note in worklog confirmed (PLAN.md wins over spawn). | pass |
+| 5 | `TestRunSetsClaudeCodeOAuthTokenWhenCredentialsPresent` writes fixture, calls Run, asserts Env key | `service_test.go:531-567` — writes `{"claudeAiAccessToken":"test-oauth-token"}` (`:535-538`); calls `service.Run` (`:559`); asserts `executor.got.Env["CLAUDE_CODE_OAUTH_TOKEN"] == "test-oauth-token"` (`:563-566`). Test does exactly what its name claims. | pass |
+| 6 | Token never logged in any path | Exhaustive scan: `:280` error path logs `home` + `err` only (helper wraps `os.ReadFile`/`json.Unmarshal` errors which do not embed token content); `:282-283` assignment, no log; `:285` empty-token debug logs `home` only; `readClaudeAuthToken` returns `read claude credentials: %w` and `parse claude credentials: %w` — neither path could contain the token because token extraction follows error returns | pass |
+| 7 | `prepared.Env` writable map (no nil-map crash) | Pre-existing `TestRunSucceedsWithBoundProject` at `service_test.go:204-261` asserts `executor.got.Env["CLAUDE_CONFIG_DIR"] == clauderuntime.ContainerClaudeDir` (`:254-256`) — proves `prepared.Env` is non-nil and writable. Injection at `service.go:283` writes the same map. Worklog notes `clauderuntime.PrepareRuntime` already writes to `prepared.Env` (sets `CLAUDE_CONFIG_DIR`). | pass |
+
+### Idiomatic Go checks
+
+- **Doc comment** on `readClaudeAuthToken` (`service.go:291-299`) starts with the identifier name and explains absent-file vs parse-failure semantics. Standard godoc shape.
+- **Error wrapping with `%w`** at every boundary: `:306`, `:313`. Both preserve the underlying `os.ReadFile` / `json.Unmarshal` error chain.
+- **`ps(1)` visibility comment** at `:276-279` documents the security trade-off per PLAN.md instruction.
+- **Mage-only verification** — re-ran `mage testPkg ./internal/services/claude`; no raw `go test`/`go build`/`gofumpt` invoked.
+
+### Worklog-to-code consistency
+
+- **Production LOC:** helper at `:291-316` = 26 LOC; injection block at `:276-286` = 11 LOC. Combined ~37. Worklog claimed ~33 (~25 helper + ~8 injection). Within margin.
+- **Test LOC:** `service_test.go:528-567` = 40 LOC including doc comment. Worklog claimed ~35. Within margin.
+- **Schema cross-reference Unit 7.1:** `claude_auth.go:92-94` defines `claudeCredentials` with `AccessToken string \`json:"claudeAiAccessToken"\``; 7.1 writes that shape via `writeClaudeCredentials`. Unit 7.2 `service.go:309-311` reads the identical key via anonymous struct `Token string \`json:"claudeAiAccessToken"\``. Schemas match exactly. Test fixture at `service_test.go:536` writes the same key. Three-way consistent.
+- **Spawn-vs-PLAN deviation acknowledged:** Worklog line 77 records that builder followed PLAN.md AC4 (graceful skip on bad JSON) over spawn-prompt's error-propagation hint. Code at `service.go:280-281` confirms graceful skip. PLAN.md is correctly treated as authoritative.
+- **`mage testPkg` rerun:** 18/18 pass, 80.8% coverage — exact match with worklog claim.
+
+### Findings
+
+None — all 7 acceptance criteria verified end-to-end with file:line evidence.
+
+### Gaps
+
+- 2.1 [Axis: acceptance-criteria-coverage] [severity: low] PLAN.md AC4 ("When `.credentials.json` is present but unreadable, `Run` succeeds with debug log; env var omitted") has no dedicated test that writes a corrupt JSON file and asserts the env var is absent. The parse-error branch at `service.go:312-314` and the graceful-skip-on-helper-error branch at `service.go:280-281` are covered only by the package-level 80.8% coverage measurement, not by behavior-asserting tests. → spawn brief and PLAN.md Unit 7.3 plan call for `TestRunOmitsClaudeCodeOAuthTokenWhenCredentialsMissing` (existing scenario via `TestRunSucceedsWithBoundProject`'s empty `t.TempDir()`) → Unit 7.3 should add a `TestRunGracefullySkipsTokenInjectionWhenCredentialsCorrupt` test writing malformed JSON and asserting `executor.got.Env["CLAUDE_CODE_OAUTH_TOKEN"] == ""`. Low severity because the coverage gate passes and the code path is straightforward.
+- 2.2 [Axis: acceptance-criteria-coverage] [severity: low] No test verifies that the existing `CLAUDE_CONFIG_DIR` env (set by `PrepareRuntime`) survives the injection. `TestRunSetsClaudeCodeOAuthTokenWhenCredentialsPresent` only checks the new key, not that the prior keys are preserved. → trivially mitigated by `TestRunSucceedsWithBoundProject` still passing (which asserts `CLAUDE_CONFIG_DIR` in a no-creds scenario), but a fixture-with-creds variant asserting both keys together would tighten the contract. Optional Unit 7.3 polish.
+
+### Observations
+
+- The injection lives at the tail of `buildRequest` (`service.go:276-286`), AFTER the `ContainerRunRequest` literal is constructed, NOT inside the literal. This is correct because `request.Env` aliases `prepared.Env` (the same map reference) — mutating `request.Env` post-construction is equivalent to mutating `prepared.Env` directly, but reads more clearly at the call site.
+- The three-branch dispatch (`err != nil` / `token != ""` / `else`) at `:280-286` gives clean separation of "unreadable", "have token", "no creds file" — each with distinct debug log signatures, which helps operators diagnose why a container ran unauthed.
+- `readClaudeAuthToken` is unexported (lowercase `r`), satisfying PLAN.md AC5 verified by inspection at `:300`.
+- Coverage jumped from 7.1's package-cli 68.4% → 7.2's package-services-claude 80.8% (different package). Both packages still need Unit 7.3 to lift the `internal/cli` package above the 70% AGENTS.md floor; `internal/services/claude` already exceeds it.
+
+### Summary
+
+PASS. All 7 acceptance criteria verified by file:line citation. `mage testPkg ./internal/services/claude` rerun confirms 18/18 tests, 80.8% coverage — exact match with worklog. Schema (`claudeAiAccessToken`) is consistent across Unit 7.1 writer, Unit 7.2 reader, and test fixtures. Builder's spawn-vs-PLAN deviation (graceful skip on parse error) is correctly resolved in favor of PLAN.md authority. Two low-severity Gaps deferred to Unit 7.3 expansion — neither blocks Unit 7.2 closeout.
+
+### Hylla Feedback
+
+N/A — review touched non-Go files (`PLAN.md`, `BUILDER_WORKLOG.md`) and Go files navigated directly via `Read` per spawn brief's explicit file pointers. No Hylla queries were needed for committed-state lookup on this small in-package review.
