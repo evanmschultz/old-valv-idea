@@ -100,22 +100,30 @@ type claudeCredentials struct {
 //
 // SkipLogin short-circuits before any credential mutation.
 //
-// A non-TTY guard is enforced before the credential wipe: the setup-token flow
-// requires a terminal for browser-open and paste-prompt interaction. If no TTY
-// is present the function returns an actionable error and leaves pre-existing
-// credentials intact.
+// If .credentials.json already exists and is non-empty, the account is
+// considered already authenticated and the function returns nil immediately
+// without running setup-token. This is the normal path for account switch when
+// the account has previously completed auth.
+//
+// A non-TTY guard is enforced when auth is actually needed: the setup-token
+// flow requires a terminal for browser-open and paste-prompt interaction.
 func ensureClaudeAccountReady(cmd *cobra.Command, account domain.Profile, options accountAuthOptions) error {
 	if options.SkipLogin {
 		return nil
+	}
+	credPath := filepath.Join(strings.TrimSpace(account.HomePath), ".credentials.json")
+	info, statErr := os.Stat(credPath)
+	if statErr == nil && info.Size() > 0 {
+		return nil
+	}
+	if statErr != nil && !os.IsNotExist(statErr) {
+		return fmt.Errorf("check claude credentials for account %q: %w", account.Name, statErr)
 	}
 	if !commandHasTTY(cmd.InOrStdin()) || !commandHasTTY(cmd.OutOrStdout()) {
 		return fmt.Errorf(
 			"account %q is not logged in; rerun in a TTY to complete Claude setup-token login",
 			account.Name,
 		)
-	}
-	if err := wipeClaudeCredentials(account.HomePath); err != nil {
-		return fmt.Errorf("prepare claude account %q: wipe credentials: %w", account.Name, err)
 	}
 	if err := writeCLINotice(
 		cmd.ErrOrStderr(),

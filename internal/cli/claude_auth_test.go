@@ -141,10 +141,12 @@ func TestEnsureClaudeAccountReadyRespectsSkipLogin(t *testing.T) {
 	}
 }
 
-// TestEnsureClaudeAccountReadyNonTTYDoesNotWipe verifies the TTY check fires
-// BEFORE the credential wipe, so a non-TTY caller with pre-existing credentials
-// receives the error and the credentials remain on disk.
-func TestEnsureClaudeAccountReadyNonTTYDoesNotWipe(t *testing.T) {
+// TestEnsureClaudeAccountReadyAlreadyAuthedReturnsNilEvenNonTTY verifies that
+// when .credentials.json already exists and is non-empty, ensureClaudeAccountReady
+// returns nil immediately — even in a non-TTY context — without invoking any
+// runner methods. This is the normal path for `valv account switch claude <name>`
+// when the account has previously completed auth.
+func TestEnsureClaudeAccountReadyAlreadyAuthedReturnsNilEvenNonTTY(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -159,15 +161,96 @@ func TestEnsureClaudeAccountReadyNonTTYDoesNotWipe(t *testing.T) {
 
 	account := domain.Profile{Name: "personal", HomePath: dir}
 	err := ensureClaudeAccountReady(cmd, account, accountAuthOptions{})
+	if err != nil {
+		t.Fatalf("ensureClaudeAccountReady() error = %v, want nil (already authed)", err)
+	}
+	if stub.setupTokenHits != 0 {
+		t.Fatalf("RunSetupToken() hits = %d, want 0 (already-authed must short-circuit before runner)", stub.setupTokenHits)
+	}
+	if stub.extractHits != 0 {
+		t.Fatalf("ExtractKeychainToken() hits = %d, want 0 (already-authed must short-circuit before runner)", stub.extractHits)
+	}
+	// Credentials file must remain untouched.
+	if _, statErr := os.Stat(credPath); os.IsNotExist(statErr) {
+		t.Fatal("credentials file was removed; must be preserved when already authed")
+	}
+}
+
+// TestEnsureClaudeAccountReadyMissingCredsAndNonTTYFailsTTY verifies that when
+// .credentials.json is absent and the caller has no TTY, ensureClaudeAccountReady
+// returns a TTY error (auth is needed but cannot proceed without a terminal).
+func TestEnsureClaudeAccountReadyMissingCredsAndNonTTYFailsTTY(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	// No credentials file written — empty profile home.
+
+	cmd := newTestClaudeCmd()
+	stub := &stubClaudeAccountAuthRunner{}
+	installStubClaudeAuth(t, cmd, stub)
+
+	account := domain.Profile{Name: "personal", HomePath: dir}
+	err := ensureClaudeAccountReady(cmd, account, accountAuthOptions{})
 	if err == nil {
-		t.Fatal("ensureClaudeAccountReady() error = nil, want non-tty error")
+		t.Fatal("ensureClaudeAccountReady() error = nil, want TTY error (no creds, no TTY)")
 	}
 	if !strings.Contains(err.Error(), "TTY") {
 		t.Fatalf("ensureClaudeAccountReady() error = %v, want TTY mention", err)
 	}
-	// Credentials must be preserved — the TTY guard fired before the wipe.
-	if _, statErr := os.Stat(credPath); os.IsNotExist(statErr) {
-		t.Fatal("credentials file was wiped on non-TTY call; TTY check must precede wipe")
+	if stub.setupTokenHits != 0 {
+		t.Fatalf("RunSetupToken() hits = %d, want 0 (TTY guard must block before runner)", stub.setupTokenHits)
+	}
+}
+
+// TestEnsureClaudeAccountReadySkipsWhenAlreadyAuthed verifies the already-authed
+// check via a fixture .credentials.json: function returns nil AND neither runner
+// method is invoked. This is the primary coverage test for the Round 2 fix.
+func TestEnsureClaudeAccountReadySkipsWhenAlreadyAuthed(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	credPath := filepath.Join(dir, ".credentials.json")
+	if err := os.WriteFile(credPath, []byte(`{"claudeAiAccessToken":"tok"}`), 0o600); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", credPath, err)
+	}
+
+	cmd := newTestClaudeCmd()
+	stub := &stubClaudeAccountAuthRunner{}
+	installStubClaudeAuth(t, cmd, stub)
+
+	account := domain.Profile{Name: "work", HomePath: dir}
+	if err := ensureClaudeAccountReady(cmd, account, accountAuthOptions{}); err != nil {
+		t.Fatalf("ensureClaudeAccountReady() error = %v, want nil", err)
+	}
+	if stub.setupTokenHits != 0 || stub.extractHits != 0 {
+		t.Fatalf("runner invoked (setup=%d, extract=%d), want 0 — already-authed must return before runner", stub.setupTokenHits, stub.extractHits)
+	}
+}
+
+// TestEnsureClaudeAccountReadyAuthsWhenCredentialsMissing verifies that when
+// .credentials.json is absent, ensureClaudeAccountReady does NOT short-circuit
+// via the already-authed check and instead proceeds toward auth. In a non-TTY
+// context the TTY guard fires — this test asserts that the TTY guard error is
+// returned (not a "no creds" error or nil), proving the function passed the
+// already-authed check and reached the next gate.
+func TestEnsureClaudeAccountReadyAuthsWhenCredentialsMissing(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	// No credentials file — the already-authed check must NOT short-circuit.
+
+	cmd := newTestClaudeCmd()
+	stub := &stubClaudeAccountAuthRunner{}
+	installStubClaudeAuth(t, cmd, stub)
+
+	account := domain.Profile{Name: "work", HomePath: dir}
+	err := ensureClaudeAccountReady(cmd, account, accountAuthOptions{})
+	// Non-TTY + no creds → TTY guard fires.
+	if err == nil {
+		t.Fatal("ensureClaudeAccountReady() error = nil, want TTY error (creds missing, non-TTY)")
+	}
+	if !strings.Contains(err.Error(), "TTY") {
+		t.Fatalf("ensureClaudeAccountReady() error = %v, want TTY mention (proves auth path reached)", err)
 	}
 }
 

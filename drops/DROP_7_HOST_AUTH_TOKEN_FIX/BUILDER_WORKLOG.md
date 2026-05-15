@@ -144,3 +144,58 @@ None — all items resolved.
 ## Hylla Feedback
 
 None — Hylla answered everything needed. The task touched only files changed in this drop (not yet reingested); all Go code reads went directly via `Read` tool per mid-drop evidence protocol.
+
+---
+
+## Unit 7.1 — Round 2
+
+**Date:** 2026-05-15
+**State at start:** done (Round 2 is a post-smoke-test UX fix; state stays done)
+
+### Bug fixed
+
+`valv account switch claude <existing-name>` triggered full OAuth re-auth instead of a no-op. Root cause: `ensureClaudeAccountReady` had no already-authed check — it unconditionally proceeded to the TTY guard and setup-token flow on every call. Calling this function on an account that already has `.credentials.json` should be an immediate return.
+
+### Files touched
+
+- `internal/cli/claude_auth.go` — `ensureClaudeAccountReady` (lines 99–154 prior to fix):
+  - **Removed** the unconditional `wipeClaudeCredentials` call (was line 117–119).
+  - **Added** already-authed check immediately after the SkipLogin guard: `os.Stat(credPath)` + `info.Size() > 0` → return nil. Stat errors other than `os.IsNotExist` propagate wrapped. Credentials path constructed with `strings.TrimSpace(account.HomePath)` matching the pattern used by `wipeClaudeCredentials` and `writeClaudeCredentials`.
+  - Ordering after fix: SkipLogin → already-authed (NEW) → TTY guard → notice → RunSetupToken → user.Current → ExtractKeychainToken → empty-token sentinel → writeClaudeCredentials → ReadAccountIdentity.
+  - `loginClaudeAccount` is unchanged — wipe + force-fresh flow preserved.
+- `internal/cli/claude_auth_test.go`:
+  - **Removed** `TestEnsureClaudeAccountReadyNonTTYDoesNotWipe` — the prior semantics (creds present + non-TTY → TTY error) no longer hold. Post-fix, creds present → already-authed → nil before TTY check.
+  - **Added** `TestEnsureClaudeAccountReadyAlreadyAuthedReturnsNilEvenNonTTY`: creds present + non-TTY → nil, zero runner calls. Primary test of the already-authed early-return path.
+  - **Added** `TestEnsureClaudeAccountReadyMissingCredsAndNonTTYFailsTTY`: no creds + non-TTY → TTY error, zero runner calls. Proves already-authed check does not short-circuit when creds absent.
+  - **Added** `TestEnsureClaudeAccountReadySkipsWhenAlreadyAuthed`: alternate fixture, asserts nil + zero runner calls. Primary coverage test for the Round 2 fix as named in the spec.
+  - **Added** `TestEnsureClaudeAccountReadyAuthsWhenCredentialsMissing`: no creds + non-TTY → TTY error, proving the function passed the already-authed check and reached the auth gate.
+
+### Mage targets run and result
+
+- `mage testPkg ./internal/cli` — RED (1 failure: `TestEnsureClaudeAccountReadyNonTTYDoesNotWipe` expected TTY error but got nil) after production change, before test update. Confirms the fix is working.
+- `mage testPkg ./internal/cli` — GREEN (154/154 pass, 70.4% coverage) after test update.
+
+### Design notes
+
+**Empty credentials file (0 bytes) treated as NOT authed:** The `info.Size() > 0` check means a zero-byte `.credentials.json` is treated as absent and the full auth flow runs. This matches the spec's intent: a partial/corrupt write should not block re-auth.
+
+**TTY guard now only fires when auth is actually needed:** Non-TTY callers with existing creds get a clean no-op at the already-authed check, not a TTY error. This is the correct behavior for `account switch` in headless contexts.
+
+**`loginClaudeAccount` unchanged:** The wipe + force-fresh is correct by design for explicit `valv account login` invocations. All existing `loginClaudeAccount` tests pass unchanged.
+
+**Test count delta:** +4 tests added, 1 removed = net +3 (151 → 154).
+
+### Acceptance criteria check
+
+| # | Criterion | Result |
+|---|---|---|
+| AC1 | `ensureClaudeAccountReady` order: SkipLogin → already-authed → TTY → notice → RunSetupToken → ... | PASS — verified by code and tests |
+| AC2 | `loginClaudeAccount` unchanged; wipe still present | PASS — loginClaudeAccount not modified |
+| AC3 | `mage testPkg ./internal/cli` green, coverage ≥70% | PASS — 154/154, 70.4% |
+| AC4 | `TestEnsureClaudeAccountReadySkipsWhenAlreadyAuthed` added and passes | PASS |
+| AC5 | `TestEnsureClaudeAccountReadyAuthsWhenCredentialsMissing` added and passes | PASS |
+| AC6 | All other tests in `internal/cli` continue to pass | PASS — 150/150 prior passing tests all pass |
+
+### Unknowns
+
+None — all items resolved.
