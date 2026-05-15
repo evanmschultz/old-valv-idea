@@ -2,6 +2,7 @@ package claude
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -271,7 +272,47 @@ func (s Service) buildRequest(workingDir string, project domain.Project, profile
 		Remove:      true,
 		User:        s.user,
 	}
+
+	// Inject CLAUDE_CODE_OAUTH_TOKEN from the stored credentials file so the
+	// container claude CLI authenticates without an interactive login prompt.
+	// CLAUDE_CODE_OAUTH_TOKEN is passed as an environment variable and is
+	// visible to ps(1). Acceptable for v0.1.0.
+	if token, err := readClaudeAuthToken(profile.HomePath); err != nil {
+		s.debug("claude auth token unreadable", "home", profile.HomePath, "err", err)
+	} else if token != "" {
+		request.Env["CLAUDE_CODE_OAUTH_TOKEN"] = token
+	} else {
+		s.debug("no claude credentials file found, container will run unauthed", "home", profile.HomePath)
+	}
+
 	return request, nil
+}
+
+// readClaudeAuthToken reads the CLAUDE_CODE_OAUTH_TOKEN value from the
+// .credentials.json file stored in the managed profile home directory. The
+// file is written by ensureClaudeAccountReady after a successful host-side
+// claude setup-token run and keychain extraction.
+//
+// Returns the token string on success. Returns an empty string and nil error
+// when the file does not exist (graceful — the caller decides what to do).
+// Returns an empty string and a non-nil error only when the file exists but
+// cannot be parsed, which indicates a corrupted credentials file.
+func readClaudeAuthToken(homePath string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(homePath, ".credentials.json"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("read claude credentials: %w", err)
+	}
+
+	var creds struct {
+		Token string `json:"claudeAiAccessToken"`
+	}
+	if err := json.Unmarshal(data, &creds); err != nil {
+		return "", fmt.Errorf("parse claude credentials: %w", err)
+	}
+	return creds.Token, nil
 }
 
 func withinProjectRoot(projectRoot, workingDir string) (bool, error) {

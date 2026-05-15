@@ -65,7 +65,7 @@ Three atomic units. Units 7.1 and 7.2 may run in parallel (disjoint packages). U
 
 ### Unit 7.1 — Rewrite `claude_auth.go`: new host-subprocess runner + reworked orchestration
 
-**state:** todo
+**state:** in_progress
 **blocked_by:** —
 **paths:** `internal/cli/claude_auth.go`
 **packages:** `internal/cli`
@@ -131,7 +131,7 @@ New imports needed: `encoding/json`, `os/user`.
 
 ### Unit 7.2 — Service-layer `CLAUDE_CODE_OAUTH_TOKEN` env propagation
 
-**state:** todo
+**state:** done
 **blocked_by:** —
 **paths:** `internal/services/claude/service.go`
 **packages:** `internal/services/claude`

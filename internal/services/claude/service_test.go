@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -520,6 +522,47 @@ func TestContainerNameContainsClaude(t *testing.T) {
 	}
 	if strings.Contains(name, "codex") {
 		t.Fatalf("containerName() = %q, must not contain \"codex\"", name)
+	}
+}
+
+// TestRunSetsClaudeCodeOAuthTokenWhenCredentialsPresent verifies that when a
+// valid .credentials.json exists in the profile home, Run injects
+// CLAUDE_CODE_OAUTH_TOKEN into the container env map.
+func TestRunSetsClaudeCodeOAuthTokenWhenCredentialsPresent(t *testing.T) {
+	t.Parallel()
+
+	profileHome := t.TempDir()
+	credsPath := filepath.Join(profileHome, ".credentials.json")
+	if err := os.WriteFile(credsPath, []byte(`{"claudeAiAccessToken":"test-oauth-token"}`), 0o600); err != nil {
+		t.Fatalf("WriteFile(.credentials.json) error = %v", err)
+	}
+
+	project := domain.Project{ID: "project-creds", Root: "/tmp/project", Name: "project"}
+	store := boundClaudeStore(project, profileHome)
+	executor := &fakeExecutor{}
+
+	service, err := New(Options{
+		Store:    store,
+		Executor: executor,
+		Detect:   detectAlways(project.Root),
+		Image:    docker.NewImageRef("valv-claude", "dev"),
+		TTY:      true,
+		Stdin:    true,
+		TempRoot: t.TempDir(),
+		Now:      func() time.Time { return time.Unix(0, 987654321) },
+		Logger:   log.NewWithOptions(io.Discard, log.Options{Level: log.DebugLevel}),
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if err := service.Run(context.Background(), "/tmp/project", []string{"--resume"}); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	got := executor.got.Env["CLAUDE_CODE_OAUTH_TOKEN"]
+	if got != "test-oauth-token" {
+		t.Fatalf("Run() CLAUDE_CODE_OAUTH_TOKEN = %q, want %q", got, "test-oauth-token")
 	}
 }
 
