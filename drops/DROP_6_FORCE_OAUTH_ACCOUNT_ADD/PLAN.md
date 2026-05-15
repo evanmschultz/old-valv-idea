@@ -1,6 +1,6 @@
 # DROP_6 — FORCE OAUTH ACCOUNT ADD
 
-**State:** planning
+**State:** building
 **Blocked by:** DROP_5 (done)
 **Paths (expected):** `internal/cli/account_auth.go` (edit — flip `ensureManagedAccountReady` `case domain.ProviderClaude` no-op stub to real `ensureClaudeAccountReady` call; audit `ensureCodexAccountReady` for credential-reuse path), `internal/cli/claude_auth.go` (new — Claude-side container-based device-code auth flow; or fold into `account_auth.go` if small), `internal/adapters/providers/claude/account.go` (edit — bump `ReadAccountIdentity` from presence-only to parse-and-extract email from `.credentials.json`), `internal/adapters/providers/codex/account.go` (audit — verify JWT email extraction is using the actual file in the managed dir, not a cached/inherited identity), `internal/cli/manage.go` and/or `internal/cli/account.go` (edit — `account add` clears any pre-existing creds in target home before launching auth; add `--force-relogin` flag to `account login`), tests alongside each.
 **Packages (expected):** `internal/cli` (edits + possible new file), `internal/adapters/providers/claude` (edit), `internal/adapters/providers/codex` (audit + possible edit).
@@ -34,25 +34,23 @@ Also: bump Claude `ReadAccountIdentity` from presence-only check to parse-and-ex
 
 ## Planner
 
+### Scope Narrowing (2026-05-15)
+
+After the dev wiped their local Valv DB and re-ran `valv account add codex personal` + `valv account add codex work` against two distinct ChatGPT accounts, `valv account list` showed two distinct emails (`evanmschultz@gmail.com`, `evan@hylla.io`). **This proves the Codex code path is correct as-is** — the prior same-identity observation was 100% stale local artifacts, not an ongoing code bug.
+
+Consequently this drop ships only the Claude work (Units 6.2 + 6.3). Units 6.1 (Codex wipe at `account add`) and 6.4 (`--force-relogin` flag) are **deferred** as defensive hardening; they belong in DROP_9 cleanup or a later drop. Their full specifications below are preserved as-written for the deferred work — do NOT delete them.
+
 ### Scope Confirmation
 
-Four coherent workstreams, each touching different packages and independently
-testable:
+Two active workstreams for this drop:
 
-1. **Codex credential-reuse fix** — force a fresh login at `account add` time by
-   wiping `auth.json` from the managed home before `ensureManagedAccountReady`
-   is called.
-2. **Claude container-based auth flow** — net-new `ensureClaudeAccountReady` and
-   `loginClaudeAccount` in a new file `internal/cli/claude_auth.go`, wiring
-   the drop sequence: wipe credentials → launch container attached → user sees
-   device-code URL → credentials land in bind-mounted dir → container exits.
-3. **Claude credentials parsing** — extend `ReadAccountIdentity` in
-   `internal/adapters/providers/claude/account.go` from presence-only to
-   parse-and-extract, then wire the new data into `readAccountIdentity` in
-   `internal/cli/operator_helpers.go`.
-4. **Force-relogin flag and auth dispatcher flip** — add `--force-relogin` to
-   `account login`, flip `loginManagedAccount` Claude no-op to call the new
-   `loginClaudeAccount`, update `readAccountIdentity` to handle the Claude case.
+2. **Claude container-based auth flow** (active) — net-new `ensureClaudeAccountReady` and `loginClaudeAccount` in a new file `internal/cli/claude_auth.go`. Wires the drop sequence: wipe credentials → launch container attached → user sees device-code URL → credentials land in bind-mounted dir → container exits.
+3. **Claude credentials parsing** (active) — extend `ReadAccountIdentity` in `internal/adapters/providers/claude/account.go` from presence-only to parse-and-extract, then wire the new data into `readAccountIdentity` in `internal/cli/operator_helpers.go`.
+
+Deferred:
+
+1. ~~Codex credential-reuse fix~~ — deferred. Codex code path is correct; prior issue was stale local state, not a bug.
+4. ~~Force-relogin flag~~ — deferred. Useful hardening but not required for v0.1.0 Claude dogfood.
 
 ### Committed-State Audit (2026-05-15)
 
@@ -123,12 +121,14 @@ via the Read tool, Hylla keyword search confirmed alignment):
 
 ---
 
-#### Unit 6.1 — Codex account-add credential wipe
+#### Unit 6.1 — Codex account-add credential wipe (DEFERRED 2026-05-15)
 
-**State:** todo  
+**State:** deferred  
 **Paths:** `internal/cli/manage.go`, `internal/cli/manage_test.go`  
 **Packages:** `internal/cli`  
 **Blocked by:** —
+
+**Deferred because:** dev verified clean Codex behavior by wiping local DB and re-doing `account add codex` with distinct ChatGPT accounts → two distinct emails confirmed. No current code bug. This unit's defensive wipe is hardening, not a fix. Revisit in DROP_9 cleanup or as a standalone hardening drop.
 
 **Description:**
 
@@ -363,13 +363,15 @@ Tests:
 
 ---
 
-#### Unit 6.4 — Force-relogin flag on `account login`
+#### Unit 6.4 — Force-relogin flag on `account login` (DEFERRED 2026-05-15)
 
-**State:** todo  
+**State:** deferred  
 **Paths:** `internal/cli/manage.go`, `internal/cli/manage_test.go`,
   `internal/cli/account_auth.go`  
 **Packages:** `internal/cli`  
 **Blocked by:** 6.1, 6.2, 6.3
+
+**Deferred because:** scope narrowing eliminated 6.1; this unit's primary value is the `--force-relogin` flag for re-auth without delete+recreate. Useful hardening but not required for v0.1.0 Claude dogfood. Revisit in DROP_9 cleanup.
 
 **Description:**
 
