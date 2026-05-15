@@ -1,6 +1,6 @@
 # DROP_7 — HOST AUTH TOKEN FIX
 
-**State:** planning
+**State:** building
 **Blocked by:** DROP_6 (done)
 **Paths (expected):** `internal/cli/claude_auth.go` (rewrite — replace container-launch path with host-subprocess `claude setup-token` runner; add keychain-extract step), `internal/cli/claude_auth_test.go` (rewrite tests for the new flow), `internal/services/claude/service.go` (edit — read stored token from managed home, set `CLAUDE_CODE_OAUTH_TOKEN` env on container launch), `internal/services/claude/service_test.go` (edit — verify env-var threading), `internal/adapters/providers/claude/account.go` (edit — `ReadAccountIdentity` recognizes the stored-token file as the `LoggedIn` signal; keep `.claude.json` email extraction as-is), `internal/adapters/providers/claude/account_test.go` (edit), `internal/cli/preflight.go` or similar (new pre-flight check that `claude` CLI is on host PATH — mirrors how Codex requires `codex` on PATH).
 **Packages (expected):** `internal/cli` (rewrite + edits), `internal/services/claude` (edit), `internal/adapters/providers/claude` (edit).
