@@ -60,3 +60,70 @@ Real end-to-end auth verification (device-code URL rendered in terminal, user co
 Hylla is Go-only and was queried for cross-package symbol reference confirmation. All key symbols (`ensureManagedAccountReady`, `logoutManagedAccount`, `loginManagedAccount`, `runManageAccountAdd`, `runManageAccountSwitch`, `runManageAccountLogin`) confirmed via `Read` tool (faster for full-file context than Hylla block queries). Hylla was not needed for any symbol that required graph navigation — all references are in one package (`internal/cli`).
 
 None — Hylla answered all queries; no misses. Non-Go files (PLAN.md, WORKFLOW.md) read directly per Hylla's Go-only scope.
+
+---
+
+## Unit 6.2 — Round 2
+
+**Date:** 2026-05-14
+**State result:** done
+**Mage target:** `mage testPkg ./internal/cli`
+**Mage result:** PASS — 137 tests, 0 failures, 71.2% coverage (≥60% gate, ≥70% AGENTS.md target)
+**Prior attempt:** Round 1 shipped working code; Round 2 fixes three QA Falsification findings (C1, C2, C3).
+
+### Files touched
+
+- `internal/cli/account_auth.go` — **edited** (line 42): changed `ensureClaudeAccountReady(cmd, account, options.Paths)` to `ensureClaudeAccountReady(cmd, account, options)` — passes full `accountAuthOptions` so `SkipLogin` is not dropped.
+- `internal/cli/claude_auth.go` — **edited** (lines 52-99): changed `ensureClaudeAccountReady` signature from `(cmd, account, paths config.Paths)` to `(cmd, account, options accountAuthOptions)`; added `if options.SkipLogin { return nil }` as first check (C1); moved TTY guard to before `wipeClaudeCredentials` (C2); updated internal `paths` references to `options.Paths`.
+- `internal/cli/claude_auth_test.go` — **rewritten**: removed 3 misnamed/indirect tests; added 5 new tests; test count 135 → 137 (net +2).
+
+### Fix C1 — `options.SkipLogin` threaded to Claude path (`account_auth.go:42`, `claude_auth.go:63-66`)
+
+**Problem:** dispatcher at `account_auth.go:42` forwarded only `options.Paths` to `ensureClaudeAccountReady`, silently dropping `options.SkipLogin`. `ensureClaudeAccountReady` had no `SkipLogin` parameter. `valv manage account add claude --skip-login` and `valv manage account switch claude --skip-login` both ignored the flag.
+
+**Fix:**
+- `account_auth.go:42`: `ensureClaudeAccountReady(cmd, account, options)` — full struct forwarded.
+- `claude_auth.go:63-66`: signature changed to `options accountAuthOptions`; `if options.SkipLogin { return nil }` added as first statement; internal `paths` usages replaced with `options.Paths`.
+
+**Test:** `TestEnsureClaudeAccountReadyRespectsSkipLogin` (`claude_auth_test.go:88-113`) — verifies `SkipLogin=true` → returns nil, no container hit, no image hit, pre-existing creds file preserved.
+
+### Fix C2 — TTY check reordered before credential wipe (`claude_auth.go:67-75`)
+
+**Problem:** `wipeClaudeCredentials` (line 60 in Round 1) executed before the TTY check (line 63). Non-TTY callers with valid pre-existing credentials had them destroyed before receiving the "rerun in TTY" error.
+
+**Fix:** Sequence is now: `SkipLogin` check → TTY check → `wipeClaudeCredentials` → `EnsureImage` → notice → `RunContainer` → verify. The wipe only occurs when the function is committed to running the full auth flow.
+
+**Test:** `TestEnsureClaudeAccountReadyNonTTYDoesNotWipe` (`claude_auth_test.go:117-143`) — writes pre-existing creds, calls with non-TTY, asserts error contains "TTY" AND creds file still exists on disk.
+
+**Secondary effect:** `TestEnsureClaudeAccountReadyWipesExistingCredentials` from Round 1 was removed — it asserted that creds are gone after a non-TTY call, which is now the wrong behavior (TTY guard fires first). The new `TestEnsureClaudeAccountReadyNonTTYDoesNotWipe` replaces it with the correct assertion.
+
+### Fix C3 — Renamed/replaced two misnamed tests (`claude_auth_test.go`)
+
+**Problem:** Two Round 1 tests were named for behavior of `ensureClaudeAccountReady` but did not call it:
+- `TestEnsureClaudeAccountReadySucceedsAfterContainerWrite` called `buildClaudeAuthContainerRequest` only.
+- `TestEnsureClaudeAccountReadyFailsWhenNoCreds` called a test-local shadow `claudeproviderReadAccountIdentity`.
+
+**Fix:**
+- Renamed `TestEnsureClaudeAccountReadySucceedsAfterContainerWrite` → `TestBuildClaudeAuthContainerRequestShape` (`claude_auth_test.go:147-172`): accurately describes the container-request shape assertions.
+- Renamed `TestEnsureClaudeAccountReadyFailsWhenNoCreds` → `TestReadAccountIdentityReturnsLoggedOutWhenNoCreds` (`claude_auth_test.go:175-195`): now calls `claudeprovider.ReadAccountIdentity` directly (real adapter, not shadow). Shadow function `claudeproviderReadAccountIdentity` removed.
+- Added `TestLoginClaudeAccountFailsWhenNoCredsAfterContainer` (`claude_auth_test.go:198-226`): exercises the genuine "no credentials file found after login" error path via `loginClaudeAccount` (which has no TTY guard), using a stub that does NOT write creds. This is the correct way to test the no-creds-after-container branch — `loginClaudeAccount` shares the same wipe→image→container→verify body as `ensureClaudeAccountReady` but without the TTY gate.
+
+### Test count
+
+| Round | Tests | Coverage |
+|---|---|---|
+| Round 1 | 135 | 71.1% |
+| Round 2 | 137 | 71.2% |
+| Delta | +2 | +0.1pp |
+
+### Design decisions
+
+**Why test "no creds after container" via `loginClaudeAccount` not `ensureClaudeAccountReady`:** The post-container verify branch of `ensureClaudeAccountReady` is unreachable with a non-TTY stub because the TTY guard fires first (C2 fix). `loginClaudeAccount` has no TTY guard and shares the identical wipe→image→container→verify body. Testing the error path via `loginClaudeAccount` with a no-write stub covers the same production code branch without requiring TTY-faking infrastructure.
+
+**`TestEnsureClaudeAccountReadyWipesExistingCredentials` removal:** This test asserted that creds are wiped on a non-TTY call. After C2, this assertion became wrong (creds are preserved on non-TTY). The test was removed and replaced by `TestEnsureClaudeAccountReadyNonTTYDoesNotWipe` which asserts the new correct behavior.
+
+### Hylla Feedback
+
+Hylla returned 0 results for `ensureClaudeAccountReady` keyword search (`visibility_mode=include_private`) — expected, as this symbol was introduced in Round 1 and Hylla is ingest-at-drop-end. All symbol lookups done via `Read` on the production files. No unexpected misses.
+
+N/A for cross-package references — all changes are within `internal/cli`.

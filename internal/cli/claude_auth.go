@@ -54,11 +54,15 @@ func claudeAuthRunnerFromContext(ctx context.Context, cmd *cobra.Command) claude
 // ensures the Claude image is built, launches a Claude container with the
 // account home bind-mounted, and verifies credentials were written.
 //
-// A non-TTY guard is enforced: the device-code login flow requires a
-// terminal. If no TTY is present the function returns an actionable error.
-func ensureClaudeAccountReady(cmd *cobra.Command, account domain.Profile, paths config.Paths) error {
-	if err := wipeClaudeCredentials(account.HomePath); err != nil {
-		return fmt.Errorf("prepare claude account %q: wipe credentials: %w", account.Name, err)
+// SkipLogin short-circuits before any credential mutation: if options.SkipLogin
+// is true, the function returns nil immediately without wiping or launching.
+//
+// A non-TTY guard is enforced before the credential wipe: the device-code
+// login flow requires a terminal. If no TTY is present the function returns
+// an actionable error and leaves pre-existing credentials intact.
+func ensureClaudeAccountReady(cmd *cobra.Command, account domain.Profile, options accountAuthOptions) error {
+	if options.SkipLogin {
+		return nil
 	}
 	if !commandHasTTY(cmd.InOrStdin()) {
 		return fmt.Errorf(
@@ -66,8 +70,11 @@ func ensureClaudeAccountReady(cmd *cobra.Command, account domain.Profile, paths 
 			account.Name,
 		)
 	}
+	if err := wipeClaudeCredentials(account.HomePath); err != nil {
+		return fmt.Errorf("prepare claude account %q: wipe credentials: %w", account.Name, err)
+	}
 	runner := claudeAuthRunnerFromContext(cmd.Context(), cmd)
-	if err := runner.EnsureImage(cmd, paths); err != nil {
+	if err := runner.EnsureImage(cmd, options.Paths); err != nil {
 		return fmt.Errorf("ensure claude account %q: %w", account.Name, err)
 	}
 	if err := writeCLINotice(
