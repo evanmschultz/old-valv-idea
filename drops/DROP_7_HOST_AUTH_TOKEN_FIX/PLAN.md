@@ -563,6 +563,87 @@ R1 QA proof PASS + R1 QA falsification PASS with one CONFIRMED counterexample (A
 
 ---
 
+### Unit 7.11 — Auth UX polish: host browser auto-open + clean exit on creds-write
+
+**state:** todo
+**blocked_by:** 7.5 R2 (done) — depends on the `RunInContainer` orchestration code
+**paths:** `internal/cli/claude_auth.go`, `internal/cli/claude_auth_test.go`, possibly a small new helper file in `internal/cli/` (planner's choice)
+**packages:** `internal/cli`
+**Round 5 scope addition (added 2026-05-16):** UX polish identified during dogfood smoke test. Auth flow works end-to-end; two ergonomic gaps remain.
+
+**Orchestrator-locked scope (planner decomposes):**
+
+Two bundled UX fixes inside the auth-container orchestration in `claude_auth.go::RunInContainer`. Bundled (not split into two units) because both modify the same `RunInContainer` flow — file overlap forces serial work either way; bundling saves one build-QA cycle.
+
+**FIX A — Host browser auto-open on OAuth URL detection.**
+
+- Wrap the auth container's stdout with an `io.TeeReader` (or equivalent multiplexed pipe) that:
+  - Continues to forward output to the user's terminal (so claude's `Browser didn't open? Use the URL below` + `Paste code here` prompts still render unchanged).
+  - Scans incoming bytes for OAuth URL patterns: `https://claude.com/cai/oauth/authorize` (subscription path) and `https://platform.claude.com/oauth/authorize` (Console path).
+  - On first match per session, asynchronously fires `exec.Command("open", url).Start()` (macOS host) to launch the dev's default browser.
+- macOS-only for v0.1.0 per AGENTS.md macOS+Docker scope. Add a TODO comment for cross-platform (`xdg-open` Linux, `cmd /c start` Windows).
+- No retry on `open` failure — claude's URL-fallback prompt is still visible, so user has manual recourse. YAGNI hard.
+
+**FIX B — `.credentials.json` watcher → SIGTERM container on completion.**
+
+- After spawning the container, start a goroutine that polls `filepath.Join(homePath, ".credentials.json")` every ~500ms for existence + non-zero size.
+- When detected, send SIGTERM to the container subprocess. Container exits cleanly. `--rm` removes it.
+- Function returns nil. User sees a one-line success notice (`writeCLINotice`).
+- No manual Ctrl-C needed. (Until this fix lands, users must Ctrl-C twice after auth completes — claude TUI doesn't auto-exit; this is documented in §"Ctrl-C UX interim guidance" below.)
+- Polling cadence: 500ms is fast enough for human-paced OAuth (10-30s typical) and slow enough to be negligible CPU.
+- `fsnotify` is over-engineering for this single file watch; polling is simpler with no new deps.
+
+**Cancellation + cleanup correctness:**
+
+- Polling goroutine must exit cleanly in three cases:
+  1. Creds file appears → SIGTERM container → done.
+  2. Container exits on its own (user Ctrl-C'd before creds appeared) → goroutine sees `os.IsNotExist` indefinitely; must NOT leak. Use a `context.Context` derived from the run; cancel when container subprocess exits.
+  3. Build-side test injection: pollable via interface or `Clock` injection so tests don't actually `time.Sleep`.
+
+**Tests:**
+
+- `TestRunInContainerOpensBrowserOnURLDetect` — feed a fake stdout with the OAuth URL; assert a fake `opener` got called once with the URL.
+- `TestRunInContainerDoesNotOpenWhenNoURL` — feed unrelated stdout; assert opener NOT called.
+- `TestRunInContainerSigtermsOnCredsWrite` — fake docker executor; write `.credentials.json` after a short delay in the test; assert SIGTERM was sent and function returned nil.
+- `TestRunInContainerSurvivesContainerExitBeforeCreds` — fake docker executor returns immediately (user Ctrl-C'd); assert poller goroutine doesn't leak; assert function returns appropriate error.
+- `TestRunInContainerCancelsPollerOnContextCancel` — context-cancellation hygiene.
+
+**Interface shape (planner refines):**
+
+Likely introduce two unexported interfaces in `claude_auth.go`:
+- `urlOpener interface { Open(ctx context.Context, url string) error }` — production: `exec.Command("open", url).Start()`.
+- `credsWatcher interface { WaitForCreds(ctx context.Context, path string) error }` — production: poll loop.
+
+Inject via the existing `claudeAuthRunner` interface or extended runner type. Tests provide stubs.
+
+**Acceptance criteria:**
+
+- AC1: `RunInContainer` detects OAuth URL in container stdout and fires `urlOpener.Open(url)` exactly once. Verified by test.
+- AC2: `RunInContainer` polls for `<homePath>/.credentials.json`; on appearance, SIGTERMs the container. Verified by test.
+- AC3: User-terminal output is unaffected — stdout still flows through. Verified by test capturing terminal-side bytes.
+- AC4: Poller goroutine does not leak when container exits before creds appear. Verified by test + `go test -race`.
+- AC5: `mage testPkg github.com/evanmschultz/valv/internal/cli` GREEN, coverage ≥70%.
+- AC6: `mage test` GREEN full suite.
+
+**Verification target:** `mage testPkg github.com/evanmschultz/valv/internal/cli` then `mage test`.
+
+**Coordination:** Unit 7.11 owns `internal/cli/`. No parallel unit currently in flight in the same package.
+
+---
+
+### Ctrl-C UX interim guidance (until Unit 7.11 lands)
+
+Confirmed working pattern from dogfood 2026-05-16: after completing OAuth in browser and pasting code back, claude does NOT auto-exit. Users must press Ctrl-C twice:
+
+1. First Ctrl-C → claude prints `Press Ctrl-C again to exit`.
+2. Second Ctrl-C → claude exits cleanly, container removes (`--rm`).
+
+Three to four total presses sometimes needed if claude's TUI is mid-render. Wait for the `Press Ctrl-C again to exit` line before the second tap.
+
+**Unit 7.11's FIX B obsoletes this guidance** — once it lands, claude's container auto-exits when `.credentials.json` is written. Document this as obsolete in the user-facing docs (when those exist) post-7.11.
+
+---
+
 ## Path A Scope (superseded 2026-05-15 — preserved as historical record)
 
 **Codex parity for Claude auth.** DROP_6.2's container-side `claude auth login` flow has invisible paste prompt (TUI mode doesn't render through Docker pty). User verified on 2026-05-15 that host-side `claude setup-token` works perfectly: browser auto-opens, paste prompt clearly visible, completes cleanly. This drop replaces the container-auth flow with host-subprocess auth mirroring Codex's existing pattern.
