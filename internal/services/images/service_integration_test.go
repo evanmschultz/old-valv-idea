@@ -14,6 +14,11 @@ import (
 	"github.com/evanmschultz/valv/internal/domain"
 )
 
+// testClaudeCLIVersion is a fixed version string for integration tests that
+// need a concrete Claude CLI version but must not reference exported constants
+// that may be deleted in the future.
+const testClaudeCLIVersion = "2.1.143"
+
 func TestServiceBuildRealDockerImage(t *testing.T) {
 	t.Parallel()
 
@@ -124,7 +129,7 @@ func TestWriteDefaultClaudeContextBuildsWithExistingUIDAndGID(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	result, err := svc.Build(context.Background(), BuildRequest{Version: DefaultClaudeCLIVersion})
+	result, err := svc.Build(context.Background(), BuildRequest{Version: testClaudeCLIVersion})
 	if err != nil {
 		t.Fatalf("Build() error = %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 	}

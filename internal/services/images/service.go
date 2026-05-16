@@ -376,7 +376,7 @@ func (s Service) EnsureLatest(ctx context.Context, request EnsureRequest) (Ensur
 
 	now := s.clock()
 	cacheData := readVersionCache(s.cachePath)
-	latestVersion, fromCache := cachedVersion(cacheData, s.provider, now)
+	latestVersion, cachedCheckedAt, fromCache := cachedVersion(cacheData, s.provider, now)
 	if !fromCache {
 		latestVersion, err = s.resolver.LatestVersion(ctx)
 		if err != nil {
@@ -408,7 +408,14 @@ func (s Service) EnsureLatest(ctx context.Context, request EnsureRequest) (Ensur
 		}
 	}
 
-	checkedAt := now.UTC()
+	// On a cache hit, report when the version was actually last checked (the
+	// cached timestamp).  On a fresh resolver call, report the current time.
+	var checkedAt time.Time
+	if fromCache {
+		checkedAt = cachedCheckedAt
+	} else {
+		checkedAt = now.UTC()
+	}
 	versionTag := s.versionImageRef(latestVersion)
 	defaultRef := s.defaultImageRef()
 	available, err := s.imageAvailable(ctx, defaultRef)
@@ -426,7 +433,7 @@ func (s Service) EnsureLatest(ctx context.Context, request EnsureRequest) (Ensur
 	if available && stateFound && state.InstalledVersion == latestVersion && recipeMatches {
 		state.LatestVersion = latestVersion
 		state.LatestCheckedAt = checkedAt
-		state.UpdatedAt = time.Now().UTC()
+		state.UpdatedAt = s.clock().UTC()
 		if _, err := s.stateStore.UpsertProviderImageState(ctx, state); err != nil {
 			return EnsureResult{}, fmt.Errorf("ensure latest image: persist provider image state: %w", err)
 		}
@@ -476,7 +483,7 @@ func (s Service) EnsureLatest(ctx context.Context, request EnsureRequest) (Ensur
 		InstalledVersion:    latestVersion,
 		InstalledImageRef:   buildResult.Image.String(),
 		InstalledVersionTag: versionTag.String(),
-		UpdatedAt:           time.Now().UTC(),
+		UpdatedAt:           s.clock().UTC(),
 	}
 	if _, err := s.stateStore.UpsertProviderImageState(ctx, state); err != nil {
 		return EnsureResult{}, fmt.Errorf("ensure latest image: persist provider image state: %w", err)

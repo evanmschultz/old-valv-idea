@@ -4,6 +4,59 @@ Append a `## Unit 7.M — Round K` section per build attempt. See `main/drops/WO
 
 <!-- units filled in by planner, then by builder during Phase 4 -->
 
+## Unit 7.10 — Round 2
+
+**Date:** 2026-05-16
+**State at start:** done (R1) → in_progress (R2 start) → done (R2 close)
+**Why Round 2:** R1 falsification A8 (cache pollution confirmed, downgraded from BLOCK to CONCERN since outside R1's cosmetic-parity scope) + bundled tmpfs disk-space test fix per dev directive 2026-05-16.
+
+### Files touched
+- `internal/cli/operator_helpers.go` — FIX 1: added `CachePath: filepath.Join(paths.CachesDir, "version-cache.json")` to `imagesservice.Options` in `openImagesService`.
+- `internal/cli/operator_helpers_test.go` — FIX 1 test: `TestOpenImagesServiceWritesCacheToCachesDir` confirms the cache file lands at `paths.CachesDir/version-cache.json` (not at `os.UserCacheDir()`).
+- `internal/cli/codex_test.go` — FIX 2: added `t.Setenv("VALV_REAL_HOME", t.TempDir())` to `TestRootDebugFlagIsNotPassedThroughToInteractiveCodexLaunch`.
+
+### Fixes applied
+
+**FIX 1 — Cache-path isolation (A8):**
+`openImagesService` in `operator_helpers.go` now sets `CachePath: filepath.Join(paths.CachesDir, "version-cache.json")` in the base `imagesservice.Options` struct (above the provider switch), so both Codex and Claude images services receive an isolated per-invocation cache path. Tests use `testCodexPaths(t)` which sets `CachesDir: filepath.Join(root, "caches")` where `root = t.TempDir()`, ensuring full disk isolation from the real `~/Library/Caches/valv/version-cache.json`.
+
+Field used: `paths.CachesDir` — confirmed from `internal/config/paths.go`. Cache filename: `version-cache.json` — same filename as `cache.go::defaultCachePath()` returns for the `valv` subdir of `os.UserCacheDir()`, ensuring symmetry.
+
+Test approach: call `openImagesService` for `ProviderClaude` with a static resolver stub (`stubClaudeVersionResolver`) and fake docker (`installFakeDocker`), then call `EnsureLatest`. Verify cache file exists at `paths.CachesDir/version-cache.json`. TDD RED phase confirmed correct failure ("cache file not created at paths.CachesDir") before the fix.
+
+**FIX 2 — Tmpfs disk-space test fix (option a — minimal fake CODEX_HOME):**
+Root cause: `TestRootDebugFlagIsNotPassedThroughToInteractiveCodexLaunch` calls `runCodexCommand` with no `VALV_REAL_HOME` override. `runCodexCommand` builds a `codexservice.Service` with `RealHome: realHomeDir()` which returns the developer's real `$HOME`. `sharedCodexStateHome` then calls `DefaultHostProfile(realHome)` → returns `$HOME/.codex`. `PrepareRuntime` is called with `SharedHome = $HOME/.codex` and since `profileHome != sharedHome`, it calls `copyDirContents($HOME/.codex, runtimeCodexHome, nil)` — copying the dev's entire `~/.codex` to a tmpfs-backed `t.TempDir()`.
+
+Fix: add `t.Setenv("VALV_REAL_HOME", t.TempDir())` at the top of the test. `realHomeDir()` reads `VALV_REAL_HOME` and returns the fresh empty temp dir. `DefaultHostProfile(tempDir)` returns `tempDir/.codex` (empty, nonexistent). `PrepareRuntime` finds nothing to copy (the staging path `MkdirAll`s the empty dir and `filepath.Walk` sees only the root, copying zero files). The disk-space dependency is eliminated entirely. Option (a) preferred over (b)/(c) because it removes the coupling to the dev's `~/.codex` size permanently.
+
+Runtime improvement: test now completes in ~5s (previously blocked 87s+ then failed with ENOSPC).
+
+### Mage targets run and result
+- `mage testPkg ./internal/cli` (RED before FIX 1) — 156/157, `TestOpenImagesServiceWritesCacheToCachesDir` FAIL (correct reason: cache file not at paths.CachesDir)
+- `mage testPkg ./internal/cli` (GREEN after FIX 1) — 157/157, 72.4%
+- `mage testPkg ./internal/cli` (GREEN after FIX 2) — 157/157, 72.5%
+- `mage test` run 1 — [SUCCESS] all packages ≥60%, internal/cli=72.5%
+- `mage test` run 2 — [SUCCESS] all packages ≥60%, internal/cli=72.5%
+- `mage test` run 3 — [SUCCESS] all packages ≥60%, internal/cli=72.5%
+
+### Cache pollution verification
+- Pre-test: `~/Library/Caches/valv/version-cache.json` mtime = `May 16 00:22:51 2026` (from R1 test pollution)
+- Post-test (3 consecutive `mage test` runs): mtime still `May 16 00:22:51 2026` — UNCHANGED
+- Timestamps identical? YES — the real cache file was not touched by any of the three mage test runs.
+
+### Acceptance criteria check
+| # | Criterion | Result |
+|---|---|---|
+| AC1 | `openImagesService` threads `paths.CachesDir` into `Options.CachePath` | PASS — `operator_helpers.go` line 84: `CachePath: filepath.Join(paths.CachesDir, "version-cache.json")` |
+| AC2 | Tests no longer pollute `~/Library/Caches/valv/version-cache.json` | PASS — mtime unchanged across 3 mage test runs |
+| AC3 | `TestRootDebugFlagIsNotPassedThroughToInteractiveCodexLaunch` passes 428/428 across 3 consecutive `mage test` runs | PASS — all 3 runs green, test now runs in ~5s |
+| AC4 | All R1 ACs still pass | PASS — 157/157, all R1 sub-fixes verified by same test count |
+| AC5 | `mage testPkg ./internal/cli` GREEN, coverage ≥70% | PASS — 157/157, 72.5% |
+| AC6 | `mage test` GREEN 428/428 | PASS — 3 consecutive runs all green |
+
+### Unknowns
+- `TestOpenImagesServiceWritesCacheToCachesDir` does not assert the ABSENCE of content at `realCachePath` because the dev's real cache file may legitimately contain "2.2.0" if a real `valv manage update claude` was run when 2.2.0 was actually latest. The cache-path isolation is positively proven by the wantCachePath existence check (which fails before FIX 1 and passes after). The real-file non-pollution is proven by the mtime-unchanged post-test observation and by the mechanism: `openImagesService` now always sets `CachePath` to the test-isolated path, so the `imagesservice` package never calls `defaultCachePath()` (which uses `os.UserCacheDir()`).
+
 ## Unit 7.10 — Round 1
 
 **Date:** 2026-05-16
@@ -41,6 +94,55 @@ Append a `## Unit 7.M — Round K` section per build attempt. See `main/drops/WO
 ## Hylla Feedback
 - `DefaultClaudeDockerfile` was found via Hylla keyword search — that answered the question of whether the helper exists, cleanly. No miss.
 - Hylla does not index test files (`hide_tests` mode), so test function names (e.g. `mustReadFile`, `fakeCodexRecipeHash`) required direct `Read` of test files. Expected behavior for the current Hylla test-mode setting; no actionable suggestion — this is by design.
+
+---
+
+## Unit 7.9 — Round 2
+
+**Date:** 2026-05-16
+**State at start:** done (R1) → in_progress (R2 start) → done (R2 close)
+**Why Round 2:** R1 QA proof FAIL (AC5: integration test referenced deleted symbol; `LatestCheckedAt` semantic gap) + R1 QA falsification PASS-with-concerns (future-timestamp cache stuck, clock-injection completeness, false atomic-write claim in worklog).
+
+### Files touched
+
+- `internal/services/images/service_integration_test.go` — FIX 1: added `const testClaudeCLIVersion = "2.1.143"`; replaced `DefaultClaudeCLIVersion` at line 127.
+- `internal/services/images/cache.go` — FIX 2+4: `cachedVersion` signature changed to return `(string, time.Time, bool)` (adds cached `CheckedAt` as 3rd return value); added `delta < 0` guard for future-timestamp rejection.
+- `internal/services/images/service.go` — FIX 2: `EnsureLatest` now branches on `fromCache` to set `checkedAt` from the cached timestamp on hit, or `now.UTC()` on miss. FIX 3: two `time.Now().UTC()` calls for `state.UpdatedAt` replaced with `s.clock().UTC()`.
+- `internal/services/images/service_test.go` — added `TestEnsureLatestReportsCachedCheckedAtOnCacheHit` (FIX 2) and `TestEnsureLatestRejectsCacheWithFutureTimestamp` (FIX 4).
+
+### Fixes applied
+
+- **FIX 1 — Integration-test reference:** Added `const testClaudeCLIVersion = "2.1.143"` immediately after the import block in `service_integration_test.go`. Replaced `DefaultClaudeCLIVersion` at line 127 with `testClaudeCLIVersion`. The file is build-tagged `//go:build integration` so no current mage target exercises it, but the source is now compilable under `-tags=integration ./internal/services/images/...`.
+- **FIX 2 — `LatestCheckedAt` cache-hit semantic:** Changed `cachedVersion` to return `(string, time.Time, bool)` — the 3rd return is `entry.CheckedAt` (zero value when not a cache hit). In `EnsureLatest`, replaced `checkedAt := now.UTC()` with a conditional: `fromCache → checkedAt = cachedCheckedAt`, `!fromCache → checkedAt = now.UTC()`. This makes `EnsureResult.LatestCheckedAt` report the true last-checked timestamp when served from cache, matching the field's semantic contract.
+- **FIX 3 — Clock-injection completeness:** Replaced `time.Now().UTC()` with `s.clock().UTC()` at both `state.UpdatedAt` write sites inside `EnsureLatest` (the up-to-date branch and the rebuild branch). The injected clock now governs all time writes in `EnsureLatest`, making tests with a fixed clock fully deterministic.
+- **FIX 4 — Future-timestamp guard:** Added `delta := now.Sub(entry.CheckedAt); if delta < 0 || delta >= versionCacheTTL` in `cachedVersion`. A negative delta (checked_at is in the future relative to `now`) is treated as a cache miss, preventing the cache from being stuck permanently on clock-skew or manually-edited entries.
+- **FIX 5 — Worklog atomic-write correction:** The R1 worklog's claim that "`os.WriteFile` is atomic at the kernel level for this size" is factually incorrect. POSIX `os.WriteFile` is an `open(O_TRUNC)+write+close` sequence — a concurrent reader can observe zero bytes or a partial write mid-truncation. The implementation remains acceptable because `readVersionCache` silently swallows both read and parse errors, so a torn read falls through to the resolver (one extra network call at worst). The correct justification is: "self-healing via parse-error swallowing makes the non-atomic write acceptable for a 24h-TTL cache at v0.1.0." The temp+rename pattern (`os.CreateTemp` + `os.Rename`) would be strictly safer but adds complexity for a file whose corruption is gracefully handled.
+
+### Mage targets run and result
+
+- `mage testPkg github.com/evanmschultz/valv/internal/services/images` — GREEN 29/29, 79.2% coverage (was 27/27 before R2; 2 new tests added)
+- `mage test` — GREEN 430/430 across 20 packages, all above 60% gate; `internal/services/images` 79.2%, `internal/cli` 72.4% (disk-space environmental flake did NOT recur this run)
+
+### Acceptance criteria check
+
+| # | Criterion | Result |
+|---|---|---|
+| AC1 | `service_integration_test.go:127` no longer references `DefaultClaudeCLIVersion` | PASS — uses local `testClaudeCLIVersion = "2.1.143"` |
+| AC2 | `LatestCheckedAt` semantic test added; cache-hit path returns cached `CheckedAt` | PASS — `TestEnsureLatestReportsCachedCheckedAtOnCacheHit` passes |
+| AC3 | `service.go:429, :479` use `s.clock()` not `time.Now()` | PASS — both replaced; verified by inspection |
+| AC4 | Future-timestamp cache guard implemented + test added | PASS — `delta < 0` guard in `cachedVersion`; `TestEnsureLatestRejectsCacheWithFutureTimestamp` passes |
+| AC5 | Worklog corrects atomic-write justification | PASS — this R2 entry documents the correct behavior |
+| AC6 | All R1 ACs still pass | PASS — 27 original tests still green (29 total) |
+| AC7 | `mage testPkg ./internal/services/images` GREEN, coverage ≥70% | PASS — 29/29, 79.2% |
+| AC8 | `mage test` GREEN (environmental flake orthogonal) | PASS — 430/430 |
+
+### Unknowns
+
+- None. All five fixes implemented as specified; no scope deviations.
+
+## Hylla Feedback
+
+N/A — task touched only files modified during DROP_7 after the last Hylla ingest. All code reads used `Read` tool directly per mid-drop evidence protocol. No Hylla queries attempted (Hylla snapshot is stale until drop-end reingest per CLAUDE.md § "Hylla Baseline").
 
 ---
 

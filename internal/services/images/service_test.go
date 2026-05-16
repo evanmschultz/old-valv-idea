@@ -933,3 +933,91 @@ func TestEnsureLatestSurvivesCacheWriteError(t *testing.T) {
 		t.Fatalf("LatestVersion = %q, want %q", got, want)
 	}
 }
+
+// TestEnsureLatestReportsCachedCheckedAtOnCacheHit verifies that when the
+// version is served from the on-disk cache (resolver not called), EnsureResult.LatestCheckedAt
+// reflects the CACHED entry's checked_at timestamp rather than the current wall clock.
+func TestEnsureLatestReportsCachedCheckedAtOnCacheHit(t *testing.T) {
+	oldFind := findDockerBinary
+	findDockerBinary = func(string) (string, error) { return "/usr/bin/docker", nil }
+	t.Cleanup(func() { findDockerBinary = oldFind })
+
+	cacheDir := t.TempDir()
+	cachePath := filepath.Join(cacheDir, "version-cache.json")
+
+	// Cache entry stamped at midnight; clock is 12 hours later (well within TTL).
+	cachedAt := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	clockNow := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+
+	writeCacheFile(t, cachePath, versionCacheFile{
+		Providers: map[string]versionCacheEntry{
+			"claude": {Version: "2.1.143", CheckedAt: cachedAt},
+		},
+	})
+
+	counter := &resolverCallCounter{inner: staticResolver("should-not-be-called")}
+	svc := newCacheTestService(t, counter, cachePath, func() time.Time { return clockNow })
+
+	result, err := svc.EnsureLatest(context.Background(), EnsureRequest{})
+	if err != nil {
+		t.Fatalf("EnsureLatest() error = %v", err)
+	}
+	if counter.called != 0 {
+		t.Fatalf("resolver called %d times, want 0 (cache should have been used)", counter.called)
+	}
+	if got, want := result.LatestVersion, "2.1.143"; got != want {
+		t.Fatalf("LatestVersion = %q, want %q", got, want)
+	}
+	// LatestCheckedAt must reflect when the version was ACTUALLY checked
+	// (the cache entry's timestamp), not the current clock value.
+	if !result.LatestCheckedAt.Equal(cachedAt) {
+		t.Fatalf("LatestCheckedAt = %v, want cached value %v", result.LatestCheckedAt, cachedAt)
+	}
+}
+
+// TestEnsureLatestRejectsCacheWithFutureTimestamp verifies that a cache entry
+// whose checked_at is in the future (clock skew, manual edit, NTP correction)
+// is rejected and treated as a cache miss, so the resolver is called and the
+// cache is refreshed.
+func TestEnsureLatestRejectsCacheWithFutureTimestamp(t *testing.T) {
+	oldFind := findDockerBinary
+	findDockerBinary = func(string) (string, error) { return "/usr/bin/docker", nil }
+	t.Cleanup(func() { findDockerBinary = oldFind })
+
+	cacheDir := t.TempDir()
+	cachePath := filepath.Join(cacheDir, "version-cache.json")
+
+	// Cache entry's timestamp is in year 2030; clock is in 2026 — negative delta.
+	futureTime := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	clockNow := time.Date(2026, 5, 16, 0, 0, 0, 0, time.UTC)
+
+	writeCacheFile(t, cachePath, versionCacheFile{
+		Providers: map[string]versionCacheEntry{
+			"claude": {Version: "2.1.999", CheckedAt: futureTime},
+		},
+	})
+
+	counter := &resolverCallCounter{inner: staticResolver("2.1.200")}
+	svc := newCacheTestService(t, counter, cachePath, func() time.Time { return clockNow })
+
+	result, err := svc.EnsureLatest(context.Background(), EnsureRequest{})
+	if err != nil {
+		t.Fatalf("EnsureLatest() error = %v", err)
+	}
+	// Resolver must have been called — the future-timestamp entry is treated as a miss.
+	if counter.called != 1 {
+		t.Fatalf("resolver called %d times, want 1 (future-timestamp cache entry must be rejected)", counter.called)
+	}
+	if got, want := result.LatestVersion, "2.1.200"; got != want {
+		t.Fatalf("LatestVersion = %q, want %q", got, want)
+	}
+	// Cache file must now contain the fresh resolver result, not the stale future timestamp.
+	c := readCacheFile(t, cachePath)
+	entry := c.Providers["claude"]
+	if entry.Version != "2.1.200" {
+		t.Fatalf("cache claude.version = %q, want %q after future-timestamp rejection", entry.Version, "2.1.200")
+	}
+	if entry.CheckedAt.After(clockNow.Add(time.Second)) {
+		t.Fatalf("cache claude.checked_at = %v is later than expected current time %v", entry.CheckedAt, clockNow)
+	}
+}

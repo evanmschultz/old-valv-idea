@@ -58,24 +58,26 @@ func readVersionCache(path string) versionCacheFile {
 	return c
 }
 
-// cachedVersion returns the cached version for provider p and whether it is
-// still within TTL relative to now.  If no entry exists or the entry is stale,
-// returns ("", false).
-func cachedVersion(c versionCacheFile, p domain.Provider, now time.Time) (string, bool) {
+// cachedVersion returns the cached version, the timestamp at which it was
+// last checked, and whether the entry is still within TTL relative to now.
+// If no entry exists, the entry is stale, or the entry's timestamp is in the
+// future (negative delta — clock skew or manual edit), returns ("", time.Time{}, false).
+func cachedVersion(c versionCacheFile, p domain.Provider, now time.Time) (string, time.Time, bool) {
 	if c.Providers == nil {
-		return "", false
+		return "", time.Time{}, false
 	}
 	entry, ok := c.Providers[providerKey(p)]
 	if !ok {
-		return "", false
+		return "", time.Time{}, false
 	}
 	if entry.Version == "" {
-		return "", false
+		return "", time.Time{}, false
 	}
-	if now.Sub(entry.CheckedAt) >= versionCacheTTL {
-		return "", false
+	delta := now.Sub(entry.CheckedAt)
+	if delta < 0 || delta >= versionCacheTTL {
+		return "", time.Time{}, false
 	}
-	return entry.Version, true
+	return entry.Version, entry.CheckedAt, true
 }
 
 // writeVersionCache writes an updated entry for provider p into the cache file
