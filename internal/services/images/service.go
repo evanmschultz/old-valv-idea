@@ -33,7 +33,7 @@ const (
 // npm package baked into the default Claude provider image. Verified against
 // Context7 /anthropics/claude-code at build time; see drop BUILDER_WORKLOG.md
 // for the timestamped re-verification record.
-const DefaultClaudeCLIVersion = "2.1.89"
+const DefaultClaudeCLIVersion = "2.1.143"
 
 var (
 	findDockerBinary = exec.LookPath

@@ -312,3 +312,40 @@ None.
 
 - **Query:** `hylla_search_keyword` for `ReadAccountIdentity` in the claude adapter — found the function and confirmed its summary states "LoggedIn is set iff .credentials.json exists and is not a directory." This directly confirmed verbatim write compatibility. Hylla answered correctly on first query.
 - No other misses.
+
+---
+
+## Unit 7.4 — Round 1
+
+**Date:** 2026-05-15
+**State at start:** todo → in_progress → done
+
+### Files touched
+
+- `internal/services/images/service.go` — updated `DefaultClaudeCLIVersion` constant from `"2.1.89"` to `"2.1.143"` (line 36). One-line change.
+
+### Mage targets run and result
+
+- `mage testPkg ./internal/services/images` — GREEN (16/16 pass, 74.8% coverage).
+- `mage testPkg ./internal/cli` — GREEN (154/154 pass, 70.4% coverage).
+- `mage testPkg ./internal/adapters/providers/claude` — GREEN (21/21 pass, 78.4% coverage).
+
+### Design notes
+
+**No test file changes needed:** All test references to `DefaultClaudeCLIVersion` use the constant by name (not the literal string `"2.1.89"`). `TestDefaultClaudeCLIVersionIsNonEmpty` validates the semver format `^\d+\.\d+\.\d+$` — passes for `"2.1.143"`. `TestServiceBuildRecipeHashMatchesProviderDockerfile` computes the recipe hash from `DefaultClaudeDockerfile()` which uses `${CLAUDE_VERSION}` as a Docker build arg placeholder — the Dockerfile template does not embed the constant value, so the SHA-256 hash is invariant to the version pin change. No test file updates required.
+
+**No hash assertion drift:** The `recipeHash()` implementation hashes the Dockerfile content string returned by `DefaultClaudeDockerfile()`. Since `DefaultClaudeDockerfile()` contains `@${CLAUDE_VERSION}` (not the literal version), changing the constant changes only the build-arg value passed at `docker buildx build` time — not the Dockerfile text hashed for the recipe label. Hash assertions in tests remain valid.
+
+**Version source confirmed:** npm registry `https://registry.npmjs.org/@anthropic-ai/claude-code/latest` returned `"version": "2.1.143"` as of 2026-05-15 (per dev smoke test context; builder cannot make outbound HTTP calls as subagent).
+
+### Test count delta
+
+No change — 16/16, 154/154, 21/21 identical to pre-change counts.
+
+### Unknowns
+
+None — this is a single constant update; all behavior is compile-time.
+
+## Hylla Feedback
+
+None — Hylla answered everything needed. `hylla_refs_find` on `DefaultClaudeCLIVersion` gave the complete inbound-reference graph (5 callers across 4 files) in one query, confirming exhaustively that no test file pins the literal string `"2.1.89"`. Zero fallbacks required.
