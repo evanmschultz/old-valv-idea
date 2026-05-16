@@ -199,3 +199,116 @@ None — Hylla answered everything needed. The task touched only files changed i
 ### Unknowns
 
 None — all items resolved.
+
+---
+
+## Unit 7.1 — Round 3
+
+**Date:** 2026-05-15
+**State at start:** done (Round 3 is a design-pivot fix; state stays done)
+
+### Change summary
+
+Design pivot from `setup-token` + JSON-wrap to `auth login` + verbatim keychain write. The smoke test 2026-05-15 confirmed that `setup-token` produces `user:inference`-scoped tokens (insufficient for interactive container `claude` sessions), and wrapping the keychain blob in `{"claudeAiAccessToken":"<blob>"}` breaks container claude's native `.credentials.json` parsing.
+
+### Files touched
+
+- `internal/cli/claude_auth.go`:
+  - Renamed interface method `RunSetupToken` → `RunAuthLogin`.
+  - Updated `systemClaudeAccountAuthRunner.RunAuthLogin` to pass args `"auth", "login"` instead of `"setup-token"`.
+  - Deleted `claudeCredentials` struct (was only used by `writeClaudeCredentials` for JSON-wrapping).
+  - Removed `encoding/json` import (no longer needed).
+  - Rewrote `writeClaudeCredentials(homePath, credentialsBlob string)`: now a single `os.WriteFile(path, []byte(credentialsBlob), 0o600)` — no `json.Marshal`, no struct, verbatim write.
+  - Updated doc comments on `claudeKeychainService`, `RunAuthLogin`, `ExtractKeychainToken`, `ensureClaudeAccountReady`, `loginClaudeAccount`, `writeClaudeCredentials` to reflect `auth login` and "full-scope credentials JSON blob" semantics.
+  - Updated all `"setup-token"` references in error messages to `"auth login"`.
+  - Updated all `runner.RunSetupToken` call sites in `ensureClaudeAccountReady` and `loginClaudeAccount` to `runner.RunAuthLogin`.
+
+- `internal/cli/claude_auth_test.go`:
+  - Renamed stub method `RunSetupToken` → `RunAuthLogin` (implementing updated interface).
+  - Updated `installFakeHostClaude` script: now checks `[ "${1:-}" = "auth" ] && [ "${2:-}" = "login" ]` instead of `"setup-token"`.
+  - Renamed `TestSystemClaudeAccountAuthRunnerRunSetupTokenUsesCLAUDE_CONFIG_DIR` → `TestSystemClaudeAccountAuthRunnerRunAuthLoginUsesCLAUDE_CONFIG_DIR`. Updated the call from `RunSetupToken` to `RunAuthLogin`. Updated the log assertion from `"args:setup-token"` to `"args:auth login"`.
+  - Updated `TestRunClaudeHostCommandPreflightFailsWhenClaudeMissing`: arg changed from `"setup-token"` to `"auth", "login"` (cosmetic — test fails at `exec.LookPath` before args matter).
+
+### Mage targets run and result
+
+- `mage testPkg ./internal/cli` — GREEN (154/154 pass, 70.4% coverage).
+
+### Design notes
+
+**Verbatim write rationale:** The macOS keychain stores the full session JSON blob (e.g. `{"accessToken":"...","refreshToken":"...","expiresAt":"..."}`) as a single string. Container claude on Linux reads `.credentials.json` natively — it expects exactly this format. Wrapping it in a second JSON envelope (`{"claudeAiAccessToken":"<blob>"}`) broke parsing. Writing verbatim eliminates the wrapping entirely.
+
+**`ReadAccountIdentity` compatibility:** Confirmed via Hylla that `claudeprovider.ReadAccountIdentity` only checks `.credentials.json` file existence (not content shape). Verbatim write still yields `LoggedIn=true`. No changes needed to the adapter.
+
+**Test fixture compatibility:** The test stub's `extractToken` field (type `string`) now notionally returns a JSON blob. The test `TestLoginClaudeAccountWipesAndRunsSetupTokenAndExtractsAndWrites` uses `extractToken: "fresh-token"` — a bare string, not a real JSON blob. The `strings.Contains(data, "fresh-token")` assertion still passes since the file content IS `"fresh-token"` verbatim. This is acceptable: the stub isolates the write path; live keychain integration is a smoke-test concern.
+
+**No logging of credentials:** The `writeClaudeCredentials` function receives the blob and writes it to disk. The blob is never passed to any logger. Error messages reference the path, not the content.
+
+### Acceptance criteria check
+
+| # | Criterion | Result |
+|---|---|---|
+| AC1 | `mage testPkg ./internal/cli` green, coverage ≥70% | PASS — 154/154, 70.4% |
+| AC2 | No `setup-token` in production code paths | PASS — deleted from args, interface, error messages, doc comments |
+| AC3 | `writeClaudeCredentials` is a single `os.WriteFile` with no `json.Marshal` | PASS — verified in function body |
+| AC4 | `claudeCredentials` struct deleted | PASS — struct removed, `encoding/json` import removed |
+| AC5 | All call sites updated to `RunAuthLogin` | PASS — both `ensureClaudeAccountReady` and `loginClaudeAccount` |
+
+### Unknowns
+
+None.
+
+---
+
+## Unit 7.2 — Round 2
+
+**Date:** 2026-05-15
+**State at start:** done (Round 2 is a follow-on to Unit 7.1 Round 3 design pivot; state stays done)
+
+### Change summary
+
+Deleted the `readClaudeAuthToken` helper and `CLAUDE_CODE_OAUTH_TOKEN` env-var injection from `service.go`. With `.credentials.json` now written verbatim in the correct format, container claude reads it natively via the bind-mount set up by `clauderuntime.PrepareRuntime` (DROP_5). The env-var injection was a workaround for the wrong file format — no longer needed.
+
+### Files touched
+
+- `internal/services/claude/service.go`:
+  - Removed `encoding/json` import.
+  - Deleted `readClaudeAuthToken` function (~17 LOC + doc comment).
+  - Deleted the env-injection block in `buildRequest` (~9 LOC including the `// Inject CLAUDE_CODE_OAUTH_TOKEN ...` comment).
+  - `os` and `path/filepath` imports retained — both still used elsewhere (`os.TempDir()` in `New`; `filepath.Rel`, `filepath.Separator` in `withinProjectRoot` and `containerName`).
+
+- `internal/services/claude/service_test.go`:
+  - Removed `"os"` and `"path/filepath"` imports (now unused after test deletion).
+  - Deleted `TestRunSetsClaudeCodeOAuthTokenWhenCredentialsPresent` (tested env-var injection with valid creds).
+  - Deleted `TestRunOmitsClaudeCodeOAuthTokenWhenCredentialsMissing` (tested graceful-skip when creds absent).
+  - Deleted `TestRunOmitsClaudeCodeOAuthTokenWhenCredentialsMalformed` (tested graceful-skip on bad JSON).
+
+### Mage targets run and result
+
+- `mage testPkg ./internal/services/claude` — GREEN (17/17 pass, 81.0% coverage). Down from 20 tests (3 deleted); coverage 81.0% vs prior 82.3% — well above the 70% floor.
+- `mage testPkg ./internal/adapters/providers/claude` — GREEN (21/21 pass, 78.4% coverage). Unchanged.
+
+### Design notes
+
+**Bind-mount mechanism confirmed:** `buildRequest` includes the profile home in `prepared.Mounts` via `clauderuntime.PrepareRuntime`. `PrepareRuntime` mounts `<managed-home>` → `/home/valv/.claude` in the container. `TestRunSucceedsWithBoundProject` verifies this mount exists. The mount predates DROP_7 (DROP_5 added it); no changes needed here.
+
+**Coverage delta is acceptable:** 82.3% → 81.0% (−3 tests each covering the deleted behavior). The remaining 17 tests cover all retained behavior. Coverage stays above the 70% AGENTS.md floor.
+
+### Acceptance criteria check
+
+| # | Criterion | Result |
+|---|---|---|
+| AC1 | `readClaudeAuthToken` deleted from `service.go` | PASS |
+| AC2 | No `CLAUDE_CODE_OAUTH_TOKEN` references in production code | PASS |
+| AC3 | `encoding/json` import removed from `service.go` | PASS |
+| AC4 | Three deleted test functions removed from `service_test.go` | PASS |
+| AC5 | `mage testPkg ./internal/services/claude` green, coverage ≥70% | PASS — 17/17, 81.0% |
+| AC6 | `mage testPkg ./internal/adapters/providers/claude` green | PASS — 21/21, 78.4% |
+
+### Unknowns
+
+None.
+
+## Hylla Feedback
+
+- **Query:** `hylla_search_keyword` for `ReadAccountIdentity` in the claude adapter — found the function and confirmed its summary states "LoggedIn is set iff .credentials.json exists and is not a directory." This directly confirmed verbatim write compatibility. Hylla answered correctly on first query.
+- No other misses.

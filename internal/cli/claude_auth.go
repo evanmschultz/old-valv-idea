@@ -3,7 +3,6 @@ package cli
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -21,15 +20,15 @@ import (
 )
 
 // claudeKeychainService is the macOS keychain service name that the Claude CLI
-// uses when writing OAuth credentials. Verified on 2026-05-15: both
-// `claude auth login` and `claude setup-token` write to this service.
+// uses when writing OAuth credentials. Verified on 2026-05-15: `claude auth login`
+// writes the full-scope session JSON blob to this service.
 const claudeKeychainService = "Claude Code-credentials"
 
 // claudeAuthRunner is the injectable interface for Claude auth operations.
 // Implementations wrap the host subprocess invocation so unit tests can stub
 // both methods without a real Claude CLI or macOS keychain.
 type claudeAuthRunner interface {
-	RunSetupToken(ctx context.Context, homePath string, stdin io.Reader, stdout, stderr io.Writer) error
+	RunAuthLogin(ctx context.Context, homePath string, stdin io.Reader, stdout, stderr io.Writer) error
 	ExtractKeychainToken(ctx context.Context, macOSUser string) (string, error)
 }
 
@@ -41,20 +40,24 @@ var hostClaudeAccountAuth claudeAuthRunner = systemClaudeAccountAuthRunner{}
 // claudeAuthRunner. It shells out to the host `claude` and `security` CLIs.
 type systemClaudeAccountAuthRunner struct{}
 
-// RunSetupToken runs `claude setup-token` as a host subprocess with
+// RunAuthLogin runs `claude auth login` as a host subprocess with
 // CLAUDE_CONFIG_DIR set to homePath so the CLI writes its .claude.json state
 // into the managed account home. Stdio is streamed to the caller's terminal so
-// the user sees the browser-open prompt and paste field.
-func (systemClaudeAccountAuthRunner) RunSetupToken(ctx context.Context, homePath string, stdin io.Reader, stdout, stderr io.Writer) error {
-	_, err := runClaudeHostCommand(ctx, homePath, stdin, stdout, stderr, "setup-token")
+// the user sees the browser-open prompt and paste field. The auth login flow
+// produces full-scope session credentials that container claude can use
+// natively via .credentials.json.
+func (systemClaudeAccountAuthRunner) RunAuthLogin(ctx context.Context, homePath string, stdin io.Reader, stdout, stderr io.Writer) error {
+	_, err := runClaudeHostCommand(ctx, homePath, stdin, stdout, stderr, "auth", "login")
 	return err
 }
 
-// ExtractKeychainToken extracts the Claude OAuth token from the macOS keychain
-// using `security find-generic-password`. The token is written to the keychain
-// by `claude setup-token` under the service "Claude Code-credentials" with the
-// macOS username as the account field. Returns an error if the entry is absent
-// or the token is empty.
+// ExtractKeychainToken extracts the Claude credentials JSON blob from the
+// macOS keychain using `security find-generic-password`. The blob is written
+// to the keychain by `claude auth login` under the service
+// "Claude Code-credentials" with the macOS username as the account field.
+// The returned string is the full JSON blob as stored by the Claude CLI —
+// callers write it verbatim to .credentials.json. Returns an error if the
+// entry is absent or the returned blob is empty.
 func (systemClaudeAccountAuthRunner) ExtractKeychainToken(ctx context.Context, macOSUser string) (string, error) {
 	cmd := exec.CommandContext(
 		ctx, "security", "find-generic-password",
@@ -86,26 +89,19 @@ func claudeAuthRunnerFromContext(ctx context.Context) claudeAuthRunner {
 	return hostClaudeAccountAuth
 }
 
-// claudeCredentials is the JSON shape written to .credentials.json in the
-// managed account home. The service layer reads claudeAiAccessToken to set
-// CLAUDE_CODE_OAUTH_TOKEN when launching the container.
-type claudeCredentials struct {
-	AccessToken string `json:"claudeAiAccessToken"`
-}
-
 // ensureClaudeAccountReady is the Claude-specific auth flow called from
-// ensureManagedAccountReady. It runs `claude setup-token` as a host subprocess,
-// extracts the resulting token from the macOS keychain, and writes it to
-// .credentials.json in the managed account home.
+// ensureManagedAccountReady. It runs `claude auth login` as a host subprocess,
+// extracts the resulting credentials JSON blob from the macOS keychain, and
+// writes it verbatim to .credentials.json in the managed account home.
 //
 // SkipLogin short-circuits before any credential mutation.
 //
 // If .credentials.json already exists and is non-empty, the account is
 // considered already authenticated and the function returns nil immediately
-// without running setup-token. This is the normal path for account switch when
+// without running auth login. This is the normal path for account switch when
 // the account has previously completed auth.
 //
-// A non-TTY guard is enforced when auth is actually needed: the setup-token
+// A non-TTY guard is enforced when auth is actually needed: the auth login
 // flow requires a terminal for browser-open and paste-prompt interaction.
 func ensureClaudeAccountReady(cmd *cobra.Command, account domain.Profile, options accountAuthOptions) error {
 	if options.SkipLogin {
@@ -121,7 +117,7 @@ func ensureClaudeAccountReady(cmd *cobra.Command, account domain.Profile, option
 	}
 	if !commandHasTTY(cmd.InOrStdin()) || !commandHasTTY(cmd.OutOrStdout()) {
 		return fmt.Errorf(
-			"account %q is not logged in; rerun in a TTY to complete Claude setup-token login",
+			"account %q is not logged in; rerun in a TTY to complete Claude auth login",
 			account.Name,
 		)
 	}
@@ -129,13 +125,13 @@ func ensureClaudeAccountReady(cmd *cobra.Command, account domain.Profile, option
 		cmd.ErrOrStderr(),
 		laslig.NoticeInfoLevel,
 		"Claude login needed",
-		fmt.Sprintf("Complete Claude setup-token login for account %q.", account.Name),
+		fmt.Sprintf("Complete Claude auth login for account %q.", account.Name),
 	); err != nil {
 		return fmt.Errorf("announce claude login: %w", err)
 	}
 	runner := claudeAuthRunnerFromContext(cmd.Context())
-	if err := runner.RunSetupToken(cmd.Context(), account.HomePath, cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr()); err != nil {
-		return fmt.Errorf("run claude setup-token for account %q: %w", account.Name, err)
+	if err := runner.RunAuthLogin(cmd.Context(), account.HomePath, cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr()); err != nil {
+		return fmt.Errorf("run claude auth login for account %q: %w", account.Name, err)
 	}
 	u, err := user.Current()
 	if err != nil {
@@ -161,7 +157,7 @@ func ensureClaudeAccountReady(cmd *cobra.Command, account domain.Profile, option
 	return nil
 }
 
-// loginClaudeAccount performs the Claude setup-token auth flow without the
+// loginClaudeAccount performs the Claude auth login flow without the
 // non-TTY guard. Used by loginManagedAccount for explicit re-login.
 func loginClaudeAccount(cmd *cobra.Command, account domain.Profile, _ config.Paths) error {
 	if err := wipeClaudeCredentials(account.HomePath); err != nil {
@@ -171,13 +167,13 @@ func loginClaudeAccount(cmd *cobra.Command, account domain.Profile, _ config.Pat
 		cmd.ErrOrStderr(),
 		laslig.NoticeInfoLevel,
 		"Claude login",
-		fmt.Sprintf("Starting Claude setup-token login for account %q.", account.Name),
+		fmt.Sprintf("Starting Claude auth login for account %q.", account.Name),
 	); err != nil {
 		return fmt.Errorf("announce claude login: %w", err)
 	}
 	runner := claudeAuthRunnerFromContext(cmd.Context())
-	if err := runner.RunSetupToken(cmd.Context(), account.HomePath, cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr()); err != nil {
-		return fmt.Errorf("run claude setup-token for account %q: %w", account.Name, err)
+	if err := runner.RunAuthLogin(cmd.Context(), account.HomePath, cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr()); err != nil {
+		return fmt.Errorf("run claude auth login for account %q: %w", account.Name, err)
 	}
 	u, err := user.Current()
 	if err != nil {
@@ -203,16 +199,14 @@ func loginClaudeAccount(cmd *cobra.Command, account domain.Profile, _ config.Pat
 	return nil
 }
 
-// writeClaudeCredentials writes a .credentials.json file containing the
-// extracted OAuth token to homePath. The file is created with mode 0o600.
-func writeClaudeCredentials(homePath, token string) error {
-	creds := claudeCredentials{AccessToken: token}
-	data, err := json.Marshal(creds)
-	if err != nil {
-		return fmt.Errorf("marshal claude credentials: %w", err)
-	}
+// writeClaudeCredentials writes the credentials JSON blob to .credentials.json
+// in homePath. The blob is the raw value returned by ExtractKeychainToken —
+// the macOS keychain stores it in the exact format container claude reads from
+// .credentials.json on Linux, so it is written verbatim without re-encoding.
+// The file is created with mode 0o600.
+func writeClaudeCredentials(homePath, credentialsBlob string) error {
 	credPath := filepath.Join(strings.TrimSpace(homePath), ".credentials.json")
-	if err := os.WriteFile(credPath, data, 0o600); err != nil {
+	if err := os.WriteFile(credPath, []byte(credentialsBlob), 0o600); err != nil {
 		return fmt.Errorf("write %q: %w", credPath, err)
 	}
 	return nil

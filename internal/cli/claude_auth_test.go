@@ -32,7 +32,7 @@ type stubClaudeAccountAuthRunner struct {
 	extractHits     int
 }
 
-func (s *stubClaudeAccountAuthRunner) RunSetupToken(_ context.Context, _ string, _ io.Reader, _, _ io.Writer) error {
+func (s *stubClaudeAccountAuthRunner) RunAuthLogin(_ context.Context, _ string, _ io.Reader, _, _ io.Writer) error {
 	s.setupTokenHits++
 	return s.setupTokenErr
 }
@@ -72,8 +72,8 @@ func installFakeHostClaude(t *testing.T) string {
 set -eu
 printf 'args:%s\n' "$*" >> "$FAKE_CLAUDE_LOG"
 printf 'CLAUDE_CONFIG_DIR=%s\n' "${CLAUDE_CONFIG_DIR:-}" >> "$FAKE_CLAUDE_LOG"
-if [ "${1:-}" = "setup-token" ]; then
-  printf 'Setup token complete.\n'
+if [ "${1:-}" = "auth" ] && [ "${2:-}" = "login" ]; then
+  printf 'Auth login complete.\n'
   exit 0
 fi
 printf 'unexpected args\n'
@@ -505,7 +505,7 @@ func TestRunClaudeHostCommandPreflightFailsWhenClaudeMissing(t *testing.T) {
 	t.Setenv("PATH", emptyDir)
 
 	ctx := context.Background()
-	_, err := runClaudeHostCommand(ctx, "/tmp/home", nil, nil, nil, "setup-token")
+	_, err := runClaudeHostCommand(ctx, "/tmp/home", nil, nil, nil, "auth", "login")
 	if err == nil {
 		t.Fatal("runClaudeHostCommand() error = nil, want missing-claude error")
 	}
@@ -518,19 +518,19 @@ func TestRunClaudeHostCommandPreflightFailsWhenClaudeMissing(t *testing.T) {
 	}
 }
 
-// TestSystemClaudeAccountAuthRunnerRunSetupTokenUsesCLAUDE_CONFIG_DIR verifies
-// that RunSetupToken sets CLAUDE_CONFIG_DIR in the subprocess environment.
-// It installs a fake `claude` script that logs env vars, calls RunSetupToken,
-// then reads the log to verify the env was set correctly.
+// TestSystemClaudeAccountAuthRunnerRunAuthLoginUsesCLAUDE_CONFIG_DIR verifies
+// that RunAuthLogin sets CLAUDE_CONFIG_DIR in the subprocess environment and
+// passes `auth login` as the command args. It installs a fake `claude` script
+// that logs env vars and args, calls RunAuthLogin, then reads the log to verify.
 // Note: t.Setenv (inside installFakeHostClaude) requires no t.Parallel() here.
-func TestSystemClaudeAccountAuthRunnerRunSetupTokenUsesCLAUDE_CONFIG_DIR(t *testing.T) {
+func TestSystemClaudeAccountAuthRunnerRunAuthLoginUsesCLAUDE_CONFIG_DIR(t *testing.T) {
 	logPath := installFakeHostClaude(t)
 
 	homePath := t.TempDir()
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
-	err := systemClaudeAccountAuthRunner{}.RunSetupToken(
+	err := systemClaudeAccountAuthRunner{}.RunAuthLogin(
 		context.Background(),
 		homePath,
 		bytes.NewBuffer(nil),
@@ -538,7 +538,7 @@ func TestSystemClaudeAccountAuthRunnerRunSetupTokenUsesCLAUDE_CONFIG_DIR(t *test
 		&stderr,
 	)
 	if err != nil {
-		t.Fatalf("RunSetupToken() error = %v", err)
+		t.Fatalf("RunAuthLogin() error = %v", err)
 	}
 
 	content, err := os.ReadFile(logPath)
@@ -548,7 +548,7 @@ func TestSystemClaudeAccountAuthRunnerRunSetupTokenUsesCLAUDE_CONFIG_DIR(t *test
 	if !strings.Contains(string(content), "CLAUDE_CONFIG_DIR="+homePath) {
 		t.Fatalf("fake claude log = %q, want CLAUDE_CONFIG_DIR=%s entry", string(content), homePath)
 	}
-	if !strings.Contains(string(content), "args:setup-token") {
-		t.Fatalf("fake claude log = %q, want args:setup-token entry", string(content))
+	if !strings.Contains(string(content), "args:auth login") {
+		t.Fatalf("fake claude log = %q, want args:auth login entry", string(content))
 	}
 }
