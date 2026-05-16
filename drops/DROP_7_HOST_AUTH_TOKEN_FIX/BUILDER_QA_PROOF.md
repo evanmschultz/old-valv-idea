@@ -618,3 +618,77 @@ PASS. All three R1 falsification findings (BLOCK 1 + CONCERN 1 + CONCERN 2) are 
   - **Worked correctly.**
 - All other lookups (claude_auth.go body, manage.go body, runtime.go body, docker types) went through direct `Read` per mid-drop evidence protocol (these files were modified post-snapshot-11). No Hylla fallbacks were needed for committed-but-stale code, and no Hylla query missed.
 
+---
+
+## Unit 7.8 — Round 1
+
+**Date:** 2026-05-16
+**Reviewer:** go-qa-proof-agent
+**Verdict:** pass
+
+### Evidence reviewed
+
+- `drops/DROP_7_HOST_AUTH_TOKEN_FIX/PLAN.md` Unit 7.8 spec (lines 374–420) plus Round 5 design notes (lines 113–124).
+- `drops/DROP_7_HOST_AUTH_TOKEN_FIX/BUILDER_WORKLOG.md` — Unit 7.8 Round 1 entry (lines 7–44).
+- `internal/cli/claude.go` lines 181–195 (`ensureClaudeImageCurrent`).
+- `internal/cli/manage.go` lines 1115–1145 (`runManageUpdateCodex` — parity baseline) and lines 1147–1177 (`runManageUpdateClaude`); also account-add Claude image guard at 497–501 and account-switch guard at 612–616.
+- `internal/cli/operator_helpers.go` lines 27–31 (factory vars) and 95–104 (Claude case in `openImagesService`).
+- `internal/cli/extended_test.go` lines 30–50 (`stubCodexVersionResolver` parity baseline + new `stubClaudeVersionResolver`).
+- `internal/cli/manage_test.go` lines 265–316 (`TestRunManageUpdateClaudeBuildsImage`).
+- `git diff HEAD~1 HEAD --stat` and full per-file diff for commit `c0724f8`.
+- Hylla `hylla_search_keyword` for `EnsureActionUpToDate` and `hylla_refs_find` on `DefaultClaudeCLIVersion` (snapshot 11 — pre-Unit-7.8 state; cross-referenced with diff).
+- `mage testPkg github.com/evanmschultz/valv/internal/cli` — re-run by reviewer.
+- `mage test` — re-run by reviewer.
+
+### Acceptance criteria verification
+
+| # | Criterion | Builder Result | QA-Proof Verification |
+|---|---|---|---|
+| AC1 | `ensureClaudeImageCurrent` non-`VALV_CLAUDE_IMAGE` path no longer references `imagesservice.BuildRequest` or `DefaultClaudeCLIVersion` | PASS | PASS — `internal/cli/claude.go:181–195` shows the env-override branch at line 182 returning early via `ensureClaudeImageAvailable`, then `openImagesService(...)` at line 185 (which now wires `claudeVersionResolverFactory(nil)`), then `service.EnsureLatest(...)` at line 190. The stale "pinned-version fast path" comment is removed. Diff confirms `-3 +1`. `DefaultClaudeCLIVersion` still exists in `internal/services/images/service.go` as the Dockerfile build-arg fallback constant (per appendix carve-out: "that's fine — the check is that this function doesn't reference it"), and Hylla's stale inbound-refs list includes only `internal/services/images/service_test.go` references after this commit (the `internal/cli` references shown in Hylla snapshot 11 are the lines this commit just removed). |
+| AC2 | `ensureClaudeImageCurrent` calls `service.EnsureLatest(cmd.Context(), imagesservice.EnsureRequest{AllowExistingOnCheckFail: true})` | PASS | PASS — `internal/cli/claude.go:190` exact text: `_, err = service.EnsureLatest(cmd.Context(), imagesservice.EnsureRequest{AllowExistingOnCheckFail: true})`. Matches spec line 394 byte-for-byte. |
+| AC3 | `runManageUpdateClaude` calls `EnsureLatest` (not `Build`); output includes `checked_at` field; heading branches correctly | PASS | PASS — `internal/cli/manage.go:1153` declares `var result imagesservice.EnsureResult`; line 1161 calls `service.EnsureLatest(cmd.Context(), imagesservice.EnsureRequest{})`; line 1172–1175 branch heading `"Provider image built"` → `"Provider image up to date"` on `imagesservice.EnsureActionUpToDate`; line 1176 output field set is `{provider, image, tags, version, checked at, context}` — identical shape to `runManageUpdateCodex` at line 1144. Renderer emits the field label `"checked at"` as `checked_at=` in stdout (asserted at `manage_test.go:295`). Hylla confirms `EnsureActionUpToDate` is a real const at `internal/services/images/service.go`. |
+| AC4 | `mage testPkg github.com/evanmschultz/valv/internal/cli` passes | PASS — 154/154, 71.9% | PASS reproduced — reviewer ran `mage testPkg github.com/evanmschultz/valv/internal/cli`: 154 tests, 0 failed, 71.9% coverage; minimum-package gate at 60.0% (mage gate) cleared. |
+| AC5 | `mage test` passes (full suite, race detector, coverage floor) | PASS — 421/421 | PASS reproduced — reviewer ran `mage test`: 421 tests across 20 packages, 0 failed, 0 skipped. Package coverage range 64.7% (`internal/adapters/docker`, lowest) – 91.3% (`internal/tui/manage`, highest); all clear the 60.0% mage gate. `internal/cli` is 71.9%, `internal/services/images` is 76.9%, both above AGENTS.md's 70% target. |
+
+### Codex-parity completeness
+
+Side-by-side review of `runManageUpdateCodex` (manage.go:1115–1145) vs `runManageUpdateClaude` (manage.go:1147–1177):
+
+| Aspect | Codex | Claude | Match |
+|---|---|---|---|
+| Result type | `imagesservice.EnsureResult` | `imagesservice.EnsureResult` | yes |
+| Spinner running | `"Checking provider image"` | `"Checking provider image"` | yes |
+| Spinner success | `"Provider image check complete"` | `"Provider image check complete"` | yes |
+| Spinner failure | `"Provider image update failed"` | `"Provider image update failed"` | yes |
+| Service call | `service.EnsureLatest(cmd.Context(), imagesservice.EnsureRequest{})` | `service.EnsureLatest(cmd.Context(), imagesservice.EnsureRequest{})` | yes |
+| Action constant | `imagesservice.EnsureActionUpToDate` | `imagesservice.EnsureActionUpToDate` | yes (constant, not literal) |
+| Up-to-date heading | `"Provider image up to date"` | `"Provider image up to date"` | yes |
+| Default heading | `"Provider image updated"` | `"Provider image built"` | divergent text; intentional — see note |
+| Output fields | provider, image, tags, version, checked at, context | provider, image, tags, version, checked at, context | yes (same set, same order, same labels) |
+
+Default-heading divergence (`"Provider image updated"` vs `"Provider image built"`) is intentional and not a parity defect. Builder preserved Claude's historical wording, which `TestRunManageUpdateClaudeBuildsImage` (`manage_test.go:283`) asserts on. The spec required output **shape** parity (field set + action-branch logic + spinner texts), not identical heading wording. Acceptable.
+
+`claudeVersionResolverFactory` symmetry with `codexVersionResolverFactory` (`operator_helpers.go:27–31`):
+
+- Both are package-level `var` typed as `func(*http.Client) imagesservice.VersionResolver`.
+- Both default to the canonical constructor (`NewCodexVersionResolver` / `NewClaudeVersionResolver`).
+- Both are consumed in `openImagesService` (line 91 Codex, line 100 Claude) via `factory(nil)`.
+- Both are stubbed via parallel test helpers (`stubCodexVersionResolver` lines 30–39 vs `stubClaudeVersionResolver` lines 41–50) using the same `staticCLIResolver` and the same `t.Cleanup` swap pattern.
+
+The previous `options.Resolver = nil` (which relied on `imagesservice.New()`'s auto-wire) is now replaced with the explicit factory call; behaviorally identical (auto-wire still fires as fallback when resolver is nil) but now overrideable in tests. Worklog notes the redundancy and confirms the explicit path is what enables test stubbing — correct rationale.
+
+`VALV_CLAUDE_IMAGE` override path: `claude.go:182` exits via `ensureClaudeImageAvailable` before reaching the EnsureLatest call, so the override semantics are untouched by this change. Confirmed by inspection of the diff (`+1 -3` in this function; only the EnsureLatest line and the deleted comment are affected).
+
+### Unknowns
+
+- None. All 5 ACs verified by code inspection + re-run of mage targets reproducing the builder's claimed counts.
+
+### Hylla Feedback
+
+- **Query:** `hylla_search_keyword` for `EnsureActionUpToDate` (fields=content, limit=5) — returned the const at `internal/services/images/service.go` on first try.
+  - **Worked correctly.**
+- **Query:** `hylla_refs_find` on `github.com/evanmschultz/valv/internal/services/images/DefaultClaudeCLIVersion` (direction=inbound) — returned 5 inbound refs from snapshot 11 (pre-Unit-7.8). The Unit 7.8 commit removed three of those references (`ensureClaudeImageCurrent`, `runManageUpdateClaude`, `TestRunManageUpdateClaudeBuildsImage`). Cross-referenced against `git diff HEAD~1 HEAD` to confirm — Hylla's snapshot is stale per mid-drop protocol, not a Hylla defect.
+  - **Worked correctly given the snapshot-11 staleness expectation.**
+- **Suggestion:** None — the staleness is by design (drop-end-only reingest policy in CLAUDE.md). Mid-drop verification correctly uses `git diff` as the authoritative source for changed files.
+- All other code reads went through direct `Read` per mid-drop evidence protocol. No Hylla fallbacks needed; no Hylla query missed.
+
