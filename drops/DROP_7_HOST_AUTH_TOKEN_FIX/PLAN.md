@@ -631,6 +631,176 @@ Inject via the existing `claudeAuthRunner` interface or extended runner type. Te
 
 ---
 
+### Design decisions locked by planner (Unit 7.11)
+
+Added 2026-05-16. Builder must NOT relitigate these decisions; raise concerns as a worklog note if a decision proves wrong during implementation.
+
+---
+
+#### D1 — Stdout pipe ownership: wrap inside `RunInContainer`
+
+**Decision:** Wrap the `stdout` and `stderr` writers INSIDE `RunInContainer`, before passing them to `NewSystemRunner`. Specifically, construct a `lineScanner` writer that tees bytes to the original terminal writer AND scans complete lines for the OAuth URL regex. Pass the `lineScanner` as `stdout` (and a parallel instance for `stderr`) to `NewSystemRunner`.
+
+**Rationale:** `RunInContainer` already constructs `NewSystemRunner` inline. Wrapping at that call site requires no changes to the docker adapter. The auth-specific logic stays fully contained in `claude_auth.go`. Option (b) — adding a field to `ContainerRunRequest` — would contaminate the shared adapter with auth-domain concerns.
+
+**Critical refinement (from QA Falsification attack 4 + attack 8):** Wrap BOTH the `stdout` AND `stderr` writers with the same `sync.Once`-guarded URL scanner, because claude may emit the OAuth URL on either stream depending on TTY mode. The line scanner must buffer incomplete lines across `Write` calls and only scan on newline flush — URL may straddle two write chunks and per-write regex scanning would miss it.
+
+---
+
+#### D2 — URL regex pattern
+
+**Decision (locked):**
+
+```go
+var oauthURLRegex = regexp.MustCompile(
+    `https://(?:claude\.com/cai|platform\.claude\.com)/oauth/authorize\S*`,
+)
+```
+
+`\S*` captures the rest of the non-whitespace URL token (query params, fragments) without consuming newlines or trailing whitespace.
+
+**Builder verification required:** After the first real auth run, check the worklog and confirm the exact URL emitted by the container matches this pattern. If the URL format differs (e.g. different subdomain), update the regex and document in worklog.
+
+---
+
+#### D3 — Once-per-session URL-open semantics
+
+**Decision:** Use `sync.Once` to guarantee `urlOpener.Open` is called at most once per `RunInContainer` invocation. The `once.Do` wraps the open call inside the scanning writer's line-match handler.
+
+---
+
+#### D4 — `urlOpener` interface + injection
+
+**Decision:** Define:
+
+```go
+type urlOpener interface {
+    Open(ctx context.Context, url string) error
+}
+```
+
+Add a `urlOpener urlOpener` field to `systemClaudeAccountAuthRunner` (unexported field name, unexported type). Production nil-guard: if `r.urlOpener == nil`, use `defaultURLOpener{}` which calls `exec.Command("open", url).Start()` (non-blocking — `Start`, not `Run`, so it returns immediately after OS hands off to the default browser handler). Add macOS-only `// TODO: xdg-open (Linux), cmd /c start (Windows)` comment on `defaultURLOpener`.
+
+No retry on `open` failure. If `open` errors, swallow silently — claude's printed URL is the user's fallback.
+
+**Test injection:** Tests set `systemClaudeAccountAuthRunner{executor: stub, urlOpener: &stubURLOpener{}, credsWatcher: &stubCredsWatcher{}}`.
+
+---
+
+#### D5 — `credsWatcher` interface + injection
+
+**Decision:** Define:
+
+```go
+type credsWatcher interface {
+    WaitForCreds(ctx context.Context, path string) error
+}
+```
+
+Add a `credsWatcher credsWatcher` field to `systemClaudeAccountAuthRunner`. Production nil-guard: if `r.credsWatcher == nil`, use `defaultCredsWatcher{}`.
+
+`defaultCredsWatcher.WaitForCreds` implementation:
+- `ticker := time.NewTicker(500 * time.Millisecond)` + `defer ticker.Stop()`
+- `select { case <-ticker.C: check file; case <-ctx.Done(): return ctx.Err() }`
+- File check: `os.Stat(path)` → if no error and `info.Size() > 0` → return nil (creds present). Otherwise continue.
+
+---
+
+#### D6 — SIGTERM delivery via `docker stop`
+
+**Decision:** The goroutine fires `exec.Command("docker", "stop", "--time", "5", containerName).Run()` when creds are detected.
+
+**Rationale:** The docker `Executor.Run` wraps `cmd.Run()` synchronously and does not expose `cmd.Process`. Adding a process handle to the adapter is invasive. Using `docker stop <name>` is a clean CLI call — Valv already owns the container name before calling `exec.Run`, so the goroutine has it via closure. This keeps the adapter unchanged.
+
+**Error handling:** If `docker stop` returns a non-zero exit (e.g. container already gone after user Ctrl-C before goroutine fires), swallow the error — `exec.Run` will return its own result independently.
+
+---
+
+#### D7 — Goroutine lifecycle and cancellation
+
+**Decision:**
+
+```
+ctx, cancel := context.WithCancel(parentCtx)
+defer cancel()
+```
+
+at top of `RunInContainer`. The creds-watcher goroutine receives this `ctx`. When `RunInContainer` returns — for any reason — `defer cancel()` fires and the goroutine's `WaitForCreds` returns `ctx.Err()` on the next tick check. No goroutine leak in any of the three cases:
+
+1. Creds appear → goroutine calls `docker stop` → goroutine returns → `exec.Run` returns → `defer cancel()` fires (goroutine already gone).
+2. Container exits independently → `exec.Run` returns → `defer cancel()` fires → goroutine exits on next `ctx.Done()` check within ≤500ms.
+3. Parent context cancelled → `exec.Run` returns (context cancellation propagates to docker run) → `defer cancel()` fires → goroutine exits.
+
+---
+
+#### D8 — Concurrency: URL once-guard and creds notification
+
+**Decision:**
+
+- URL detection uses `sync.Once` (goroutine-safe, correct for the one-shot fire).
+- Creds notification to the main goroutine: NOT a channel. The goroutine fires `docker stop` directly and sets an `atomic.Bool` (`credDetected.Store(true)`) before calling `docker stop`. After `exec.Run` returns, `RunInContainer` reads `credDetected.Load()` to decide whether to emit the success notice and return nil vs. propagate the run error.
+- No shared mutable state other than the `sync.Once` and the `atomic.Bool`. Both are safe.
+
+---
+
+#### D9 — Error semantics on `credsWatcher.WaitForCreds` failure
+
+**Decision:** If `WaitForCreds` returns a non-nil error that is NOT `context.Canceled` / `context.DeadlineExceeded`:
+- Log at debug level: `"creds watcher error, continuing without auto-exit"`.
+- Do NOT call `docker stop`.
+- Let the container run normally. User retains the Ctrl-C fallback.
+- `RunInContainer` returns whatever `exec.Run` returns.
+
+Context cancellation errors (`ctx.Err()`) are normal — they indicate container exited or parent cancelled; swallow silently.
+
+---
+
+#### D10 — Test injection seam and test name refinements
+
+**Decision:** All three injectable fields (`executor`, `urlOpener`, `credsWatcher`) are fields on `systemClaudeAccountAuthRunner`. Tests construct the struct directly with all three set.
+
+**Test stubs (new, not yet in tree):**
+
+```go
+type stubURLOpener struct {
+    openedURLs []string
+    err        error
+}
+func (s *stubURLOpener) Open(_ context.Context, url string) error {
+    s.openedURLs = append(s.openedURLs, url)
+    return s.err
+}
+
+type stubCredsWatcher struct {
+    err       error
+    callCount int
+}
+func (s *stubCredsWatcher) WaitForCreds(_ context.Context, _ string) error {
+    s.callCount++
+    return s.err
+}
+```
+
+**Revised test names (builder writes these, all new — not yet in tree):**
+
+- `TestRunInContainerOpensBrowserOnURLDetect` — stub `urlOpener`; feed a fake stdout writer (via `stubAuthContainerExecutor` that writes the OAuth URL into the `stdout` writer it receives); assert `stub.openedURLs` contains the URL. Also wrap stderr to confirm both streams are scanned.
+- `TestRunInContainerDoesNotOpenWhenNoURL` — feed unrelated stdout via stub executor; assert `stub.openedURLs` is empty.
+- `TestRunInContainerSigtermsOnCredsWrite` — stub `credsWatcher` returns nil immediately (creds "found"); stub executor records the `ContainerRunRequest.Name`; verify `RunInContainer` returns nil and success notice was written to stderr (check stderr buffer).
+- `TestRunInContainerSurvivesContainerExitBeforeCreds` — stub executor returns immediately; stub `credsWatcher` returns `ctx.Err()` (simulating context cancel); verify `RunInContainer` does NOT return nil (no creds written → `exec.Run` returned with container's exit error or nil, then identity check fails → but wait, the identity check lives in `ensureClaudeAccountReady` / `loginClaudeAccount`, not in `RunInContainer` itself). Clarification: `RunInContainer` itself returns what `exec.Run` returns. The test verifies the goroutine doesn't leak (test completes promptly, `-race` clean).
+- `TestRunInContainerCancelsPollerOnContextCancel` — cancel the context; verify `stubCredsWatcher.callCount` stops incrementing and `RunInContainer` returns promptly.
+
+**Builder note:** `TestRunInContainerSigtermsOnCredsWrite` cannot verify the actual `docker stop` subprocess (that would require a real Docker daemon). It verifies the observable effect: `RunInContainer` returns nil after `stubCredsWatcher` returns nil, and `credDetected` path emits the success notice. The `docker stop` call is the production behavior; in tests `stubCredsWatcher` returning nil is sufficient to trigger the post-detection path.
+
+---
+
+#### Additional implementation note: success notice and nil-return semantics
+
+After `exec.Run` returns: if `credDetected.Load() == true`, treat the run as a success regardless of `exec.Run`'s error value (docker may report a non-zero exit from SIGTERM even on clean stop). Call `writeCLINotice(stderr, laslig.NoticeInfoLevel, "Claude auth complete", "Browser authentication complete. Credentials saved.")` and return nil. If `credDetected.Load() == false`, propagate `exec.Run`'s error normally.
+
+**Open question for builder to resolve:** Does `docker run --rm` exit with code 0 or non-zero when the container is stopped via `docker stop`? If non-zero, the `credDetected` guard is required. Builder must verify via worklog note from a real run.
+
+---
+
 ### Ctrl-C UX interim guidance (until Unit 7.11 lands)
 
 Confirmed working pattern from dogfood 2026-05-16: after completing OAuth in browser and pasting code back, claude does NOT auto-exit. Users must press Ctrl-C twice:
