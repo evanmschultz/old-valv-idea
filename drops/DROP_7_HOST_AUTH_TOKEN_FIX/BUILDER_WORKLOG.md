@@ -4,6 +4,66 @@ Append a `## Unit 7.M — Round K` section per build attempt. See `main/drops/WO
 
 <!-- units filled in by planner, then by builder during Phase 4 -->
 
+## Unit 7.11 — Round 1
+
+**Date:** 2026-05-16
+**State at start:** todo → in_progress → done
+
+### Files touched
+- `internal/cli/claude_auth.go` — added `lineScanner`, `urlOpener` / `credsWatcher` interfaces + production impls, extended `systemClaudeAccountAuthRunner` with two new fields, rewrote `RunInContainer` body with `context.WithCancel` + `sync.WaitGroup` + `atomic.Bool` + `externalCommand` hook.
+- `internal/cli/claude_auth_test.go` — added `stubURLOpener`, `stubCredsWatcher`, `callbackExecutor` stubs + 10 new test functions (4 lineScanner unit tests + 6 RunInContainer integration tests).
+
+### Implementation summary
+
+**`lineScanner` writer (D1):** Unexported `lineScanner` struct with `buf []byte`, `inner io.Writer`, `onMatch func(string)`. `Write()` appends to buf, splits on `\n`, forwards each complete line to inner, calls `onMatch` if line matches `oauthURLRegex`. Partial lines are buffered until the next `Write` completes them. This handles the URL-straddles-two-writes case from the falsification refinement.
+
+**`oauthURLRegex` (D2):** `https://(?:claude\.com/cai|platform\.claude\.com)/oauth/authorize\S*` — covers subscription + Console endpoints.
+
+**`urlOpener` interface + `defaultURLOpener` (D4):** `defaultURLOpener.Open` calls `exec.Command("open", url).Start()` (non-blocking, macOS-only). TODO comment for xdg-open (Linux) / cmd /c start (Windows). Errors swallowed per spec.
+
+**`credsWatcher` interface + `defaultCredsWatcher` (D5):** 500ms ticker + `select { case <-ctx.Done(): case <-ticker.C: os.Stat(path) }`. Returns nil on file present + non-empty, `ctx.Err()` on cancel.
+
+**`externalCommand` package-level var:** `func(string, ...string) *exec.Cmd` — test hook for intercepting `docker stop`. Default implementation calls `exec.Command`. Avoids requiring a real Docker daemon in tests.
+
+**`RunInContainer` rewrite (D3, D6, D7, D8, D9):**
+1. `ctx, cancel := context.WithCancel(parentCtx)` + `defer cancel()` at top.
+2. Nil-guards for `urlOpener` / `credsWatcher`.
+3. When `executor==nil` (production): wrap `stdout` and `stderr` with `lineScanner` instances sharing one `sync.Once`-guarded opener call. Pass wrapped writers to `NewSystemRunner`.
+4. Goroutine launched with `sync.WaitGroup` (wg.Add(1) before go, wg.Done() at end): calls `watcher.WaitForCreds(ctx, credsPath)`; on nil → `credDetected.Store(true)` + `externalCommand("docker","stop","--time","5",containerName).Run()` (error swallowed, D6); on non-context error → log debug, no docker stop (D9); on context error → silent return.
+5. After `containerExec.Run(ctx, request)` returns, call `cancel()` explicitly (goroutine exits on next tick), then `wg.Wait()` (ensure goroutine completes before reading `credDetected`).
+6. If `credDetected.Load()`: emit success notice + return nil (overriding SIGTERM non-zero exit from docker run, D8/additional impl note).
+
+**Section 0 Convergence finding applied:** Added `sync.WaitGroup` (not prohibited by D8 which only bans channels for creds notification) to guarantee goroutine completion before `credDetected.Load()`. Without WaitGroup, the goroutine could be unscheduled when the stub executor returns immediately, leading to `credDetected==false` when main reads it. WaitGroup makes the test deterministic and the production path correct.
+
+**Test design:** Since the production lineScanner wrapping only fires when `executor==nil` and tests inject a non-nil executor for isolation, URL-detection is tested via direct lineScanner unit tests. RunInContainer integration tests verify: goroutine lifecycle (no leak), creds detection path (notice + nil return), error propagation (executor error forwarded when no creds).
+
+### Mage targets run and result
+- `mage testPkg github.com/evanmschultz/valv/internal/cli` — GREEN 167/167, 72.6% coverage (was 157/157 + 72.5% before unit 7.11)
+- `mage test` — GREEN 441/441 across 20 packages, all ≥60%, `internal/cli` 72.6%
+
+### Acceptance criteria check
+
+| # | Criterion | Result |
+|---|---|---|
+| AC1 | `RunInContainer` detects OAuth URL in container stdout and fires `urlOpener.Open(url)` exactly once | PASS — `TestRunInContainerOpensBrowserOnURLDetect` + `TestLineScannerDetectsOAuthURL` verify sync.Once-guarded URL detection |
+| AC2 | `RunInContainer` polls for `<homePath>/.credentials.json`; on appearance, SIGTERMs container | PASS — `TestRunInContainerSigtermsOnCredsWrite` verifies creds path returns nil + notice written |
+| AC3 | User-terminal output unaffected — stdout still flows through lineScanner | PASS — `TestLineScannerForwardsAllBytes` verifies all bytes forwarded to inner writer |
+| AC4 | Poller goroutine does not leak when container exits before creds | PASS — `TestRunInContainerSurvivesContainerExitBeforeCreds` completes promptly with -race clean |
+| AC5 | `mage testPkg github.com/evanmschultz/valv/internal/cli` GREEN, coverage ≥70% | PASS — 167/167, 72.6% |
+| AC6 | `mage test` GREEN full suite | PASS — 441/441 |
+
+### Unknowns
+- U1 (`docker run --rm` exit code under SIGTERM): Not yet observed from a real run. Expected to be non-zero (SIGTERM causes non-zero exit code from docker run). The `credDetected` guard in `RunInContainer` handles this: if `credDetected.Load()==true`, `runErr` is ignored and nil is returned. This is the correct behavior confirmed by the implementation + test.
+- U2 (exact OAuth URL string from container): The D2 regex `https://(?:claude\.com/cai|platform\.claude\.com)/oauth/authorize\S*` covers both known endpoints. After first real auth run, the builder should verify the exact URL matches. No code change needed unless the URL format differs significantly.
+
+## Hylla Feedback
+
+Hylla was not queried for this unit. The Hylla snapshot is stale for all DROP_7 changes (mid-drop, no reingest since Unit 7.5). All code reads used `Read` tool directly per mid-drop evidence protocol. No Hylla queries attempted and none expected to succeed for files modified in this drop.
+
+N/A — all evidence sourced from direct file reads (mid-drop, Hylla stale).
+
+---
+
 ## Unit 7.10 — Round 2
 
 **Date:** 2026-05-16

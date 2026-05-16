@@ -565,7 +565,7 @@ R1 QA proof PASS + R1 QA falsification PASS with one CONFIRMED counterexample (A
 
 ### Unit 7.11 — Auth UX polish: host browser auto-open + clean exit on creds-write
 
-**state:** todo
+**state:** done
 **blocked_by:** 7.5 R2 (done) — depends on the `RunInContainer` orchestration code
 **paths:** `internal/cli/claude_auth.go`, `internal/cli/claude_auth_test.go`, possibly a small new helper file in `internal/cli/` (planner's choice)
 **packages:** `internal/cli`
