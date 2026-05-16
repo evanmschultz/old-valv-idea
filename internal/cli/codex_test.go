@@ -379,6 +379,14 @@ func TestRootDebugFlagIsNotPassedThroughToCodex(t *testing.T) {
 func TestRootDebugFlagIsNotPassedThroughToInteractiveCodexLaunch(t *testing.T) {
 	t.Setenv("VALV_CODEX_IMAGE", "valv-codex-dev:dev")
 	t.Setenv(valvTestSkipHostCodexLoginEnv, "1")
+	// VALV_REAL_HOME controls the shared-home staging path used by codexservice.
+	// Without this override, sharedCodexStateHome resolves to $HOME/.codex and
+	// PrepareRuntime copies the developer's entire ~/.codex to a tmpfs-backed
+	// t.TempDir(), which fails with "no space left on device" when the dev's
+	// ~/.codex is large. Pointing VALV_REAL_HOME at a fresh empty temp dir
+	// ensures the staging step copies nothing, eliminating the disk-space
+	// dependency entirely.
+	t.Setenv("VALV_REAL_HOME", t.TempDir())
 
 	paths := testCodexPaths(t)
 	projectRoot := filepath.Join(t.TempDir(), "project")

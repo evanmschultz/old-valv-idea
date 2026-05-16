@@ -81,6 +81,7 @@ func openImagesService(cmd *cobra.Command, paths config.Paths, provider domain.P
 		UserID:     os.Getuid(),
 		GroupID:    os.Getgid(),
 		Logger:     LoggerFromContext(cmd.Context()),
+		CachePath:  filepath.Join(paths.CachesDir, "version-cache.json"),
 	}
 	switch provider {
 	case domain.ProviderCodex:
