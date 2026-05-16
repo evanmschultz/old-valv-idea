@@ -364,3 +364,114 @@ None CONFIRMED.
 ## Hylla Feedback
 
 None — Hylla was not queried for this Unit 7.3 falsification round. All evidence came from direct `Read` of files committed AFTER snapshot 8 (`c33da3c` and `c3642f3` are both post-ingest), so Hylla would have served stale results for the symbols-under-review. The mid-drop staleness pattern documented in Unit 7.1's falsification round (this file's lines 114-122) and Unit 7.2's (lines 242) continues to apply: any "is the code currently shaped this way?" question goes to `git diff` / direct file read, not Hylla, until drop-end reingest. Not a Hylla bug.
+
+---
+
+## Unit 7.1 — Round 2
+
+**Date:** 2026-05-15
+**Verdict:** pass
+
+### Attack Attempts
+
+Each numbered vector from the spawn prompt is enumerated below. CONFIRMED = counterexample produced. REFUTED = attack tried, evidence rules it out. EXHAUSTED = honest attempt, no counterexample constructable.
+
+1. **Empty `.credentials.json` (0 bytes).** REFUTED. `claude_auth.go:115-118` reads `info, statErr := os.Stat(credPath)` then `if statErr == nil && info.Size() > 0`. A zero-byte file passes the stat-no-error check but FAILS `info.Size() > 0` (`0 > 0` is false), so the function falls through to the TTY guard and the auth path. The size check correctly distinguishes "file exists but empty" from "file exists with content". No counterexample.
+
+2. **`.credentials.json` is a directory.** REFUTED with nuance. If `<homePath>/.credentials.json` is a directory, `os.Stat` returns no error and `info.Size()` for a directory is implementation-dependent on macOS (typically the directory entry size, which is non-zero — usually 64+ bytes on APFS). So `info.Size() > 0` is true and the function returns nil — treating the directory as "already authed". This is a real edge case BUT the next consumer (Unit 7.2's `readClaudeAuthToken`) opens the path with `os.ReadFile` which returns `EISDIR` for directories; the service then logs "claude auth token unreadable" and gracefully skips the env var injection (PLAN.md AC4). The container launches unauthed; the user sees a clean auth-failure inside the container. Not a panic, not a silent token-with-garbage. Acceptable for v0.1.0 — the failure surfaces, just one layer deeper. The `ensureCodexAccountReady` twin has the same shape (it trusts `LoginStatus` to make the binary determination). Not a counterexample; flag for a future hardening pass if dir-shaped corruption becomes plausible.
+
+3. **`.credentials.json` exists but contains garbage.** REFUTED. Size > 0 check passes and `ensureClaudeAccountReady` returns nil — exactly as the design intends ("if creds appear to exist, trust them; let the downstream consumer decide whether the contents parse"). The user-visible failure mode: Unit 7.2's `readClaudeAuthToken` (`internal/services/claude/service.go`) hits a JSON parse error, `service_test.go::TestRunOmitsClaudeCodeOAuthTokenWhenCredentialsMalformed` confirms `Run` returns nil and the env var is absent. Container launches unauthed; `claude` inside the container then surfaces the unauth state to the user with its own messaging. Layered failure surfacing is acceptable for v0.1.0. No counterexample.
+
+4. **Race between stat and subsequent launch.** REFUTED (acceptable). `ensureClaudeAccountReady` does `os.Stat` at `:115` and returns nil at `:117`. A concurrent `valv account logout claude work` between this stat and the subsequent container launch could `wipeClaudeCredentials` the file. `readClaudeAuthToken` in `services/claude/service.go` handles missing file gracefully (PLAN.md AC4: graceful skip → container launches unauthed). No panic, no token-stale state. Acceptable race window for v0.1.0 single-user macOS desktop UX. No counterexample.
+
+5. **Stat error other than IsNotExist.** REFUTED. `claude_auth.go:119-121` reads `if statErr != nil && !os.IsNotExist(statErr) { return fmt.Errorf("check claude credentials for account %q: %w", account.Name, statErr) }`. The `%w` verb wraps the underlying error so `errors.Is(err, os.ErrPermission)` works for callers. EACCES, EIO, ENOTDIR (when an intermediate path component is a regular file), and any other non-NotExist stat failure all propagate wrapped. No swallow. No counterexample.
+
+6. **SkipLogin ordering.** REFUTED. Reading `ensureClaudeAccountReady` body (`claude_auth.go:110-162`):
+   - `:111-113`: `if options.SkipLogin { return nil }` — FIRST gate.
+   - `:114-118`: stat + already-authed check — SECOND gate.
+   - `:119-121`: stat-error propagation.
+   - `:122-127`: TTY guard.
+   - `:128+`: setup-token flow.
+   Ordering is correct: SkipLogin short-circuits before any filesystem touch (no unnecessary stat). An already-authed account with `SkipLogin=true` correctly returns nil at `:112` without statting. A not-authed account with `SkipLogin=true` also correctly returns nil — SkipLogin takes priority over the stat-then-auth path. Confirmed by `TestEnsureClaudeAccountReadyRespectsSkipLogin` (`claude_auth_test.go:117-142`) which writes creds + sets `SkipLogin=true` and asserts nil + zero runner hits + creds preserved. No counterexample.
+
+7. **`TestEnsureClaudeAccountReadyMissingCredsAndNonTTYFailsTTY` assertions.** REFUTED. The test (`claude_auth_test.go:182-203`) does:
+   - `dir := t.TempDir()` — empty profile home (line 185). No creds file written.
+   - `err := ensureClaudeAccountReady(cmd, account, accountAuthOptions{})` (line 193) — non-TTY cmd.
+   - `if !strings.Contains(err.Error(), "TTY")` (line 197) — asserts the SPECIFIC TTY error string, not just "any error".
+   - `if stub.setupTokenHits != 0` (line 200) — asserts runner was NOT invoked.
+   Empty home → stat returns IsNotExist → already-authed check fails (passes through) → TTY guard fires. Test correctly exercises the "auth needed but cannot prompt" path. No counterexample.
+
+8. **`TestEnsureClaudeAccountReadySkipsWhenAlreadyAuthed` assertions.** REFUTED. The test (`claude_auth_test.go:208-228`) does:
+   - `os.WriteFile(credPath, []byte(`{"claudeAiAccessToken":"tok"}`), 0o600)` (line 213) — writes a NON-EMPTY creds file BEFORE the call.
+   - `ensureClaudeAccountReady(cmd, account, accountAuthOptions{})` (line 222) — non-SkipLogin.
+   - `if err != nil { t.Fatalf("...want nil", err) }` (lines 222-224) — asserts return is nil.
+   - `if stub.setupTokenHits != 0 || stub.extractHits != 0` (line 225) — asserts BOTH runner methods uninvoked.
+   This is exactly the Round 2 fix's primary coverage test. No counterexample.
+
+9. **`loginClaudeAccount` regression.** REFUTED. `git diff HEAD~1 HEAD -- internal/cli/claude_auth.go` shows ONLY `ensureClaudeAccountReady` (the doc comment + the function body around lines 100-127) changed. `loginClaudeAccount` body (lines 166-204 in current state) is byte-for-byte identical to its Round 1 state: `wipeClaudeCredentials` at `:167-169`, notice at `:170-177`, `RunSetupToken` at `:178-181`, `user.Current` at `:182-185`, `ExtractKeychainToken` at `:186-189`, empty-token sentinel at `:190-192`, `writeClaudeCredentials` at `:193-195`, `ReadAccountIdentity` verify at `:196-202`. The wipe + force-fresh flow for explicit `valv account login` is preserved. No counterexample.
+
+10. **`account add` semantic shift.** REFUTED, confirmed intentional. `runManageAccountAdd` in `manage.go` calls `ensureManagedAccountReady` (Hylla `runManageAccountAdd` node confirms the `code.depends_on` edge to `ensureManagedAccountReady`). After Round 2, `valv account add claude work` against an existing authed `work` profile now returns nil at the already-authed check — no re-auth. Compare with `ensureCodexAccountReady` (`account_auth.go:70-107`): it calls `LoginStatus`, returns nil if `loggedIn==true` at `:82-84`. Same semantic. The Round 2 fix brings Claude to parity with Codex. The behavior is also defensible standalone: `account add` is a create-or-ensure idempotent operation; re-running it on an existing authed account should not invalidate the auth. Confirmed as intended, not a regression.
+
+11. **`mage testPkg ./internal/cli` re-run.** EXHAUSTED — cannot re-run from QA subagent context (per safety / `mage`-only orchestration policy). Relying on the builder's worklog claim (worklog line 176: "GREEN (154/154 pass, 70.4% coverage)") and on the test additions visible in `claude_auth_test.go`. The four new tests are concretely visible in source:
+   - `TestEnsureClaudeAccountReadyAlreadyAuthedReturnsNilEvenNonTTY` (`:149-177`),
+   - `TestEnsureClaudeAccountReadyMissingCredsAndNonTTYFailsTTY` (`:182-203`),
+   - `TestEnsureClaudeAccountReadySkipsWhenAlreadyAuthed` (`:208-228`),
+   - `TestEnsureClaudeAccountReadyAuthsWhenCredentialsMissing` (`:236-255`).
+   Plus one removal (`TestEnsureClaudeAccountReadyNonTTYDoesNotWipe` — worklog line 167-168). Net +3. Count is consistent with 151→154. No counterexample.
+
+12. **No raw `go` invocations.** REFUTED. Worklog lines 175-176 explicitly cite `mage testPkg ./internal/cli` for both the RED and GREEN runs. No `go test`, `go vet`, `go build` strings appear anywhere in the Round 2 worklog section. Compliant with AGENTS.md § 13 / project CLAUDE.md mage-only rule. No counterexample.
+
+13. **Coverage genuine.** REFUTED. The 4 new tests are behavior-asserting, not trivial:
+   - `TestEnsureClaudeAccountReadyAlreadyAuthedReturnsNilEvenNonTTY`: asserts nil return + `setupTokenHits == 0` + `extractHits == 0` + creds file preserved. Three orthogonal assertions over the new code path.
+   - `TestEnsureClaudeAccountReadyMissingCredsAndNonTTYFailsTTY`: asserts TTY error mention + `setupTokenHits == 0`. Pins the fall-through-to-TTY-guard path.
+   - `TestEnsureClaudeAccountReadySkipsWhenAlreadyAuthed`: dual-counter assertion `setup=0 AND extract=0`. Pins the early-return invariant.
+   - `TestEnsureClaudeAccountReadyAuthsWhenCredentialsMissing`: asserts "creds-missing reaches auth gate" via TTY-error proxy. Distinguishes "early-return swallowed the case" from "case reached auth and failed correctly".
+   Each test pins a distinct branch of the new 4-line stat+size check (`:114-121`). Coverage delta from 70.3% → 70.4% is small in proportion but the new statements ARE the new branch — small delta is correct, not suspicious. No counterexample.
+
+14. **`TestEnsureClaudeAccountReadyRejectsNonTTY` (Round 1 inherited).** REFUTED. The test (`claude_auth_test.go:94-112`) does:
+   - `account := domain.Profile{Name: "personal", HomePath: t.TempDir()}` (line 101) — `t.TempDir()` returns a freshly-created EMPTY directory. No `os.WriteFile` for `.credentials.json` precedes the call.
+   - Empty profile home → `os.Stat` returns IsNotExist → already-authed check passes through (falls through to TTY guard) → TTY guard fires.
+   - Test asserts TTY-error + `setupTokenHits == 0`.
+   The builder's claim that this test "required no modification" is verified: empty home + non-TTY produces a TTY error regardless of Round 1 vs Round 2 behavior. The already-authed check has zero observable effect on this test because the precondition (creds present) is absent. No counterexample.
+
+### Additional Adversarial Probes
+
+Three extra attacks beyond the spawn-prompt's 14 vectors:
+
+A1. **`strings.TrimSpace(account.HomePath)` consistency.** REFUTED. Round 2 uses `filepath.Join(strings.TrimSpace(account.HomePath), ".credentials.json")` at `:114`. This matches `wipeClaudeCredentials` (`:224`) and `writeClaudeCredentials` (`:214`) — all three resolve the same credPath. A trailing-whitespace HomePath would resolve consistently across stat/write/wipe. No mismatch counterexample.
+
+A2. **Race between stat and read by Unit 7.2's `readClaudeAuthToken`.** REFUTED. Even if the stat passes at `ensureClaudeAccountReady` time and the file is deleted before Unit 7.2's read, `readClaudeAuthToken` handles missing file as "no token → omit env var → log debug" (PLAN.md AC4). No panic. Same race-handling shape as Attack 4 — no counterexample.
+
+A3. **`info.Mode()` not checked.** REFUTED but flagged. The stat check only inspects `Size()`. A file with mode `0o000` (no read permission) would pass the size > 0 check and `ensureClaudeAccountReady` would return nil — but Unit 7.2's `readClaudeAuthToken` would then fail with EACCES on `os.ReadFile`, gracefully degrading to unauthed container. Same surfacing pattern as Attack 2 (directory case). Not a counterexample for THIS unit; layered defense at the consumer.
+
+### Counterexamples
+
+None CONFIRMED.
+
+### Findings Summary
+
+- **Attack 2 (directory case)** — minor edge case. Defense-in-depth at Unit 7.2's `readClaudeAuthToken` covers it (returns `EISDIR` → graceful skip → container launches unauthed). Not blocking.
+- **Attack A3 (mode 0o000 case)** — same shape. Same layered defense covers it. Not blocking.
+- **Attack 10 (`account add` semantic shift)** — INTENTIONAL semantic change, brings Claude to parity with Codex. Confirmed as intended via Codex-twin comparison. Worth noting in the release notes if this drop ships standalone.
+
+### Verdict
+
+**pass.** Unit 7.1 Round 2 holds against all 14 spawn-prompt vectors plus 3 additional adversarial probes. The fix is byte-for-byte structurally correct:
+- Unconditional wipe removed from `ensureClaudeAccountReady` (`git diff` confirms the deletion).
+- Already-authed check correctly placed AFTER SkipLogin (no unnecessary stat) and BEFORE TTY guard (no spurious TTY error for already-authed accounts).
+- `info.Size() > 0` correctly distinguishes empty-file corruption from real authed state.
+- Non-IsNotExist stat errors wrap with `%w` and propagate (no swallow).
+- `loginClaudeAccount` unchanged — wipe + force-fresh preserved for explicit `valv account login` (`git diff` confirms).
+- `account add` semantic now mirrors Codex (idempotent ensure, not force re-auth).
+
+Four new behavior-asserting tests pin every branch of the new check. Test count delta (+3 net = 151→154) is consistent. Coverage delta (70.3% → 70.4%) is small in proportion but proportional to the small new-branch surface — not suspicious. Mage-only invocation honored.
+
+The original `valv account switch claude <existing-name>` forced re-auth bug is correctly fixed at the right layer with the right semantics.
+
+## Hylla Feedback
+
+- **Query:** `hylla_search_keyword` for `runManageAccountSwitch` (fields=summary/docstring/content).
+  - **Missed because:** First attempt with default fields returned zero results — Hylla's `hide_tests` + `public_only` defaults plus content-search filter on a private function in a package whose summaries don't mention "runManageAccountSwitch" by name yielded nothing. Adding `visibility_mode=include_private` and `fields=["content"]` returned the node immediately.
+  - **Worked via:** `hylla_search_keyword` with `visibility_mode=include_private` + `fields=["content"]`, then `hylla_node_full` for the dependency edges.
+  - **Suggestion:** Default `visibility_mode` to `include_private` for `tail_symbol`-style queries (the symbol name alone signals deliberate intent). Or surface a hint in the response when zero results came back due to a visibility filter.
+

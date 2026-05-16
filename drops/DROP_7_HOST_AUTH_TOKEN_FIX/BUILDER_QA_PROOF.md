@@ -233,3 +233,73 @@ PASS. All 11 spawn-brief acceptance criteria verified by file:line citation and 
 ### Hylla Feedback
 
 None — Hylla answered everything needed. Files in this drop are mid-stream (post-edit, pre-ingest) so `Read` is the canonical evidence path per the drop-mid protocol. No Hylla queries fell back.
+
+---
+
+## Unit 7.1 — Round 2
+
+**Date:** 2026-05-15
+**Reviewer:** go-qa-proof-agent
+**Verdict:** pass
+
+### Bug fix scope
+
+Round 2 fixes a Phase 6 smoke-test UX bug: `valv account switch claude <existing-name>` triggered full OAuth re-auth instead of binding to an already-authed account. Root cause: `ensureClaudeAccountReady` had no already-authed early-return — it unconditionally wiped `.credentials.json` and ran `setup-token` on every call. Fix mirrors the `ensureCodexAccountReady` early-return-when-authed pattern (`account_auth.go:78-83`): check existing credential state first, return nil when authed, only run the auth flow when credentials are missing.
+
+### Acceptance criteria verification
+
+| # | Criterion | Evidence (file:line) | Result |
+|---|---|---|---|
+| 1 | `ensureClaudeAccountReady` ordering: SkipLogin → already-authed → TTY guard → notice → RunSetupToken → user.Current → ExtractKeychainToken → empty-token sentinel → write | `internal/cli/claude_auth.go:110-162` walked step-by-step: SkipLogin `:111-113`; already-authed stat+size+error-propagate `:114-121`; TTY guard `:122-127`; notice `:128-135`; RunSetupToken `:136-139`; user.Current `:140-143`; ExtractKeychainToken `:144-147`; empty-token sentinel `:148-150`; writeClaudeCredentials `:151-153`; ReadAccountIdentity verify `:154-160` | pass |
+| 2 | Already-authed check uses `os.Stat(<homePath>/.credentials.json)` + `info.Size() > 0`; non-NotExist stat errors propagate wrapped | `claude_auth.go:114-121` — `credPath := filepath.Join(strings.TrimSpace(account.HomePath), ".credentials.json")`; `info, statErr := os.Stat(credPath)`; `if statErr == nil && info.Size() > 0 { return nil }`; `if statErr != nil && !os.IsNotExist(statErr) { return fmt.Errorf("check claude credentials for account %q: %w", account.Name, statErr) }` | pass |
+| 3 | `wipeClaudeCredentials` call REMOVED from `ensureClaudeAccountReady` body | Walked `claude_auth.go:110-162` end-to-end — zero `wipeClaudeCredentials` invocations remain. Function `wipeClaudeCredentials` itself preserved at `:223-229` for use by `logoutManagedAccount` and `loginClaudeAccount` | pass |
+| 4 | `loginClaudeAccount` UNCHANGED — still wipes then runs setup-token then extracts and writes | `claude_auth.go:166-204`: wipe `:167-169`; notice `:170-177`; RunSetupToken `:179-181`; user.Current `:182-185`; ExtractKeychainToken `:186-189`; empty-token sentinel `:190-192`; writeClaudeCredentials `:193-195`; ReadAccountIdentity `:196-203`. Matches Unit 7.1/7.3 Round 1 pipeline exactly. No TTY guard, no SkipLogin — confirmed by `TestLoginClaudeAccountSkipsNonTTYGuard` `claude_auth_test.go:399-421` | pass |
+| 5 | `mage testPkg ./internal/cli` green; 154 tests; ≥70% coverage | Live rerun: `tests: 154 passed: 154 failed: 0`; `Minimum package coverage: 60.0%`; `github.com/evanmschultz/valv/internal/cli 70.4%`; `[SUCCESS] All tests passed` (87.01s) | pass |
+| 6 | `TestEnsureClaudeAccountReadySkipsWhenAlreadyAuthed` added; asserts nil return AND zero runner calls | `claude_auth_test.go:208-228` — writes fixture `{"claudeAiAccessToken":"tok"}`, calls function with non-TTY cmd, asserts `err == nil` then `stub.setupTokenHits != 0 \|\| stub.extractHits != 0` rejected. Both runner methods proven unreachable | pass |
+| 7 | `TestEnsureClaudeAccountReadyAuthsWhenCredentialsMissing` added; proves already-authed check does NOT short-circuit when creds absent | `claude_auth_test.go:236-255` — empty `t.TempDir()` (no creds), non-TTY cmd, asserts error contains "TTY". Per inline docstring at `:230-235`: TTY mention proves the function passed the already-authed check and reached the next gate. The test name "Auths" describes intent of the success path; the assertion verifies the gate ordering via the TTY guard (success path itself is covered by `TestLoginClaudeAccountWipesAndRunsSetupTokenAndExtractsAndWrites`) | pass |
+| 8 | `TestEnsureClaudeAccountReadyAlreadyAuthedReturnsNilEvenNonTTY` added; proves already-authed check fires BEFORE the TTY guard | `claude_auth_test.go:149-177` — writes fixture creds, non-TTY cmd (`bytes.Buffer` in+out), asserts `err == nil`, both runner methods zero hits, AND creds file preserved post-call | pass |
+| 9 | `TestEnsureClaudeAccountReadyMissingCredsAndNonTTYFailsTTY` added; proves TTY guard still fires when auth is actually needed | `claude_auth_test.go:182-203` — empty `t.TempDir()`, non-TTY cmd, asserts error contains "TTY" AND `stub.setupTokenHits == 0` (TTY guard blocks before runner) | pass |
+| 10 | `TestEnsureClaudeAccountReadyNonTTYDoesNotWipe` REMOVED | Full file scan `claude_auth_test.go:1-555` — no test function with that name. Its prior assertion ("non-TTY caller with existing creds gets TTY error AND creds preserved") is invalidated by the new contract: under Round 2, that exact scenario returns nil at the already-authed check before the TTY guard runs. Replacement tests `TestEnsureClaudeAccountReadyAlreadyAuthedReturnsNilEvenNonTTY` (creds present + non-TTY → nil) and `TestEnsureClaudeAccountReadyMissingCredsAndNonTTYFailsTTY` (creds absent + non-TTY → TTY error) together cover both halves of the old test's matrix correctly | pass |
+
+### Call-site verification (switch-no-op behavior)
+
+Walked the path from `valv account switch claude <name>` to `ensureClaudeAccountReady`:
+
+- `runManageAccountSwitch` (`internal/cli/manage.go:561-604`) resolves the target profile then calls `ensureManagedAccountReady(cmd, provider, account, accountAuthOptions{SkipLogin: skipLogin, Paths: paths})` at `:600`.
+- `ensureManagedAccountReady` (`internal/cli/account_auth.go:37-46`) dispatches on provider and routes `domain.ProviderClaude` to `ensureClaudeAccountReady` at `:41-42`.
+- `ensureClaudeAccountReady` Round 2 body: with creds already on disk in `<account.HomePath>/.credentials.json`, the stat-and-size check at `claude_auth.go:114-118` fires and returns nil before TTY guard or any runner invocation.
+- Net effect: `valv account switch claude work` on an already-authed account is now a clean no-op through to `runManageBind` (`manage.go:603`), which performs the binding update without any re-auth flow. This matches the Codex behavior produced by `ensureCodexAccountReady`'s `loggedIn` early-return at `account_auth.go:82-84`.
+
+The switch-no-op behavior is correctly tested at the unit level by `TestEnsureClaudeAccountReadySkipsWhenAlreadyAuthed` and `TestEnsureClaudeAccountReadyAlreadyAuthedReturnsNilEvenNonTTY` — both fixtures place `{"claudeAiAccessToken":"..."}` at the account's `HomePath/.credentials.json` and prove zero runner invocations.
+
+### Worklog numerical claims
+
+| Claim | Verified |
+|---|---|
+| Production: ~+10 LOC | Net code delta in `ensureClaudeAccountReady`: 8 lines added (stat + size-check return + non-NotExist error propagation), 3 lines removed (the prior `wipeClaudeCredentials` call + its `if err` guard). Net ~+5 to ~+8 LOC against the function body; including the inline doc comment update at `:103-107` totals ~+10. Matches. |
+| Test: ~+80 LOC net | Test additions span `claude_auth_test.go:149-255` (`TestEnsureClaudeAccountReadyAlreadyAuthedReturnsNilEvenNonTTY` ~29 LOC, `TestEnsureClaudeAccountReadyMissingCredsAndNonTTYFailsTTY` ~22 LOC, `TestEnsureClaudeAccountReadySkipsWhenAlreadyAuthed` ~21 LOC, `TestEnsureClaudeAccountReadyAuthsWhenCredentialsMissing` ~20 LOC) = ~92 LOC added; removed `TestEnsureClaudeAccountReadyNonTTYDoesNotWipe` was ~12 LOC. Net ~+80 LOC. Matches. |
+| Test count: 151 → 154 (+3 net) | Live mage: `tests: 154`. Round 1 (Unit 7.3) closed at 151. Delta = +3 (4 added, 1 removed). Matches. |
+| Coverage: 70.3% → 70.4% | Live mage: `github.com/evanmschultz/valv/internal/cli 70.4%`. Matches. |
+
+### Findings
+
+None.
+
+### Gaps
+
+None.
+
+### Observations
+
+- **Already-authed check is presence-only, not validity-only.** The stat+size check at `claude_auth.go:114-118` treats any non-empty `.credentials.json` as "authed" — it does NOT parse the JSON or verify the token field is non-empty. A malformed-but-non-empty file would short-circuit ensure and return nil. The downstream consumer (`internal/services/claude/service.go::readClaudeAuthToken`) handles malformed JSON via graceful-skip (Unit 7.2 design), so the container would launch unauthed rather than fail. This is weaker than the Codex template (which uses `LoginStatus` to actually query codex CLI state), but the spawn-prompt explicitly framed Round 2 as a presence-style mirror and the worklog Design Notes acknowledge this trade-off ("partial/corrupt write should not block re-auth"). Acceptable for Round 2 scope; revisit if Phase 6 smoke testing surfaces malformed-creds edge cases.
+- **`TestEnsureClaudeAccountReadyAuthsWhenCredentialsMissing` test name vs. assertion.** The test name promises "Auths When Credentials Missing", but the actual assertion verifies the TTY guard fires (since the test runs in a non-TTY context). The inline docstring at `:230-235` explains this clearly: the TTY-error mention proves the function passed the already-authed check and reached the next gate. The full success path (RunSetupToken + extract + write) is covered by `TestLoginClaudeAccountWipesAndRunsSetupTokenAndExtractsAndWrites` at `:269-312` which uses `loginClaudeAccount` to bypass the TTY guard. Coverage strategy is sound; test name slightly misleading but docstring rescues it. Non-blocking style nit.
+- **SkipLogin precedence preserved.** SkipLogin still runs BEFORE the already-authed check (`claude_auth.go:111-113` before `:114-121`), so a caller with SkipLogin=true and no creds still returns nil (consistent with Unit 7.1 Round 1 semantics). This is the correct ordering: SkipLogin is an explicit caller override, already-authed is a state-derived shortcut. Both reach the same nil-return.
+- **`loginClaudeAccount` deliberately retains the wipe-first contract.** This is correct by design: explicit `valv account login` is a force-fresh action that should always re-authenticate, even when creds already exist. Only the implicit `account switch` path needed the early-return — and that path goes through `ensureClaudeAccountReady`, not `loginClaudeAccount`.
+
+### Summary
+
+PASS. All 10 acceptance criteria verified by file:line citation and live `mage testPkg ./internal/cli` rerun (154/154 pass, 70.4% coverage). Round 2 fix correctly mirrors the Codex `ensureCodexAccountReady` early-return-when-authed pattern at a behavioral level: stat+size presence check replaces a real `LoginStatus` call, with the trade-offs documented in Observations. The switch-no-op UX bug is now closed: `valv account switch claude <name>` on an already-authed account returns at `claude_auth.go:117` before any wipe, setup-token, or extract step runs. `loginClaudeAccount`'s force-fresh wipe contract is preserved unchanged. Test matrix correctly covers both halves (creds-present → nil vs. creds-absent → TTY error) via the four new tests plus the removed test's matrix replaced.
+
+### Hylla Feedback
+
+None — task touched only files mid-stream in the drop (post-edit, pre-ingest), so `Read` is the canonical evidence path per the drop-mid protocol. No Hylla queries fell back. One grep/rg invocation was sandbox-blocked when locating `runManageAccountSwitch` in `manage.go`; resolved by reading a 300-line offset window directly (`manage.go:400-700` covered the call site). Not a Hylla issue — orchestrator harness tool restriction.
