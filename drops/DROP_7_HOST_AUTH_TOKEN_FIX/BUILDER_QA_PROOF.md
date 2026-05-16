@@ -303,3 +303,107 @@ PASS. All 10 acceptance criteria verified by file:line citation and live `mage t
 ### Hylla Feedback
 
 None — task touched only files mid-stream in the drop (post-edit, pre-ingest), so `Read` is the canonical evidence path per the drop-mid protocol. No Hylla queries fell back. One grep/rg invocation was sandbox-blocked when locating `runManageAccountSwitch` in `manage.go`; resolved by reading a 300-line offset window directly (`manage.go:400-700` covered the call site). Not a Hylla issue — orchestrator harness tool restriction.
+
+---
+
+## Unit 7.1 — Round 3
+
+**Date:** 2026-05-15
+**Reviewer:** go-qa-proof-agent
+**Verdict:** pass
+
+Round 3 is a design pivot following the dev smoke test 2026-05-15: `claude setup-token` produces `user:inference`-scoped tokens (insufficient for interactive container claude), and wrapping the keychain blob in `{"claudeAiAccessToken":"<blob>"}` broke container claude's native `.credentials.json` parsing. The fix: (a) switch container args to `auth login` (full session scope), (b) write the keychain blob VERBATIM to `.credentials.json` with no wrapping, no `json.Marshal`, no struct.
+
+### Acceptance criteria verification
+
+| # | Criterion | Evidence (file:line) | Result |
+|---|---|---|---|
+| 1 | `mage testPkg ./internal/cli` green, ≥70% coverage | live rerun: `tests: 154 passed: 154`, `github.com/evanmschultz/valv/internal/cli 70.4%` | pass |
+| 2 | Container args literal `"auth", "login"` (not `"setup-token"`) | `claude_auth.go:50` — `runClaudeHostCommand(ctx, homePath, stdin, stdout, stderr, "auth", "login")` | pass |
+| 3 | Interface method renamed `RunSetupToken` → `RunAuthLogin` | interface `claude_auth.go:30-33`; method body `:43-52`; call sites `:133` (`ensureClaudeAccountReady`) and `:175` (`loginClaudeAccount`); test stub `claude_auth_test.go:35-38` | pass |
+| 4 | `writeClaudeCredentials` writes verbatim via single `os.WriteFile` (no `json.Marshal`, no wrapping) | `claude_auth.go:207-213` — function body is exactly `credPath := filepath.Join(...); os.WriteFile(credPath, []byte(credentialsBlob), 0o600)` plus error wrap. No `json.Marshal`. No struct alloc. | pass |
+| 5 | `encoding/json` import removed from `claude_auth.go` | import block `claude_auth.go:3-20` — `bytes`, `context`, `fmt`, `io`, `os`, `os/exec`, `os/user`, `path/filepath`, `strings` + three external packages. No `encoding/json` | pass |
+| 6 | `claudeCredentials` struct deleted | full-file scan confirms no `type claudeCredentials` declaration anywhere in `claude_auth.go` | pass |
+| 7 | Empty-token sentinel preserved | `ExtractKeychainToken` body `claude_auth.go:78-81` returns error when trimmed token is empty; downstream re-check at `:144-146` and `:186-188` returns wrapped error if extractor returns `("", nil)` | pass |
+| 8 | File mode `0o600` (owner-only) | `claude_auth.go:209` — `os.WriteFile(credPath, []byte(credentialsBlob), 0o600)` | pass |
+| 9 | Test fake claude script expects `auth login` args | `claude_auth_test.go:75` — `if [ "${1:-}" = "auth" ] && [ "${2:-}" = "login" ]; then` | pass |
+| 10 | Renamed test function + updated args/log assertion | `claude_auth_test.go:526` — `TestSystemClaudeAccountAuthRunnerRunAuthLoginUsesCLAUDE_CONFIG_DIR`. Method call line 533 — `systemClaudeAccountAuthRunner{}.RunAuthLogin(...)`. Log assertion line 551 — `strings.Contains(string(content), "args:auth login")` | pass |
+| 11 | All `runner.RunAuthLogin` call sites match the renamed method | `ensureClaudeAccountReady` line 133; `loginClaudeAccount` line 175; preflight test still uses `"auth", "login"` args at `:508`. No residual `RunSetupToken` reference in `internal/cli/` (verified by full file scan of `claude_auth.go`+`claude_auth_test.go`) | pass |
+
+### Idiomatic Go checks
+
+- **No `json.Marshal` / `json.Unmarshal` in `claude_auth.go`** — full file scan confirms zero matches. The verbatim-write design eliminates the json package dependency entirely from this file.
+- **No token logging** — `writeClaudeCredentials` only references `credPath` in error messages, never the blob. `ExtractKeychainToken` errors reference `security` command output, never the token value.
+- **Doc comments updated** — `claudeKeychainService:23-24`, `RunAuthLogin:43-48`, `ExtractKeychainToken:54-60`, `ensureClaudeAccountReady:92-105`, `writeClaudeCredentials:202-206` all reflect the new `auth login` + verbatim semantics. Each starts with the identifier name per Go style.
+- **Imports cleanly pruned** — `encoding/json` removed; `os`, `os/exec`, `os/user`, `path/filepath`, `bytes` retained because still used (`os.WriteFile`, `os.Remove`, `os.Stat`, `os.IsNotExist`, `exec.LookPath`, `exec.CommandContext`, `user.Current`, `filepath.Join`, `bytes.Buffer`).
+- **Error wrapping** — every error path uses `%w` (`claude_auth.go:74, 76, 80, 117, 119-121, 134, 138, 142, 148, 152, 164, 176, 180, 184, 190, 194, 211, 220, 237-240`).
+
+### Observations
+
+- **Stale test naming** — three existing tests retain "SetupToken" in their names: `TestLoginClaudeAccountWipesAndRunsSetupTokenAndExtractsAndWrites` (line 269), `TestLoginClaudeAccountFailsWhenRunSetupTokenErrors` (line 317), and the stub struct's `setupTokenErr` / `setupTokenHits` fields (line 27-33). The worklog acknowledges this implicitly (only the one explicit rename was performed). All three tests still assert correct behavior against the renamed `RunAuthLogin` method via the stub. **This is a code-cleanliness gripe, not a verdict-blocker** — production interface + method name + call sites are all correctly renamed; only stale identifiers remain inside tests. A future refactor pass should rename them for consistency, but no functional impact.
+- **`TestLoginClaudeAccountWipesAndRunsSetupTokenAndExtractsAndWrites` correctness under verbatim write** — stub returns `extractToken: "fresh-token"` (a bare string, not real JSON). With the old wrapping write, file content was `{"claudeAiAccessToken":"fresh-token"}`; with the new verbatim write, file content is exactly `fresh-token`. Both pass the test's `strings.Contains(string(data), "fresh-token")` assertion. Worklog explicitly calls this out — acceptable since the stub isolates the write path and live keychain integration is smoke-test territory.
+
+### Verdict rationale
+
+PASS. All 11 acceptance criteria verified by file:line citation and live `mage testPkg ./internal/cli` rerun (154/154 pass, 70.4% coverage — unchanged test count vs Round 2 since this is a behavioral pivot, not an addition/removal). Container args `"auth", "login"` (line 50) + verbatim `os.WriteFile` (line 209) + deleted `claudeCredentials` struct + deleted `encoding/json` import together close the design pivot. Empty-token sentinel preserved. File mode `0o600` preserved. Interface rename propagated cleanly across production and the one test that explicitly references the method name.
+
+### Hylla Feedback
+
+None — Hylla answered the bind-mount question on first query. `hylla_node_full` on `ContainerClaudeDir` confirmed the constant value `/home/valv/.claude`; `hylla_node_full` on `PrepareRuntime` returned the full function body showing `dockeradapter.NewMountSpec(runtimeClaudeHome, ContainerClaudeDir, false)` in the mounts slice. One earlier `hylla_search_keyword` query for `PrepareRuntime claude mount` ranked codex-side variants higher than the claude-side function (probably because the codex package was indexed first and the summary keywords cluster); a more specific `ContainerClaudeDir` query resolved the miss. Suggestion: when a query mentions a provider name (`claude`), keyword search could weight summaries containing the same provider token.
+
+---
+
+## Unit 7.2 — Round 2
+
+**Date:** 2026-05-15
+**Reviewer:** go-qa-proof-agent
+**Verdict:** pass
+
+Round 2 is a follow-on cleanup to Unit 7.1 Round 3's design pivot. With `.credentials.json` now written verbatim in the format container claude reads natively, the `CLAUDE_CODE_OAUTH_TOKEN` env-var injection layer is no longer needed and is fully removed.
+
+### Acceptance criteria verification
+
+| # | Criterion | Evidence (file:line) | Result |
+|---|---|---|---|
+| 1 | `readClaudeAuthToken` helper deleted from `service.go` | full-file scan of `internal/services/claude/service.go` (346 lines) confirms no `readClaudeAuthToken` function declaration anywhere. Last surviving function in the file is `sanitizeContainerPart:325` | pass |
+| 2 | `CLAUDE_CODE_OAUTH_TOKEN` env-var injection block deleted from `buildRequest` | `buildRequest` body `service.go:244-276` contains no env-injection code path. The `request.Env` field is set once at line 257 to `prepared.Env` (from `PrepareRuntime`) and never mutated for token injection. No `CLAUDE_CODE_OAUTH_TOKEN` string literal anywhere in file | pass |
+| 3 | `encoding/json` import removed from `service.go` | import block `service.go:3-21` — `context`, `errors`, `fmt`, `io`, `os`, `path/filepath`, `strings`, `time`, `unicode`, plus `log`, `docker`, `clauderuntime`, `domain`, `pathutil`, `projectdetect`. No `encoding/json` | pass |
+| 4 | `os` + `path/filepath` retained (still used elsewhere) | `os.TempDir()` at `service.go:96`; `filepath.Rel` at `:279`, `filepath.Separator` at `:286`, `filepath.Base` at `:317` | pass |
+| 5 | Three deleted tests removed from `service_test.go` | full-file scan of `internal/services/claude/service_test.go` (550 lines) confirms none of the three function names appear: `TestRunSetsClaudeCodeOAuthTokenWhenCredentialsPresent`, `TestRunOmitsClaudeCodeOAuthTokenWhenCredentialsMalformed`, `TestRunOmitsClaudeCodeOAuthTokenWhenCredentialsMissing` — all three absent | pass |
+| 6 | Test count = 17 | 14 top-level `func Test*` + 3 subtests in `TestNewRequiresDependencies` (cases "nil store", "nil executor", "empty image repository", lines 174-185) = 17. Matches mage output `tests: 17 passed: 17` | pass |
+| 7 | `service_test.go` imports cleanly pruned (no unused `os` / `path/filepath` / `encoding/json`) | import block `service_test.go:3-18` — `context`, `errors`, `fmt`, `io`, `strings`, `testing`, `time`, `log`, `docker`, `clauderuntime`, `domain`, `projectdetect`. No `os`, no `path/filepath`, no `encoding/json` | pass |
+| 8 | `mage testPkg ./internal/services/claude` green, ≥70% coverage | live rerun: `tests: 17 passed: 17`, `github.com/evanmschultz/valv/internal/services/claude 81.0%` | pass |
+| 9 | `mage testPkg ./internal/adapters/providers/claude` green, unchanged | live rerun: `tests: 21 passed: 21`, `github.com/evanmschultz/valv/internal/adapters/providers/claude 78.4%` | pass |
+| 10 | Bind-mount of `<managed-home>` → `/home/valv/.claude` unchanged | `PrepareRuntime` content (via Hylla `hylla_node_full`): `mounts := []dockeradapter.MountSpec{dockeradapter.NewMountSpec(runtimeClaudeHome, ContainerClaudeDir, false)}` where `ContainerClaudeDir = "/home/valv/.claude"` (const at `runtime.go`). `Service.Run` `service.go:127-130` passes `SharedHome: ""`, so `PrepareRuntime`'s `sharedHome := profileHome` path runs and `runtimeClaudeHome = sharedHome = profileHome`. Mount target unchanged from DROP_5 | pass |
+
+### Idiomatic Go checks
+
+- **Coverage delta** — 82.3% → 81.0% (−1.3 pp), explained by removing the three env-injection tests. Worklog acknowledges this; the floor (60% by mage's `Minimum package coverage`, 70% per AGENTS.md guidance) is comfortably cleared.
+- **`buildRequest` returns the runtime's env as-is** — `service.go:257` (`Env: prepared.Env`) — `prepared.Env` from `PrepareRuntime` includes `CLAUDE_CONFIG_DIR=/home/valv/.claude`, `HOME=/home/valv`, `LOGNAME=valv`, `TERM=...`, `USER=valv`. No token-injection step.
+- **No raw `go test` / `go build`** — verified via mage targets only.
+- **Error wrapping** — all errors in `service.go` use `%w` (`:78, 81, 84, 135, 142, 167, 178, 198, 203, 211, 213, 218, 220, 230, 232, 281`).
+
+### Observations
+
+- **Coverage gate alignment** — `mage testPkg` reports `Minimum package coverage: 60.0%`. AGENTS.md § 11 states the 70% per-package floor. Both packages clear 70% (cli 70.4%, services/claude 81.0%, adapters/providers/claude 78.4%). The 60% line in mage output is the per-target floor for testPkg; the 70% drop-end gate runs via `mage test`. No discrepancy with policy.
+- **Bind-mount path correctness end-to-end** — confirmed via two-step trace: (1) `service.go:127-133` builds `clauderuntime.PrepareRequest{ProfileHome: resolved.profile.HomePath, SharedHome: ""}`. (2) `PrepareRuntime` `runtime.go` body shows `sharedHome := profileHome` when `request.SharedHome` is whitespace-only, then mounts `runtimeClaudeHome` (= `profileHome`) at `ContainerClaudeDir`. So `<homePath>/.credentials.json` becomes `/home/valv/.claude/.credentials.json` inside the container — exactly where container claude expects it.
+- **`TestRunSucceedsWithBoundProject` still validates the mount** — `service_test.go:241-249` iterates `executor.got.Mounts` checking `m.Target == clauderuntime.ContainerClaudeDir`. This is the integration assertion that the mount is still present after Unit 7.2's deletions — and it passes (in the 17-test run).
+
+### Verdict rationale
+
+PASS. All 10 acceptance criteria verified by file:line citation and live mage reruns (services/claude 17/17 / 81.0%; adapters/providers/claude 21/21 / 78.4%). `readClaudeAuthToken` is gone; `CLAUDE_CODE_OAUTH_TOKEN` injection is gone; `encoding/json` is gone from both files; the three obsoleted tests are gone; imports pruned. The bind-mount mechanism (DROP_5) carrying `.credentials.json` from `profileHome` to `/home/valv/.claude` is unchanged and still asserted by `TestRunSucceedsWithBoundProject`.
+
+### Final design summary
+
+End-to-end auth flow after Unit 7.1 Round 3 + Unit 7.2 Round 2:
+
+1. **Host trigger** — `valv claude` → `ensureClaudeAccountReady` checks `.credentials.json` presence.
+2. **Host auth** — if missing + TTY: `runner.RunAuthLogin(homePath)` shells out to host `claude auth login` with `CLAUDE_CONFIG_DIR=homePath` (full session scope, not headless inference scope).
+3. **Keychain extraction** — `runner.ExtractKeychainToken(macOSUser)` reads the JSON blob from macOS keychain service `"Claude Code-credentials"`.
+4. **Verbatim write** — `writeClaudeCredentials(homePath, blob)` writes blob as-is to `<homePath>/.credentials.json` (mode `0o600`).
+5. **Container launch** — `Service.Run` → `PrepareRuntime` bind-mounts `homePath` → `/home/valv/.claude` (unchanged DROP_5 mechanism).
+6. **Container reads natively** — container `claude` reads `/home/valv/.claude/.credentials.json` in the exact format the keychain stored it. No env-var, no second JSON envelope.
+
+### Hylla Feedback
+
+None — `hylla_node_full` on `PrepareRuntime` returned the full function body including the mounts slice; `hylla_node_full` on `ContainerClaudeDir` confirmed the const value. One earlier keyword search for "PrepareRuntime claude mount" ranked codex-side variants higher; resolved by direct `node_full` on the claude-side const + function via known IDs. Mild ergonomics suggestion: when keyword search includes a provider/package qualifier, prefer summaries containing that token over more-popular cross-package hits.

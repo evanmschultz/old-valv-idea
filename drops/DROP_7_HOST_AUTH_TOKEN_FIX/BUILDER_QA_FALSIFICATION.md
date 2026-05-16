@@ -475,3 +475,204 @@ The original `valv account switch claude <existing-name>` forced re-auth bug is 
   - **Worked via:** `hylla_search_keyword` with `visibility_mode=include_private` + `fields=["content"]`, then `hylla_node_full` for the dependency edges.
   - **Suggestion:** Default `visibility_mode` to `include_private` for `tail_symbol`-style queries (the symbol name alone signals deliberate intent). Or surface a hint in the response when zero results came back due to a visibility filter.
 
+---
+
+## Unit 7.1 — Round 3
+
+**Date:** 2026-05-15
+**Verdict:** pass (with two non-blocking observations on test fixture realism and Codex template fidelity)
+
+### Attack Attempts
+
+Each numbered vector from the spawn prompt is enumerated below. CONFIRMED = counterexample produced. REFUTED = attack tried, evidence rules it out. EXHAUSTED = honest attempt, no counterexample constructable. OBSERVATION = real finding that does not invalidate the fix.
+
+1. **Token format mismatch hypothesis — verbatim preservation.** REFUTED. `writeClaudeCredentials` at `internal/cli/claude_auth.go:207-213` is exactly:
+   ```go
+   func writeClaudeCredentials(homePath, credentialsBlob string) error {
+       credPath := filepath.Join(strings.TrimSpace(homePath), ".credentials.json")
+       if err := os.WriteFile(credPath, []byte(credentialsBlob), 0o600); err != nil {
+           return fmt.Errorf("write %q: %w", credPath, err)
+       }
+       return nil
+   }
+   ```
+   No `json.Marshal`, no struct wrap, no transformation. Bytes from `ExtractKeychainToken` go straight to disk. Whether the keychain shape matches `.credentials.json` shape end-to-end is the dev's live smoke test — verbatim preservation is mechanically guaranteed by the implementation.
+
+2. **`auth login` vs `setup-token` UX.** REFUTED. The `RunAuthLogin` argv at `claude_auth.go:50` is `"auth", "login"`. Browser-redirect + paste-prompt UX semantics are owned by the upstream `claude` CLI; both `setup-token` and `auth login` produce the same paste-callback flow. No `valv`-side UX regression.
+
+3. **`auth login` scope sufficiency — literal argv.** REFUTED. Verified at `claude_auth.go:49-52`:
+   ```go
+   func (systemClaudeAccountAuthRunner) RunAuthLogin(ctx context.Context, homePath string, ...) error {
+       _, err := runClaudeHostCommand(ctx, homePath, stdin, stdout, stderr, "auth", "login")
+       return err
+   }
+   ```
+   No `"setup-token"` anywhere in production argv. The `git grep -n "setup-token"` audit returns only test-file comments and error-message string literals (all in test scaffolding); no production argv reference survived the pivot.
+
+4. **Empty keychain output sentinel preserved.** REFUTED. Three sentinel layers exist:
+   - `ExtractKeychainToken` (`claude_auth.go:78-81`): `if token == ""` → returns explicit error `"extract claude keychain token: empty token returned by security command"`.
+   - `ensureClaudeAccountReady` (`claude_auth.go:144-146`): defense-in-depth re-check after `ExtractKeychainToken` returns — `if token == ""` → error.
+   - `loginClaudeAccount` (`claude_auth.go:186-188`): same defense-in-depth check.
+
+   Test `TestLoginClaudeAccountFailsOnEmptyToken` (`claude_auth_test.go:372-391`) verifies this end-to-end with `stub := &stubClaudeAccountAuthRunner{}` (extractToken zero-value): asserts error returned AND `.credentials.json` NOT written. The `writeClaudeCredentials` call is never reached on empty.
+
+5. **File mode 0o600.** REFUTED. `claude_auth.go:209`: `os.WriteFile(credPath, []byte(credentialsBlob), 0o600)`. Owner read+write only, no group, no world. Matches `wipeClaudeCredentials` removal mode of the same file. No regression.
+
+6. **No JSON marshal/unmarshal on write path.** REFUTED. `git grep encoding/json -- internal/cli/claude_auth.go internal/services/claude/service.go` returns ZERO matches. Both files have the import removed. `writeClaudeCredentials` is a single `os.WriteFile` with `[]byte(credentialsBlob)` — no encoder anywhere on the write path.
+
+7. **0-byte file write edge case.** REFUTED via sentinel layering. The only path to `writeClaudeCredentials` from a successful `ExtractKeychainToken` return is gated by the `token == ""` check at `claude_auth.go:144` (and `:186` for `loginClaudeAccount`). If keychain ever returned empty string with `nil` error (it cannot — `ExtractKeychainToken` itself errors first at `:78-81`), the redundant ensure/login check catches it. A 0-byte `.credentials.json` cannot be written by the production code path. Tests `TestLoginClaudeAccountFailsOnEmptyToken` and (existing) verify both gates.
+
+8. **`encoding/json` import audit + dead-symbol audit.** REFUTED.
+   - `internal/cli/claude_auth.go` imports: `bytes / context / fmt / io / os / os/exec / os/user / path/filepath / strings / laslig / cobra / claudeprovider / config / domain`. No `encoding/json`. Audit clean.
+   - `internal/services/claude/service.go` imports: `context / errors / fmt / io / os / path/filepath / strings / time / unicode / charmbracelet/log / docker / clauderuntime / domain / pathutil / projectdetect`. No `encoding/json`. Audit clean.
+   - `git grep claudeCredentials\\b`: zero matches across `internal/`. Struct deleted, no stragglers.
+   - `git grep readClaudeAuthToken`: zero matches across `internal/`. Function deleted, no stragglers.
+   - Compile cleanliness is implicit (`mage testPkg` GREEN, see vectors 13-14) but the grep audit is the direct evidence.
+
+9. **Test fixtures realism — multi-key vs single-key shape.** **OBSERVATION (non-blocking, not a CONFIRMED counterexample).**
+
+   The Round 3 design pivot rationale (worklog line 238) is: "the macOS keychain stores the full session JSON blob (e.g. `{"accessToken":"...","refreshToken":"...","expiresAt":"..."}`) as a single string. Container claude on Linux reads `.credentials.json` natively — it expects exactly this format."
+
+   But the test fixtures in `internal/cli/claude_auth_test.go` still use the OLD single-key wrapper shape that the pivot explicitly rejects:
+   - Line 122: `os.WriteFile(credPath, []byte(\`{"claudeAiAccessToken":"existing"}\`), 0o600)`
+   - Line 154: same shape
+   - Line 213: `{"claudeAiAccessToken":"tok"}`
+   - Line 275: `{"claudeAiAccessToken":"old"}`
+   - Line 432: same shape
+   - Line 462: same shape
+   - Plus `TestLoginClaudeAccountWipesAndRunsSetupTokenAndExtractsAndWrites` (`:269-312`) uses `extractToken: "fresh-token"` — a bare unbalanced string, neither valid keychain JSON nor the old wrapper. The test assertion `strings.Contains(data, "fresh-token")` passes only because the production code now writes verbatim.
+
+   **Why this is not a CONFIRMED counterexample**: production code is fully shape-agnostic. `ReadAccountIdentity` checks only file existence (`internal/adapters/providers/claude/account.go:40-56`); `os.Stat(...).Size() > 0` checks only non-empty bytes. The fixtures pass these gates regardless of internal shape. So the tests still validate the production invariants ("already-authed short-circuit fires when file exists & non-empty", "write happens verbatim", etc.).
+
+   **Why it is a real OBSERVATION**: the worklog Round 3 design notes (line 242) acknowledge this directly — "the stub's `extractToken` field (type `string`) now notionally returns a JSON blob. The test ... uses `extractToken: "fresh-token"` — a bare string, not a real JSON blob ... This is acceptable: the stub isolates the write path; live keychain integration is a smoke-test concern." Builder is aware. Recommendation for a future polish pass: switch fixtures to a realistic shape (e.g. `{"accessToken":"abc","refreshToken":"def","expiresAt":"2026-12-31T00:00:00Z"}`) to document the contract the production code targets. Not a build blocker.
+
+10. **Bind-mount pipeline unchanged.** REFUTED. Verified end-to-end:
+    - `internal/services/claude/service.go::buildRequest` (`:244-276`) constructs the request with `Mounts: append([]docker.MountSpec{docker.NewMountSpec(project.Root, project.Root, false)}, prepared.Mounts...)` at line 266.
+    - `prepared.Mounts` comes from `clauderuntime.PrepareRuntime` (`service.go:127-133`).
+    - `clauderuntime.PrepareRuntime` (`internal/adapters/providers/claude/runtime.go:59-116`) adds `dockeradapter.NewMountSpec(runtimeClaudeHome, ContainerClaudeDir, false)` to its returned `Mounts` at line 116, where `ContainerClaudeDir = "/home/valv/.claude"` (`:22`).
+    - `TestRunSucceedsWithBoundProject` (`service_test.go:241-249`) asserts a mount with target `ContainerClaudeDir` exists in the executor's received request. GREEN per re-run.
+
+    Round 2 of Unit 7.2 deleted ONLY the env-injection block in `buildRequest`; mount construction was not touched. Verified by `git diff HEAD~1 HEAD --stat` showing only `service.go: -40` lines and `service_test.go: -118` lines (no `Mount`-touching changes).
+
+11. **3 deleted tests — coverage gap?** REFUTED. The three tests deleted in Unit 7.2 Round 2:
+    - `TestRunSetsClaudeCodeOAuthTokenWhenCredentialsPresent` — asserted env-var injection. No longer applicable: the production code no longer injects the env var. Deletion correct.
+    - `TestRunOmitsClaudeCodeOAuthTokenWhenCredentialsMissing` — asserted absent creds → env var absent. No longer applicable: env var is never present in any case. Deletion correct.
+    - `TestRunOmitsClaudeCodeOAuthTokenWhenCredentialsMalformed` — asserted bad JSON → graceful skip → env var absent. No longer applicable: no parsing happens. Deletion correct.
+
+    The behaviors these tests gated have been deleted along with them. The retained tests (`TestRunSucceedsWithBoundProject` at minimum) still verify the mount-based authentication path: profile home → `/home/valv/.claude` mount carries `.credentials.json` to the container. No coverage gap on the new design.
+
+12. **`CLAUDE_CODE_OAUTH_TOKEN` env-var leak audit.** REFUTED. `git grep -n "CLAUDE_CODE_OAUTH_TOKEN" -- internal/ cmd/ magefile.go` returns ZERO matches. Variable name is gone from production AND test code. Not even a comment-form reference remains. Audit clean.
+
+13. **Mage discipline.** REFUTED. Worklog Round 3 (line 234) reports only `mage testPkg ./internal/cli`. Round 2 of Unit 7.2 reports `mage testPkg ./internal/services/claude` and `mage testPkg ./internal/adapters/providers/claude`. No raw `go test`, `go build`, `go vet`, `go run` references in the worklog. AGENTS.md § 13 / WORKFLOW.md `mage`-first rule observed.
+
+14. **`mage testPkg` re-runs (independent verification).** REFUTED.
+    - `mage testPkg ./internal/cli` re-run: 154 tests passed, coverage 70.4%. Matches worklog Round 3 line 234 exactly. (Worklog claimed "70.3%" in Unit 7.3, "70.4%" in Round 2/Round 3 — re-run confirms 70.4%.)
+    - `mage testPkg ./internal/services/claude` re-run: 17 tests passed, coverage 81.0%. Matches Round 2 line 287 exactly.
+    - `mage testPkg ./internal/adapters/providers/claude` re-run: 21 tests passed, coverage 78.4%. Matches Round 2 line 288 exactly.
+
+    Coverage threshold report from mage output: `Minimum package coverage: 60.0%` — note this is mage's hardcoded internal floor, not the AGENTS.md § 11 70%-per-package target the worklog cites. All three packages exceed both floors. Non-blocking nit: mage's threshold (60%) is more permissive than AGENTS.md (70%); a future drop could tighten the mage gate to match AGENTS.md.
+
+15. **Interface rename propagation — `RunSetupToken` → `RunAuthLogin`.** REFUTED. Audit:
+    - Interface declaration: `claude_auth.go:30-33`. Single method `RunAuthLogin`, no stale `RunSetupToken`.
+    - Production implementation: `systemClaudeAccountAuthRunner.RunAuthLogin` (`claude_auth.go:49-52`). Interface satisfied.
+    - Production callers: `ensureClaudeAccountReady` at `claude_auth.go:133`; `loginClaudeAccount` at `claude_auth.go:175`. Both call `runner.RunAuthLogin(...)`. No stale `runner.RunSetupToken(...)` remains.
+    - Test stub: `stubClaudeAccountAuthRunner.RunAuthLogin` (`claude_auth_test.go:35-38`). Interface satisfied (compile would fail otherwise; `mage testPkg ./internal/cli` GREEN).
+    - Test field names still use `setupTokenHits` (`:28, 30`) and the test assertions/comments still reference "RunSetupToken" in error messages (16 occurrences per `git grep`). **OBSERVATION (cosmetic)**: the production rename was thorough; the test-side field/comment naming is stale-but-functionally-correct. The struct field `setupTokenHits` increments inside `RunAuthLogin` and is asserted as `setupTokenHits` — the name is now misleading, not wrong. Not a build blocker; recommend renaming `setupTokenHits` → `authLoginHits` (and updating the 16 stale comment/string references) in the next test polish pass.
+
+### Counterexamples
+
+None CONFIRMED.
+
+### Verdict
+
+**PASS.** Round 3 fix correctly:
+- Switches argv from `setup-token` to `auth login`.
+- Removes the `claudeCredentials` JSON wrapper struct and `encoding/json` import.
+- Writes the keychain blob verbatim with `0o600` mode.
+- Propagates the `RunSetupToken` → `RunAuthLogin` rename consistently across interface, implementation, callers, stub, and CLAUDE_CONFIG_DIR-verifying test.
+- Preserves all defense-in-depth sentinel checks (empty-token, file-mode, error-wrap, TTY guard, already-authed short-circuit).
+
+Two non-blocking observations for a future polish pass:
+- Vector 9: test fixtures still use the old single-key wrapper shape (`{"claudeAiAccessToken":"..."}`); production code is shape-agnostic so tests pass, but the realism gap weakens the test-as-documentation value of the fixtures.
+- Vector 15: test-side field/comment names (`setupTokenHits`, 16 `RunSetupToken`/`setup-token` string/comment references in `claude_auth_test.go`) are stale-but-correct after the interface rename.
+
+End-to-end correctness of the `keychain-shape == .credentials.json-shape` hypothesis cannot be verified from the orchestrator/QA seat; it requires a live dev smoke test against a real Claude account and a containerized Linux `claude` binary. That is explicitly the dev's smoke-test job per worklog Round 3 design notes. Within the QA-falsifiable surface, no counterexample lands.
+
+### Unknowns
+
+- Live keychain-blob shape on the dev's macOS keychain (smoke test only).
+- Whether Linux container `claude` actually accepts the verbatim macOS keychain JSON shape (smoke test only).
+- Both are explicit per worklog Round 3 and routed to the dev.
+
+## Hylla Feedback
+
+None — Hylla answered everything needed via direct `git grep` and `Read`. The reviewed files are uncommitted-to-baseline (Round 3 commit `9e7bc48` post-dates last Hylla ingest); per CLAUDE.md § "Code Understanding Rules" item 2, `git diff` / `Read` / `Grep` is the correct evidence path for changed-since-ingest files.
+
+---
+
+## Unit 7.2 — Round 2
+
+**Date:** 2026-05-15
+**Verdict:** pass (no findings)
+
+### Attack Attempts
+
+Unit 7.2 Round 2 deletes the `readClaudeAuthToken` helper, the `encoding/json` import, the env-injection block in `buildRequest`, and three associated test functions. Attack vectors below are scoped to that delta. Vectors that overlap with Unit 7.1 Round 3 (which is the broader pivot) are cross-referenced rather than duplicated.
+
+1. **`readClaudeAuthToken` fully deleted.** REFUTED. `git grep readClaudeAuthToken -- internal/ cmd/`: zero matches. No production reference, no test reference, no string-literal mention. Deletion complete.
+
+2. **`CLAUDE_CODE_OAUTH_TOKEN` fully deleted.** REFUTED. `git grep CLAUDE_CODE_OAUTH_TOKEN -- internal/ cmd/ magefile.go`: zero matches. No env-var assignment, no env-var read, no comment reference. Audit clean.
+
+3. **`encoding/json` import removed from `service.go`.** REFUTED. `git grep "encoding/json" -- internal/services/claude/service.go`: zero matches. Import block of `service.go` (lines 1-21) shows only: `context / errors / fmt / io / os / path/filepath / strings / time / unicode / charmbracelet/log / docker / clauderuntime / domain / pathutil / projectdetect`. No stale import.
+
+4. **`os` and `path/filepath` imports retained where still used.** REFUTED. `service.go` line 8 imports `"os"` (used at `:96` for `os.TempDir()`), line 9 imports `"path/filepath"` (used at `:279` for `filepath.Rel` and `:286` for `filepath.Separator`). Both still pull their weight. No dead import.
+
+5. **Three deleted test functions — coverage shadow.** REFUTED. The three deletions:
+   - `TestRunSetsClaudeCodeOAuthTokenWhenCredentialsPresent` — asserted env-var injection on valid creds.
+   - `TestRunOmitsClaudeCodeOAuthTokenWhenCredentialsMissing` — asserted graceful skip on missing creds.
+   - `TestRunOmitsClaudeCodeOAuthTokenWhenCredentialsMalformed` — asserted graceful skip on bad JSON.
+
+   All three tested behavior that no longer exists in production code (env-var injection is gone in Round 2; bad-JSON handling is gone because no JSON parsing happens). Deleting the tests along with the deleted production code is correct. No shadow coverage remains — the retained `TestRunSucceedsWithBoundProject` covers the mount-based authentication path which is the new (and now sole) auth-delivery mechanism.
+
+6. **`service_test.go` import cleanup.** REFUTED. Worklog line 280 claims `"os"` and `"path/filepath"` imports were removed. Verified by reading the import block (`service_test.go:3-18`): `context / errors / fmt / io / strings / testing / time / charmbracelet/log / docker / clauderuntime / domain / projectdetect`. No `os`, no `path/filepath`. Both correctly removed (no longer used after the three test deletions). Audit clean.
+
+7. **Bind-mount pipeline unchanged.** REFUTED. Already covered in Unit 7.1 Round 3 vector 10 above. `clauderuntime.PrepareRuntime` adds the `<managed-home>` → `/home/valv/.claude` mount at `runtime.go:116`; `service.go::buildRequest` propagates it at `:266`; `TestRunSucceedsWithBoundProject` (`service_test.go:241-249`) verifies the mount in the executor's received request. None of this code was touched in Round 2 of Unit 7.2 — `git diff HEAD~1 HEAD service.go` shows only the env-injection block deleted, no `Mount`-line changes. Verified.
+
+8. **`mage testPkg ./internal/services/claude` re-run.** REFUTED. Re-ran independently: 17 tests passed, 81.0% coverage. Matches worklog line 287 exactly. (Pre-deletion was 20 tests at 82.3% — coverage drop of 1.3 percentage points across the three deleted tests is consistent and stays well above both the mage floor of 60% and the AGENTS.md § 11 floor of 70%.)
+
+9. **`mage testPkg ./internal/adapters/providers/claude` re-run.** REFUTED. Re-ran independently: 21 tests passed, 78.4% coverage. Matches worklog line 288 exactly. No regression from the Round 2 deletes — the adapters package was not modified.
+
+10. **No collateral edits to other files.** REFUTED. `git diff HEAD~1 HEAD --stat` output:
+    ```
+    .../DROP_7_HOST_AUTH_TOKEN_FIX/BUILDER_WORKLOG.md  | 113 ++++++++++++++++++++
+    internal/cli/claude_auth.go                        |  78 +++++++-------
+    internal/cli/claude_auth_test.go                   |  26 ++---
+    internal/services/claude/service.go                |  40 -------
+    internal/services/claude/service_test.go           | 118 ---------------------
+    ```
+    Five files. Three production-relevant: `claude_auth.go` (Round 3), `service.go` (Round 2), `service_test.go` (Round 2). One test: `claude_auth_test.go` (Round 3). One doc: `BUILDER_WORKLOG.md`. No collateral edits to `magefile.go`, `cmd/valv/`, `internal/adapters/`, `internal/domain/`, or other packages.
+
+### Counterexamples
+
+None CONFIRMED.
+
+### Verdict
+
+**PASS.** Round 2 fix correctly:
+- Deletes `readClaudeAuthToken` helper and `CLAUDE_CODE_OAUTH_TOKEN` env-injection block (the env-var workaround for the wrong file format is no longer needed; container claude now reads `.credentials.json` natively via the existing DROP_5 bind-mount).
+- Removes the `encoding/json` import from `service.go`.
+- Removes the three associated tests whose subject behavior was deleted.
+- Retains all imports (`os`, `path/filepath`) where they are still used elsewhere in the file.
+- Preserves the DROP_5 bind-mount pipeline intact (verified by reading `service.go::buildRequest` and `runtime.go::PrepareRuntime`).
+- Maintains coverage at 81.0% (above both the mage 60% gate and AGENTS.md 70% gate).
+
+The Round 2 change is a clean negative-delta — it removes code that became dead after Round 3 of Unit 7.1 fixed the file format. The combined Round 3 + Round 2 change correctly implements the design pivot: macOS keychain blob is now written verbatim to `<managed-home>/.credentials.json` at `0o600`, container claude reads it natively via the bind-mount, and the env-var injection that was a workaround for the broken wrapper format is gone.
+
+### Unknowns
+
+None — all 10 attack vectors REFUTED with file:line evidence and re-run mage output.
+
+## Hylla Feedback
+
+None — Hylla answered everything needed via direct `git grep` and `Read`. The reviewed files (`service.go`, `service_test.go`) are uncommitted-to-baseline (Round 2 commit `9e7bc48` post-dates last Hylla ingest); per CLAUDE.md § "Code Understanding Rules" item 2, `git diff` / `Read` / `Grep` is the correct evidence path for changed-since-ingest files.
+
