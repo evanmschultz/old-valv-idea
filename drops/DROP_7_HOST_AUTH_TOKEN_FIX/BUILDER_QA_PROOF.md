@@ -846,3 +846,109 @@ N/A — Unit 7.9 reviewed via direct `Read` + `git diff` + `git grep` per mid-dr
 
 N/A — Hylla service was unreachable (gRPC `connection refused` on `127.0.0.1:9080`) during this review. Mid-drop snapshot would be stale anyway. Evidence gathered via direct `Read` + `Bash mage` per mid-drop protocol. No falsifiable Hylla miss to record.
 
+## Unit 7.10 — Round 2
+
+**Date:** 2026-05-16
+**Verdict:** pass
+
+### R1 finding closure
+- A8 (cache pollution): closed
+- (tmpfs flake bundled per dev directive): closed
+
+### Fix-by-fix verification
+
+| FIX | Description | Code evidence | Test pinning | Result |
+|---|---|---|---|---|
+| FIX 1 | `openImagesService` threads `paths.CachesDir` into `imagesservice.Options.CachePath` | `internal/cli/operator_helpers.go:84` — `CachePath: filepath.Join(paths.CachesDir, "version-cache.json")` placed in the base `Options` struct above the provider switch, so both Codex and Claude paths inherit it. `internal/services/images/service.go:269-272` confirms `options.CachePath` is consumed (`cachePath := strings.TrimSpace(options.CachePath); if cachePath == "" { cachePath = defaultCachePath() }`). | `internal/cli/operator_helpers_test.go:97-156` — `TestOpenImagesServiceWritesCacheToCachesDir` constructs `openImagesService(..., paths, domain.ProviderClaude)` using `testCodexPaths(t)` (which sets `CachesDir = $tmpdir/caches`), calls `EnsureLatest(AllowExistingOnCheckFail: true)`, then asserts `os.Stat($tmpdir/caches/version-cache.json)` succeeds. | PASS |
+| FIX 2 | `TestRootDebugFlagIsNotPassedThroughToInteractiveCodexLaunch` no longer copies dev's real `~/.codex` to tmpfs | `internal/cli/codex_test.go:382-389` — `t.Setenv("VALV_REAL_HOME", t.TempDir())` placed before `testCodexPaths(t)`. Flow verified end-to-end: `realHomeDir()` (`operator_helpers.go:304-313`) returns `VALV_REAL_HOME` value when set → `runCodexCommand` (`codex.go:112`) seeds `codexservice.Options.RealHome` → `sharedCodexStateHome` (`services/codex/service.go:171-183`) calls `codexruntime.DefaultHostProfile(realHome)` → returns `tempDir/.codex` (nonexistent) → `codexruntime.PrepareRuntime` (`adapters/providers/codex/runtime.go:48`) walks the empty dir, `copyDirContents` (`runtime.go:95`) copies zero files. Disk-space dependency removed. | Test itself is the pinning. Pre-fix would fail with `no space left on device` on tmpfs when dev's `~/.codex` is large; post-fix passes deterministically. | PASS |
+
+### Cache pollution test
+
+Direct mtime/content inspection of `~/Library/Caches/valv/version-cache.json` is sandbox-blocked for this QA agent (reads outside the repo are denied). Indirect verification:
+
+- **File size before `mage test`:** 209B (`ls` reports path + size only; mtime/perm fields stripped by sandbox).
+- **File size after `mage test`:** 209B (identical).
+- **Builder worklog claim:** "Cache file timestamp unchanged across 3 mage test runs" (`BUILDER_WORKLOG.md:43-44`). The dev confirmed this in the spawn prompt.
+- **Structural argument (sufficient on its own):**
+  - All `internal/cli` tests that exercise the images service go through `openImagesService`, which post-FIX-1 always sets `CachePath = paths.CachesDir/version-cache.json`. `paths.CachesDir` for tests comes from `testCodexPaths(t)` (`codex_test.go:474`) which uses `t.TempDir()`. No bypass path exists — `git grep "imagesservice.New\|images\.New"` returns only `operator_helpers.go:109` for production code, no test-side direct construction in `internal/cli`.
+  - All `internal/services/images` tests that call `EnsureLatest` (which writes the cache) set `CachePath: filepath.Join(t.TempDir(), "version-cache.json")` explicitly. Verified via `git grep -n "CachePath:" internal/services/images/service_test.go` returning 6 hits, all `t.TempDir()`-rooted. Build-only tests (lines 86, 398, 472, 550) don't write the cache because `Build` ≠ `EnsureLatest` (the cache write happens in `EnsureLatest`'s resolver-success branch only).
+- **Conclusion:** No code path in `mage test` can hit `defaultCachePath()` (the dev's `~/Library/Caches/valv/version-cache.json`). The fix is complete.
+
+### Mage targets
+
+- `mage testPkg ./internal/cli`: 157/157 PASS, coverage 72.5%.
+- `mage test`: 431/431 PASS across 20 packages. Coverage gate met (60% minimum; per-package floors all clear). Builder reported 428/428 — delta of +3 tests likely reflects test additions from another in-flight unit between R1 and R2 mage runs. No regressions.
+
+### Unknowns
+
+- **Cache mtime direct verification unavailable in this QA session.** The orchestrator/dev should `stat -f "%Sm" ~/Library/Caches/valv/version-cache.json` before close to confirm the worklog claim. Structural code-trace makes pollution impossible, but a direct mtime check is the gold-standard empirical witness. Route to dev for the final empirical check.
+- No other Unknowns for Unit 7.10 R2's claim space.
+
+### Hylla Feedback
+
+N/A — Hylla service unreachable (`gRPC connection refused on 127.0.0.1:9080`) during this review. Mid-drop snapshot would be stale anyway. Evidence gathered via direct `Read` + `git grep` + `mage` invocations per mid-drop protocol. No falsifiable Hylla miss to record.
+
+---
+
+## Unit 7.9 — Round 2
+
+**Date:** 2026-05-16
+**Reviewer:** go-qa-proof-agent
+**Verdict:** **PASS**
+
+### R1 finding closure
+
+- **AC5 integration-test reference (proof Finding 1.1 / falsification A8):** **CLOSED.** `service_integration_test.go:20` declares `const testClaudeCLIVersion = "2.1.143"`; line 132 uses `BuildRequest{Version: testClaudeCLIVersion}`. `git grep -n DefaultClaudeCLIVersion` (via inspection of `git diff HEAD~2 HEAD` + reading the integration test file in full) shows the only remaining symbol mention is in this R2 commit's own removal context. The file now compiles cleanly under `-tags=integration ./internal/services/images/...`.
+- **AC1 / `LatestCheckedAt` semantic (proof Finding 1.2 / falsification A4):** **CLOSED via option (a) — cache hit returns cached `CheckedAt`.** `cache.go:65` signature `cachedVersion(...) (string, time.Time, bool)` adds the cached timestamp as the 2nd return. `service.go:379` destructures `latestVersion, cachedCheckedAt, fromCache := cachedVersion(...)`. `service.go:411-418` branches on `fromCache`: cache hit → `checkedAt = cachedCheckedAt`; cache miss → `checkedAt = now.UTC()`. New test `TestEnsureLatestReportsCachedCheckedAtOnCacheHit` (`service_test.go:935-980`) pre-populates `checked_at = 2025-01-01T00:00:00Z`, sets clock to `2025-01-01T12:00:00Z` (12h later, within TTL), and asserts `result.LatestCheckedAt.Equal(cachedAt)` — the cache-hit semantic is now behaviorally pinned.
+- **Falsification A17 (clock-injection completeness):** **CLOSED.** `service.go:436` (`state.UpdatedAt = s.clock().UTC()`) replaces R1's `time.Now().UTC()`; `service.go:486` (`UpdatedAt: s.clock().UTC()`) replaces the second R1 `time.Now().UTC()`. Both `state.UpdatedAt` writes inside `EnsureLatest` now honor injected clock. The two new tests (cache-hit and future-timestamp) inject deterministic clocks via `newCacheTestService(..., func() time.Time { return clockNow })` and observe deterministic timestamps — implicit but adequate behavioral pinning for the contract.
+- **Falsification A5 (future-timestamp permanence):** **CLOSED.** `cache.go:76-79` computes `delta := now.Sub(entry.CheckedAt)` and rejects on `delta < 0 || delta >= versionCacheTTL` — covering both the original stale-past and the new future-timestamp miss cases. New test `TestEnsureLatestRejectsCacheWithFutureTimestamp` (`service_test.go:982-1023`) seeds `checked_at = 2030-01-01`, sets clock to `2026-05-16`, asserts the resolver is called (`counter.called == 1`) and the cache is refreshed with the new version (`entry.Version == "2.1.200"`, `entry.CheckedAt < clockNow + 1s`). Behavior-pinned.
+- **Falsification A2 (false atomic-write claim in worklog):** **CLOSED.** `BUILDER_WORKLOG.md:119` (Unit 7.9 R2 entry) replaces the incorrect "POSIX WriteFile is atomic at the kernel level for this size" claim with the correct justification: "self-healing via parse-error swallowing makes the non-atomic write acceptable for a 24h-TTL cache at v0.1.0." The temp+rename pattern is acknowledged as strictly safer; the doc-only decision to keep `os.WriteFile` is rationalized rather than misjustified.
+
+### Fix-by-fix verification
+
+| FIX | Description | Code evidence | Test pinning | Result |
+|---|---|---|---|---|
+| 1 | Integration test references `testClaudeCLIVersion` local const, not `DefaultClaudeCLIVersion` | `service_integration_test.go:20` (`const testClaudeCLIVersion = "2.1.143"`); `:132` (`BuildRequest{Version: testClaudeCLIVersion}`) | Build-tagged file; no runtime test gate compiles it but Go source is now valid under `-tags=integration ./internal/services/images/...` | PASS |
+| 2 | `cachedVersion` returns `(string, time.Time, bool)`; `EnsureLatest` sets `LatestCheckedAt = cachedCheckedAt` on hit, `now.UTC()` on miss | `cache.go:65` signature; `cache.go:80` returns `entry.Version, entry.CheckedAt, true`; `service.go:379` destructure; `service.go:411-418` conditional | `TestEnsureLatestReportsCachedCheckedAtOnCacheHit` (`service_test.go:935-980`) — asserts `result.LatestCheckedAt.Equal(cachedAt)` with cache pre-populated 12h before clock | PASS |
+| 3 | `state.UpdatedAt` uses `s.clock().UTC()` not `time.Now().UTC()` at both call sites in `EnsureLatest` | `service.go:436` (up-to-date branch); `service.go:486` (rebuild branch) — both confirmed by reading 364-499 in full | Implicit via two new clock-injection tests; no direct `UpdatedAt` assertion (existing tests don't assert on `UpdatedAt` per R1 falsification A17 note — gap closed mechanically) | PASS |
+| 4 | `cachedVersion` rejects `delta < 0 || delta >= versionCacheTTL` | `cache.go:76-79` (combined past + future guard) | `TestEnsureLatestRejectsCacheWithFutureTimestamp` (`service_test.go:982-1023`) — resolver call count == 1; cache rewritten to fresh value | PASS |
+| 5 | Worklog corrects atomic-write justification (doc-only) | `BUILDER_WORKLOG.md:119` — "self-healing via parse-error swallowing makes the non-atomic write acceptable" replaces R1's "POSIX WriteFile is atomic" claim | N/A — doc-only | PASS |
+
+### Mage targets
+
+- `mage testPkg github.com/evanmschultz/valv/internal/services/images` — GREEN 29/29, **79.2% coverage**. Reproduces builder's exact claim.
+- `mage test` — GREEN **431/431** across 20 packages. Builder reported 430/430; the +1 delta is Unit 7.10 R2's new `TestOpenImagesServiceWritesCacheToCachesDir` in `internal/cli/operator_helpers_test.go` (commit `6b55d59`, landed after builder's 7.9 R2 snapshot). All 20 packages above the 60% gate; `internal/services/images=79.2%`, `internal/cli=72.5%`. The pre-existing `TestRootDebugFlagIsNotPassedThroughToInteractiveCodexLaunch` tmpfs-disk-space failure noted in R1 falsification A9 did NOT recur — Unit 7.10 R2's `t.Setenv("VALV_REAL_HOME", t.TempDir())` fix closed it.
+- Coverage threshold met for all packages. Race detector clean.
+
+### Worklog-to-code consistency
+
+- **Files touched (4):** matches `git diff --stat HEAD~2 HEAD -- internal/services/images/` exactly — `cache.go +12/-10`, `service.go +11/-4`, `service_integration_test.go +6/-1`, `service_test.go +88/-0`.
+- **Test count delta:** 27 → 29 (+2). Matches the two new tests added in `service_test.go`.
+- **Coverage delta:** 78.9% → 79.2% (+0.3pp). Slight uplift from the two new tests exercising previously-unverified cache-hit and future-timestamp branches.
+- **Commits referenced:** `6b4ea4f fix(images): unit 7.9 r2 cache-hit timestamp + clock injection` matches the scope and CLAUDE.md commit-format rules (lowercase, no period, subject-only).
+
+### Findings
+
+None blocking. All five R1 findings (two proof FAILs + three falsification CONCERNs/NOTEs) are closed by the R2 diff. Two non-finding observations:
+
+- **NOTE — Clock-injection coverage gap minor.** FIX 3's `s.clock().UTC()` substitution for `state.UpdatedAt` is provably correct by inspection but not directly asserted by any test. The two new R2 tests use a deterministic clock but only assert on `result.LatestCheckedAt`, not on the persisted `state.UpdatedAt`. A future regression that reverts one of the two lines (line 436 or 486) back to `time.Now()` would not be caught by `mage testPkg`. Low priority — the mechanical replacement is unlikely to drift; flagged for orchestrator awareness only.
+- **NOTE — Latent integration-test orphan unchanged.** R1's CONCERN about `service_integration_test.go` being orphaned from any mage target persists. FIX 1 makes the file compile under `-tags=integration ./internal/services/images/...` but no mage target invokes that path (`mage integration` runs only `./internal/cli`). The test is correct Go source, just unreached. Future drops should either delete it or wire `./internal/services/images` into the integration target — already routed per Unit 7.10 R2's parallel work on cache-path isolation.
+
+### Idiomatic Go checks
+
+- **Doc comments:** `cachedVersion`'s updated doc comment (`cache.go:61-64`) correctly describes the new `(string, time.Time, bool)` return shape and the negative-delta guard. New test functions have doc comments starting with the function name (`service_test.go:935`, `:981`).
+- **Error wrapping:** No new error boundaries introduced — the R2 diff only changes return arity and conditional branches; no new `fmt.Errorf` sites. Existing wrap pattern preserved.
+- **No token logging:** New code paths handle version strings and timestamps only — zero credential surface.
+- **Mage-only verification:** Used `mage testPkg ./internal/services/images` and `mage test`; no raw `go test` / `go build` / `gofumpt`.
+
+### Unknowns
+
+- None for Unit 7.9's R2 claim space. All five fixes verified by file:line evidence + reproduced mage targets + R1 finding closure.
+- Pre-existing tmpfs disk-space failure: no longer reproducing on `mage test`. Unit 7.10 R2's `t.Setenv("VALV_REAL_HOME", ...)` fix in `codex_test.go` resolved it. Orthogonal to 7.9.
+
+### Hylla Feedback
+
+N/A — Hylla daemon was unreachable during this review (`dial tcp 127.0.0.1:9080: connect: connection refused`). Mid-drop staleness protocol applies regardless — all touched files (`cache.go`, `service.go`, `service_test.go`, `service_integration_test.go`, `BUILDER_WORKLOG.md`) were modified after the last Hylla ingest. Evidence gathered via direct `Read` + `git diff HEAD~2 HEAD` + reproduced `mage` runs per CLAUDE.md § "Hylla Baseline".
+
+---
+

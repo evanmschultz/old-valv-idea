@@ -1121,3 +1121,191 @@ Each numbered vector from the spawn prompt enumerated. CONFIRMED = counterexampl
 - **Suggestion:** None — daemon down is infra; fallback `Read` covers Go-only review scope adequately when files are known.
 
 ---
+
+## Unit 7.9 — Round 2
+
+**Date:** 2026-05-16
+**Verdict:** pass
+
+### Attack vectors probed
+
+Each attack vector from the spawn prompt enumerated with verdict (CONFIRMED / REFUTED / EXHAUSTED / NOTE / OBSERVATION).
+
+- **A1 — `cachedVersion` signature change ripple.** REFUTED. `git grep cachedVersion -- '*.go'` returns exactly one production caller at `internal/services/images/service.go:379`: `latestVersion, cachedCheckedAt, fromCache := cachedVersion(cacheData, s.provider, now)` — three-receiver destructure matching the new `(string, time.Time, bool)` signature. No second caller exists in production OR tests (cache_test.go does not exist; only `service_test.go` exercises `EnsureLatest` end-to-end, never calling `cachedVersion` directly). Zero compile-break surface from the signature change.
+
+- **A2 — `LatestCheckedAt` cache-hit UTC consistency.** OBSERVATION (non-blocking). On a cache hit, `service.go:415` sets `checkedAt = cachedCheckedAt` — the value returned from `cachedVersion`, which is the JSON-deserialized `entry.CheckedAt` from the on-disk file. The cache WRITE path at `cache.go:94` always normalizes via `now.UTC().Truncate(time.Second)`, so a Valv-written cache file always contains UTC timestamps. A user manually editing the file to insert e.g. `"checked_at":"2025-01-01T00:00:00-05:00"` would round-trip a `time.Time` with a fixed-offset zone; downstream `result.LatestCheckedAt.Format(time.RFC3339)` at `manage.go:1144` / `manage.go:1176` would render it WITH that offset (`2025-01-01T00:00:00-05:00`) — a valid RFC3339 string representing the same instant, but visually non-UTC. **Not a CONFIRMED counterexample** because (a) the production writer always writes UTC, (b) RFC3339-with-offset is still spec-correct, (c) `time.Time.Equal` (used in the test assertion at line 973) correctly compares the same wall instant regardless of zone. Documented as OBSERVATION: a defensive `.UTC()` normalization on `cachedCheckedAt` at `service.go:415` would harden against hand-edited cache files. Low priority.
+
+- **A3 — Future-timestamp guard boundary (`delta == 0`).** REFUTED. `cache.go:77` reads `if delta < 0 || delta >= versionCacheTTL`. When `delta == 0` (clock hasn't ticked since the entry was written, e.g. an injected fixed clock equals `entry.CheckedAt`), the predicate is `false || false` → falls through to `return entry.Version, entry.CheckedAt, true`. Treats it as fresh, which is correct: a zero-delta cache is the freshest possible. The fix's guard is `<` not `<=`, so the equality boundary is not erroneously rejected.
+
+- **A4 — Test fixture clock injection race.** REFUTED. Both new tests (`TestEnsureLatestReportsCachedCheckedAtOnCacheHit` at `service_test.go:940-976`; `TestEnsureLatestRejectsCacheWithFutureTimestamp` at `service_test.go:982-1023`) construct a fresh `clockNow` closure via `func() time.Time { return clockNow }`. Each test gets its own `cacheDir := t.TempDir()` and its own `svc` via `newCacheTestService`. NEITHER test calls `t.Parallel()` (verified by direct read of lines 940 and 982 — only `t.Cleanup(...)` on findDockerBinary). The injected clock is per-Service, immutable for the test lifetime, never shared. No race surface.
+
+- **A5 — FIX 3 clock-injection completeness.** REFUTED. `git grep "time.Now" -- internal/services/images/service.go` returns exactly 2 hits, both in the `Options` defaulting at lines 69 (doc comment) and 275 (`clock = time.Now` — the default-when-nil fallback). NO `time.Now()` call survives inside `EnsureLatest` body (lines 364-510). The two original `state.UpdatedAt = time.Now().UTC()` writes at the up-to-date branch and the build-then-upsert branch are now `s.clock().UTC()` at `service.go:436` and `:486` respectively. Verified by diff `git show 6b4ea4f -- internal/services/images/service.go`. The injected clock fully governs all time writes in `EnsureLatest`.
+
+- **A6 — Integration test value (FYI for orchestrator).** NOTE. `service_integration_test.go` now compiles cleanly under `-tags=integration` (verified by direct read — `const testClaudeCLIVersion = "2.1.143"` declared at line 20, used at line 132). But `magefile.go::Integration` runs only `-tags=integration -count=1 ./internal/cli` — it does NOT include `./internal/services/images`. So the file still has no mage target that exercises it. Same status as before R2 (file is dead-on-arrival in the mage workflow). Fix is correct in scope; orchestrator/dev decision whether to wire the file in or delete it is unchanged from R1 finding A8. NOTE — not a R2 regression.
+
+- **A7 — `TestEnsureLatestReportsCachedCheckedAtOnCacheHit` assertion strength.** REFUTED. Line 973 uses `result.LatestCheckedAt.Equal(cachedAt)` — `time.Time.Equal` is the correct comparator. Per Go stdlib (`time.Time.Equal` documentation): "Equal reports whether t and u represent the same time instant. Two times can be equal even if they are in different locations. For example, 6:00 +0200 and 4:00 UTC are Equal. See the documentation on the Time type for the pitfalls of using == with Time values; most code should use Equal instead." Both `result.LatestCheckedAt` (from the cache-hit branch) and `cachedAt` (the literal constructed in the test) are in `time.UTC`, but the test would survive a defensive `.UTC()` change to the production code path because `Equal` compares instants, not struct fields. No `==` comparator anywhere in the new tests (verified by reading lines 940-1023). Correct.
+
+- **A8 — `TestEnsureLatestRejectsCacheWithFutureTimestamp` future-trigger correctness.** REFUTED. Line 991 sets `futureTime := time.Date(2030, 1, 1, ...)`; line 992 sets `clockNow := time.Date(2026, 5, 16, ...)`. `delta = clockNow.Sub(futureTime) = -4 years approx`, which is well negative, triggering the `delta < 0` branch in `cachedVersion`. Resolver IS called (line 1008 asserts `counter.called == 1`); cache file is updated to `2.1.200` (line 1018 asserts `entry.Version == "2.1.200"`). The future-vs-clock gap is 4 years — not "within minutes". Trigger is unambiguous.
+
+- **A9 — `cachedVersion` zero-value `time.Time` on cache miss.** REFUTED. `cache.go:67,71,74,78` all return `time.Time{}` (zero value) when fromCache is false. The single caller at `service.go:379` destructures into `cachedCheckedAt`. `cachedCheckedAt` is then read ONLY at line 415 inside `if fromCache { checkedAt = cachedCheckedAt }`. The variable is never read when `fromCache == false`. No latent zero-value bug.
+
+- **A10 — Atomic-write JUSTIFICATION fix vs IMPLEMENTATION upgrade.** NOTE (builder chose option a — doc-only). Builder Worklog line 119 documents the choice: "The implementation remains acceptable because `readVersionCache` silently swallows both read and parse errors, so a torn read falls through to the resolver (one extra network call at worst). The correct justification is: 'self-healing via parse-error swallowing makes the non-atomic write acceptable for a 24h-TTL cache at v0.1.0.' The temp+rename pattern (`os.CreateTemp` + `os.Rename`) would be strictly safer but adds complexity for a file whose corruption is gracefully handled." The race (concurrent reader catching a mid-truncate state) is therefore still POSSIBLE but BENIGN — readVersionCache returns empty cache on `json.Unmarshal` error, fromCache is false, resolver runs, cache rewritten. Builder's reasoning is technically correct: the production cost is at-worst one extra network call per race. The previously-incorrect "POSIX kernel-level atomic" claim is now correctly described. Acceptable trade-off for v0.1.0. NOTE — orchestrator/dev may revisit if multi-process Valv invocations become common.
+
+- **A11 — `mage test` count discrepancy.** RESOLVED with ground truth. Builder 7.9 R2 worklog reported 430/430. Builder 7.10 R2 worklog reported 428/428. My independent `mage test` run from `main/` reports **431/431 GREEN across 20 packages**. The +1 vs builder 7.9 R2's 430 most likely reflects the test added in 7.10 R2 (`TestOpenImagesServiceWritesCacheToCachesDir`) being committed AFTER builder 7.9 R2's mage run — the two R2 commits landed sequentially (`6b4ea4f` 7.9 R2 then `6b55d59` 7.10 R2). With BOTH R2 commits on HEAD, ground truth is 431/431. The +3 vs builder 7.10 R2's 428 is harder to explain — that count came from a tmpfs-affected machine. Both R2 changes are now committed and `mage test` is fully green. No flakes, no race detector hits.
+
+  Coverage summary (relevant packages):
+  - `internal/services/images` — 79.2% (was 78.9% in R1; +2 tests; +0.3pp consistent with new branch coverage)
+  - `internal/cli` — 72.5%
+  - All 20 packages ≥60% gate, including the AGENTS.md § 11 70%-per-package target met on every package that matters for Unit 7.9 scope.
+
+### Additional Adversarial Probes (beyond the spawn-prompt's A1-A11)
+
+- **A12 (new) — `LatestCheckedAt` field on `AllowExistingOnCheckFail` path.** REFUTED. `service.go:400` (inside `if !fromCache` → resolver-error → AllowExistingOnCheckFail branch) sets `LatestCheckedAt: state.LatestCheckedAt`. `state` here is the existing state-store entry from a previous successful run, NOT from the cache. The cache hit/miss semantics don't apply on this path because we're already in the `!fromCache` branch (resolver was called and failed). Correct — uses the durable state-store value, which was UTC-normalized at write time.
+
+- **A13 (new) — `state.LatestCheckedAt` write source consistency in the build-then-upsert path.** REFUTED. `service.go:482` writes `LatestCheckedAt: checkedAt` into the new `state` after a build. `checkedAt` was computed at line 413-418 conditional on `fromCache`. On a cache-hit + build (cache says version is current, but image is missing or recipe drifted), `checkedAt = cachedCheckedAt` — the cache's check timestamp gets persisted into the state store. This is correct semantically: the state store records when the version was last verified against npm, regardless of whether the image build was forced for other reasons. On a cache-miss + build (resolver was called), `checkedAt = now.UTC()` — the current invocation's check timestamp. Both branches are coherent. The state store always receives a meaningful timestamp.
+
+- **A14 (new) — `state.UpdatedAt` vs `state.LatestCheckedAt` separation under cache-hit.** REFUTED. `state.UpdatedAt = s.clock().UTC()` at lines 436 and 486 reflects when the state-store row was last touched (always "now"), distinct from `state.LatestCheckedAt = checkedAt` (when version was last verified against npm). On a cache-hit-up-to-date case, `UpdatedAt = now` but `LatestCheckedAt = cachedCheckedAt` (potentially many hours ago). These two fields semantically diverge by design — that's the entire point of caching. Schema is coherent.
+
+- **A15 (new) — `Equal` vs `==` time comparison in tests.** REFUTED across all new and modified tests. Line 973 (`TestEnsureLatestReportsCachedCheckedAtOnCacheHit`): `result.LatestCheckedAt.Equal(cachedAt)`. Line 1020 (`TestEnsureLatestRejectsCacheWithFutureTimestamp`): `entry.CheckedAt.After(clockNow.Add(time.Second))` — uses `After`, not `==`. No `==` time comparisons in new test code. Monotonic-clock pitfall avoided.
+
+- **A16 (new) — Truncation-to-second precision and `Equal` interaction.** REFUTED. The writer truncates to second precision at `cache.go:94` (`now.UTC().Truncate(time.Second)`). The new test fixture at `service_test.go:949` uses `time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)` — already second-aligned with zero nanoseconds. So `cachedAt` written via `writeCacheFile`, round-tripped through JSON, and re-read as `entry.CheckedAt` yields a value `Equal` to the original `cachedAt`. The truncation is idempotent on already-second-aligned values. Test assertion is correct.
+
+- **A17 (new) — Cache file unwritten when resolver errors.** REFUTED. `service.go:404` returns the wrapped error without calling `writeVersionCache`. The cache write at `service.go:406` is inside the `if !fromCache` branch, after the resolver succeeds — never reached on resolver error. Cache will only ever contain successfully-resolved versions. Verified by direct read of lines 380-409.
+
+- **A18 (new) — Test counter `resolverCallCounter` assertions.** REFUTED. `service_test.go:958` (cache-hit test) asserts `counter.called == 0` — proves resolver was NOT invoked, confirming cache-hit short-circuit. `service_test.go:1008` (future-timestamp test) asserts `counter.called == 1` — proves resolver was invoked exactly once, confirming the future-ts entry was rejected as a miss. Both assertions are positively-specified (exact count, not `>= N`), so a future regression that double-calls the resolver or skips it would fail the test.
+
+### Findings
+
+- **A2 OBSERVATION:** `cachedCheckedAt` on cache hit comes verbatim from the JSON-deserialized entry. The Valv-written cache file is always UTC, but a hand-edited cache file with non-UTC timezone offsets would render with that offset in the `manage update` output's RFC3339 string. Visually non-UTC but instant-correct. Defensive fix: `checkedAt = cachedCheckedAt.UTC()` at `service.go:415`. Low priority; documented for orchestrator/dev.
+- **A6 NOTE:** Integration test now compiles but is still not in any mage target. Same as R1 finding A8 — orchestrator/dev decision (delete vs wire to mage) is unchanged from R1.
+- **A10 NOTE:** Builder chose option (a) — doc-only correction in worklog. The race is now correctly documented but not defended against by temp+rename. Acceptable for v0.1.0 because `readVersionCache` swallows torn-read errors. Orchestrator may revisit later.
+
+No CONFIRMED counterexamples.
+No BLOCK findings.
+No regression-causing CONCERNs.
+
+### R1 finding closure
+
+- **R1 Proof Finding 1.1 (integration test compile breakage):** **CLOSED.** `service_integration_test.go:132` now uses `testClaudeCLIVersion` (declared at line 20). Source compiles cleanly under `-tags=integration`.
+- **R1 Proof Finding 1.2 (`LatestCheckedAt` cache-hit semantic):** **CLOSED.** `service.go:413-418` branches on `fromCache`; cache hits return `cachedCheckedAt` not `now`. `TestEnsureLatestReportsCachedCheckedAtOnCacheHit` pins the contract.
+- **R1 Falsification A2 (false atomic-write claim in worklog):** **CLOSED.** R2 worklog explicitly corrects the claim (BUILDER_WORKLOG.md:119). Implementation remains non-atomic but justification is now accurate.
+- **R1 Falsification A4 (cache-hit `LatestCheckedAt` masks cache):** **CLOSED.** Same fix as Proof 1.2 — cache hits now report the cached timestamp.
+- **R1 Falsification A5 (future-timestamp permanence):** **CLOSED.** `cache.go:77` adds `delta < 0` guard; `TestEnsureLatestRejectsCacheWithFutureTimestamp` pins the rejection behavior.
+- **R1 Falsification A17 (clock-injection completeness):** **CLOSED.** Two surviving `time.Now()` calls in `EnsureLatest` replaced with `s.clock()` (lines 436, 486). Verified by `git grep "time.Now"`: only the default-fallback at line 275 remains, outside `EnsureLatest`.
+
+### Mage test count (with both R2 sets committed)
+
+**431/431 GREEN across 20 packages.** Independent re-run from `main/` confirms full suite passes. Coverage threshold met for all packages (minimum 60%; `internal/services/images=79.2%`, `internal/cli=72.5%`). No flakes, no race detector hits.
+
+Builder 7.9 R2 reported 430/430 and 7.10 R2 reported 428/428 — both predate one of the R2 commits being on disk at the time their respective mage runs landed. Ground truth with both R2 commits on HEAD is 431/431.
+
+### Unknowns
+
+- **A2 OBSERVATION (manual cache-file timezone edit):** Acceptable for v0.1.0; production writer always writes UTC. Defensive `.UTC()` at the cache-hit branch would harden against hand-edited files. Routes to orchestrator for prioritization.
+- **A6 NOTE (integration test wiring):** Same status as R1 A8 — file compiles but no mage target runs it. Orchestrator/dev decision (delete vs wire) is unchanged from R1.
+- **A10 NOTE (atomic-write deferred):** Worklog now correctly documents the non-atomic write. Race is benign due to error-swallowing in `readVersionCache`. Routes to orchestrator if multi-process Valv invocations become common.
+
+### Verdict
+
+`pass` — no CONFIRMED counterexamples. All five R2 fixes (integration test reference, `LatestCheckedAt` cache-hit semantic, clock-injection completeness, future-timestamp guard, worklog correction) land cleanly with file:line evidence and behavior-pinned tests. `cachedVersion` signature change has exactly one production caller, correctly updated. New tests use `time.Time.Equal` (no monotonic-clock pitfall), positively-specified resolver-call counts, and unambiguous future-vs-clock gaps. `mage test` is 431/431 GREEN with both R2 commits on disk.
+
+The three remaining items (A2 OBSERVATION on manual cache-file edits, A6 NOTE on integration test wiring, A10 NOTE on deferred atomic-write upgrade) are documented for orchestrator routing but do not block Phase 6 advancement for Unit 7.9 R2.
+
+## Hylla Feedback
+
+- **Hylla MCP not consulted for this round.** All reviewed code was committed in `6b4ea4f` (Unit 7.9 R2), which post-dates the most recent Hylla ingest. Per CLAUDE.md § "Code Understanding Rules" item 2 (changed-since-ingest files use `git diff` / `Read`), I went directly to `git show 6b4ea4f -- <file>`, `Read` on current source, and `git grep` for symbol audits. No Hylla queries attempted; no fallback miss to log. Drop-end reingest will refresh the snapshot for future readers.
+
+---
+
+## Unit 7.10 — Round 2
+
+**Date:** 2026-05-16
+**Verdict:** pass
+
+### Attack vectors probed
+
+Each numbered vector from the spawn prompt enumerated. CONFIRMED = counterexample produced. REFUTED = attack tried, evidence rules it out. NOTE/CONCERN = real finding but not BLOCK.
+
+- **A1 — Other paths bypassing `openImagesService`.** REFUTED. Every production-code construction of the images service goes through `openImagesService(cmd, paths, provider)`. Confirmed by direct `Read` of the four files that import `imagesservice`:
+  - `internal/cli/operator_helpers.go:70-115` — sole site that constructs `imagesservice.Options{}` and calls `imagesservice.New(options)`. FIX 1 lives here at line 84.
+  - `internal/cli/manage.go:1116,1148` — `runManageUpdateCodex` and `runManageUpdateClaude` both call `openImagesService(cmd, paths, provider)`; neither constructs `imagesservice.Options{}` directly.
+  - `internal/cli/codex.go:243` — `ensureCodexImageCurrent` calls `openImagesService(cmd, paths, domain.ProviderCodex)`.
+  - `internal/cli/claude.go:185` — `ensureClaudeImageCurrent` calls `openImagesService(cmd, paths, domain.ProviderClaude)`.
+  - `cmd/valv/main.go` — does not reference `imagesservice` at all (verified by full `Read`).
+  - `internal/cli/claude_auth.go` — does not reference `imagesservice` (verified by full `Read`; only `dockeradapter`, not the higher-level images service).
+  No production path bypasses FIX 1. All four call sites land on the patched constructor.
+
+- **A2 — `paths.CachesDir` field name correctness.** REFUTED. `internal/config/paths.go:22` declares `CachesDir string` in the `Paths` struct. `ResolvePaths` populates it at line 56 as `filepath.Join(homeDir, "Library", "Caches", "valv")`. `Paths.Ensure()` at line 73 `MkdirAll`s the directory. The field name in FIX 1 matches the struct field exactly. Symmetric with how `BuildCacheDir` and other path fields are threaded through.
+
+- **A3 — Empty `paths.CachesDir` fallback to CWD-relative path.** **REFUTED in production, NOTE for partial-`Paths` constructions in tests.** Production: `cmd/valv/main.go` → `cli.NewRootCommand` → `config.ResolvePaths(homeDir)` always populates `CachesDir`. Tests: `testCodexPaths(t)` at `codex_test.go:461-482` populates `CachesDir = filepath.Join(root, "caches")` for every cli test. ONE construction at `codex_test.go:81-96` (`TestRunCodexCommandReturnsEnsureError`) builds a hand-rolled `config.Paths{...}` literal with `CachesDir: filepath.Join(root, "caches")` populated. No production or test path constructs `Paths` with empty `CachesDir`. If a future test ever builds a partial `Paths` without `CachesDir`, `filepath.Join("", "version-cache.json")` returns `"version-cache.json"` (relative) — but that's a future-test hazard, not a current bug. NOTE only.
+
+- **A4 — FIX 2 `VALV_REAL_HOME=t.TempDir()` interaction with other env state.** REFUTED. The test still sets `VALV_CODEX_IMAGE`, `valvTestSkipHostCodexLoginEnv=1`, and `PATH` (via fake docker install). `prepareCodexRuntime` at `runtime.go:71` calls `os.MkdirAll(sharedHome, 0o755)` to ensure the empty dir exists before `copyDirContents`. `copyDirContents` at `runtime.go:227-235` returns `nil` if the source doesn't exist; on an empty dir, `filepath.Walk` only visits the root and skips it (line 242-244). Zero files copied. The fake docker binary handles `image inspect` and `run --rm` paths (both exit 0 via the test's shell script at `codex_test.go:401-406`). `CODEX_HOME` is not set on the host — `runCodexHostCommand` would set it but the test bypasses host codex via `valvTestSkipHostCodexLoginEnv=1` (`account_auth.go:74,215-217`). Full chain works.
+
+- **A5 — FIX 2: does the test still test what it was supposed to?** REFUTED. The test's assertion is at `codex_test.go:443-445`: `if bytes.Contains(got, []byte("--debug")) { t.Fatalf(...) }`. It reads the captured docker-run args from `logPath` and asserts the root `--debug` flag was NOT forwarded. With `VALV_REAL_HOME=t.TempDir()`, the test now reaches `service.Run` → `executor.Run` → fake docker, which logs the actual run args to `logPath`. Before FIX 2, the test would fail at `PrepareRuntime`'s `copyDirContents` (ENOSPC) BEFORE reaching the docker exec. So FIX 2 doesn't change WHAT is tested — it removes the disk-space dependency that prevented the test from running at all. The `--debug` passthrough verification is preserved.
+
+- **A6 — Mage test count anomaly.** **CONFIRMED — builder reporting inaccuracy, not a test failure.** Builder reported `mage test GREEN 428/428` × 3 runs in `BUILDER_WORKLOG.md:55` (AC6) and `BUILDER_WORKLOG.md:38-40`. Independent re-run from `main/` on HEAD (commit `6b55d59`): **`mage test` produces 431/431 GREEN** across 20 packages (two consecutive runs confirmed). Coverage thresholds met for every package; `internal/cli=72.5%`, `internal/services/images=79.2%`. The 431/431 number aligns with the orchestrator's expected range (430-431) and contradicts the builder's 428/428 figure. The R2 QA-PROOF appendix at `BUILDER_QA_FALSIFICATION.md:1135` already noted this exact discrepancy for Unit 7.9 R2 ("Builder 7.9 R2 reported 430/430 and 7.10 R2 reported 428/428 — both predate one of the R2 commits being on disk at the time their respective mage runs landed"). Same pattern reproduced here. **No tests fail; the count is just mis-reported.** Not a BLOCK — production correctness is intact, but builder reports should be re-verified.
+
+- **A7 — New test `TestOpenImagesServiceWritesCacheToCachesDir` exercises the write path.** REFUTED. The test at `operator_helpers_test.go:97-156` constructs the service, then calls `svc.EnsureLatest(ctx, imagesservice.EnsureRequest{AllowExistingOnCheckFail: true})` at line 128. Trace through `service.go:367-419`:
+  1. `currentState` returns empty + `stateFound=false` (new test store).
+  2. `readVersionCache(s.cachePath)` returns empty cache (fresh path).
+  3. Cache miss → `s.resolver.LatestVersion(ctx)` calls the stubbed resolver returning `"2.2.0"`.
+  4. `writeVersionCache(s.cachePath, "2.2.0", ProviderClaude, now)` writes the file at `s.cachePath` = `paths.CachesDir/version-cache.json` (line 406).
+  5. `imageAvailable` runs `docker image inspect valv-claude:dev` → fake docker exits 0 → returns true.
+  6. `imageRecipeMatches` runs `docker image inspect --format ...` → fake docker outputs empty (`VALV_DOCKER_IMAGE_INSPECT_OUTPUT` unset) → recipe mismatch.
+  7. `Build()` runs `docker buildx build --load ...` → fake docker exits 0.
+  Cache write happens at step 4, BEFORE the docker-build steps. The test's `os.Stat(wantCachePath)` at line 131 confirms the file exists at the expected path. End-to-end write path exercised — not just a field-value check.
+
+- **A8 — Concurrent-test pollution between mage test runs.** REFUTED. `TestOpenImagesServiceWritesCacheToCachesDir` does NOT call `t.Parallel()` (verified at line 97 of operator_helpers_test.go — no `t.Parallel()` invocation). It cannot, because it calls `installFakeDocker` which uses `t.Setenv` (incompatible with `t.Parallel`). Same constraint binds every other test that calls `installFakeDocker` (verified across `manage_test.go` and `extended_test.go` — none of the `installFakeDocker` callers use `t.Parallel`). Per-test cache isolation via `t.TempDir()` (which is itself per-test-unique) means even if these tests ran in parallel they'd each write to their own `paths.CachesDir`. No cross-test cache state leak.
+
+- **A9 — `paths` not threaded through tests.** REFUTED. Every cli test that constructs the images service does so via `openImagesService(cmd, paths, provider)` with `paths` from `testCodexPaths(t)`. The new FIX 1 makes `paths.CachesDir` flow into the cache. No "indirect" path bypasses this — see A1.
+
+- **A10 — FIX 2 `t.Setenv` ordering vs subprocess.** REFUTED. The env-set sequence in `TestRootDebugFlagIsNotPassedThroughToInteractiveCodexLaunch` (codex_test.go:379-411):
+  1. line 380: `t.Setenv("VALV_CODEX_IMAGE", "valv-codex-dev:dev")`
+  2. line 381: `t.Setenv(valvTestSkipHostCodexLoginEnv, "1")`
+  3. line 389: `t.Setenv("VALV_REAL_HOME", t.TempDir())` ← FIX 2
+  4. line 391: `paths := testCodexPaths(t)`
+  5. line 396: `runManage(...)` (account add)
+  6. line 411: `t.Setenv("PATH", binDir+...)` (fake docker)
+  7. line 435: `cmd.Execute()` → `runCodexCommand` → eventually `realHomeDir()`
+  `VALV_REAL_HOME` is set FIRST (step 3) before any code that calls `realHomeDir()`. `realHomeDir()` (`operator_helpers.go:304`) reads the env var on every call, no caching. Subprocess (fake docker) inherits the env after step 6. Order is correct; FIX 2 sequence works.
+
+### R1 finding closure
+
+- **A8 cache pollution: CLOSED.** R1 confirmed pollution of dev's `~/Library/Caches/valv/version-cache.json` with test values. R2 FIX 1 threads `paths.CachesDir` through. The new test `TestOpenImagesServiceWritesCacheToCachesDir` positively verifies cache lands at `paths.CachesDir/version-cache.json`. Mechanism: `openImagesService` (the SINGLE construction site, per A1) always sets `CachePath`, so `imagesservice.New` never falls back to `defaultCachePath()` for cli-originated callers. Builder's `BUILDER_WORKLOG.md:43-45` reports the dev's real cache file mtime unchanged across 3 consecutive `mage test` runs — independent corroboration via filesystem observation.
+- **Tmpfs flake: CLOSED.** R1 reproduced a 427/428 tmpfs ENOSPC failure of `TestRootDebugFlagIsNotPassedThroughToInteractiveCodexLaunch` due to copying the dev's real `~/.codex` into a tmpfs-backed `t.TempDir()`. R2 FIX 2 short-circuits the copy via `VALV_REAL_HOME=t.TempDir()`. `PrepareRuntime`'s copy step now walks an empty dir (zero bytes copied). Verified live: `mage test` GREEN 431/431, including this specific test, on two consecutive runs without any environmental disk-space prep.
+
+### Mage test ground-truth
+
+- **count: 431/431** (two independent `mage test` runs from `main/` on HEAD `6b55d59`).
+- **failures: none.**
+- **coverage:** all 20 packages above the 60% floor. Specific cover values for the most-touched packages: `internal/cli=72.5%`, `internal/services/images=79.2%`.
+- **race detector:** clean.
+- **Builder reported count (428/428) does NOT match ground truth (431/431).** Same "mage run predates final commit" pattern as 7.9 R2 (per the R2 QA-PROOF appendix). Production correctness intact; reporting accuracy concern only.
+
+### Findings
+
+- **CONCERN (A6): Builder test-count mis-reporting recurrence.** Builder reported 428/428 in `BUILDER_WORKLOG.md:38-40,55` and the AC6 acceptance criterion explicitly cites "428/428 GREEN". Ground truth (after both FIX 1 and FIX 2 commits land on HEAD) is **431/431 GREEN**. Same pattern as Unit 7.9 R2 (per the R2 QA-PROOF appendix). No tests fail; the discrepancy is in reporting only. Routes to orchestrator: builders should re-run `mage test` AFTER their final commit, not before. The QA-PROOF appendix from the prior unit had already flagged this pattern; recurrence indicates the lesson did not propagate.
+- **NOTE (A3): Empty-`paths.CachesDir` future-test hazard.** No current code path produces an empty `CachesDir`, but if a future test builds a partial `config.Paths{}` literal without populating `CachesDir`, FIX 1 would produce `"version-cache.json"` (relative path) and write to CWD. Not exploitable today. Routes to orchestrator as a defensive-hardening candidate: add `if strings.TrimSpace(paths.CachesDir) == ""` guard inside `openImagesService` OR `Paths.Ensure()` validate non-empty `CachesDir`.
+- **NOTE (test-design):** The new test's "Confirm the real platform cache path was NOT written" block at `operator_helpers_test.go:135-155` is intentionally non-fatal (the comment at line 148-150 explains the rationale). The real existence-of-isolation proof is the `os.Stat(wantCachePath)` assertion at line 131 + the mechanism (FIX 1 forces `CachePath` to a fresh `t.TempDir()` path, so `defaultCachePath()` is unreachable from this caller). Defensible test design; documenting for future readers.
+
+### Counterexamples
+
+None CONFIRMED. The A6 mage-test-count mismatch is a reporting accuracy concern, not a behavior counterexample — all 431 tests pass, including the new test pinning FIX 1 and the previously-flaky test pinned by FIX 2.
+
+### Unknowns
+
+- **Live smoke test outcome:** whether `valv manage update claude` on a fresh install actually writes to `~/Library/Caches/valv/version-cache.json` (NOT `$XDG_CACHE_HOME` overrides or other edge paths). Routes to orchestrator for dev smoke test at drop close.
+- **A3 follow-up:** whether to add an empty-`CachesDir` guard inside `openImagesService` (or move the validation into `Paths.Ensure()`). Routes to orchestrator/dev.
+- **Builder test-count reporting:** procedural fix to prevent recurrence. Routes to orchestrator.
+
+### Verdict
+
+`pass` — no CONFIRMED counterexamples. FIX 1 (`openImagesService` threads `paths.CachesDir` into `Options.CachePath`) and FIX 2 (`VALV_REAL_HOME=t.TempDir()` in the interactive codex launch test) both land cleanly with file:line evidence and behavior-pinned tests. Both R1 findings (A8 cache pollution + tmpfs flake) are CLOSED with positive test coverage AND filesystem-observation corroboration. Mage test ground truth is 431/431 GREEN — three tests higher than the builder reported but consistent with the orchestrator's expected delta range. The builder-reporting accuracy concern (A6) is a procedural NOTE for orchestrator routing, not a regression-causing finding.
+
+## Hylla Feedback
+
+- **Hylla daemon unreachable** (`dial tcp 127.0.0.1:9080: connect: connection refused`) during this review. Three `hylla_search_keyword` queries attempted (`imagesservice.New imagesservice.Options`, `CachesDir`, `CachePath`) — all failed with the connection-refused error. Per CLAUDE.md § "Code Understanding Rules" item 2, files modified since the last Hylla snapshot use direct `Read` regardless of daemon state, so this round's primary evidence path was unaffected.
+- **Worked via:** direct `Read` of `internal/cli/operator_helpers.go`, `internal/cli/operator_helpers_test.go`, `internal/cli/codex_test.go`, `internal/cli/codex.go`, `internal/cli/claude.go`, `internal/cli/claude_image.go`, `internal/cli/claude_auth.go`, `internal/cli/manage.go`, `internal/cli/manage_test.go`, `internal/cli/extended_test.go`, `internal/cli/claude_image_test.go`, `internal/services/codex/service.go`, `internal/adapters/providers/codex/runtime.go`, `internal/services/images/service.go`, `internal/services/images/cache.go`, `internal/config/paths.go`, `cmd/valv/main.go`. `git diff HEAD~1 HEAD -- internal/cli/` for the unit's exact change set. `mage testPkg ./internal/cli` and `mage test` × 2 for ground-truth count verification.
+- **Suggestion:** None for Hylla itself — daemon down is infra. The A1 attack (find-all-call-sites of `imagesservice.New` / `imagesservice.Options{}`) is the textbook use case for `hylla_search_keyword` + `hylla_refs_find`; falling back to per-file `Read` is feasible only because the cli package has a small import surface. On a larger codebase the A1 audit without Hylla would be substantially more expensive.
+
+---
