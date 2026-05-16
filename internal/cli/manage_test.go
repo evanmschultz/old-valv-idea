@@ -280,7 +280,7 @@ func TestRunManageUpdateClaudeBuildsImage(t *testing.T) {
 		t.Fatalf("Execute() error = %v\nstderr=%s", err, stderr.String())
 	}
 
-	if !strings.Contains(stdout.String(), "Provider image built") {
+	if !strings.Contains(stdout.String(), "Provider image updated") {
 		t.Fatalf("unexpected update output: %q", stdout.String())
 	}
 	if !strings.Contains(stdout.String(), "provider=claude") {

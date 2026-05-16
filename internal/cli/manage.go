@@ -1169,7 +1169,7 @@ func runManageUpdateClaude(cmd *cobra.Command, paths config.Paths, mode output.M
 	for _, tag := range result.Tags {
 		tagValues = append(tagValues, tag.String())
 	}
-	heading := "Provider image built"
+	heading := "Provider image updated"
 	if result.Action == imagesservice.EnsureActionUpToDate {
 		heading = "Provider image up to date"
 	}

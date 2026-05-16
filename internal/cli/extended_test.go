@@ -855,6 +855,54 @@ func fakeCodexRecipeHash() string {
 	return hex.EncodeToString(sum[:])
 }
 
+func fakeClaudeRecipeHash() string {
+	sum := sha256.Sum256([]byte(imagesservice.DefaultClaudeDockerfile()))
+	return hex.EncodeToString(sum[:])
+}
+
+func TestManageUpdateClaudeSecondRunReportsUpToDate(t *testing.T) {
+	const stubbedVersion = "2.2.0"
+	paths := testCodexPaths(t)
+	logPath := installFakeDocker(t)
+	stubClaudeVersionResolver(t, stubbedVersion)
+	t.Setenv("VALV_DOCKER_IMAGE_INSPECT_OUTPUT", fakeClaudeRecipeHash())
+
+	runManage(t, paths, []string{"update", "claude"})
+	output := runManage(t, paths, []string{"update", "claude"})
+	if !strings.Contains(output, "Provider image up to date") {
+		t.Fatalf("unexpected second update output: %q", output)
+	}
+
+	logContent := mustReadFile(t, logPath)
+	if got, want := strings.Count(logContent, "buildx build --load"), 1; got != want {
+		t.Fatalf("build count = %d, want %d in log %q", got, want, logContent)
+	}
+}
+
+func TestEnsureClaudeImageCurrentAutoUpdatesWhenNoOverrideIsSet(t *testing.T) {
+	const stubbedVersion = "2.2.0"
+	paths := testCodexPaths(t)
+	logPath := installFakeDocker(t)
+	stubClaudeVersionResolver(t, stubbedVersion)
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	cmd.SetIn(bytes.NewBuffer(nil))
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+
+	if err := ensureClaudeImageCurrent(cmd, paths); err != nil {
+		t.Fatalf("ensureClaudeImageCurrent() error = %v", err)
+	}
+
+	logContent := mustReadFile(t, logPath)
+	for _, want := range []string{"image inspect valv-claude:dev", "buildx build --load", "--build-arg CLAUDE_VERSION=" + stubbedVersion} {
+		if !strings.Contains(logContent, want) {
+			t.Fatalf("unexpected docker log %q missing %q", logContent, want)
+		}
+	}
+}
+
 func installFakePgrep(t *testing.T, exitCode int) {
 	t.Helper()
 

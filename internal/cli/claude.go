@@ -187,9 +187,12 @@ func ensureClaudeImageCurrent(cmd *cobra.Command, paths config.Paths) error {
 		return fmt.Errorf("initialize image updater: %w", err)
 	}
 	defer closeImages()
-	_, err = service.EnsureLatest(cmd.Context(), imagesservice.EnsureRequest{AllowExistingOnCheckFail: true})
+	result, err := service.EnsureLatest(cmd.Context(), imagesservice.EnsureRequest{AllowExistingOnCheckFail: true})
 	if err != nil {
 		return err
+	}
+	if result.Action == imagesservice.EnsureActionUsingExistingImage {
+		LoggerFromContext(cmd.Context()).Debug("using existing claude image after latest-version check failed", "image", result.Image.String(), "version", result.Version)
 	}
 	return nil
 }
