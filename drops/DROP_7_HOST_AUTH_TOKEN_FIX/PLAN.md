@@ -421,6 +421,92 @@ Builder must verify: does any test or golden fixture assert on `runManageUpdateC
 
 ---
 
+### Unit 7.9 — 24h on-disk version cache for `EnsureLatest`
+
+**state:** todo
+**blocked_by:** 7.7, 7.8
+**paths:** `internal/services/images/service.go`, `internal/services/images/service_test.go`, possibly new `internal/services/images/cache.go`
+**packages:** `internal/services/images`
+
+**Why this unit exists:** Unit 7.8 R1 falsification CONCERN 1 — Round 5 Scope explicitly promised "24h cache to avoid per-launch latency" but Unit 7.8 only shipped the wiring. Every `valv claude` / `valv codex` launch now makes a ~10s-timeout HTTPS round-trip to npm/GitHub. Dev directed "fix all 5 findings before smoke test" 2026-05-16.
+
+**What to build:**
+
+Add a disk-based version cache to `images.Service` so `EnsureLatest` skips the registry network call when a fresh cached version exists.
+
+**Cache design:**
+- Storage: `$XDG_CACHE_HOME/valv/version-cache.json` (fall back to `$HOME/.cache/valv/version-cache.json` if `XDG_CACHE_HOME` unset). Use Go stdlib `os.UserCacheDir()` — it handles the platform-correct path.
+- Schema: `{"providers": {"claude": {"version": "2.1.143", "checked_at": "2026-05-16T18:00:00Z"}, "codex": {...}}}`. JSON-encoded, mode 0o644.
+- TTL: 24h (`const versionCacheTTL = 24 * time.Hour`).
+- API on `Service`: extend `EnsureLatest` to consult the cache before calling `resolver.LatestVersion`. If cached + fresh: return the cached version. If cached + stale or missing: call resolver, on success update cache, on failure honor `AllowExistingOnCheckFail`.
+- Concurrency safety: file write should be `os.WriteFile` (full-file atomic at the kernel level for small files); for stricter safety use write-temp-then-rename pattern via `os.CreateTemp` + `os.Rename`. Reads are read-only — no locking needed.
+- Failure isolation: cache read errors (file missing, malformed JSON, permission denied) MUST NOT block `EnsureLatest`. Log debug, proceed with normal resolver path.
+
+**API touch points:**
+- Constructor `New()`: accept an optional `CachePath string` field on `Options`. Empty → default to `os.UserCacheDir()`-based path. Tests can override to `t.TempDir()`.
+- `EnsureLatest` body: before `resolver.LatestVersion`, attempt cache read keyed by provider. After successful resolver call, write back. Provider key derives from the `Provider` field passed to `New()` (`domain.ProviderClaude` / `domain.ProviderCodex` map to string keys `"claude"` / `"codex"`).
+- Override capability for tests: a `clock func() time.Time` field on Service for deterministic `checked_at` timestamps; default `time.Now`.
+
+**Tests:**
+- Cache miss → resolver invoked → cache written.
+- Cache hit fresh (within 24h) → resolver NOT invoked → cached version returned.
+- Cache hit stale (older than 24h) → resolver invoked → cache updated.
+- Cache read error (malformed JSON file) → resolver invoked, no error propagated.
+- Cache write error (e.g. parent dir non-writable) → resolver still returns success, error logged.
+- Both providers in one file: Claude write doesn't trample Codex entry.
+
+**Plus SUB-FIX from NOTE 3 — resolve `DefaultClaudeCLIVersion` residue:** absorbed into this unit since it touches the same `service.go` file. After Unit 7.8, `DefaultClaudeCLIVersion` has zero production callers. Builder options (pick based on actual reference scan):
+- (preferred) Delete `DefaultClaudeCLIVersion`. Update tests to use a fresh test constant (e.g. `const testClaudeCLIVersion = "2.1.143"` local to the test file) where needed. Delete `TestDefaultClaudeCLIVersionIsNonEmpty` if its only purpose was guarding the deleted constant. Update recipe-hash tests that reference it.
+- (fallback) If deletion creates ripple effects (e.g. external integrations rely on the export), document why kept in a doc comment on the constant.
+
+**Acceptance criteria:**
+- AC1: `EnsureLatest` reads from `versionCachePath` before invoking resolver; returns cached version when within TTL. Verified by test injecting a fake clock + pre-populated cache file.
+- AC2: After a fresh resolver call, the cache file contains `{provider: {version, checked_at}}` entry. Verified by test reading the file.
+- AC3: Both Claude and Codex entries coexist in the same file. Verified by test writing a Codex entry then triggering a Claude `EnsureLatest`.
+- AC4: Cache read errors do not propagate to `EnsureLatest` callers. Verified by test seeding malformed JSON.
+- AC5: `DefaultClaudeCLIVersion` deletion (preferred) or kept-with-doc-comment (fallback). Builder picks and documents in worklog.
+- AC6: `mage testPkg ./internal/services/images` GREEN, coverage ≥70%.
+- AC7: `mage test` GREEN (full suite, race detector).
+
+**Verification target:** `mage testPkg github.com/evanmschultz/valv/internal/services/images` then `mage test`
+
+---
+
+### Unit 7.10 — Polish: Codex parity for debug log, tests, heading wording
+
+**state:** todo
+**blocked_by:** 7.7, 7.8
+**paths:** `internal/cli/claude.go`, `internal/cli/manage.go`, `internal/cli/manage_test.go`, possibly `internal/cli/extended_test.go`
+**packages:** `internal/cli`
+
+**Why this unit exists:** Unit 7.8 R1 falsification NOTE 1, NOTE 2, NOTE 4 — surface-level Codex-parity gaps in `internal/cli` that the dev requested be addressed before smoke test 2026-05-16. NOTE 3 (`DefaultClaudeCLIVersion` cleanup) moved to Unit 7.9 to keep package boundaries disjoint.
+
+**What to build (three sub-fixes):**
+
+**SUB-FIX A — NOTE 1: Capture `EnsureResult` in `ensureClaudeImageCurrent` for debug log.**
+Match `ensureCodexImageCurrent` (`internal/cli/codex.go:248–254`). Currently `ensureClaudeImageCurrent` (`claude.go:190`) discards the result with `_`. Capture it, and on `result.Action == imagesservice.EnsureActionUsingExistingImage` emit a debug log mirroring Codex's exact log key/format. Use the same logger reference Codex uses.
+
+**SUB-FIX B — NOTE 2: Add Claude-equivalent tests.**
+Codex has `TestManageUpdateSecondRunReportsUpToDate` (or similarly named — find via grep) and `TestEnsureCodexImageCurrentAutoUpdatesWhenNoOverrideIsSet`. Add Claude mirrors:
+- `TestManageUpdateClaudeSecondRunReportsUpToDate` — invoke `runManageUpdateClaude` twice, second invocation should report up-to-date heading.
+- `TestEnsureClaudeImageCurrentAutoUpdatesWhenNoOverrideIsSet` — confirms `ensureClaudeImageCurrent` fires `EnsureLatest` (not a no-op or pinned `Build`) when `VALV_CLAUDE_IMAGE` is unset.
+
+**SUB-FIX D — NOTE 4: Heading wording symmetry.**
+Codex default `manage update` heading is `"Provider image updated"` (`manage.go:1140`). Claude default is `"Provider image built"` (`manage.go:1172`). Change Claude's default to `"Provider image updated"` to match. Update any test that asserts the old wording.
+
+**Acceptance criteria:**
+- AC1: `ensureClaudeImageCurrent` emits a debug log on `EnsureActionUsingExistingImage` matching Codex's pattern. Verified by test (capture debug logger output or inspect via mock).
+- AC2: `TestManageUpdateClaudeSecondRunReportsUpToDate` and `TestEnsureClaudeImageCurrentAutoUpdatesWhenNoOverrideIsSet` exist and pass.
+- AC3: Claude's `runManageUpdateClaude` default heading is `"Provider image updated"`. Old-wording test assertions updated.
+- AC4: `mage testPkg ./internal/cli` GREEN. Coverage ≥70%.
+- AC5: `mage test` GREEN full suite.
+
+**Verification target:** `mage testPkg github.com/evanmschultz/valv/internal/cli` then `mage test`
+
+**Coordination with Unit 7.9 (parallel-safe):** Unit 7.9 owns `internal/services/images/`. Unit 7.10 owns `internal/cli/`. Zero file overlap. Both BUILDER_WORKLOG.md appends go to the same file; distinct `## Unit N.M — Round 1` headings prevent collision.
+
+---
+
 ## Path A Scope (superseded 2026-05-15 — preserved as historical record)
 
 **Codex parity for Claude auth.** DROP_6.2's container-side `claude auth login` flow has invisible paste prompt (TUI mode doesn't render through Docker pty). User verified on 2026-05-15 that host-side `claude setup-token` works perfectly: browser auto-opens, paste prompt clearly visible, completes cleanly. This drop replaces the container-auth flow with host-subprocess auth mirroring Codex's existing pattern.
