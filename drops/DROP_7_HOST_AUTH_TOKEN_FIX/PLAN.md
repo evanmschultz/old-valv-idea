@@ -423,7 +423,7 @@ Builder must verify: does any test or golden fixture assert on `runManageUpdateC
 
 ### Unit 7.9 — 24h on-disk version cache for `EnsureLatest`
 
-**state:** todo
+**state:** done
 **blocked_by:** 7.7, 7.8
 **paths:** `internal/services/images/service.go`, `internal/services/images/service_test.go`, possibly new `internal/services/images/cache.go`
 **packages:** `internal/services/images`
@@ -474,7 +474,7 @@ Add a disk-based version cache to `images.Service` so `EnsureLatest` skips the r
 
 ### Unit 7.10 — Polish: Codex parity for debug log, tests, heading wording
 
-**state:** todo
+**state:** done
 **blocked_by:** 7.7, 7.8
 **paths:** `internal/cli/claude.go`, `internal/cli/manage.go`, `internal/cli/manage_test.go`, possibly `internal/cli/extended_test.go`
 **packages:** `internal/cli`

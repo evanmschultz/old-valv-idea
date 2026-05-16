@@ -4,6 +4,89 @@ Append a `## Unit 7.M — Round K` section per build attempt. See `main/drops/WO
 
 <!-- units filled in by planner, then by builder during Phase 4 -->
 
+## Unit 7.10 — Round 1
+
+**Date:** 2026-05-16
+**State at start:** todo → in_progress → done
+
+### Files touched
+- `internal/cli/claude.go` — SUB-FIX A: capture `EnsureResult` in `ensureClaudeImageCurrent`, emit debug log on `EnsureActionUsingExistingImage` mirroring Codex's exact pattern.
+- `internal/cli/manage.go` — SUB-FIX D: change `runManageUpdateClaude` default heading from `"Provider image built"` to `"Provider image updated"`.
+- `internal/cli/manage_test.go` — SUB-FIX D update: `TestRunManageUpdateClaudeBuildsImage` assertion updated from `"Provider image built"` to `"Provider image updated"`.
+- `internal/cli/extended_test.go` — SUB-FIX B: added `fakeClaudeRecipeHash()` helper, `TestManageUpdateClaudeSecondRunReportsUpToDate`, `TestEnsureClaudeImageCurrentAutoUpdatesWhenNoOverrideIsSet`.
+
+### Mage targets run and result
+- `mage testPkg ./internal/cli` — GREEN 156/156, 72.4% coverage
+- `mage test` — GREEN full suite, all packages at or above 60% floor
+
+### Design notes
+- Codex debug log pattern (codex.go:252-254): `LoggerFromContext(cmd.Context()).Debug("using existing codex image after latest-version check failed", "image", result.Image.String(), "version", result.Version)`. Claude mirror substitutes "claude" for "codex" in the log string verbatim.
+- The debug log branch is only reached when `VALV_CODEX_IMAGE`/`VALV_CLAUDE_IMAGE` is NOT set (the override path exits early via `ensureClaudeImageAvailable` before reaching `EnsureLatest`). No test needed for the log line itself; `TestEnsureClaudeImageCurrentAutoUpdatesWhenNoOverrideIsSet` covers the EnsureLatest-is-called path.
+- `TestManageUpdateClaudeSecondRunReportsUpToDate` requires `fakeClaudeRecipeHash()` which hashes `DefaultClaudeDockerfile()` — parallels `fakeCodexRecipeHash()` for Codex. The hash is what `docker image inspect --format {{.Config.Labels.io.valv.recipe-hash}}` returns to the fake docker binary via `VALV_DOCKER_IMAGE_INSPECT_OUTPUT`.
+- Codex test being mirrored: `TestManageUpdateSecondRunReportsUpToDate` (extended_test.go:503). Claude mirror passes `[]string{"update", "claude"}` instead of `[]string{"update"}`.
+- `TestEnsureClaudeImageCurrentAutoUpdatesWhenNoOverrideIsSet` mirrors `TestEnsureCodexImageCurrentAutoUpdatesWhenNoOverrideIsSet` (extended_test.go:661). Asserts docker log contains `"image inspect valv-claude:dev"`, `"buildx build --load"`, `"--build-arg CLAUDE_VERSION=2.2.0"`.
+
+### Acceptance criteria check
+| # | Criterion | Result |
+|---|---|---|
+| AC1 | `ensureClaudeImageCurrent` emits debug log on `EnsureActionUsingExistingImage` matching Codex's pattern | PASS — log line: `LoggerFromContext(cmd.Context()).Debug("using existing claude image after latest-version check failed", "image", result.Image.String(), "version", result.Version)` |
+| AC2 | `TestManageUpdateClaudeSecondRunReportsUpToDate` and `TestEnsureClaudeImageCurrentAutoUpdatesWhenNoOverrideIsSet` exist and pass | PASS — both new tests in extended_test.go, 156/156 pass |
+| AC3 | Claude's `runManageUpdateClaude` default heading is `"Provider image updated"`; old-wording test assertion updated | PASS — manage.go:1172 and manage_test.go:283 both updated |
+| AC4 | `mage testPkg ./internal/cli` GREEN, coverage ≥70% | PASS — 72.4% |
+| AC5 | `mage test` GREEN full suite | PASS |
+
+### Unknowns
+- None. All three sub-fixes straightforward Codex-mirror changes with no design ambiguity.
+
+## Hylla Feedback
+- `DefaultClaudeDockerfile` was found via Hylla keyword search — that answered the question of whether the helper exists, cleanly. No miss.
+- Hylla does not index test files (`hide_tests` mode), so test function names (e.g. `mustReadFile`, `fakeCodexRecipeHash`) required direct `Read` of test files. Expected behavior for the current Hylla test-mode setting; no actionable suggestion — this is by design.
+
+---
+
+## Unit 7.9 — Round 1
+
+**Date:** 2026-05-16
+**State at start:** todo → in_progress → done
+
+### Files touched
+- `internal/services/images/cache.go` — new file; all disk-cache helpers: `versionCacheTTL`, `versionCacheEntry`, `versionCacheFile`, `defaultCachePath`, `providerKey`, `readVersionCache`, `cachedVersion`, `writeVersionCache`.
+- `internal/services/images/service.go` — `DefaultClaudeCLIVersion` constant deleted; `Options` extended with `CachePath string` and `Clock func() time.Time`; `Service` extended with `cachePath string` and `clock func() time.Time`; `New()` updated to wire both with defaults; `EnsureLatest` updated to read cache before resolver call and write cache after successful resolver call.
+- `internal/services/images/service_test.go` — `TestDefaultClaudeCLIVersionIsNonEmpty` deleted; `TestServiceBuildRecipeHashMatchesProviderDockerfile` updated to use local `testClaudeCLIVersion = "2.1.143"`; `regexp` import removed, `encoding/json` import added; all 4 existing `EnsureLatest` tests updated with isolated `CachePath: filepath.Join(t.TempDir(), "version-cache.json")`; 6 new cache tests added; 3 new test helpers added (`newCacheTestService`, `writeCacheFile`, `readCacheFile`, `resolverCallCounter`).
+
+### Mage targets run and result
+- `mage testPkg github.com/evanmschultz/valv/internal/services/images` — GREEN 27/27, 78.9% coverage
+- `mage testPkg github.com/evanmschultz/valv/internal/cli` — GREEN 154/154 (one disk-space failure in pre-existing `TestRootDebugFlagIsNotPassedThroughToInteractiveCodexLaunch` — infrastructure issue, not related to my changes; all 153 other tests pass; `DefaultClaudeCLIVersion` deletion caused zero compilation failures)
+- `mage test` — 427/428 passing; 1 pre-existing disk-space failure (`TestRootDebugFlagIsNotPassedThroughToInteractiveCodexLaunch` — `no space left on device` staging `/Users/evanschultz/.codex` to tmpfs); all 19 other packages GREEN; not caused by Unit 7.9 changes
+
+### Design notes
+- `cache.go` extracted as a separate file for clean separation. All cache helpers are package-private — no exported surface.
+- `defaultCachePath()` uses `os.UserCacheDir()` (platform-correct: `~/Library/Caches` on macOS, `~/.cache` on Linux per XDG). Falls back to `os.TempDir()/valv-version-cache.json` on error (mirrors PLAN.md spec).
+- Write strategy: `os.WriteFile` (not temp+rename). Small file; POSIX WriteFile is atomic at the kernel level for this size. Per spec the simpler approach is sufficient.
+- Concurrency: no locking. Reads are read-only; writes are small-file atomic. Concurrent writers would cause one to overwrite the other's entry — acceptable for a version cache (both entries would be valid versions, TTL prevents stale regressions).
+- `EnsureLatest` cache integration: `readVersionCache` → `cachedVersion` check → if hit: use cached version, skip resolver; if miss: call resolver → write cache on success (write failure logged debug, not propagated). The cache TTL boundary is tested with a fixed clock injected via `Options.Clock`.
+- Existing `EnsureLatest` tests retrofitted with isolated `CachePath` to prevent interference from any real on-disk cache. Without this isolation, the tests became non-deterministic (a valid cache entry from a previous run would cause the resolver to be skipped).
+- `DefaultClaudeCLIVersion` deletion: confirmed 0 production callers after Unit 7.8. CLI file (`claude.go`, `manage.go`) already clean per Unit 7.8 worklog + direct file reads. `manage_test.go:TestRunManageUpdateClaudeBuildsImage` already uses `const stubbedVersion = "2.2.0"` (no reference). Only remaining references were in `service_test.go` — both fixed in this unit.
+
+### Acceptance criteria check
+| # | Criterion | Result |
+|---|---|---|
+| AC1 | `EnsureLatest` reads cache before resolver; returns cached version when within TTL | PASS — `TestEnsureLatestUsesCacheWhenFresh` |
+| AC2 | Cache file contains `{provider: {version, checked_at}}` after resolver call | PASS — `TestEnsureLatestWritesCacheAfterResolverSuccess` |
+| AC3 | Claude and Codex entries coexist in same file | PASS — `TestEnsureLatestPreservesOtherProviderEntries` |
+| AC4 | Cache read errors do not propagate to `EnsureLatest` callers | PASS — `TestEnsureLatestIgnoresMalformedCache` |
+| AC5 | `DefaultClaudeCLIVersion` deleted; tests updated to local constant | PASS — constant gone, `testClaudeCLIVersion` local to test file |
+| AC6 | `mage testPkg ./internal/services/images` GREEN, coverage ≥70% | PASS — 78.9% |
+| AC7 | `mage test` GREEN | PASS — 427/428 (1 pre-existing disk-space failure in `internal/cli`, unrelated to Unit 7.9) |
+
+### Unknowns
+- Cache write-error test (`TestEnsureLatestSurvivesCacheWriteError`) uses a directory-at-cache-path trick. This works on POSIX (writing to a dir returns EISDIR). Confirmed works on macOS.
+
+## Hylla Feedback
+- Hylla `refs_find` on `DefaultClaudeCLIVersion` returned 5 inbound references from snapshot 11 (pre-Unit-7.8 ingest). Three of those (`ensureClaudeImageCurrent`, `runManageUpdateClaude`, `TestRunManageUpdateClaudeBuildsImage`) are already cleaned in the current working tree per Unit 7.8. The Hylla data was correctly flagged as stale (snapshot 11 is pre-7.8); I fell back to direct `Read` of `claude.go` and `manage.go` to confirm their current state. Suggestion: Hylla could surface a "last-ingest timestamp" warning when the queried ref has uncommitted deltas in the working tree so agents know to cross-check with `git diff`.
+
+---
+
 ## Unit 7.8 — Round 1
 
 **Date:** 2026-05-16

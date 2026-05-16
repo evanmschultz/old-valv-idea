@@ -4,13 +4,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -130,6 +130,7 @@ func TestEnsureLatestBuildsAndPersistsStateWhenImageIsMissing(t *testing.T) {
 		Resolver:   staticResolver("0.117.0"),
 		Repository: "ghcr.io/valv/codex",
 		ContextDir: "/tmp/codex-image",
+		CachePath:  filepath.Join(t.TempDir(), "version-cache.json"),
 		UserID:     1000,
 		GroupID:    1000,
 	})
@@ -183,6 +184,7 @@ func TestEnsureLatestSkipsBuildWhenStateIsCurrent(t *testing.T) {
 		Resolver:   staticResolver("0.117.0"),
 		Repository: "ghcr.io/valv/codex",
 		ContextDir: "/tmp/codex-image",
+		CachePath:  filepath.Join(t.TempDir(), "version-cache.json"),
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -234,6 +236,7 @@ func TestEnsureLatestRebuildsWhenRecipeHashDiffers(t *testing.T) {
 		Resolver:   staticResolver("0.117.0"),
 		Repository: "ghcr.io/valv/codex",
 		ContextDir: "/tmp/codex-image",
+		CachePath:  filepath.Join(t.TempDir(), "version-cache.json"),
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -281,6 +284,7 @@ func TestEnsureLatestFallsBackToExistingImageWhenVersionCheckFails(t *testing.T)
 		Resolver:   errResolver{err: fmt.Errorf("boom")},
 		Repository: "ghcr.io/valv/codex",
 		ContextDir: "/tmp/codex-image",
+		CachePath:  filepath.Join(t.TempDir(), "version-cache.json"),
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -319,6 +323,7 @@ func TestEnsureLatestRemovesPreviousVersionTagWhenUpdating(t *testing.T) {
 		Resolver:   staticResolver("0.117.0"),
 		Repository: "ghcr.io/valv/codex",
 		ContextDir: "/tmp/codex-image",
+		CachePath:  filepath.Join(t.TempDir(), "version-cache.json"),
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -507,14 +512,9 @@ func TestWriteDefaultClaudeContextWritesDockerfile(t *testing.T) {
 	}
 }
 
-func TestDefaultClaudeCLIVersionIsNonEmpty(t *testing.T) {
-	if strings.TrimSpace(DefaultClaudeCLIVersion) == "" {
-		t.Fatal("DefaultClaudeCLIVersion is empty")
-	}
-	if !regexp.MustCompile(`^\d+\.\d+\.\d+$`).MatchString(DefaultClaudeCLIVersion) {
-		t.Fatalf("DefaultClaudeCLIVersion = %q, want MAJOR.MINOR.PATCH", DefaultClaudeCLIVersion)
-	}
-}
+// testClaudeCLIVersion is a fixed version string used in tests that need a
+// concrete Claude CLI version but do not depend on any pinned-constant export.
+const testClaudeCLIVersion = "2.1.143"
 
 func TestServiceBuildRecipeHashMatchesProviderDockerfile(t *testing.T) {
 	cases := []struct {
@@ -536,7 +536,7 @@ func TestServiceBuildRecipeHashMatchesProviderDockerfile(t *testing.T) {
 			provider:    domain.ProviderClaude,
 			writeCtx:    WriteDefaultClaudeContext,
 			wantContent: DefaultClaudeDockerfile(),
-			version:     DefaultClaudeCLIVersion,
+			version:     testClaudeCLIVersion,
 		},
 	}
 
@@ -674,5 +674,262 @@ func TestNewWiresClaudeVersionResolverWhenProviderIsClaudeAndNilResolver(t *test
 	}
 	if svc.resolver == nil {
 		t.Fatal("New() with ProviderClaude and nil Resolver: resolver is nil, want auto-wired claudeVersionResolver")
+	}
+}
+
+// newCacheTestService builds a minimal Service for cache-focused tests. It
+// wires a providerImageStateStore so EnsureLatest can persist state, a
+// runnerRecorder that simulates a missing image (forcing a build), and
+// optionally injects a clock and cachePath.
+func newCacheTestService(t *testing.T, resolver VersionResolver, cachePath string, clock func() time.Time) Service {
+	t.Helper()
+	runner := &runnerRecorder{
+		errs: map[string]error{
+			"image inspect ghcr.io/valv/claude:dev": fmt.Errorf("no such image"),
+		},
+	}
+	svc, err := New(Options{
+		Runner:     runner,
+		StateStore: &providerImageStateStore{},
+		Resolver:   resolver,
+		Provider:   domain.ProviderClaude,
+		Repository: "ghcr.io/valv/claude",
+		ContextDir: t.TempDir(),
+		CachePath:  cachePath,
+		Clock:      clock,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	return svc
+}
+
+// writeCacheFile writes a versionCacheFile JSON directly to path so tests can
+// pre-populate the cache without going through the production write path.
+func writeCacheFile(t *testing.T, path string, c versionCacheFile) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll cache dir: %v", err)
+	}
+	data, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		t.Fatalf("MarshalIndent cache: %v", err)
+	}
+	if err := os.WriteFile(path, append(data, '\n'), 0o644); err != nil {
+		t.Fatalf("WriteFile cache: %v", err)
+	}
+}
+
+// readCacheFile reads and parses the on-disk cache file for assertions.
+func readCacheFile(t *testing.T, path string) versionCacheFile {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile cache: %v", err)
+	}
+	var c versionCacheFile
+	if err := json.Unmarshal(data, &c); err != nil {
+		t.Fatalf("Unmarshal cache: %v", err)
+	}
+	return c
+}
+
+// resolverCallCounter wraps a staticResolver and counts invocations.
+type resolverCallCounter struct {
+	inner  VersionResolver
+	called int
+}
+
+func (r *resolverCallCounter) LatestVersion(ctx context.Context) (string, error) {
+	r.called++
+	return r.inner.LatestVersion(ctx)
+}
+
+func TestEnsureLatestUsesCacheWhenFresh(t *testing.T) {
+	oldFind := findDockerBinary
+	findDockerBinary = func(string) (string, error) { return "/usr/bin/docker", nil }
+	t.Cleanup(func() { findDockerBinary = oldFind })
+
+	cacheDir := t.TempDir()
+	cachePath := filepath.Join(cacheDir, "version-cache.json")
+	fixedNow := time.Date(2026, 5, 16, 12, 0, 0, 0, time.UTC)
+	cacheTime := fixedNow.Add(-1 * time.Hour) // 1 hour ago — within TTL
+
+	writeCacheFile(t, cachePath, versionCacheFile{
+		Providers: map[string]versionCacheEntry{
+			"claude": {Version: "2.1.143", CheckedAt: cacheTime},
+		},
+	})
+
+	counter := &resolverCallCounter{inner: staticResolver("should-not-be-called")}
+	svc := newCacheTestService(t, counter, cachePath, func() time.Time { return fixedNow })
+
+	result, err := svc.EnsureLatest(context.Background(), EnsureRequest{})
+	if err != nil {
+		t.Fatalf("EnsureLatest() error = %v", err)
+	}
+	if counter.called != 0 {
+		t.Fatalf("resolver called %d times, want 0 (cache should have been used)", counter.called)
+	}
+	if got, want := result.LatestVersion, "2.1.143"; got != want {
+		t.Fatalf("LatestVersion = %q, want %q", got, want)
+	}
+}
+
+func TestEnsureLatestSkipsCacheWhenStale(t *testing.T) {
+	oldFind := findDockerBinary
+	findDockerBinary = func(string) (string, error) { return "/usr/bin/docker", nil }
+	t.Cleanup(func() { findDockerBinary = oldFind })
+
+	cacheDir := t.TempDir()
+	cachePath := filepath.Join(cacheDir, "version-cache.json")
+	fixedNow := time.Date(2026, 5, 16, 12, 0, 0, 0, time.UTC)
+	staleTime := fixedNow.Add(-25 * time.Hour) // 25 hours ago — beyond TTL
+
+	writeCacheFile(t, cachePath, versionCacheFile{
+		Providers: map[string]versionCacheEntry{
+			"claude": {Version: "2.1.100", CheckedAt: staleTime},
+		},
+	})
+
+	counter := &resolverCallCounter{inner: staticResolver("2.1.200")}
+	svc := newCacheTestService(t, counter, cachePath, func() time.Time { return fixedNow })
+
+	result, err := svc.EnsureLatest(context.Background(), EnsureRequest{})
+	if err != nil {
+		t.Fatalf("EnsureLatest() error = %v", err)
+	}
+	if counter.called != 1 {
+		t.Fatalf("resolver called %d times, want 1 (stale cache should trigger resolver)", counter.called)
+	}
+	if got, want := result.LatestVersion, "2.1.200"; got != want {
+		t.Fatalf("LatestVersion = %q, want %q", got, want)
+	}
+	// Cache file must be updated with the new version.
+	c := readCacheFile(t, cachePath)
+	if got := c.Providers["claude"].Version; got != "2.1.200" {
+		t.Fatalf("cache claude.version = %q, want %q", got, "2.1.200")
+	}
+}
+
+func TestEnsureLatestWritesCacheAfterResolverSuccess(t *testing.T) {
+	oldFind := findDockerBinary
+	findDockerBinary = func(string) (string, error) { return "/usr/bin/docker", nil }
+	t.Cleanup(func() { findDockerBinary = oldFind })
+
+	cacheDir := t.TempDir()
+	cachePath := filepath.Join(cacheDir, "version-cache.json")
+	fixedNow := time.Date(2026, 5, 16, 12, 0, 0, 0, time.UTC)
+
+	// No pre-existing cache file — resolver must be called and cache created.
+	svc := newCacheTestService(t, staticResolver("2.1.200"), cachePath, func() time.Time { return fixedNow })
+
+	_, err := svc.EnsureLatest(context.Background(), EnsureRequest{})
+	if err != nil {
+		t.Fatalf("EnsureLatest() error = %v", err)
+	}
+
+	c := readCacheFile(t, cachePath)
+	entry, ok := c.Providers["claude"]
+	if !ok {
+		t.Fatal("cache missing claude entry after resolver call")
+	}
+	if entry.Version != "2.1.200" {
+		t.Fatalf("cache claude.version = %q, want %q", entry.Version, "2.1.200")
+	}
+	wantCheckedAt := fixedNow.UTC().Truncate(time.Second)
+	if !entry.CheckedAt.Equal(wantCheckedAt) {
+		t.Fatalf("cache claude.checked_at = %v, want %v", entry.CheckedAt, wantCheckedAt)
+	}
+}
+
+func TestEnsureLatestPreservesOtherProviderEntries(t *testing.T) {
+	oldFind := findDockerBinary
+	findDockerBinary = func(string) (string, error) { return "/usr/bin/docker", nil }
+	t.Cleanup(func() { findDockerBinary = oldFind })
+
+	cacheDir := t.TempDir()
+	cachePath := filepath.Join(cacheDir, "version-cache.json")
+	fixedNow := time.Date(2026, 5, 16, 12, 0, 0, 0, time.UTC)
+
+	// Pre-populate with a Codex entry.
+	writeCacheFile(t, cachePath, versionCacheFile{
+		Providers: map[string]versionCacheEntry{
+			"codex": {Version: "0.50.0", CheckedAt: fixedNow},
+		},
+	})
+
+	// Run EnsureLatest for Claude — should add Claude entry without touching Codex.
+	svc := newCacheTestService(t, staticResolver("2.1.200"), cachePath, func() time.Time { return fixedNow })
+
+	_, err := svc.EnsureLatest(context.Background(), EnsureRequest{})
+	if err != nil {
+		t.Fatalf("EnsureLatest() error = %v", err)
+	}
+
+	c := readCacheFile(t, cachePath)
+	if got := c.Providers["codex"].Version; got != "0.50.0" {
+		t.Fatalf("codex entry overwritten: got %q, want %q", got, "0.50.0")
+	}
+	if got := c.Providers["claude"].Version; got != "2.1.200" {
+		t.Fatalf("claude entry = %q, want %q", got, "2.1.200")
+	}
+}
+
+func TestEnsureLatestIgnoresMalformedCache(t *testing.T) {
+	oldFind := findDockerBinary
+	findDockerBinary = func(string) (string, error) { return "/usr/bin/docker", nil }
+	t.Cleanup(func() { findDockerBinary = oldFind })
+
+	cacheDir := t.TempDir()
+	cachePath := filepath.Join(cacheDir, "version-cache.json")
+
+	// Write invalid JSON to the cache file.
+	if err := os.WriteFile(cachePath, []byte("not-json"), 0o644); err != nil {
+		t.Fatalf("WriteFile(malformed cache): %v", err)
+	}
+
+	fixedNow := time.Date(2026, 5, 16, 12, 0, 0, 0, time.UTC)
+	counter := &resolverCallCounter{inner: staticResolver("2.1.200")}
+	svc := newCacheTestService(t, counter, cachePath, func() time.Time { return fixedNow })
+
+	result, err := svc.EnsureLatest(context.Background(), EnsureRequest{})
+	if err != nil {
+		t.Fatalf("EnsureLatest() error = %v (malformed cache must not propagate)", err)
+	}
+	if counter.called != 1 {
+		t.Fatalf("resolver called %d times, want 1 (malformed cache should fall through to resolver)", counter.called)
+	}
+	if got, want := result.LatestVersion, "2.1.200"; got != want {
+		t.Fatalf("LatestVersion = %q, want %q", got, want)
+	}
+	// Cache should now be rewritten with the fresh entry.
+	c := readCacheFile(t, cachePath)
+	if c.Providers["claude"].Version != "2.1.200" {
+		t.Fatalf("cache not rewritten after malformed-cache fallback")
+	}
+}
+
+func TestEnsureLatestSurvivesCacheWriteError(t *testing.T) {
+	oldFind := findDockerBinary
+	findDockerBinary = func(string) (string, error) { return "/usr/bin/docker", nil }
+	t.Cleanup(func() { findDockerBinary = oldFind })
+
+	cacheDir := t.TempDir()
+	// Place a directory at the cache file path so WriteFile fails (is-a-dir error).
+	cachePath := filepath.Join(cacheDir, "version-cache.json")
+	if err := os.MkdirAll(cachePath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(cachePath-as-dir): %v", err)
+	}
+
+	fixedNow := time.Date(2026, 5, 16, 12, 0, 0, 0, time.UTC)
+	svc := newCacheTestService(t, staticResolver("2.1.200"), cachePath, func() time.Time { return fixedNow })
+
+	result, err := svc.EnsureLatest(context.Background(), EnsureRequest{})
+	if err != nil {
+		t.Fatalf("EnsureLatest() error = %v (cache write error must not propagate)", err)
+	}
+	if got, want := result.LatestVersion, "2.1.200"; got != want {
+		t.Fatalf("LatestVersion = %q, want %q", got, want)
 	}
 }

@@ -30,12 +30,6 @@ const (
 	recipeHashLabel          = "io.valv.recipe_hash"
 )
 
-// DefaultClaudeCLIVersion is the pinned version of the @anthropic-ai/claude-code
-// npm package baked into the default Claude provider image. Verified against
-// Context7 /anthropics/claude-code at build time; see drop BUILDER_WORKLOG.md
-// for the timestamped re-verification record.
-const DefaultClaudeCLIVersion = "2.1.143"
-
 var (
 	findDockerBinary = exec.LookPath
 	versionPattern   = regexp.MustCompile(`\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?`)
@@ -69,6 +63,12 @@ type Options struct {
 	UserID     int
 	GroupID    int
 	Logger     *log.Logger
+	// CachePath is the path to the on-disk version cache file.  If empty,
+	// the platform-default cache path is used (see defaultCachePath).
+	CachePath string
+	// Clock overrides time.Now for deterministic testing.  If nil, time.Now
+	// is used.
+	Clock func() time.Time
 }
 
 type Service struct {
@@ -83,6 +83,8 @@ type Service struct {
 	userID     int
 	groupID    int
 	logger     *log.Logger
+	cachePath  string
+	clock      func() time.Time
 }
 
 type BuildRequest struct {
@@ -264,6 +266,14 @@ func New(options Options) (Service, error) {
 	if resolver == nil && provider == domain.ProviderClaude {
 		resolver = NewClaudeVersionResolver(nil)
 	}
+	cachePath := strings.TrimSpace(options.CachePath)
+	if cachePath == "" {
+		cachePath = defaultCachePath()
+	}
+	clock := options.Clock
+	if clock == nil {
+		clock = time.Now
+	}
 	return Service{
 		runner:     options.Runner,
 		stateStore: options.StateStore,
@@ -276,6 +286,8 @@ func New(options Options) (Service, error) {
 		userID:     userID,
 		groupID:    groupID,
 		logger:     options.Logger,
+		cachePath:  cachePath,
+		clock:      clock,
 	}, nil
 }
 
@@ -362,33 +374,41 @@ func (s Service) EnsureLatest(ctx context.Context, request EnsureRequest) (Ensur
 		return EnsureResult{}, err
 	}
 
-	latestVersion, err := s.resolver.LatestVersion(ctx)
-	if err != nil {
-		if request.AllowExistingOnCheckFail {
-			available, inspectErr := s.imageAvailable(ctx, s.defaultImageRef())
-			if inspectErr != nil {
-				return EnsureResult{}, inspectErr
+	now := s.clock()
+	cacheData := readVersionCache(s.cachePath)
+	latestVersion, fromCache := cachedVersion(cacheData, s.provider, now)
+	if !fromCache {
+		latestVersion, err = s.resolver.LatestVersion(ctx)
+		if err != nil {
+			if request.AllowExistingOnCheckFail {
+				available, inspectErr := s.imageAvailable(ctx, s.defaultImageRef())
+				if inspectErr != nil {
+					return EnsureResult{}, inspectErr
+				}
+				if available {
+					return EnsureResult{
+						BuildResult: BuildResult{
+							Image:      s.defaultImageRef(),
+							Tags:       existingTags(state, s.defaultImageRef()),
+							ContextDir: s.contextDir,
+							Dockerfile: filepath.Join(s.contextDir, s.dockerfile),
+							Version:    state.InstalledVersion,
+						},
+						Action:          EnsureActionUsingExistingImage,
+						LatestVersion:   state.LatestVersion,
+						PreviousVersion: state.InstalledVersion,
+						LatestCheckedAt: state.LatestCheckedAt,
+					}, nil
+				}
 			}
-			if available {
-				return EnsureResult{
-					BuildResult: BuildResult{
-						Image:      s.defaultImageRef(),
-						Tags:       existingTags(state, s.defaultImageRef()),
-						ContextDir: s.contextDir,
-						Dockerfile: filepath.Join(s.contextDir, s.dockerfile),
-						Version:    state.InstalledVersion,
-					},
-					Action:          EnsureActionUsingExistingImage,
-					LatestVersion:   state.LatestVersion,
-					PreviousVersion: state.InstalledVersion,
-					LatestCheckedAt: state.LatestCheckedAt,
-				}, nil
-			}
+			return EnsureResult{}, fmt.Errorf("ensure latest image: resolve latest %s version: %w", s.provider, err)
 		}
-		return EnsureResult{}, fmt.Errorf("ensure latest image: resolve latest %s version: %w", s.provider, err)
+		if writeErr := writeVersionCache(s.cachePath, latestVersion, s.provider, now); writeErr != nil {
+			s.debug("version cache write failed", "error", writeErr)
+		}
 	}
 
-	checkedAt := time.Now().UTC()
+	checkedAt := now.UTC()
 	versionTag := s.versionImageRef(latestVersion)
 	defaultRef := s.defaultImageRef()
 	available, err := s.imageAvailable(ctx, defaultRef)
