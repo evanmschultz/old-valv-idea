@@ -1,15 +1,427 @@
-# DROP_7 — HOST AUTH TOKEN FIX
+# DROP_7 — HOST AUTH TOKEN FIX → ROUND 5 PIVOT: PATH B (IN-CONTAINER AUTH) + ALWAYS-LATEST
 
 **State:** building
 **Blocked by:** DROP_6 (done)
-**Paths (expected):** `internal/cli/claude_auth.go` (rewrite — replace container-launch path with host-subprocess `claude setup-token` runner; add keychain-extract step), `internal/cli/claude_auth_test.go` (rewrite tests for the new flow), `internal/services/claude/service.go` (edit — read stored token from managed home, set `CLAUDE_CODE_OAUTH_TOKEN` env on container launch), `internal/services/claude/service_test.go` (edit — verify env-var threading), `internal/adapters/providers/claude/account.go` (edit — `ReadAccountIdentity` recognizes the stored-token file as the `LoggedIn` signal; keep `.claude.json` email extraction as-is), `internal/adapters/providers/claude/account_test.go` (edit), `internal/cli/preflight.go` or similar (new pre-flight check that `claude` CLI is on host PATH — mirrors how Codex requires `codex` on PATH).
-**Packages (expected):** `internal/cli` (rewrite + edits), `internal/services/claude` (edit), `internal/adapters/providers/claude` (edit).
+**Pivot (2026-05-15):** Rounds 1–4 (Path A, host-subprocess `claude setup-token`/`auth login` + macOS keychain extract + write to `<managed-home>/.credentials.json`) **failed end-to-end**: even verbatim keychain blob write does NOT authenticate container-side `claude`. Path A is rejected. **Round 5 = Path B + Always-Latest**, bundled per dev directive 2026-05-15.
+**Round 5 paths (expected):** `internal/cli/claude_auth.go` (rewrite — delete host-extract, restore in-container plain `claude` auto-prompt), `internal/cli/claude_auth_test.go` (rewrite — in-container flow with fake docker executor), `internal/services/images/service.go` (edit — add `NewClaudeVersionResolver` mirroring `NewCodexVersionResolver` shape), `internal/services/images/service_test.go` (edit), launch path wiring for both providers (TBD by planner).
+**Round 5 packages (expected):** `internal/cli`, `internal/services/images`, `internal/services/claude`, `internal/services/codex` (planner to confirm).
 **PLAN.md ref:** main/PLAN.md → DROP_7_HOST_AUTH_TOKEN_FIX row
 **Workflow:** main/drops/WORKFLOW.md
 **Started:** 2026-05-15
+**Round 5 started:** 2026-05-15
 **Closed:** —
 
-## Scope
+## Round 5 Scope (current — Path B + Always-Latest)
+
+**Path B — Strategic revert to in-container auth (Anthropic's blessed pattern).** Per Anthropic's official devcontainer docs (https://code.claude.com/docs/en/devcontainer) and claudebox (https://github.com/RchGrav/claudebox)'s working implementation, the correct multi-account Docker pattern is: container starts with `<managed-home>` bind-mounted to `/home/USER/.claude`; container runs **plain `claude` (NO subcommand)**; claude auto-detects missing `.credentials.json` and prompts in-terminal; host browser opens via URL print; user pastes code; container `claude` writes `.credentials.json` natively to the bind-mounted dir. No host keychain extraction. No env-var injection. Per-Valv-account isolation = separate managed home per account, identical to DROP_5's existing design.
+
+**Why Path A failed:** macOS keychain blob format and Linux container `.credentials.json` format are NOT 1:1 interchangeable. Verbatim copy from host keychain to `<managed-home>/.credentials.json` did NOT authenticate container-side claude (verified 2026-05-15 smoke test). The credentials handshake includes machine/session bindings that don't transfer cross-platform.
+
+**Always-Latest version policy** (bundled per dev directive 2026-05-15): every `valv claude` and `valv codex` launch should use the latest provider CLI version unless dev explicitly pins. Currently only `valv manage update <provider>` runs the latest-check; launches use the pinned constant. Mirror Codex's existing `NewCodexVersionResolver` (queries GitHub Releases for `openai/codex`) with a new `NewClaudeVersionResolver` (queries `https://registry.npmjs.org/@anthropic-ai/claude-code/latest`). Wire both into launch path with a 24h cache to avoid per-launch latency. Dev can override via flag/env (TBD by planner).
+
+**Round 5 design summary (planner will detail):**
+- DELETE in `claude_auth.go`: host `claude` subprocess invocation, `runClaudeHostCommand`, `systemClaudeAccountAuthRunner.RunAuthLogin`, `ExtractKeychainToken`, `writeClaudeCredentials` verbatim-write logic, host `claude` PATH preflight, `security` shell-out, `claudeKeychainService` constant.
+- RESTORE in-container auth: `ensureClaudeAccountReady` spins up `valv-claude:dev` container with the managed home bind-mounted (DROP_5 design already works) and runs **plain `claude`** (NO subcommand). Container auto-prompts; user completes OAuth in terminal; container claude writes `.credentials.json` natively; container exits.
+- KEEP: Round 2's already-authed check (`os.Stat + Size > 0` → return nil — works correctly, verified 2026-05-15). DROP_5 bind-mount design (unchanged). DROP_6.3 `.claude.json` email parsing in `ReadAccountIdentity` (unchanged — host `claude` writes `.claude.json` independently of credentials handshake). R4 version pin bump to 2.1.143 (will be superseded by always-latest resolver but no harm).
+- ADD: `NewClaudeVersionResolver` mirroring `NewCodexVersionResolver`. Wire latest-check into launch path for BOTH providers (Codex resolver currently only invoked by `EnsureLatest` from `manage update`). 24h cache. Override capability.
+
+**Critical post-build smoke test:**
+
+```bash
+mage install
+# Nuke claude/work state via cleanup SQL:
+DB="$HOME/Library/Application Support/valv/db/valv.sqlite3"
+sqlite3 "$DB" "DELETE FROM project_bindings WHERE provider='claude' AND profile_id IN (SELECT id FROM profiles WHERE provider='claude' AND name='work');"
+sqlite3 "$DB" "DELETE FROM profiles WHERE provider='claude' AND name='work';"
+rm -rf "$HOME/Library/Application Support/valv/providers/claude/profiles/work"
+# DO NOT delete macOS keychain entry — that breaks the user's host Claude Code session.
+valv account add claude work    # Expect: container starts, claude prompts in-terminal, browser opens via URL print, user pastes code, .credentials.json written to bind-mounted dir.
+valv claude                     # Expect: container starts, reads .credentials.json natively, NO re-auth.
+```
+
+## Path A Status (Rounds 1–4, superseded 2026-05-15)
+
+**Path A failed end-to-end despite all four rounds landing green CI + green QA.** The unit-level acceptance criteria were met (interface contracts, test coverage, file format) but the integration assumption (macOS keychain blob ≈ Linux container `.credentials.json`) was wrong. Code from Rounds 1–4 is on `origin/main`; Round 5 replaces it. Unit 7.1–7.4 definitions below are preserved as historical record — DO NOT use them as the spec for Round 5.
+
+**Iteration recap:**
+- Round 1: host `claude setup-token` + wrapped JSON `{"claudeAiAccessToken":"<token>"}` + `CLAUDE_CODE_OAUTH_TOKEN` env injection. Wrong scope (`user:inference` insufficient for interactive sessions), wrong file format.
+- Round 2: already-authed early-return check in `ensureClaudeAccountReady`. **Works correctly — preserve in Round 5.**
+- Round 3: pivoted to host `claude auth login` + verbatim keychain blob write + dropped env injection. Still re-auths in container. Wrong layer.
+- Round 4: bumped `DefaultClaudeCLIVersion` 2.1.89 → 2.1.143. Did not fix auth bug (version was a red herring).
+
+## Round 5 Planner — TO BE FILLED BY `go-planning-agent`
+
+The `go-planning-agent` will append unit definitions for Round 5 below this header. Expected shape: 2–4 atomic units covering (a) Path B revert + in-container auth restore, (b) `NewClaudeVersionResolver` add, (c) launch-path wiring for always-latest on both providers. Planner grounds design in Anthropic devcontainer docs + claudebox source + Codex resolver template. Single planner pass per trimmed-cascade rule for copy-adapt drops.
+
+<!-- Round 5 unit definitions land here -->
+
+### Design decisions locked by planner (Round 5)
+
+- **`claudeAuthRunner` interface — in-container, one method:**
+  ```go
+  type claudeAuthRunner interface {
+      RunInContainer(ctx context.Context, homePath string, stdin io.Reader, stdout, stderr io.Writer) error
+  }
+  ```
+  Replaces Path A's two-method interface (`RunAuthLogin` + `ExtractKeychainToken`). No host subprocess. No keychain. The single method spins up the `valv-claude:dev` container with `homePath` bind-mounted to `/home/valv/.claude`, runs plain `claude` (no subcommand) with `-it` if stdin is a TTY, waits for the container to exit.
+
+- **`systemClaudeAccountAuthRunner` — embeds executor + image:**
+  The production implementation holds an unexported `authContainerExecutor interface { Run(context.Context, docker.ContainerRunRequest) error }` (defined locally in `claude_auth.go` to avoid importing `claudeservice`) and a `docker.ImageRef`. Constructed at the `hostClaudeAccountAuth` package-level var using `dockeradapter.NewExecutor(dockeradapter.NewSystemRunner(...))` and `claudeImageRef()` — same callsite pattern as `claude.go`. The `RunInContainer` method constructs a `docker.ContainerRunRequest` with: bind mount `homePath → /home/valv/.claude`, env `CLAUDE_CONFIG_DIR=/home/valv/.claude`, `HOME=/home/valv`, `LOGNAME=valv`, `USER=valv`, `TERM=<normalized>`, entrypoint is the container default (`claude`), args empty (no subcommand). Sets `Interactive: stdin is not nil`, `TTY: stdin is a TTY` (check via `term.IsTerminal`), `Init: true`, `Remove: true`.
+
+- **`ensureClaudeAccountReady` (Path B) — no wipe before container:**
+  Order: (1) SkipLogin → return nil. (2) `os.Stat` creds file → if exists and `Size > 0` → return nil (already-authed fast path, kept from Round 2). (3) non-TTY guard: `!commandHasTTY(cmd.InOrStdin())` → return error with "TTY" mention. (4) `writeCLINotice` announce. (5) `runner.RunInContainer(...)` → if error → return. (6) `claudeprovider.ReadAccountIdentity(account.HomePath)` → if `!identity.LoggedIn` → return error. Return nil. **No wipe step** — container writes `.credentials.json` natively; there is nothing to wipe when we reach this path.
+
+- **`loginClaudeAccount` (Path B) — same but no TTY guard:**
+  Order: (1) `writeCLINotice`. (2) `runner.RunInContainer(...)`. (3) `ReadAccountIdentity` → verify `LoggedIn`. No TTY guard (same "no guard" semantics as `loginCodexAccount`).
+
+- **`writeClaudeCredentials` and `claudeKeychainService` — DELETE both:**
+  `writeClaudeCredentials` writes the host-extracted blob verbatim to disk — not needed in Path B. `claudeKeychainService` constant references the macOS keychain service — not needed. Remove both. Remove `encoding/json` import if no longer needed (it won't be).
+
+- **`runClaudeHostCommand` — DELETE:**
+  Was the host subprocess launcher. Not needed in Path B.
+
+- **`ExtractKeychainToken` — DELETE:**
+  Was keychain extraction. Not needed in Path B.
+
+- **`RunAuthLogin` — DELETE:**
+  Replaced by `RunInContainer`.
+
+- **`os/user` import — DELETE:**
+  Was used for `user.Current()` in keychain username lookup. Not needed in Path B.
+
+- **`claude/service.go` state — CONFIRMED CLEAN:**
+  Reading the file confirms `readClaudeAuthToken` does NOT exist and `buildRequest` does NOT set `CLAUDE_CODE_OAUTH_TOKEN`. Unit 7.2 (Path A) either was never applied or was reverted. No cleanup needed in the service layer. Path B relies on container claude reading `.credentials.json` natively from the bind-mounted managed home — `CLAUDE_CONFIG_DIR=/home/valv/.claude` is already set by `PrepareRuntime`. No env injection needed.
+
+- **`NewClaudeVersionResolver` — queries npm registry:**
+  ```go
+  const defaultClaudeLatestURL = "https://registry.npmjs.org/@anthropic-ai/claude-code/latest"
+  type claudeNPMPayload struct {
+      Version string `json:"version"`
+  }
+  type claudeVersionResolver struct {
+      client *http.Client
+      url    string
+  }
+  func NewClaudeVersionResolver(client *http.Client) VersionResolver { ... }
+  func (r claudeVersionResolver) LatestVersion(ctx context.Context) (string, error) { ... }
+  ```
+  Queries the URL, decodes `.version` field. Returns the version string (already semver, no `rust-v` prefix needed). `normalizeCodexVersion` can be reused if the result matches the semver pattern, or a simpler `strings.TrimPrefix(v, "v")` suffices.
+
+- **`images.New()` — auto-wire for Claude provider:**
+  Add case: `if resolver == nil && provider == domain.ProviderClaude { resolver = NewClaudeVersionResolver(nil) }`. Mirrors the existing Codex case. Placed immediately after the Codex case.
+
+- **`runManageUpdateClaude` — switch to `EnsureLatest`:**
+  Matches `runManageUpdateCodex` shape exactly. Uses `EnsureResult` not `BuildResult`. Output adds `checked at` field. Builder must verify no golden tests assert the old Claude update output format.
+
+- **`ensureClaudeImageCurrent` — switch to `EnsureLatest`:**
+  Replaces `service.Build(...)` with `service.EnsureLatest(cmd.Context(), imagesservice.EnsureRequest{AllowExistingOnCheckFail: true})`. Matches `ensureCodexImageCurrent` behavior exactly — offline/registry-down uses installed image.
+
+- **Codex launch path — already wired:** `ensureCodexImageCurrent` already calls `EnsureLatest`. No Codex changes needed in Round 5.
+
+- **`--version` flag and `VALV_CLAUDE_VERSION` env override — deferred to DROP_8.** The per-launch version pin is a CLI surface change out of scope for this pivot drop.
+
+- **`VALV_CLAUDE_IMAGE` override — already handled:** `ensureClaudeImageCurrent` already checks `os.Getenv("VALV_CLAUDE_IMAGE")` before calling `EnsureLatest`. No change needed.
+
+---
+
+### Unit 7.5 — Rewrite `claude_auth.go`: restore in-container runner + rewrite tests
+
+**state:** todo
+**blocked_by:** —
+**paths:** `internal/cli/claude_auth.go`, `internal/cli/claude_auth_test.go`
+**packages:** `internal/cli`
+
+**What to build:**
+
+**`claude_auth.go` — full rewrite.** Keep the file; replace its entire content.
+
+Delete: `claudeKeychainService` constant, `RunAuthLogin` method, `ExtractKeychainToken` method, `runClaudeHostCommand` function, `writeClaudeCredentials` function. Remove `os/user` and `encoding/json` imports. Remove `bytes` import if no longer needed after deleting `runClaudeHostCommand`.
+
+New `authContainerExecutor` interface (unexported, defined in this file):
+```go
+type authContainerExecutor interface {
+    Run(context.Context, docker.ContainerRunRequest) error
+}
+```
+
+New `claudeAuthRunner` interface:
+```go
+type claudeAuthRunner interface {
+    RunInContainer(ctx context.Context, homePath string, stdin io.Reader, stdout, stderr io.Writer) error
+}
+```
+
+New `systemClaudeAccountAuthRunner` struct:
+```go
+type systemClaudeAccountAuthRunner struct {
+    executor authContainerExecutor
+    image    docker.ImageRef
+}
+```
+
+New `hostClaudeAccountAuth` var — initialized in an `init()` function or lazily, because it needs `dockeradapter.NewExecutor` and `claudeImageRef()`. The simplest pattern: make `hostClaudeAccountAuth` a `claudeAuthRunner` computed via a package-level function `defaultClaudeAuthRunner()` that constructs on first call, mirroring the pattern `claude.go` uses inline. Alternatively — and simpler — make `hostClaudeAccountAuth` a sentinel value and construct it inline in `claudeAuthRunnerFromContext` fallback. Builder chooses the simpler option; document in worklog.
+
+`RunInContainer` implementation:
+```go
+func (r systemClaudeAccountAuthRunner) RunInContainer(ctx context.Context, homePath string, stdin io.Reader, stdout, stderr io.Writer) error {
+    isTTY := stdin != nil && term.IsTerminal(os.Stdin.Fd()) // or pass a Fd — see note
+    request := docker.ContainerRunRequest{
+        Name:  fmt.Sprintf("valv-claude-auth-%d", time.Now().UTC().UnixNano()),
+        Image: r.image,
+        Env: map[string]string{
+            "CLAUDE_CONFIG_DIR": claudeprovider.ContainerClaudeDir,
+            "HOME":              claudeprovider.ContainerHomeDir,
+            "LOGNAME":           "valv",
+            "TERM":              normalizedContainerTERM(), // reuse from runtime.go? or inline
+            "USER":              "valv",
+        },
+        Mounts: []docker.MountSpec{
+            docker.NewMountSpec(homePath, claudeprovider.ContainerClaudeDir, false),
+        },
+        Args:        []string{},       // plain `claude` — no subcommand
+        Interactive: stdin != nil,
+        TTY:         isTTY,
+        Init:        true,
+        Remove:      true,
+        User:        currentContainerUser(), // reuse from shared.go/utils
+    }
+    return r.executor.Run(ctx, request)
+}
+```
+Note on TTY detection: use `commandHasTTY(stdin)` (already defined in the `cli` package) rather than raw `term.IsTerminal` — builder uses the package's existing TTY helper.
+
+Note on `normalizedContainerTERM()`: defined in `internal/adapters/providers/claude/runtime.go`. The `cli` package does NOT import that function; inline equivalent: `strings.TrimSpace(os.Getenv("TERM"))` defaulting to `"xterm-256color"`. Builder inlines the logic.
+
+`claudeAuthRunnerFromContext` — same pattern as before, reads context key, falls back to a constructed `systemClaudeAccountAuthRunner`. The fallback must be constructed lazily or via a `sync.Once` since it needs `claudeImageRef()` which is already defined in `claude.go` (same package). No `init()` needed — just construct inline at the fallback site.
+
+`ensureClaudeAccountReady` — rewrite per design decisions:
+1. `options.SkipLogin` → return nil.
+2. Stat creds file (already-authed check from Round 2) — keep exactly as-is.
+3. Non-TTY guard: `!commandHasTTY(cmd.InOrStdin())` → return error containing "TTY".
+4. `writeCLINotice(...)` — keep.
+5. `runner.RunInContainer(ctx, account.HomePath, cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr())` → error → return.
+6. `claudeprovider.ReadAccountIdentity(account.HomePath)` → `!identity.LoggedIn` → return error.
+7. Return nil.
+
+`loginClaudeAccount` — rewrite per design decisions (no TTY guard):
+1. `writeCLINotice(...)`.
+2. `runner.RunInContainer(ctx, account.HomePath, cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr())` → error → return.
+3. `ReadAccountIdentity` → `!identity.LoggedIn` → return error.
+4. Return nil.
+
+`wipeClaudeCredentials` — KEEP unchanged (still called from `logoutManagedAccount` via `logoutManagedAccount`→`wipeClaudeCredentials` switch case in `account_auth.go`).
+
+**`claude_auth_test.go` — full rewrite.**
+
+New `stubClaudeAccountAuthRunner`:
+```go
+type stubClaudeAccountAuthRunner struct {
+    runErr   error
+    runHits  int
+    // for inspecting what was passed:
+    lastHomePath string
+}
+func (s *stubClaudeAccountAuthRunner) RunInContainer(_ context.Context, homePath string, _, _, _ io.Writer) error {
+    s.runHits++
+    s.lastHomePath = homePath
+    return s.runErr
+}
+```
+
+New `installStubClaudeAuth(t, cmd, stub)` — inject via context, same pattern.
+
+New `newTestClaudeCmd()` — keep same non-TTY bytes-buffer pattern.
+
+Test cases:
+- `TestEnsureClaudeAccountReadyRejectsNonTTY` — non-TTY cmd + no creds file → error containing "TTY"; `runHits == 0`.
+- `TestEnsureClaudeAccountReadyRespectsSkipLogin` — SkipLogin=true → nil; `runHits == 0`; pre-existing creds preserved.
+- `TestEnsureClaudeAccountReadyAlreadyAuthedReturnsNilEvenNonTTY` — creds file present + non-empty → nil; `runHits == 0`. File preserved.
+- `TestEnsureClaudeAccountReadyFailsWhenContainerRunFails` — stub returns error → error returned; `runHits == 1`.
+- `TestEnsureClaudeAccountReadyFailsWhenNotLoggedInAfterContainer` — stub returns nil but no `.credentials.json` written to temp dir → `ReadAccountIdentity` returns `LoggedIn=false` → error returned. (Stub does not write a creds file, so `ReadAccountIdentity` stat finds nothing.)
+- `TestEnsureClaudeAccountReadySucceeds` — stub returns nil AND builder writes `.credentials.json` to the temp homePath in the stub's `RunInContainer` (to simulate container auth) → function returns nil. Note: the stub needs to write the file to simulate the container's behavior. Alternative: the stub simply creates the file as a side-effect. Builder implements `runHits`-based write in stub or uses a wrapping callback. **Simplest approach**: a `stubRunFunc func(homePath string)` field on the stub that tests can set; default is nil (no side effect). Tests that need the file written set `stub.stubRunFunc = func(hp string) { os.WriteFile(filepath.Join(hp, ".credentials.json"), []byte(`{"claudeAiAccessToken":"tok"}`), 0o600) }`.
+- `TestLoginClaudeAccountSkipsNonTTYGuard` — non-TTY + stub returns error → error does NOT contain "TTY"; `runHits == 1`.
+- `TestLoginClaudeAccountFailsWhenContainerRunFails` — stub returns error → propagated.
+- `TestLoginClaudeAccountSucceeds` — stub writes creds file → `ReadAccountIdentity` returns `LoggedIn=true` → nil.
+- `TestWipeClaudeCredentialsRemovesFile` — keep from Round 4 tests.
+- `TestWipeClaudeCredentialsMissingFileIsNoError` — keep.
+- `TestLogoutManagedAccountWipesClaudeCredentials` — keep.
+- `TestReadAccountIdentityReturnsLoggedOutWhenNoCreds` — keep.
+
+Old test names that existed for Path A (delete, do not port): `TestSystemClaudeAccountAuthRunnerRunAuthLoginUsesCLAUDE_CONFIG_DIR`, `TestRunClaudeHostCommandPreflightFailsWhenClaudeMissing`, `TestLoginClaudeAccountWipesAndRunsSetupTokenAndExtractsAndWrites`, `TestLoginClaudeAccountFailsWhenRunSetupTokenErrors`, `TestLoginClaudeAccountFailsWhenExtractTokenErrors`, `TestLoginClaudeAccountFailsOnEmptyToken`, `TestLoginClaudeAccountSkipsNonTTYGuard` (old), `TestEnsureClaudeAccountReadySkipsWhenAlreadyAuthed` (rename/keep as `TestEnsureClaudeAccountReadyAlreadyAuthedReturnsNilEvenNonTTY`).
+
+**Imports for `claude_auth.go`:**
+Keep: `context`, `fmt`, `io`, `os`, `path/filepath`, `strings`, `github.com/evanmschultz/laslig`, `github.com/spf13/cobra`, `claudeprovider`, `github.com/evanmschultz/valv/internal/config`, `github.com/evanmschultz/valv/internal/domain`, `dockeradapter "github.com/evanmschultz/valv/internal/adapters/docker"`, `"time"` (for container name timestamp).
+Remove: `bytes`, `os/exec`, `os/user`, `encoding/json`.
+
+**Acceptance criteria:**
+- AC1: `claudeAuthRunner` interface has exactly one method: `RunInContainer`. No `RunAuthLogin`, no `ExtractKeychainToken`. Verified by inspection.
+- AC2: `claude_auth.go` has no import of `os/user`, no import of `os/exec` (exec.LookPath gone), no `claudeKeychainService` constant, no `writeClaudeCredentials` function, no `runClaudeHostCommand` function.
+- AC3: `ensureClaudeAccountReady` — SkipLogin returns nil with no container run. Non-TTY (no existing creds) returns error containing "TTY" with no container run. Already-authed (creds exist + non-empty) returns nil with no container run, even in non-TTY context.
+- AC4: `ensureClaudeAccountReady` — container run failure propagates as error.
+- AC5: `loginClaudeAccount` — no TTY guard; container run is invoked even in non-TTY context.
+- AC6: `wipeClaudeCredentials` — unchanged behavior; still removes file and tolerates missing file.
+- AC7: `mage testPkg github.com/evanmschultz/valv/internal/cli` passes with all new tests green and no old Path-A test names remaining.
+
+**Verification target:** `mage testPkg github.com/evanmschultz/valv/internal/cli`
+
+---
+
+### Unit 7.7 — Add `NewClaudeVersionResolver` + wire in `images/service.go`
+
+**state:** todo
+**blocked_by:** —
+**paths:** `internal/services/images/service.go`, `internal/services/images/service_test.go`
+**packages:** `internal/services/images`
+
+**What to build:**
+
+**`images/service.go` — add resolver type + constructor + auto-wire.**
+
+New constant:
+```go
+const defaultClaudeLatestURL = "https://registry.npmjs.org/@anthropic-ai/claude-code/latest"
+```
+
+New payload type (unexported):
+```go
+type claudeNPMPayload struct {
+    Version string `json:"version"`
+}
+```
+
+New resolver type and constructor:
+```go
+type claudeVersionResolver struct {
+    client *http.Client
+    url    string
+}
+
+// NewClaudeVersionResolver returns a VersionResolver that queries the npm
+// registry for the latest @anthropic-ai/claude-code version. If client is
+// nil, a default client with a 10-second timeout is used.
+func NewClaudeVersionResolver(client *http.Client) VersionResolver {
+    if client == nil {
+        client = &http.Client{Timeout: defaultVersionRequestTTL}
+    }
+    return claudeVersionResolver{client: client, url: defaultClaudeLatestURL}
+}
+
+func (r claudeVersionResolver) LatestVersion(ctx context.Context) (string, error) {
+    req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.url, nil)
+    if err != nil {
+        return "", fmt.Errorf("latest claude version: new request: %w", err)
+    }
+    req.Header.Set("Accept", "application/json")
+    req.Header.Set("User-Agent", "valv")
+    resp, err := r.client.Do(req)
+    if err != nil {
+        return "", fmt.Errorf("latest claude version: send request: %w", err)
+    }
+    defer resp.Body.Close()
+    if resp.StatusCode != http.StatusOK {
+        body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+        return "", fmt.Errorf("latest claude version: unexpected status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+    }
+    var payload claudeNPMPayload
+    if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+        return "", fmt.Errorf("latest claude version: decode response: %w", err)
+    }
+    version := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(payload.Version), "v"))
+    if version == "" || !versionPattern.MatchString(version) {
+        return "", fmt.Errorf("latest claude version: no valid version in npm response")
+    }
+    return versionPattern.FindString(version), nil
+}
+```
+
+**`images.New()` — add Claude auto-wire** immediately after the existing Codex auto-wire:
+```go
+if resolver == nil && provider == domain.ProviderClaude {
+    resolver = NewClaudeVersionResolver(nil)
+}
+```
+
+No other changes to `New()`.
+
+**`images/service_test.go` — add tests for `claudeVersionResolver`.**
+
+New test `TestNewClaudeVersionResolverLatestVersion`:
+- Start `httptest.NewServer` returning `{"version":"2.1.200"}` with status 200.
+- Call `NewClaudeVersionResolver(server.Client())` with the test URL injected... builder discovers how to inject the URL. The `claudeVersionResolver` struct has a `url` field — tests can set it directly (same package). Mirror the existing Codex resolver test pattern (look for `TestNewCodexVersionResolverLatestVersion` or similar in service_test.go — builder reads the full test file to find the pattern).
+
+Test cases:
+- Happy path: server returns `{"version":"2.1.200"}` → resolver returns `"2.1.200"`.
+- Non-200 status → resolver returns error.
+- Bad JSON → resolver returns error.
+- Empty version in payload → resolver returns error.
+- Network error → resolver returns error.
+
+**`images.New()` tests** — add:
+- `TestNewWiresClaudeVersionResolverWhenProviderIsClaudeAndNilResolver`: construct with `Provider=ProviderClaude`, `Resolver=nil`. Verify `service.resolver != nil` by calling a method that uses it... or verify by type assertion. Simplest: call `service.EnsureLatest` with a `staticResolver` injected via `Resolver` field in a separate test — the auto-wire test just verifies `New()` succeeds with nil resolver for Claude provider.
+
+**Imports added** (all already present in the file): none new — `net/http`, `encoding/json`, `io`, `strings`, `fmt` already imported.
+
+**Acceptance criteria:**
+- AC1: `NewClaudeVersionResolver(nil)` returns a non-nil `VersionResolver`. Verified by test.
+- AC2: `claudeVersionResolver.LatestVersion` returns a valid semver string matching `\d+\.\d+\.\d+` when the server returns `{"version":"X.Y.Z"}`. Verified by httptest.
+- AC3: `images.New()` with `Provider=ProviderClaude` and `Resolver=nil` returns a service with a non-nil resolver (does not panic on `EnsureLatest`). Verified by test.
+- AC4: `mage testPkg github.com/evanmschultz/valv/internal/services/images` passes.
+
+**Verification target:** `mage testPkg github.com/evanmschultz/valv/internal/services/images`
+
+---
+
+### Unit 7.8 — Wire always-latest into `ensureClaudeImageCurrent` + `runManageUpdateClaude`
+
+**state:** todo
+**blocked_by:** 7.5, 7.7
+**paths:** `internal/cli/claude.go`, `internal/cli/manage.go`
+**packages:** `internal/cli`
+
+**What to build:**
+
+**`claude.go` — `ensureClaudeImageCurrent`: switch `Build` → `EnsureLatest`.**
+
+Current code:
+```go
+// Claude uses pinned-version fast path: Build with DefaultClaudeCLIVersion,
+// not EnsureLatest (which requires a resolver Claude does not have).
+_, err = service.Build(cmd.Context(), imagesservice.BuildRequest{Version: imagesservice.DefaultClaudeCLIVersion})
+```
+
+Replace with:
+```go
+_, err = service.EnsureLatest(cmd.Context(), imagesservice.EnsureRequest{AllowExistingOnCheckFail: true})
+```
+
+Remove the stale comment. Update the variable name: `service.EnsureLatest` returns `(EnsureResult, error)` — use `_` since we don't need the result in this function.
+
+The `openImagesService` call above this already passes `domain.ProviderClaude`, so the service is constructed with the Claude resolver auto-wired (per Unit 7.7). No other changes in `runClaudeCommand` or `runClaudeImageOnlyCommand`.
+
+**`manage.go` — `runManageUpdateClaude`: switch `Build` → `EnsureLatest`.**
+
+Current code calls `service.Build(...)` returning a `BuildResult`. New code calls `service.EnsureLatest(...)` returning an `EnsureResult`. Match the output shape of `runManageUpdateCodex` exactly — same fields, same field order. The key changes:
+- Variable type changes from `imagesservice.BuildResult` to `imagesservice.EnsureResult`.
+- The call inside the spinner changes to `service.EnsureLatest(cmd.Context(), imagesservice.EnsureRequest{})`.
+- The output fields: add `{Label: "checked at", Value: result.LatestCheckedAt.Format(time.RFC3339), Muted: true}` between `version` and `context`.
+- The heading logic: `heading := "Provider image built"` → add conditional: if `result.Action == imagesservice.EnsureActionUpToDate { heading = "Provider image up to date" }`.
+
+Builder must verify: does any test or golden fixture assert on `runManageUpdateClaude` output format? If yes, update the fixture. If a golden file exists, run `mage goldenUpdate` after the change.
+
+**No test changes needed** for this unit: the CLI command paths are integration-tested (if at all) via the integration test suite, and the unit behavior is covered by the images-service tests (Unit 7.7). The builder should run `mage testPkg github.com/evanmschultz/valv/internal/cli` to confirm no package-level compilation errors.
+
+**Acceptance criteria:**
+- AC1: `ensureClaudeImageCurrent` no longer references `imagesservice.BuildRequest` or `DefaultClaudeCLIVersion` in its non-`VALV_CLAUDE_IMAGE` path. Verified by inspection.
+- AC2: `ensureClaudeImageCurrent` calls `service.EnsureLatest` with `AllowExistingOnCheckFail: true`. Verified by inspection.
+- AC3: `runManageUpdateClaude` calls `service.EnsureLatest` (not `service.Build`). Output includes a `checked at` field. Verified by inspection.
+- AC4: `mage testPkg github.com/evanmschultz/valv/internal/cli` passes (package compiles and existing tests pass).
+- AC5: `mage test` passes (full suite, race detector, 70% per-package coverage floor).
+
+**Verification target:** `mage testPkg github.com/evanmschultz/valv/internal/cli` then `mage test`
+
+---
+
+## Path A Scope (superseded 2026-05-15 — preserved as historical record)
 
 **Codex parity for Claude auth.** DROP_6.2's container-side `claude auth login` flow has invisible paste prompt (TUI mode doesn't render through Docker pty). User verified on 2026-05-15 that host-side `claude setup-token` works perfectly: browser auto-opens, paste prompt clearly visible, completes cleanly. This drop replaces the container-auth flow with host-subprocess auth mirroring Codex's existing pattern.
 
@@ -43,7 +455,7 @@
 - **Q3 — `CLAUDE_CODE_OAUTH_TOKEN` env-var visibility in `ps`.** Passing the token via env var makes it visible to anyone who can `ps eww` the container's process. Acceptable for v0.1.0 (same constraint Codex has with `CODEX_HOME` mount). Document.
 - **Q4 — What service name does `claude setup-token` use in keychain?** Probably the same `Claude Code-credentials` as `auth login` but the planner should verify by having the builder check post-auth keychain state.
 
-## Planner
+## Path A Planner (superseded 2026-05-15 — preserved as historical record)
 
 Three atomic units. Units 7.1 and 7.2 may run in parallel (disjoint packages). Unit 7.3 is blocked by both.
 
