@@ -676,3 +676,170 @@ None — all 10 attack vectors REFUTED with file:line evidence and re-run mage o
 
 None — Hylla answered everything needed via direct `git grep` and `Read`. The reviewed files (`service.go`, `service_test.go`) are uncommitted-to-baseline (Round 2 commit `9e7bc48` post-dates last Hylla ingest); per CLAUDE.md § "Code Understanding Rules" item 2, `git diff` / `Read` / `Grep` is the correct evidence path for changed-since-ingest files.
 
+---
+
+## Unit 7.7 — Round 1
+
+**Date:** 2026-05-15
+**Verdict:** pass
+
+### Attack vectors probed
+
+- **A1: npm `/latest` URL semantics.** REFUTED. `https://registry.npmjs.org/<pkg>/latest` is npm's documented endpoint that returns the manifest for whatever version is dist-tagged `latest`. Context7 docs (`/websites/npmjs`) confirm: `dist-tags.latest` is the standard publisher channel; pre-release versions ship under separate tags (`beta`, `next`) by convention, so a `next`/`beta` release WITHOUT a `latest` bump is the documented npm behavior — not a resolver bug. The endpoint does not 404 when `latest` exists (which it must for any published Anthropic release). Code at `service.go:28` constant + `:200` request matches the endpoint name correctly.
+
+- **A2: Pre-release versions.** REFUTED (with NOTE). `versionPattern` at `service.go:41` is `\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?` — explicitly admits a `-prerelease`/`+build` suffix. If Anthropic shipped `2.2.0-beta.1` as `latest` (unusual but allowed), `MatchString` returns true, `FindString` returns `"2.2.0-beta.1"` verbatim. The Claude Dockerfile at `service.go:679` runs `npm install --global "@anthropic-ai/claude-code@${CLAUDE_VERSION}"` which accepts pre-release version strings. So end-to-end behavior is correct. Symmetric with Codex's `normalizeCodexVersion` (`service.go:173`). Not a counterexample to Unit 7.7's claim.
+
+- **A3: `versionPattern` not anchored.** REFUTED (with CONCERN below). The regex is NOT anchored with `^...$`. `MatchString` returns true on any substring match; `FindString` extracts the first match. So `"prefix-1.2.3-suffix"` would `MatchString=true` AND `FindString="1.2.3"` (the suffix `-suffix` matches the optional prerelease group). The validation+extraction divergence means the resolver could silently strip garbage from malformed npm responses. In practice npm-published versions are normalized at publish-time, so this is theoretical. **Symmetric with the Codex resolver** (same `versionPattern` used by `normalizeCodexVersion`), so anchoring is a global change not specific to Unit 7.7. Recorded as CONCERN.
+
+- **A4: User-Agent header value `"valv"`.** REFUTED. Tests round-trip the request via `httptest.NewServer`; npm registry historically accepts any UA. Codex resolver uses the same `"valv"` string at `service.go:148`. Symmetric. Not a counterexample.
+
+- **A5: 10-second timeout.** REFUTED at this unit's scope. Unit 7.7 ONLY adds the resolver. `ensureClaudeImageCurrent` at `claude.go:181-197` STILL calls `service.Build(...)` not `service.EnsureLatest(...)` — verified by direct read of the committed file. The launch path does NOT invoke the resolver in Unit 7.7. Wiring is Unit 7.8 (`state: todo` per PLAN.md). 10s timeout latency is correctly out of scope for THIS unit's claim. The timeout reuses `defaultVersionRequestTTL = 10 * time.Second` at `service.go:29`.
+
+- **A6: `defaultVersionRequestTTL` reuse.** REFUTED. Both Codex and Claude resolvers share the constant. 10s is conservative for an internet-reachable JSON GET. Matches the Codex precedent. Not a counterexample.
+
+- **A7: `claudeNPMPayload` struct minimalism.** REFUTED. `claudeNPMPayload{Version string}` at `service.go:180-182` decodes only the `version` field. Go's `encoding/json` ignores unknown fields by default (stdlib contract). npm's `/latest` payload includes many fields (`name`, `description`, `dist`, etc.) — all silently ignored. Correct.
+
+- **A8: Cross-platform npm fetch behavior.** REFUTED. `http.Client` is platform-independent stdlib. No CGO. macOS arm64/amd64 identical.
+
+- **A9: Empty version string vs null.** REFUTED. Test `TestClaudeVersionResolverEmptyVersionReturnsError` at `service_test.go:637-649` covers `{"version":""}`. For `{"version":null}`, Go's JSON decoder maps JSON null to zero-value string `""` (stdlib contract). Same code path. Same test coverage.
+
+- **A10: Auto-wire ordering.** REFUTED. `service.go:260-266` shows two INDEPENDENT `if` blocks (not `else if`):
+  ```go
+  if resolver == nil && provider == domain.ProviderCodex {
+      resolver = NewCodexVersionResolver(nil)
+  }
+  if resolver == nil && provider == domain.ProviderClaude {
+      resolver = NewClaudeVersionResolver(nil)
+  }
+  ```
+  Future providers added between these get their own independent guards. No fallthrough trap. `provider` is a single value, so only one branch fires per `New()` call.
+
+- **A11: nil-resolver protection in `New()`.** REFUTED. The `Service` struct at `service.go:74-86` is exported (`Service`, capital S) but ALL fields are unexported (`runner`, `stateStore`, `resolver`, etc.). External callers cannot construct `images.Service{resolver: ...}` directly. They could write `images.Service{}` (zero-value), but `EnsureLatest` explicitly nil-checks at `service.go:353-355`:
+  ```go
+  if s.resolver == nil {
+      return EnsureResult{}, fmt.Errorf("ensure latest image: latest-version resolver is required")
+  }
+  ```
+  Returns a wrapped error, NOT a nil-pointer panic. Defensive.
+
+- **A12: httptest test isolation.** REFUTED. All 5 new tests use `defer server.Close()`:
+  - `service_test.go:597` (happy path)
+  - `service_test.go:614` (non-200)
+  - `service_test.go:628` (bad JSON)
+  - `service_test.go:642` (empty version)
+  - `service_test.go:656` (network error — `Close()` called manually before the resolver call to force the failure)
+  No goroutine leak.
+
+- **A13: Network error test reliability.** REFUTED. `service_test.go:651-663` `TestClaudeVersionResolverNetworkErrorReturnsError` captures `server.URL`, calls `server.Close()` to free the port, then invokes `LatestVersion`. The test asserts only `err == nil` → `t.Fatal`, NOT a specific error class. Robust against dial-tcp vs timeout variations across platforms.
+
+- **A14: `EnsureLatest` integration with auto-wired resolver.** NOTE (not a counterexample). `TestNewWiresClaudeVersionResolverWhenProviderIsClaudeAndNilResolver` at `service_test.go:665-678` asserts `svc.resolver != nil` via direct field access (same package). It does NOT exercise `EnsureLatest` with the auto-wired Claude resolver. The existing `EnsureLatest` tests inject `staticResolver` via `Options.Resolver`. So the integration of `claudeVersionResolver.LatestVersion` → `EnsureLatest` flow is tested transitively (resolver returns `"X.Y.Z"` via httptest; `EnsureLatest` handles strings produced by any `VersionResolver`) but not end-to-end in a single test. Coverage is sufficient. NOTE recorded.
+
+- **A15: Concurrency on the resolver.** REFUTED. `http.Client` is documented goroutine-safe in net/http. The `claudeVersionResolver` struct is value-typed and `LatestVersion` is value-receiver — each call has a fresh request struct. No shared mutable state.
+
+- **A16: Always-latest scope completeness.** REFUTED. Unit 7.7's acceptance criteria (PLAN.md lines 364-368) cover:
+  - AC1: resolver constructor returns non-nil
+  - AC2: `LatestVersion` returns valid semver
+  - AC3: auto-wire in `New()` produces non-nil resolver for Claude provider
+  - AC4: package tests pass
+
+  Unit 7.7 does NOT claim "every `valv claude` launch uses latest". That claim belongs to Unit 7.8 (still `state: todo` per PLAN.md). Verified by direct read of `claude.go:181-197` — `ensureClaudeImageCurrent` STILL calls `service.Build(...)` with `DefaultClaudeCLIVersion`, NOT `service.EnsureLatest(...)`. The Unit 7.7 resolver is dormant in the launch path until Unit 7.8 lands. This is the planner's intentional decomposition.
+
+- **A17: Anthropic's actual package name.** NOTE. Hardcoded at `service.go:28`. If Anthropic renamed to `@anthropic/claude-cli` (hypothetical), the resolver would 404. Not a current bug; acceptable to handle reactively. NOTE.
+
+- **A18 (new): `MatchString` then `FindString` redundancy.** REFUTED. At `service.go:223-226`, after the regex match check, `FindString` is called to extract. Given the un-anchored pattern (A3), `MatchString` and `FindString` can return different STRINGS for substring inputs — but both confirm a match exists. Defensive and consistent with Codex's `normalizeCodexVersion`. Not a counterexample.
+
+- **A19 (new): Double `TrimSpace` in version extraction.** REFUTED. Line 222: `strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(payload.Version), "v"))`. Outer trim handles whitespace from a hypothetical TrimPrefix output that shouldn't introduce any. Defensive, correct, no behavior change.
+
+- **A20 (new): HTTP redirect handling.** REFUTED. Default `http.Client` follows up to 10 redirects. npm registry uses redirects sparingly. Behavior is stdlib-default.
+
+- **A21 (new): Body close on early Do() error.** REFUTED. `defer resp.Body.Close()` is at `service.go:211` AFTER the err check at `:207`. Per `net/http` docs: when `Do` returns an error, the response body is closed by the package itself. No leak.
+
+- **A22 (new): No `normalizeClaudeVersion` helper.** NOTE. Claude resolver inlines the trim+prefix+extract logic at `service.go:222-226`. Codex uses a helper `normalizeCodexVersion` (`:173-178`). Code-shape asymmetry. Not a correctness bug.
+
+- **A23 (new): Empty body Decode failure.** REFUTED. Empty body → `json.NewDecoder(...).Decode(...)` returns `io.EOF`. Code at `:219` wraps as `"decode response: %w"` and returns. Correct.
+
+- **A24 (new): npm 200 with HTML content-type.** REFUTED. Code checks only StatusCode (`:213`). HTML body with 200 → JSON Decode fails → error returned. Correct.
+
+- **A25 (new): Empty version explicit check.** REFUTED. Line 223: `version == "" || !versionPattern.MatchString(version)`. Empty version (post-trim) fails the first clause. Test coverage at `service_test.go:637-649`.
+
+- **A26 (new): Codex parity for `Accept` header.** REFUTED. Codex uses `application/vnd.github+json` (GitHub API media type); Claude uses `application/json` (generic). Both endpoints accept these. Not a counterexample.
+
+- **A27 (new): `defaultClaudeLatestURL` is a hardcoded constant.** NOTE. External consumers cannot inject the URL via `NewClaudeVersionResolver(client)`. Tests use direct struct-field injection because they're in the same package. If a fork/adopter needs to point at a private npm mirror, they'd have to construct `claudeVersionResolver{client, url}` directly — but that's unexported. NOTE.
+
+### Findings
+
+- **NOTE 7.7-1 (regex anchoring symmetry):** `versionPattern` at `service.go:41` is shared with Codex and is not anchored. Theoretical risk of silent garbage stripping from malformed npm payloads. Not specific to Unit 7.7. Hardening would be a global change anchoring `versionPattern` with `^...$` AND splitting it into separate `validatePattern` (anchored) vs `extractPattern` (unanchored) — or just relying on the trim-and-trimprefix pipeline that already cleans inputs. NOT a Unit 7.7 fix.
+- **NOTE 7.7-2 (auto-wire integration test gap):** `TestNewWiresClaudeVersionResolverWhenProviderIsClaudeAndNilResolver` (`service_test.go:665`) only asserts `svc.resolver != nil`. No end-to-end test exercises the auto-wired `claudeVersionResolver` through `EnsureLatest`. Coverage is transitive (resolver tested in isolation; `EnsureLatest` tested with `staticResolver`). Acceptable for Unit 7.7's scope; the gap closes naturally when Unit 7.8 wires `EnsureLatest` into the launch path with the auto-wired resolver active.
+- **NOTE 7.7-3 (no `normalizeClaudeVersion` helper):** Code-shape asymmetry vs Codex. Inline trim+prefix+extract at `service.go:222-226` works correctly. Stylistic, not a correctness issue.
+- **NOTE 7.7-4 (package rename risk):** Hardcoded `@anthropic-ai/claude-code` at `service.go:28`. If Anthropic renames the package, resolver 404s. Acceptable to handle reactively.
+- **NOTE 7.7-5 (private mirror not supported):** `defaultClaudeLatestURL` is hardcoded; external callers cannot inject. Symmetric with Codex (`defaultCodexLatestURL` also hardcoded). Acceptable for v0.1.0.
+
+No BLOCK findings.
+No CONCERN findings worth blocking — A3's CONCERN about regex anchoring is symmetric with Codex (preexisting risk pattern, not introduced by Unit 7.7).
+
+### Unknowns
+
+None — all 27 attack vectors REFUTED with file:line evidence or marked NOTE (acceptable, recorded for future hardening). The 7.7-vs-7.8 scope split is honored by the committed code (verified via `claude.go:192` still calling `service.Build` not `service.EnsureLatest`); Unit 7.7's claim ("resolver exists, is auto-wired in `New()` for Claude provider, tested") survives all attacks.
+
+## Hylla Feedback
+
+- **Query:** `hylla_search_keyword` for `ensureClaudeImageCurrent` and `openImagesService` — zero results.
+  - **Missed because:** Both symbols were either renamed/modified during DROP_7 work after the last Hylla ingest (snapshot 11 predates the Unit 7.7 commit) OR the Hylla index doesn't cover these specific tail symbols. The file `internal/cli/claude.go` itself is indexed (per other queries) but these function names didn't surface.
+  - **Worked via:** `Read` tool on `internal/cli/claude.go` directly per CLAUDE.md § "Code Understanding Rules" item 2 (changed-since-ingest files).
+  - **Suggestion:** None needed — mid-drop `Read` is the documented protocol. Hylla reingest at drop-end will pick these up.
+
+---
+
+## Unit 7.5 — Round 1
+
+**Date:** 2026-05-15
+**Verdict:** fail (one BLOCK + multiple CONCERN findings — Path B launch-vs-auth shape mismatch class is the exact failure mode that killed Rounds 1–4)
+
+### Attack vectors probed
+
+All 15 spawn-prompt attack vectors plus three invented (env-passthrough drift, missing image-ensure on auth path, USER override vs Dockerfile UID/GID).
+
+- **A1 (bind-mount path mismatch).** REFUTED. Auth sets `Mounts: dockeradapter.NewMountSpec(homePath, claudeprovider.ContainerClaudeDir, false)` (claude_auth.go:78-80) targeting `/home/valv/.claude`. Launch sets the SAME target via runtime.go:115-117 (`dockeradapter.NewMountSpec(runtimeClaudeHome, ContainerClaudeDir, false)`). Both go to `claudeprovider.ContainerClaudeDir = "/home/valv/.claude"` (runtime.go:22). Identical target. Auth source = profileHome directly. Launch source = profileHome (when SharedHome empty) or a staged copy. Per service.go:127-133 SharedHome is intentionally empty so runtime collapses to profileHome — same as auth. No mismatch.
+- **A2 (Container User mismatch).** REFUTED. Both auth and launch use `currentContainerUser()` which returns `"${UID}:${GID}"` of host process (operator_helpers.go:313-315). Launch via claude.go:97 (`User: currentContainerUser()`) → service.go Options.User → buildRequest User. Auth via claude_auth.go:86 (`User: currentContainerUser()`). Same UID:GID. Files written by auth-container land on host with the same UID that launch-container reads with. (Sub-note: this UID overrides the Dockerfile's `USER valv` UID 1000 — both auth and launch share this characteristic, so no drift.)
+- **A3 (TERM env).** REFUTED. Auth inlines `strings.TrimSpace(os.Getenv("TERM"))` defaulting to `"xterm-256color"` (claude_auth.go:64-67). Launch calls `normalizedContainerTERM()` (runtime.go:122 → runtime.go:300-308) with identical logic. Match.
+- **A4 (Args empty / entrypoint).** REFUTED. Dockerfile `ENTRYPOINT ["claude"]` (images/service.go:683). `Args: []string{}` (claude_auth.go:81) → container runs `claude` with zero arguments. Matches Anthropic devcontainer pattern + claudebox approach.
+- **A5 (Interactive=true semantics for TTY stdin).** REFUTED. Auth sets `Interactive: stdin != nil` AND `TTY: commandHasTTY(stdin)` (claude_auth.go:82-83). When stdin is the real TTY (`os.Stdin` via cobra's InOrStdin) both are true → `docker run -i -t` (types.go:153-158). Correct for interactive OAuth paste prompt.
+- **A6 (already-authed false positive on corrupt creds).** CONCERN-level. claude_auth.go:115-118 checks `info.Size() > 0` only. A partial multi-byte write (truncated JSON) would have `Size > 0` and short-circuit to nil → broken creds masquerade as authed. Smoke-test `rm -rf` reset path is fine; live users hitting container crash mid-write would have to manually wipe. Not a regression from prior rounds (Round 2 introduced this check with same shape).
+- **A7 (docker adapter stdin/stdout/stderr forwarding).** REFUTED. `SystemRunner.Run` (os_runner.go:35-58) sets `cmd.Stdin = r.Stdin`, `cmd.Stdout = r.Stdout`, `cmd.Stderr = r.Stderr` before `cmd.Run()`. `NewSystemRunner` captures the caller's streams (os_runner.go:26-33). Auth path passes `cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr()` (claude_auth.go:62) which are `os.Stdin`/`os.Stdout`/`os.Stderr` for real CLI. The `os/exec` mechanism wires these to the docker-CLI subprocess fds directly (no buffer copy) → docker run pty forwarding works.
+- **A8 (VALV_CLAUDE_IMAGE override bypassed for auth).** **CONFIRMED — CONCERN-level.** claude_auth.go:41-43 hardcodes `dockeradapter.NewImageRef("valv-claude", "dev")` in the package-level `hostClaudeAccountAuth` var, IGNORING `VALV_CLAUDE_IMAGE`. Launch path uses `claudeImageRef()` (claude.go:96 + claude_image.go:13-25) which DOES honor `VALV_CLAUDE_IMAGE`. Result: if a dev sets `VALV_CLAUDE_IMAGE=myorg/custom-claude:v3`, `valv account add claude` runs auth against `valv-claude:dev` (potentially different CLI version, potentially not built) while `valv claude` launches `myorg/custom-claude:v3`. Creds written by image A may be incompatible with image B. The builder's worklog (line 430) calls this "correct" but provides no rationale — PLAN.md does NOT lock this design choice (planner spec at PLAN.md:69 says use `claudeImageRef()` for the auth executor, mirroring claude.go's pattern). Builder DEVIATED from spec.
+- **A9 (container name uniqueness).** REFUTED. Nanosecond-precision timestamp + `Remove: true` makes name reuse astronomically unlikely. Same shape as `runClaudeImageOnlyCommand` (claude.go:137) — established pattern.
+- **A10 (Init: true).** REFUTED. tini wraps entrypoint for signal handling; launch sets `Init: s.tty || s.stdin` (service.go:270) which is true in the same conditions auth runs in. No divergence.
+- **A11 (test stub vs production runner gap).** CONCERN-level (test-coverage). `stubClaudeAccountAuthRunner` with `stubRunFunc` writes `.credentials.json` directly to homePath (claude_auth_test.go:35-42). Production runner spawns a real docker container that internally writes the file via the bind-mount. The stub proves "if container writes credentials, the function succeeds" but NOT "the production runner actually causes container to write credentials." This is the exact integration gap that masked Path A's keychain-format mismatch through 4 green-CI rounds. Acceptable for unit-test layer; the verification gate MUST be the dev's smoke test. PLAN.md line 28-40 prescribes the smoke test — orchestrator should not mark drop done until that smoke test passes.
+- **A12 (no test for production-runner construction).** REFUTED. `systemClaudeAccountAuthRunner.RunInContainer` is only exercised when stub injection is absent. No unit test covers the docker-adapter construction path. Same as Codex's `systemCodexAccountAuthRunner` pattern (account_auth.go:132) — established norm. Init failure surfaces at smoke-test time.
+- **A13 (claudeImageRef reuse).** Tied to A8 — see CONFIRMED finding above. Auth does NOT call `claudeImageRef()`; launch does. Drift exists.
+- **A14 (SkipLogin caller coverage).** REFUTED. `git grep SkipLogin`: callers are manage.go:493 (`runManageAccountAdd`) and manage.go:600 (`runManageAccountSwitch`), both threading a user-supplied `--skip-login` flag. Both pre-existed Path A. Both correctly route to early-return. No new caller introduced unsafe SkipLogin.
+- **A15 (plain `claude` auto-prompt assumption).** EXHAUSTED, no counterexample found. Per PLAN.md "Path B" rationale and Anthropic devcontainer docs (https://code.claude.com/docs/en/devcontainer), plain `claude` in a bind-mounted container with TTY + missing credentials prompts for OAuth in-terminal. claudebox confirms working impl. No code-level counterexample available; live smoke test is the gate.
+- **Invented: ENV PASSTHROUGH DRIFT.** **CONFIRMED — CONCERN-level.** Launch sets `EnvPassthrough: prepared.EnvPassthrough` via runtime.go:161 → `terminalEnvPassthrough()` at runtime.go:283-298, which passes `COLORTERM`, `TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, `LANG`, `LC_CTYPE` THROUGH to the container (when set on host). Auth's `ContainerRunRequest` at claude_auth.go:68-87 sets ZERO `EnvPassthrough` — only the explicit Env map (CLAUDE_CONFIG_DIR, HOME, LOGNAME, TERM, USER) is forwarded. Inside the auth container: no `LANG`, no `LC_CTYPE`, no `COLORTERM`, no `TERM_PROGRAM`. Claude's TUI may render the OAuth prompt with broken color or incorrect locale. The DROP_6.2 invisible-paste-prompt failure was a TUI-through-Docker-pty class bug — this is a sibling risk. The smoke test will either work or fail visibly; logged as CONCERN because PLAN.md does not explicitly require parity with launch's EnvPassthrough.
+- **Invented: MISSING ensureClaudeImageCurrent ON AUTH PATH.** **CONFIRMED — BLOCK-level.** `runManageAccountAdd` (manage.go:462-527) calls `ensureManagedAccountReady` (manage.go:493) → `ensureClaudeAccountReady` → `runner.RunInContainer` → `docker run --rm -i -t valv-claude:dev claude`. There is NO `ensureClaudeImageCurrent` call anywhere in this chain. On a fresh install (`mage install` + no prior `valv claude` ever invoked), `valv-claude:dev` does NOT exist locally → `docker run` fails with `"Unable to find image 'valv-claude:dev' locally"` (no implicit pull, since it's a local-only tag). Path A's host-subprocess flow did NOT need the image, so this gap is a Path B REGRESSION introduced by Unit 7.5. The dev's smoke test in PLAN.md line 28-40 is `mage install` then `valv account add claude work` — if no prior image build exists on that machine, this smoke test fails BEFORE the OAuth prompt ever appears. Even if the dev's machine happens to have a cached image from prior smoke tests, a fresh CI runner or a new contributor's machine will hit this. PLAN.md "Round 5 scope" says "first launch" auths in-container — but `valv account add` precedes `valv claude`, so there is no prior launch to seed the image. Fix: `runManageAccountAdd` must call `ensureClaudeImageCurrent` (or an equivalent build/pull guard) before `ensureManagedAccountReady` when provider == ProviderClaude.
+- **Invented: USER override vs Dockerfile UID/GID.** REFUTED (with caveat). Dockerfile sets `USER valv` (UID 1000); auth/launch both override with `currentContainerUser()` = host `"${UID}:${GID}"` (typically 501:20 on Mac). Result: `/home/valv/` is owned by 1000:1000 inside the image but the process runs as 501. The bind-mounted subdir `/home/valv/.claude` is owned by host UID 501 (file ownership flows through bind-mount) — claude writes `.credentials.json` succeed. Both auth and launch share this characteristic so no drift. Caveat: if claude tries to write to `/home/valv/` itself (not under `.claude/`), it would fail (perm denied) — but Anthropic CLI scopes writes to `$CLAUDE_CONFIG_DIR`.
+
+### Findings
+
+- **BLOCK 1 — Missing image-ensure on auth path.** `runManageAccountAdd` (internal/cli/manage.go:462-494) does NOT call `ensureClaudeImageCurrent` before `ensureManagedAccountReady` for Claude. `valv account add claude work` on a fresh install (the PLAN.md smoke test) will fail at `docker run valv-claude:dev` with image-not-found before the OAuth prompt can render. Path A did not have this dependency because it auth'd on the host. Fix: gate `ensureManagedAccountReady` on a `provider == ProviderClaude` image-ensure step. Smallest fix: in `runManageAccountAdd`, after profile creation, if provider is Claude and not SkipLogin, call `ensureClaudeImageCurrent(cmd, paths)`. Same pattern in `runManageAccountSwitch` (manage.go:600) needs the same guard.
+- **CONCERN 1 — VALV_CLAUDE_IMAGE drift.** Auth runner var hardcodes `valv-claude:dev` (claude_auth.go:41-43) instead of calling `claudeImageRef()`. Launch path honors `VALV_CLAUDE_IMAGE`. Per PLAN.md:69 the spec lock says use `claudeImageRef()` ("same callsite pattern as claude.go"); builder deviated. If a contributor sets `VALV_CLAUDE_IMAGE` for testing, auth and launch will use different images → potentially different CLI versions writing/reading the same credentials file. Fix: replace the hardcoded `NewImageRef("valv-claude", "dev")` with a call to `claudeImageRef()`. If hardcoding is intentional, document the rationale in claude_auth.go AND in PLAN.md design decisions.
+- **CONCERN 2 — EnvPassthrough drift.** Auth container does not pass through `COLORTERM`, `TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, `LANG`, `LC_CTYPE` to the auth container; launch does (runtime.go:283-298 via service.go:258). Without LANG/LC_CTYPE, the claude TUI prompt may render badly through the docker pty — same class as DROP_6.2's invisible-paste-prompt failure. Smoke test will surface this if it triggers; CONCERN until confirmed in live test. Fix: add `EnvPassthrough` field to the auth `ContainerRunRequest` mirroring `terminalEnvPassthrough()`'s output. Inline duplication or, better, export `terminalEnvPassthrough` from clauderuntime.
+- **CONCERN 3 — Test stub masks production-runner integration gap.** `stubClaudeAccountAuthRunner.stubRunFunc` (claude_auth_test.go:35-42) writes `.credentials.json` directly, bypassing the real docker container path. The unit-test success path proves "if container writes creds the function succeeds" but cannot prove "the production runner actually causes container to write creds." This is the exact integration gap that let Path A pass 4 green-QA rounds with broken end-to-end behavior. The orchestrator MUST gate drop-complete on the dev's live smoke test (PLAN.md line 28-40), not just `mage testPkg`.
+- **NOTE 1 — Already-authed corrupt creds.** claude_auth.go:115-118's `info.Size() > 0` early-return treats a truncated/partial `.credentials.json` as authed. Smoke-test reset handles dev path; live users hitting container crash mid-write must manually wipe. Pre-existing from Round 2; not a Unit 7.5 regression.
+
+### Unknowns
+
+- Whether claude's in-container OAuth prompt actually renders correctly without LANG/LC_CTYPE passthrough — only the dev's live smoke test can resolve this. Routed to orchestrator + dev.
+- Whether `valv-claude:dev` happens to be present on the dev's machine from a prior smoke test, masking BLOCK 1 in the immediate retest but leaving the regression in place for fresh installs / CI. Orchestrator should consider explicitly `docker image rm valv-claude:dev` before re-running the smoke test to expose the gap.
+
+## Hylla Feedback
+
+- **Query**: `hylla_search_keyword` for `SkipLogin: true` with `id_search_mode=exact_full_id` and `field=content`.
+  - **Missed because**: Hylla returned only the top-10 lexical matches on summary/docstring, none of which contained "SkipLogin" — Hylla does not appear to index literal field-assignment text (`{SkipLogin: true, ...}`) in block summaries/docstrings.
+  - **Worked via**: `git grep -n SkipLogin -- 'internal/**/*.go'` (Bash, allowed).
+  - **Suggestion**: index struct-literal field references (or full content text) in block embeddings so call-site searches for `Field: value` patterns return the surrounding block.
+- **Query**: `hylla_search_keyword` for `claudeImageRef` and `currentContainerUser` — both returned zero hits.
+  - **Missed because**: Both are unexported package-private functions in `internal/cli`. The `tail_symbol` search mode didn't surface them; `visibility_mode=public_only` default may have hidden internal symbols even though `internal_mode=include_internal` was specified.
+  - **Worked via**: `Read` tool on `claude_image.go` and `operator_helpers.go` directly after listing the directory.
+  - **Suggestion**: when both visibility filters and internal-mode flags are set, a same-package unexported function should still be discoverable by `tail_symbol`. Either tighten the docs on which flag combination returns unexported symbols, or surface them by default for in-artifact queries.
+
+---

@@ -407,3 +407,121 @@ End-to-end auth flow after Unit 7.1 Round 3 + Unit 7.2 Round 2:
 ### Hylla Feedback
 
 None — `hylla_node_full` on `PrepareRuntime` returned the full function body including the mounts slice; `hylla_node_full` on `ContainerClaudeDir` confirmed the const value. One earlier keyword search for "PrepareRuntime claude mount" ranked codex-side variants higher; resolved by direct `node_full` on the claude-side const + function via known IDs. Mild ergonomics suggestion: when keyword search includes a provider/package qualifier, prefer summaries containing that token over more-popular cross-package hits.
+
+---
+
+## Unit 7.5 — Round 1
+
+**Date:** 2026-05-15
+**Reviewer:** go-qa-proof-agent
+**Verdict:** pass
+
+Unit 7.5 is the Path A → Path B revert and restore. Builder deleted host-extract code (`RunAuthLogin`, `ExtractKeychainToken`, `runClaudeHostCommand`, `writeClaudeCredentials`, `claudeKeychainService`, and the `os/user`/`os/exec`/`bytes`/`encoding/json` imports) and restored in-container auth via a single-method `claudeAuthRunner` interface (`RunInContainer`) backed by a lazy-executor `systemClaudeAccountAuthRunner`. Independent verification confirms every acceptance criterion is supported by the committed code at `3d36683` (`feat(cli): restore in-container Claude auth via plain claude`).
+
+### Evidence reviewed
+
+- `PLAN.md` Round 5 locked design decisions (lines 58–124) + Unit 7.5 spec (lines 127–266).
+- `BUILDER_WORKLOG.md` Unit 7.5 Round 1 entry (lines 402–456).
+- Full read of `internal/cli/claude_auth.go` (189 lines committed at `3d36683`).
+- Full read of `internal/cli/claude_auth_test.go` (397 lines committed at `3d36683`).
+- `git diff 9e7bc48..3d36683 -- internal/cli/claude_auth.go` (Path A → Path B delta, 238 lines changed: 85 ins / 153 del).
+- `git show 9e7bc48:internal/cli/claude_auth.go` (Path A baseline for `wipeClaudeCredentials` byte-equivalence check).
+- Independent `mage testPkg github.com/evanmschultz/valv/internal/cli` rerun.
+
+### Acceptance criteria verification
+
+| # | Criterion | Builder Result | QA-Proof Verification |
+|---|---|---|---|
+| AC1 | `claudeAuthRunner` has exactly one method: `RunInContainer`. No `RunAuthLogin`, no `ExtractKeychainToken`. | PASS | CONFIRMED — interface at `claude_auth.go:32-34` declares a single method `RunInContainer(ctx context.Context, homePath string, stdin io.Reader, stdout, stderr io.Writer) error`. Full-file read of `claude_auth.go` (189 lines) and `claude_auth_test.go` (397 lines) yields zero matches for `RunAuthLogin` or `ExtractKeychainToken`. |
+| AC2 | No `os/user`, `os/exec`, `bytes`, `encoding/json` imports; no `claudeKeychainService` const; no `writeClaudeCredentials` / `runClaudeHostCommand` funcs. | PASS | CONFIRMED — import block `claude_auth.go:3-19` contains only `context`, `fmt`, `io`, `os`, `path/filepath`, `strings`, `time`, `laslig`, `cobra`, `dockeradapter`, `claudeprovider`, `config`, `domain`. Full-file review confirms none of the listed Path A symbols appear. Diff `git diff 9e7bc48..3d36683` shows the deletions explicitly (`-"bytes"`, `-"os/exec"`, `-"os/user"`, `-const claudeKeychainService`, `-func writeClaudeCredentials`, `-func runClaudeHostCommand`, `-RunAuthLogin`, `-ExtractKeychainToken`). |
+| AC3 | `ensureClaudeAccountReady` step order: SkipLogin → already-authed stat → non-TTY guard → notice → RunInContainer → ReadAccountIdentity. Tests cover all short-circuit / failure paths. | PASS | CONFIRMED — function body `claude_auth.go:110-148`: SkipLogin (`:111-113`), stat for `.credentials.json` + `Size > 0` early return (`:114-118`), stat-error propagation for non-`IsNotExist` errors (`:119-121`), non-TTY guard (`:122-127`), `writeCLINotice` (`:128-135`), `runner.RunInContainer` (`:136-139`), `ReadAccountIdentity` (`:140-146`). Order matches planner spec `PLAN.md:71-72` exactly. Tests at `claude_auth_test.go`: `TestEnsureClaudeAccountReadyRespectsSkipLogin:98`, `TestEnsureClaudeAccountReadyAlreadyAuthedReturnsNilEvenNonTTY:129`, `TestEnsureClaudeAccountReadyRejectsNonTTY:76` — all three assert `runHits == 0`, proving the short-circuits fire before container launch. |
+| AC4 | `ensureClaudeAccountReady` container-run failure propagates as error. | PASS | CONFIRMED — `TestEnsureClaudeAccountReadyFailsWhenContainerRunFails:160` exercises the path via `loginClaudeAccount` (acknowledged in worklog because non-TTY unit tests can't reach the ensure path's container call without TTY mocking; `loginClaudeAccount` shares the same downstream container+identity pipeline). Stub returns `errors.New("container: docker daemon not running")`; test asserts `errors.Is(err, containerErr)` and `runHits == 1`. `TestEnsureClaudeAccountReadyFailsWhenNotLoggedInAfterContainer:188` also exercises the post-container `ReadAccountIdentity` failure path. Error wrapping at `claude_auth.go:138` uses `%w` (`fmt.Errorf("run claude auth container for account %q: %w", account.Name, err)`) so `errors.Is` works correctly. |
+| AC5 | `loginClaudeAccount` has no TTY guard; container run invoked even in non-TTY. | PASS | CONFIRMED — function body `claude_auth.go:157-178`: `writeCLINotice` (`:158-165`), `runner.RunInContainer` (`:166-169`), `ReadAccountIdentity` (`:170-176`). No `commandHasTTY` call anywhere. `TestLoginClaudeAccountSkipsNonTTYGuard:253` passes a non-TTY `bytes.Buffer`-backed cmd, stub returns sentinel error, asserts (a) error does NOT contain "TTY" and (b) `runHits == 1` — proving no TTY guard. |
+| AC6 | `wipeClaudeCredentials` unchanged behavior. | PASS | CONFIRMED — function body `claude_auth.go:182-188` is byte-identical to Path A version at `9e7bc48:internal/cli/claude_auth.go` (same signature, same `os.Remove` + `os.IsNotExist` check, same `%w` wrap, same trimmed-homepath path construction). Tests `TestWipeClaudeCredentialsRemovesFile:329` and `TestWipeClaudeCredentialsMissingFileIsNoError:348` cover both branches; `TestLogoutManagedAccountWipesClaudeCredentials:359` proves integration with `logoutManagedAccount`. |
+| AC7 | `mage testPkg ./internal/cli` passes; all new tests green; no Path A test names remain. | PASS | CONFIRMED — independent rerun: `tests: 150 passed: 150 failed: 0`, `github.com/evanmschultz/valv/internal/cli 71.2%`. Coverage clears 70% AGENTS.md floor. Full read of `claude_auth_test.go` (397 lines) yields zero matches for Path A test names listed in `PLAN.md:250` (`TestSystemClaudeAccountAuthRunnerRunAuthLoginUsesCLAUDE_CONFIG_DIR`, `TestRunClaudeHostCommandPreflightFailsWhenClaudeMissing`, `TestLoginClaudeAccountWipesAndRunsSetupTokenAndExtractsAndWrites`, `TestLoginClaudeAccountFailsWhenRunSetupTokenErrors`, `TestLoginClaudeAccountFailsWhenExtractTokenErrors`, `TestLoginClaudeAccountFailsOnEmptyToken`). |
+
+### Spec conformance — design decisions cross-check
+
+| Decision (PLAN.md ref) | Implementation evidence | Result |
+|---|---|---|
+| Single-method interface `RunInContainer` (PLAN.md:60-66) | `claude_auth.go:32-34` | pass |
+| Lazy executor construction per-call (PLAN.md:68-69, worklog line 418) | `claude_auth.go:60-63` nil-check on `r.executor`, fallback to `dockeradapter.NewExecutor(dockeradapter.NewSystemRunner("docker", stdin, stdout, stderr))` | pass |
+| `ContainerRunRequest` env: `CLAUDE_CONFIG_DIR`, `HOME`, `LOGNAME`, `TERM`, `USER` (PLAN.md:69, 171-177) | `claude_auth.go:71-77` matches the 5 env keys exactly; `claudeprovider.ContainerClaudeDir` + `ContainerHomeDir` used for paths | pass |
+| Bind mount `homePath → ContainerClaudeDir` (PLAN.md:178-180) | `claude_auth.go:78-80` uses `dockeradapter.NewMountSpec(homePath, claudeprovider.ContainerClaudeDir, false)` | pass |
+| `Args: []string{}` — plain `claude` (PLAN.md:181) | `claude_auth.go:81` | pass |
+| `Interactive: stdin != nil`, `TTY: commandHasTTY(stdin)`, `Init: true`, `Remove: true`, `User: currentContainerUser()` (PLAN.md:182-187) | `claude_auth.go:82-86` matches all five fields | pass |
+| `ensureClaudeAccountReady` no wipe step (PLAN.md:71-72) | `claude_auth.go:110-148` — no `wipeClaudeCredentials` call | pass |
+| `loginClaudeAccount` no TTY guard, no wipe (PLAN.md:74-75) | `claude_auth.go:157-178` — no `commandHasTTY`, no `wipeClaudeCredentials` (matches `loginCodexAccount` no-guard semantics) | pass |
+| TTY check is `commandHasTTY(cmd.InOrStdin())` only, NOT widened to stdout (worklog design note line 422) | `claude_auth.go:122` — `if !commandHasTTY(cmd.InOrStdin())` (single stdin check, narrowed from Path A's stdout-widened guard per PLAN.md:200) | pass |
+| `normalizedContainerTERM()` inlined (PLAN.md:193) | `claude_auth.go:64-67` — inline `strings.TrimSpace(os.Getenv("TERM"))` with `"xterm-256color"` default | pass |
+
+### Reasoning coherence findings
+
+- **Container-error propagation tested via `loginClaudeAccount` rather than `ensureClaudeAccountReady` directly** — the worklog explicitly acknowledges this on line 426 with a sound justification: `ensureClaudeAccountReady`'s success path requires a real TTY for `commandHasTTY` to return true, and the test harness uses `bytes.Buffer` (non-TTY) for stdin. `loginClaudeAccount` has no TTY guard so it can exercise the same downstream container+identity-check pipeline. The two functions share `runner.RunInContainer` + `ReadAccountIdentity` verbatim — testing one branch is sound for both. Test naming starts with `TestEnsureClaudeAccountReady...` which is slightly misleading (the body calls `loginClaudeAccount`) but the worklog discloses this transparently. Acceptable.
+- **Stub side-effect simulation pattern** — `stubClaudeAccountAuthRunner.stubRunFunc func(homePath string)` (`claude_auth_test.go:32`) is the planner-locked pattern for tests that need the container to "write" `.credentials.json`. `TestEnsureClaudeAccountReadySucceeds:212` and `TestLoginClaudeAccountSucceeds:298` use it correctly to simulate container-side OAuth completion.
+- **Stat-error propagation for non-`IsNotExist` errors** — `claude_auth.go:119-121` wraps the stat error with `%w` and account name context. Handles cases like permission-denied on the cred dir, which the planner spec doesn't explicitly cover but is correct defensive behavior. Tests don't exercise this path; not blocking (would require a permission-injection test harness), but worth noting.
+- **`hostClaudeAccountAuth` image hardcoded `valv-claude:dev`** — `claude_auth.go:41-43` constructs `dockeradapter.NewImageRef("valv-claude", "dev")` directly rather than calling `claudeImageRef()` (which would consult `VALV_CLAUDE_IMAGE`). Worklog (line 430) acknowledges and justifies: "auth container should always use `valv-claude:dev` regardless of the image override." Defensible design — the auth container does NOT need to honor user image pins because it's a fresh OAuth flow. The dev's `VALV_CLAUDE_IMAGE` override applies to runtime image selection in `claude.go`, not auth. Not flagged.
+
+### Test count + coverage independent re-verification
+
+- Independent rerun of `mage testPkg github.com/evanmschultz/valv/internal/cli`: **150/150 passed, 0 failed, 0 skipped, 71.2% coverage**.
+- Matches builder's reported numbers exactly. Coverage threshold (60% mage floor; 70% AGENTS.md floor) cleared.
+
+### Unknowns
+
+None routed to orchestrator. All planner spec requirements have implementation evidence; all 7 ACs verified by independent file inspection + diff comparison + mage rerun.
+
+### Hylla Feedback
+
+N/A — Unit 7.5 touched only files modified in this drop (uncommitted to Hylla until drop-end reingest). All Go code reads went directly via the `Read` tool per the mid-drop evidence protocol. The Path A baseline comparison used `git show 9e7bc48:internal/cli/claude_auth.go` since Path A code is committed history. Hylla was not queried for this unit.
+
+---
+
+## Unit 7.7 — Round 1
+
+**Date:** 2026-05-15
+**Reviewer:** go-qa-proof-agent
+**Verdict:** pass
+
+### Evidence reviewed
+
+- `main/drops/DROP_7_HOST_AUTH_TOKEN_FIX/PLAN.md` Unit 7.7 spec (lines 269–371) plus Round 5 design decisions for the resolver and auto-wire (lines 95–111).
+- `main/drops/DROP_7_HOST_AUTH_TOKEN_FIX/BUILDER_WORKLOG.md` `## Unit 7.7 — Round 1` entry (lines 355–399).
+- `internal/services/images/service.go` committed at `c4c25c6` — full read.
+- `internal/services/images/service_test.go` committed at `c4c25c6` — lines 449–678 covering Codex resolver test, Claude resolver tests, and the auto-wire test.
+- `git diff HEAD~1 -- internal/services/images/` — 53 lines added in service.go, 88 lines added in service_test.go.
+- Codex resolver cross-reference: `service.go:125–178` (Codex constants block, payload, resolver struct, constructor, `LatestVersion`, `normalizeCodexVersion`) and `service.go:261–263` (Codex auto-wire).
+- Rerun verification: `mage testPkg github.com/evanmschultz/valv/internal/services/images` produced `tests: 22 passed: 22`, coverage `76.9%`, threshold met.
+
+### Acceptance criteria verification
+
+| # | Criterion | Builder Result | QA-Proof Verification |
+|---|---|---|---|
+| 1 | `NewClaudeVersionResolver(nil)` returns non-nil `VersionResolver` | PASS | PASS — `service.go:192–197` returns `claudeVersionResolver{...}` (a value, never nil); nil-client branch defaults to `&http.Client{Timeout: defaultVersionRequestTTL}`. Auto-wire test `TestNewWiresClaudeVersionResolverWhenProviderIsClaudeAndNilResolver` (service_test.go:665–678) exercises the constructor indirectly via `New()` and asserts `svc.resolver != nil`. |
+| 2 | `LatestVersion` returns valid semver matching `\d+\.\d+\.\d+` for `{"version":"X.Y.Z"}` | PASS | PASS — `service.go:199–227` decodes the npm JSON, trims `v` prefix and whitespace, validates via `versionPattern.MatchString` (shared regex `\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?` — superset of AC2 form), and returns `versionPattern.FindString(version)`. `TestClaudeVersionResolverReadsLatestVersion` (service_test.go:592–607) confirms `"2.1.200"` round-trips exactly. |
+| 3 | `images.New()` with `Provider=ProviderClaude, Resolver=nil` returns service with non-nil resolver | PASS | PASS — `service.go:264–266` auto-wire block placed **immediately** after the Codex auto-wire at lines 261–263 (no intervening code), matching the planner's locked "immediately after the existing Codex auto-wire" directive. `TestNewWiresClaudeVersionResolverWhenProviderIsClaudeAndNilResolver` constructs `New(...Provider: ProviderClaude...)` with no `Resolver` and asserts `svc.resolver != nil`. |
+| 4 | `mage testPkg github.com/evanmschultz/valv/internal/services/images` passes | PASS — 22/22, 76.9% | PASS — reviewer rerun: `tests: 22 passed: 22 failed: 0 skipped: 0`, package coverage `76.9%`, `Minimum package coverage: 60.0%` threshold met, AGENTS.md 70% floor exceeded. |
+
+### Mirror-completeness against Codex resolver
+
+- **Constants block placement:** `defaultClaudeLatestURL` at `service.go:28` sits in the same `const (...)` group as `defaultCodexLatestURL` at `:27` — adjacent lines, identical const-block membership. PASS.
+- **Struct/method vertical pattern:** Codex order: `codexReleasePayload` (`:125`) → `codexVersionResolver` (`:130`) → `NewCodexVersionResolver` (`:135`) → `LatestVersion` (`:142`) → `normalizeCodexVersion` (`:173`). Claude order: `claudeNPMPayload` (`:180`) → `claudeVersionResolver` (`:184`) → `NewClaudeVersionResolver` (`:192`) → `LatestVersion` (`:199`). Claude omits the `normalize*` helper — correct, because the npm payload is already clean semver and the inline `strings.TrimPrefix(..., "v")` + `versionPattern` validation covers all forms. PASS.
+- **Constructor signature:** `func NewClaudeVersionResolver(client *http.Client) VersionResolver` mirrors `func NewCodexVersionResolver(client *http.Client) VersionResolver` exactly — same param type, same return type (interface), same nil-client default-timeout pattern using the shared `defaultVersionRequestTTL` const. PASS.
+- **Error wrapping format:** Claude uses `"latest claude version: <op>: %w"` (`:202`, `:209`, `:220`); Codex uses `"latest codex version: <op>: %w"` (`:145`, `:152`, `:163`). Same prefix-with-provider, same op vocabulary (`new request`, `send request`, `decode response`), same `%w` wrap. The status-code error uses `"latest <provider> version: unexpected status %d: %s"` in both. PASS.
+- **HTTP header values:** Codex sets `Accept: application/vnd.github+json` (GitHub-specific). Claude sets `Accept: application/json` (npm-generic). User-Agent matches: both set `User-Agent: valv`. Correct divergence — npm doesn't require a vendor Accept media type. PASS.
+- **Status-code error body excerpt:** Both use `io.ReadAll(io.LimitReader(resp.Body, 4096))` followed by `strings.TrimSpace(string(body))` in the error string. Bound and pattern identical. PASS.
+- **Default timeout:** Both constructors reuse `defaultVersionRequestTTL` (10s) — no Claude-specific timeout constant invented. PASS.
+- **Auto-wire placement in `New()`:** Codex case `:261–263`, Claude case `:264–266`, no intervening code or `else`. Independent `if` guards (correct: a provider can only match one). PASS.
+
+### Minor observations (not findings — non-blocking)
+
+- `TestClaudeVersionResolverNetworkErrorReturnsError` (service_test.go:651–663) uses `server.Client()` after `server.Close()`. The pattern works (test passes) because the underlying transport fails the connection. The Codex resolver does not have a matching `*Network*` test — Claude exceeds the Codex baseline here. No mirror gap; bonus coverage.
+- `versionPattern` is the shared package-level regex — Claude correctly reuses it instead of inventing a Claude-specific pattern. The shared regex's optional `(?:[-+][0-9A-Za-z.-]+)?` suffix is unused for npm semver but harmless.
+
+### Unknowns
+
+None.
+
+### Hylla Feedback
+
+N/A — this QA pass touched only files modified during this drop (not yet reingested at the post-Unit-7.7 commit). All evidence reads were direct `Read` calls per mid-drop evidence protocol; Hylla was not queried for this unit.
