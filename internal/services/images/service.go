@@ -25,6 +25,7 @@ import (
 const (
 	defaultCodexDockerfile   = "Dockerfile"
 	defaultCodexLatestURL    = "https://api.github.com/repos/openai/codex/releases/latest"
+	defaultClaudeLatestURL   = "https://registry.npmjs.org/@anthropic-ai/claude-code/latest"
 	defaultVersionRequestTTL = 10 * time.Second
 	recipeHashLabel          = "io.valv.recipe_hash"
 )
@@ -176,6 +177,55 @@ func normalizeCodexVersion(value string) string {
 	return versionPattern.FindString(trimmed)
 }
 
+type claudeNPMPayload struct {
+	Version string `json:"version"`
+}
+
+type claudeVersionResolver struct {
+	client *http.Client
+	url    string
+}
+
+// NewClaudeVersionResolver returns a VersionResolver that queries the npm
+// registry for the latest @anthropic-ai/claude-code version. If client is
+// nil, a default client with a 10-second timeout is used.
+func NewClaudeVersionResolver(client *http.Client) VersionResolver {
+	if client == nil {
+		client = &http.Client{Timeout: defaultVersionRequestTTL}
+	}
+	return claudeVersionResolver{client: client, url: defaultClaudeLatestURL}
+}
+
+func (r claudeVersionResolver) LatestVersion(ctx context.Context) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.url, nil)
+	if err != nil {
+		return "", fmt.Errorf("latest claude version: new request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "valv")
+
+	resp, err := r.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("latest claude version: send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return "", fmt.Errorf("latest claude version: unexpected status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var payload claudeNPMPayload
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return "", fmt.Errorf("latest claude version: decode response: %w", err)
+	}
+	version := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(payload.Version), "v"))
+	if version == "" || !versionPattern.MatchString(version) {
+		return "", fmt.Errorf("latest claude version: no valid version in npm response")
+	}
+	return versionPattern.FindString(version), nil
+}
+
 func New(options Options) (Service, error) {
 	if options.Runner == nil {
 		return Service{}, fmt.Errorf("new image service: runner is required")
@@ -210,6 +260,9 @@ func New(options Options) (Service, error) {
 	resolver := options.Resolver
 	if resolver == nil && provider == domain.ProviderCodex {
 		resolver = NewCodexVersionResolver(nil)
+	}
+	if resolver == nil && provider == domain.ProviderClaude {
+		resolver = NewClaudeVersionResolver(nil)
 	}
 	return Service{
 		runner:     options.Runner,

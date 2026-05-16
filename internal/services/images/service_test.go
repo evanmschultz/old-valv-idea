@@ -588,3 +588,91 @@ func TestServiceBuildRecipeHashMatchesProviderDockerfile(t *testing.T) {
 		})
 	}
 }
+
+func TestClaudeVersionResolverReadsLatestVersion(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte(`{"version":"2.1.200"}`))
+	}))
+	defer server.Close()
+
+	resolver := claudeVersionResolver{client: server.Client(), url: server.URL}
+	version, err := resolver.LatestVersion(context.Background())
+	if err != nil {
+		t.Fatalf("LatestVersion() error = %v", err)
+	}
+	if got, want := version, "2.1.200"; got != want {
+		t.Fatalf("version = %q, want %q", got, want)
+	}
+}
+
+func TestClaudeVersionResolverNon200ReturnsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("internal error"))
+	}))
+	defer server.Close()
+
+	resolver := claudeVersionResolver{client: server.Client(), url: server.URL}
+	_, err := resolver.LatestVersion(context.Background())
+	if err == nil {
+		t.Fatal("LatestVersion() error = nil, want error for non-200 status")
+	}
+}
+
+func TestClaudeVersionResolverBadJSONReturnsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte(`not-json`))
+	}))
+	defer server.Close()
+
+	resolver := claudeVersionResolver{client: server.Client(), url: server.URL}
+	_, err := resolver.LatestVersion(context.Background())
+	if err == nil {
+		t.Fatal("LatestVersion() error = nil, want error for bad JSON")
+	}
+}
+
+func TestClaudeVersionResolverEmptyVersionReturnsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte(`{"version":""}`))
+	}))
+	defer server.Close()
+
+	resolver := claudeVersionResolver{client: server.Client(), url: server.URL}
+	_, err := resolver.LatestVersion(context.Background())
+	if err == nil {
+		t.Fatal("LatestVersion() error = nil, want error for empty version")
+	}
+}
+
+func TestClaudeVersionResolverNetworkErrorReturnsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"version":"2.1.200"}`))
+	}))
+	serverURL := server.URL
+	server.Close() // close before call to force network error
+
+	resolver := claudeVersionResolver{client: server.Client(), url: serverURL}
+	_, err := resolver.LatestVersion(context.Background())
+	if err == nil {
+		t.Fatal("LatestVersion() error = nil, want error for network failure")
+	}
+}
+
+func TestNewWiresClaudeVersionResolverWhenProviderIsClaudeAndNilResolver(t *testing.T) {
+	svc, err := New(Options{
+		Runner:     &runnerRecorder{},
+		Provider:   domain.ProviderClaude,
+		Repository: "ghcr.io/valv/claude",
+		ContextDir: "/tmp/claude-image",
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if svc.resolver == nil {
+		t.Fatal("New() with ProviderClaude and nil Resolver: resolver is nil, want auto-wired claudeVersionResolver")
+	}
+}
