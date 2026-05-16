@@ -38,8 +38,13 @@ type claudeAuthRunnerKey struct{}
 // hostClaudeAccountAuth is the package-level default runner. It stores only
 // the image ref; the executor is constructed per-call in RunInContainer so
 // that the caller's stdin/stdout/stderr are wired correctly.
+//
+// claudeImageRef() is used here — not a hardcoded ref — so that VALV_CLAUDE_IMAGE
+// overrides apply symmetrically to both the launch path and the auth path.
+// Using different images for auth and launch risks credential-format mismatch
+// across CLI versions.
 var hostClaudeAccountAuth claudeAuthRunner = systemClaudeAccountAuthRunner{
-	image: dockeradapter.NewImageRef("valv-claude", "dev"),
+	image: claudeImageRef(),
 }
 
 // systemClaudeAccountAuthRunner is the production implementation of
@@ -75,6 +80,12 @@ func (r systemClaudeAccountAuthRunner) RunInContainer(ctx context.Context, homeP
 			"TERM":              termValue,
 			"USER":              "valv",
 		},
+		// EnvPassthrough forwards terminal-locale vars (LANG, LC_CTYPE,
+		// COLORTERM, TERM_PROGRAM, TERM_PROGRAM_VERSION) to the auth container,
+		// matching the launch-path behaviour from PrepareRuntime. Without these,
+		// claude's TUI OAuth prompt may render incorrectly through the Docker pty
+		// — the same class of failure that affected DROP_6.2.
+		EnvPassthrough: claudeprovider.TerminalEnvPassthrough(),
 		Mounts: []dockeradapter.MountSpec{
 			dockeradapter.NewMountSpec(homePath, claudeprovider.ContainerClaudeDir, false),
 		},

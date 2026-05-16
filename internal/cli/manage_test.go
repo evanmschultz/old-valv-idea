@@ -378,6 +378,80 @@ func TestRunManageUpdateUnsupportedProvider(t *testing.T) {
 	}
 }
 
+// TestManageAccountAddClaudeWithSkipLoginSkipsImageEnsure verifies that when
+// --skip-login is passed, the Claude image-ensure guard is skipped and the
+// account is created without needing docker or a running container.
+// This pins the `!skipLogin` condition on the FIX 1 guard in runManageAccountAdd.
+func TestManageAccountAddClaudeWithSkipLoginSkipsImageEnsure(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	// No fake docker installed — if ensureClaudeImageCurrent were called without
+	// the skipLogin guard, it would invoke openImagesService → Build → docker → fail.
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd := newManageCommand(paths, &rootOptions{})
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"account", "add", "claude", "work", "--skip-login", "--no-bind"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute(account add claude work --skip-login) error = %v\nstderr=%s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "account=work") {
+		t.Fatalf("unexpected output %q missing account=work", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "provider=claude") {
+		t.Fatalf("unexpected output %q missing provider=claude", stdout.String())
+	}
+}
+
+// TestManageAccountAddClaudeWithExistingCredsAndImageOverrideSucceeds verifies
+// the full code path when VALV_CLAUDE_IMAGE is set (bypasses images service to
+// use docker inspect) and the profile already has credentials (already-authed
+// short-circuit in ensureClaudeAccountReady). A fake docker binary is installed
+// so that docker inspect returns 0. This confirms that runManageAccountAdd flows
+// through ensureClaudeImageCurrent → ensureManagedAccountReady in sequence.
+// This pins FIX 1 (BLOCK 1): image-ensure is reached for Claude before auth.
+func TestManageAccountAddClaudeWithExistingCredsAndImageOverrideSucceeds(t *testing.T) {
+	// VALV_CLAUDE_IMAGE causes ensureClaudeImageCurrent to call ensureClaudeImageAvailable
+	// (docker inspect) instead of the images-service build path. installFakeDocker
+	// provides a docker binary that exits 0 for all calls.
+	t.Setenv("VALV_CLAUDE_IMAGE", "test/claude:fixed")
+	installFakeDocker(t)
+
+	paths := testCodexPaths(t)
+
+	// Create the profile home and pre-write credentials so ensureClaudeAccountReady
+	// returns nil at the already-authed check without launching a real container.
+	profileHome := filepath.Join(paths.ProviderRoot, "claude", "profiles", "preauthed")
+	if err := os.MkdirAll(profileHome, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", profileHome, err)
+	}
+	credPath := filepath.Join(profileHome, ".credentials.json")
+	if err := os.WriteFile(credPath, []byte(`{"claudeAiOauth":{"accessToken":"tok"}}`), 0o600); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", credPath, err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd := newManageCommand(paths, &rootOptions{})
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	// Use --home to point at the pre-authed profile home we created above.
+	cmd.SetArgs([]string{"account", "add", "claude", "preauthed", "--home", profileHome, "--no-bind"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute(account add claude preauthed --home) error = %v\nstderr=%s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "account=preauthed") {
+		t.Fatalf("unexpected output %q missing account=preauthed", stdout.String())
+	}
+}
+
 func testJWT(t *testing.T, claims map[string]string) string {
 	t.Helper()
 	header, err := json.Marshal(map[string]string{"alg": "RS256", "typ": "JWT"})

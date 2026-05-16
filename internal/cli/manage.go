@@ -490,6 +490,15 @@ func runManageAccountAdd(cmd *cobra.Command, paths config.Paths, opts *rootOptio
 	if err != nil {
 		return fmt.Errorf("manage account add: %w", err)
 	}
+	// For Claude, ensure the provider image is built locally before auth.
+	// Path B auth runs claude inside a container; without the image, docker run
+	// fails before the OAuth prompt can render. Codex uses a host subprocess and
+	// does not need this guard.
+	if provider == domain.ProviderClaude && !skipLogin {
+		if err := ensureClaudeImageCurrent(cmd, paths); err != nil {
+			return fmt.Errorf("manage account add: %w", err)
+		}
+	}
 	if err := ensureManagedAccountReady(cmd, provider, profile, accountAuthOptions{SkipLogin: skipLogin, Paths: paths}); err != nil {
 		return fmt.Errorf("manage account add: %w", err)
 	}
@@ -596,6 +605,14 @@ func runManageAccountSwitch(cmd *cobra.Command, paths config.Paths, opts *rootOp
 			return fmt.Errorf("manage account switch: account %q not found for provider %q; run `valv manage account add %s %s` or `valv manage account list %s`", profileName, provider, provider, profileName, provider)
 		}
 		return fmt.Errorf("manage account switch: resolve account %q: %w", profileName, err)
+	}
+	// For Claude, ensure the provider image is built before auth (mirrors
+	// runManageAccountAdd). Path B auth runs inside a container; image must
+	// exist locally before docker run can start the OAuth prompt.
+	if provider == domain.ProviderClaude && !skipLogin {
+		if err := ensureClaudeImageCurrent(cmd, paths); err != nil {
+			return fmt.Errorf("manage account switch: %w", err)
+		}
 	}
 	if err := ensureManagedAccountReady(cmd, provider, account, accountAuthOptions{SkipLogin: skipLogin, Paths: paths}); err != nil {
 		return fmt.Errorf("manage account switch: %w", err)

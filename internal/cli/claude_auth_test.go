@@ -15,6 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	dockeradapter "github.com/evanmschultz/valv/internal/adapters/docker"
 	claudeprovider "github.com/evanmschultz/valv/internal/adapters/providers/claude"
 	"github.com/evanmschultz/valv/internal/config"
 	"github.com/evanmschultz/valv/internal/domain"
@@ -392,5 +393,81 @@ func TestReadAccountIdentityReturnsLoggedOutWhenNoCreds(t *testing.T) {
 	}
 	if identity.LoggedIn {
 		t.Fatal("ReadAccountIdentity() LoggedIn = true, want false (no creds written)")
+	}
+}
+
+// --- systemClaudeAccountAuthRunner unit tests (FIX 2 + FIX 3) ---
+
+// stubAuthContainerExecutor captures ContainerRunRequest for assertions.
+type stubAuthContainerExecutor struct {
+	lastRequest dockeradapter.ContainerRunRequest
+	err         error
+}
+
+func (s *stubAuthContainerExecutor) Run(_ context.Context, req dockeradapter.ContainerRunRequest) error {
+	s.lastRequest = req
+	return s.err
+}
+
+// TestSystemClaudeAccountAuthRunnerUsesClaudeImageRef verifies that the
+// production runner respects the VALV_CLAUDE_IMAGE override — the same env var
+// that the launch path honours — rather than a hardcoded ref.
+// This pins FIX 2 (CONCERN 1 from R1 falsification).
+func TestSystemClaudeAccountAuthRunnerUsesClaudeImageRef(t *testing.T) {
+	t.Setenv("VALV_CLAUDE_IMAGE", "test/myimg:v2")
+
+	runner := systemClaudeAccountAuthRunner{
+		image: claudeImageRef(), // production construction pattern
+	}
+
+	want := "test/myimg:v2"
+	if got := runner.image.String(); got != want {
+		t.Fatalf("runner.image = %q, want %q (claudeImageRef must honour VALV_CLAUDE_IMAGE)", got, want)
+	}
+}
+
+// TestSystemClaudeAccountAuthRunnerPassesThroughTerminalEnv verifies that
+// RunInContainer populates ContainerRunRequest.EnvPassthrough with the
+// terminal locale variables that launch-path PrepareRuntime also passes through.
+// Without these, the claude TUI prompt may render incorrectly through the Docker
+// pty — the same class of failure that affected DROP_6.2.
+// This pins FIX 3 (CONCERN 2 from R1 falsification).
+func TestSystemClaudeAccountAuthRunnerPassesThroughTerminalEnv(t *testing.T) {
+	// Set at least one env var that terminalEnvPassthrough tracks.
+	t.Setenv("LANG", "en_US.UTF-8")
+	t.Setenv("LC_CTYPE", "en_US.UTF-8")
+
+	stub := &stubAuthContainerExecutor{}
+	runner := systemClaudeAccountAuthRunner{
+		executor: stub,
+		image:    claudeImageRef(),
+	}
+
+	homePath := t.TempDir()
+	if err := runner.RunInContainer(
+		context.Background(),
+		homePath,
+		nil, // stdin nil → Interactive=false, TTY=false
+		&bytes.Buffer{},
+		&bytes.Buffer{},
+	); err != nil {
+		t.Fatalf("RunInContainer() error = %v, want nil", err)
+	}
+
+	passthrough := stub.lastRequest.EnvPassthrough
+	if len(passthrough) == 0 {
+		t.Fatal("ContainerRunRequest.EnvPassthrough is empty; expected at least LANG/LC_CTYPE")
+	}
+
+	want := map[string]bool{"LANG": true, "LC_CTYPE": true}
+	for _, name := range passthrough {
+		delete(want, name)
+	}
+	if len(want) > 0 {
+		remaining := make([]string, 0, len(want))
+		for k := range want {
+			remaining = append(remaining, k)
+		}
+		t.Fatalf("ContainerRunRequest.EnvPassthrough missing expected vars %v; got %v", remaining, passthrough)
 	}
 }

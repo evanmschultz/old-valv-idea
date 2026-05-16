@@ -123,7 +123,7 @@ func PrepareRuntime(ctx context.Context, request PrepareRequest) (PreparedRuntim
 		"USER":              "valv",
 	}
 
-	envPassthrough := terminalEnvPassthrough()
+	envPassthrough := TerminalEnvPassthrough()
 
 	cleanup := func() error {
 		var errs []error
@@ -280,7 +280,11 @@ func errorsJoin(errs ...error) error {
 	return errors.Join(errs...)
 }
 
-func terminalEnvPassthrough() []string {
+// TerminalEnvPassthrough returns the list of terminal-related environment
+// variable names that are set on the host process and should be forwarded to
+// the Claude container. This is called by both PrepareRuntime (launch path)
+// and the auth container runner to ensure consistent locale and color handling.
+func TerminalEnvPassthrough() []string {
 	names := []string{
 		"COLORTERM",
 		"TERM_PROGRAM",

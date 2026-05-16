@@ -453,3 +453,61 @@ None — all spec requirements satisfied.
   - **Worked via:** `Read` tool on `internal/cli/codex.go` and `internal/cli/operator_helpers.go`.
   - **Suggestion:** N/A — non-Go files are out of Hylla scope; these are Go symbols but the mid-drop read-directly protocol is appropriate here since the files changed since last ingest.
 - All other lookups (docker adapter types, claudeprovider constants) used `Read` tool directly per mid-drop evidence protocol. No Hylla fallbacks recorded — not applicable for files modified since last ingest.
+
+---
+
+## Unit 7.5 — Round 2
+
+**Date:** 2026-05-15
+**State at start:** done (R1) → in_progress (R2 start) → done (R2 close)
+**Why Round 2:** R1 falsification (BUILDER_QA_FALSIFICATION.md § "Unit 7.5 — Round 1") found one BLOCK + two CONCERNs. Dev approved fixing all three in one Round 2 spawn.
+
+### Files touched
+
+- `internal/adapters/providers/claude/runtime.go` — FIX 3: exported `terminalEnvPassthrough` → `TerminalEnvPassthrough` (added Go doc comment, updated internal call at line 126). No behavior change; same logic, now accessible from `internal/cli`.
+- `internal/cli/claude_auth.go` — FIX 2 + FIX 3: replaced hardcoded `dockeradapter.NewImageRef("valv-claude", "dev")` with `claudeImageRef()` in the `hostClaudeAccountAuth` var declaration; added `EnvPassthrough: claudeprovider.TerminalEnvPassthrough()` to `RunInContainer`'s `ContainerRunRequest`. Added explanatory comments for both changes.
+- `internal/cli/manage.go` — FIX 1: added `if provider == domain.ProviderClaude && !skipLogin { ensureClaudeImageCurrent(...) }` guard in both `runManageAccountAdd` (before `ensureManagedAccountReady` at line ~493) and `runManageAccountSwitch` (before `ensureManagedAccountReady` at line ~609). Added inline comments explaining the Path B dependency.
+- `internal/cli/claude_auth_test.go` — FIX 2 + FIX 3 tests: added `stubAuthContainerExecutor` (captures `ContainerRunRequest`); added `TestSystemClaudeAccountAuthRunnerUsesClaudeImageRef` (FIX 2: verify `claudeImageRef()` respects `VALV_CLAUDE_IMAGE`); added `TestSystemClaudeAccountAuthRunnerPassesThroughTerminalEnv` (FIX 3: verify `EnvPassthrough` contains `LANG`/`LC_CTYPE` when set on host). Added `dockeradapter` import.
+- `internal/cli/manage_test.go` — FIX 1 tests: added `TestManageAccountAddClaudeWithSkipLoginSkipsImageEnsure` (SkipLogin gate; no docker needed), `TestManageAccountAddClaudeWithExistingCredsAndImageOverrideSucceeds` (positive path: VALV_CLAUDE_IMAGE + fake docker + pre-written creds).
+
+### Fixes applied
+
+- **BLOCK 1 (FIX 1):** `runManageAccountAdd` and `runManageAccountSwitch` now call `ensureClaudeImageCurrent(cmd, paths)` before `ensureManagedAccountReady` when `provider == domain.ProviderClaude && !skipLogin`. Guard is in `manage.go` at both call sites. On a fresh install without the image, auth is now gated on a successful image-ensure.
+- **CONCERN 1 (FIX 2):** `hostClaudeAccountAuth` now uses `claudeImageRef()` instead of `dockeradapter.NewImageRef("valv-claude", "dev")`. `VALV_CLAUDE_IMAGE` overrides now apply symmetrically to auth and launch — prevents credential-format mismatch between different image versions.
+- **CONCERN 2 (FIX 3):** `TerminalEnvPassthrough()` exported from `clauderuntime` package. Auth `ContainerRunRequest.EnvPassthrough` now set to `claudeprovider.TerminalEnvPassthrough()` in `RunInContainer`. Locale/color vars (`LANG`, `LC_CTYPE`, `COLORTERM`, `TERM_PROGRAM`, `TERM_PROGRAM_VERSION`) are now forwarded to the auth container, matching the launch path from `PrepareRuntime`.
+
+### Mage targets run and result
+
+- `mage testPkg github.com/evanmschultz/valv/internal/adapters/providers/claude` — GREEN (21/21 pass, 78.4% coverage). Verifies export rename does not break the package.
+- `mage testPkg github.com/evanmschultz/valv/internal/cli` — GREEN (154/154 pass, 71.9% coverage). All existing 150 tests from R1 still green; 4 new tests added (2 in manage_test.go, 2 in claude_auth_test.go).
+- `mage testPkg github.com/evanmschultz/valv/internal/services/claude` — GREEN (17/17 pass, 81.0% coverage). Verifies no indirect coupling break from the export rename.
+
+### Acceptance criteria check (R2 carries R1's ACs forward + adds R2 ACs)
+
+| # | Criterion | Result |
+|---|---|---|
+| AC1 (R1) | `claudeAuthRunner` has exactly one method: `RunInContainer` | PASS — unchanged from R1 |
+| AC2 (R1) | No `os/user`, `os/exec`, `claudeKeychainService`, `writeClaudeCredentials`, `runClaudeHostCommand` in `claude_auth.go` | PASS — unchanged from R1 |
+| AC3 (R1) | SkipLogin returns nil, non-TTY (no creds) returns TTY error, already-authed returns nil | PASS — unchanged from R1 |
+| AC4 (R1) | Container run failure propagates | PASS — unchanged from R1 |
+| AC5 (R1) | `loginClaudeAccount` has no TTY guard | PASS — unchanged from R1 |
+| AC6 (R1) | `wipeClaudeCredentials` unchanged | PASS |
+| AC7 (R1) | `mage testPkg internal/cli` passes | PASS — 154/154 GREEN |
+| AC-R2-1 | `ensureClaudeImageCurrent` called before `ensureManagedAccountReady` for Claude in `runManageAccountAdd` | PASS — code inspection + TestManageAccountAddClaudeWithExistingCredsAndImageOverrideSucceeds |
+| AC-R2-2 | Same guard in `runManageAccountSwitch` | PASS — code inspection + same pattern |
+| AC-R2-3 | Guard gated on `!skipLogin` — `--skip-login` bypasses image-ensure | PASS — TestManageAccountAddClaudeWithSkipLoginSkipsImageEnsure |
+| AC-R2-4 | `claudeImageRef()` used in `hostClaudeAccountAuth` var | PASS — TestSystemClaudeAccountAuthRunnerUsesClaudeImageRef |
+| AC-R2-5 | `ContainerRunRequest.EnvPassthrough` populated from `TerminalEnvPassthrough()` | PASS — TestSystemClaudeAccountAuthRunnerPassesThroughTerminalEnv |
+| AC-R2-6 | `TerminalEnvPassthrough` exported from `clauderuntime` | PASS — 21/21 GREEN in adapters/providers/claude |
+| AC-R2-7 | `mage testPkg internal/adapters/providers/claude` GREEN | PASS — 21/21, 78.4% |
+| AC-R2-8 | `mage testPkg internal/services/claude` GREEN | PASS — 17/17, 81.0% |
+
+### Unknowns
+
+- Live smoke test outcome: whether `valv account add claude work` on a fresh install (no prior image) now correctly builds/pulls the image before launching the auth container — routes to orchestrator for dev smoke test.
+- Whether the env passthrough (`LANG`, `LC_CTYPE`) actually fixes the auth TUI rendering in practice — confirmed at smoke test time.
+- `VALV_CLAUDE_IMAGE` package-level var timing: `hostClaudeAccountAuth` is a package-level var initialized at program start. `claudeImageRef()` reads the env var at init time. Tests using `t.Setenv` won't retroactively affect the already-initialized var — the R2 test verifies the pattern (claudeImageRef respects the env) but not the specific package-level var. This is acceptable: the production path always constructs at program start, so the env var must be set before launch.
+
+## Hylla Feedback
+
+N/A — task touched Go files that were all modified since last Hylla ingest (drop-end-only reingest policy). Direct `Read` tool is the correct evidence path for mid-drop code. No Hylla queries were attempted for these files; attempting them would produce stale results per the documented protocol in Unit 7.1's falsification feedback.
