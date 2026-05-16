@@ -126,7 +126,7 @@ The `go-planning-agent` will append unit definitions for Round 5 below this head
 
 ### Unit 7.5 — Rewrite `claude_auth.go`: restore in-container runner + rewrite tests
 
-**state:** todo
+**state:** done
 **blocked_by:** —
 **paths:** `internal/cli/claude_auth.go`, `internal/cli/claude_auth_test.go`
 **packages:** `internal/cli`
@@ -268,7 +268,7 @@ Remove: `bytes`, `os/exec`, `os/user`, `encoding/json`.
 
 ### Unit 7.7 — Add `NewClaudeVersionResolver` + wire in `images/service.go`
 
-**state:** todo
+**state:** done
 **blocked_by:** —
 **paths:** `internal/services/images/service.go`, `internal/services/images/service_test.go`
 **packages:** `internal/services/images`

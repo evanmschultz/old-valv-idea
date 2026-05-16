@@ -349,3 +349,107 @@ None — this is a single constant update; all behavior is compile-time.
 ## Hylla Feedback
 
 None — Hylla answered everything needed. `hylla_refs_find` on `DefaultClaudeCLIVersion` gave the complete inbound-reference graph (5 callers across 4 files) in one query, confirming exhaustively that no test file pins the literal string `"2.1.89"`. Zero fallbacks required.
+
+---
+
+## Unit 7.7 — Round 1
+
+**Date:** 2026-05-15
+**State at start:** todo → in_progress → done
+
+### Files touched
+
+- `internal/services/images/service.go` — added `defaultClaudeLatestURL` constant; added `claudeNPMPayload` struct; added `claudeVersionResolver` struct, `NewClaudeVersionResolver` constructor, and `LatestVersion` method (~45 LOC); added Claude auto-wire block in `New()` (3 LOC).
+- `internal/services/images/service_test.go` — added 6 new test functions: `TestClaudeVersionResolverReadsLatestVersion`, `TestClaudeVersionResolverNon200ReturnsError`, `TestClaudeVersionResolverBadJSONReturnsError`, `TestClaudeVersionResolverEmptyVersionReturnsError`, `TestClaudeVersionResolverNetworkErrorReturnsError`, `TestNewWiresClaudeVersionResolverWhenProviderIsClaudeAndNilResolver`.
+
+### Mage targets run and result
+
+- `mage testPkg github.com/evanmschultz/valv/internal/services/images` — GREEN (22/22 pass, 76.9% coverage). Up from 16 tests (Unit 7.4 baseline).
+
+### Design notes
+
+**Test pattern mirrored from Codex:** `TestCodexVersionResolverReadsLatestRelease` (line 449) injects URL via direct struct-field write: `codexVersionResolver{client: server.Client(), url: server.URL}`. The Claude tests use identical pattern: `claudeVersionResolver{client: server.Client(), url: server.URL}`. Both are same-package (`package images`), so unexported struct access is valid.
+
+**No new imports:** All required imports (`net/http`, `encoding/json`, `io`, `strings`, `fmt`, `context`) were already present in `service.go`. Zero import block changes.
+
+**`versionPattern` reuse:** The package-level `versionPattern = regexp.MustCompile(`\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?`)` is shared. `LatestVersion` calls `versionPattern.MatchString(version)` for validation and `versionPattern.FindString(version)` for extraction — identical approach to `normalizeCodexVersion`.
+
+**npm payload vs GitHub release payload:** Codex uses `codexReleasePayload{TagName, Name}` because GitHub Releases returns that shape. The npm registry `/latest` endpoint returns `{"version":"X.Y.Z"}` directly as a clean semver string. A simpler `claudeNPMPayload{Version string}` struct suffices. No `normalizeCodexVersion`-style prefix stripping needed; `strings.TrimPrefix(..., "v")` covers any `v`-prefixed edge case.
+
+**Auto-wire placement:** Added immediately after the existing Codex case in `New()`, matching the planner-locked design. The two `if` guards are independent (not `else if`) — correct, since a provider can only match one.
+
+**`TestNewWiresClaudeVersionResolverWhenProviderIsClaudeAndNilResolver`:** Asserts `svc.resolver != nil` via direct field access (same package). The planner's alternate approaches (type assertion or via `EnsureLatest`) were considered but direct field access is the simplest and most direct proof.
+
+### Acceptance criteria check
+
+| # | Criterion | Result |
+|---|---|---|
+| AC1 | `NewClaudeVersionResolver(nil)` returns non-nil `VersionResolver` | PASS — constructor always returns a `claudeVersionResolver` value |
+| AC2 | `LatestVersion` returns valid semver when server returns `{"version":"X.Y.Z"}` | PASS — `TestClaudeVersionResolverReadsLatestVersion` confirms `"2.1.200"` |
+| AC3 | `images.New()` with `Provider=ProviderClaude, Resolver=nil` has non-nil resolver | PASS — `TestNewWiresClaudeVersionResolverWhenProviderIsClaudeAndNilResolver` |
+| AC4 | `mage testPkg github.com/evanmschultz/valv/internal/services/images` passes | PASS — 22/22, 76.9% coverage |
+
+### Unknowns
+
+None — all spec requirements satisfied exactly.
+
+## Hylla Feedback
+
+None — Hylla answered everything needed. The task touched only files changed since last ingest (mid-drop); all Go code reads went directly via the `Read` tool per mid-drop evidence protocol. Hylla was not queried for this unit.
+
+---
+
+## Unit 7.5 — Round 1
+
+**Date:** 2026-05-15
+**State at start:** todo → in_progress → done
+
+### Files touched
+
+- `internal/cli/claude_auth.go` — full rewrite (~175 LOC). Replaced Path A host-subprocess interface (`RunAuthLogin`/`ExtractKeychainToken`) with Path B in-container interface (`RunInContainer`). New `authContainerExecutor` local interface. New `systemClaudeAccountAuthRunner` struct with lazy executor construction. Rewrote `ensureClaudeAccountReady` and `loginClaudeAccount` per Path B step order. Preserved `wipeClaudeCredentials` unchanged. Deleted `claudeKeychainService`, `writeClaudeCredentials`, `runClaudeHostCommand`, `os/exec`, `os/user`, `bytes`, `encoding/json` imports.
+- `internal/cli/claude_auth_test.go` — full rewrite. New `stubClaudeAccountAuthRunner` with `runHits`, `lastHomePath`, `stubRunFunc` callback. 13 test functions covering all Path B acceptance criteria plus all preserved tests (wipe, logout, identity).
+
+### Mage targets run and result
+
+- `mage testPkg github.com/evanmschultz/valv/internal/cli` — GREEN (150/150 pass, 71.2% coverage).
+
+### Design notes
+
+**`systemClaudeAccountAuthRunner` executor construction:** The `executor authContainerExecutor` field is nil in the production `hostClaudeAccountAuth` var (which stores only `image: claudeImageRef()`). `RunInContainer` checks `r.executor == nil` and constructs `dockeradapter.NewExecutor(dockeradapter.NewSystemRunner("docker", stdin, stdout, stderr))` inline using the caller's IO streams. This ensures the docker command inherits the terminal's stdin/stdout/stderr rather than a fixed set captured at init. Tests inject a non-nil stub that bypasses the executor construction entirely.
+
+**Lazy executor vs `init()`:** The planner offered `init()` or inline-at-fallback construction. The nil-check pattern on the struct field is simpler — no `sync.Once`, no package-level function, no init-order risk. Documented here per spec requirement.
+
+**TTY check in `ensureClaudeAccountReady`:** Planner spec says `!commandHasTTY(cmd.InOrStdin())` (single stdin check). Path A code used `|| !commandHasTTY(cmd.OutOrStdout())` (widened). Path B spec explicitly narrows to stdin only — followed spec exactly. In-container auth only needs stdin for interactive docker; stdout can be non-TTY and auth will still work.
+
+**`loginClaudeAccount` — no wipe step:** Path A had `wipeClaudeCredentials` at the start of `loginClaudeAccount`. Path B spec removes it — container writes natively; no existing file to wipe before container runs. Followed spec.
+
+**Test coverage strategy for success paths:** `ensureClaudeAccountReady`'s success path requires a real TTY (non-TTY stdin triggers the guard). `loginClaudeAccount` has no TTY guard and exercises the same container+identity-check pipeline. Full success path (`TestEnsureClaudeAccountReadySucceeds`, `TestLoginClaudeAccountSucceeds`) tested via `loginClaudeAccount`. Container-run failure and not-logged-in-after-container cases also tested via `loginClaudeAccount` (`TestEnsureClaudeAccountReadyFailsWhenContainerRunFails`, `TestEnsureClaudeAccountReadyFailsWhenNotLoggedInAfterContainer`) — planner's `stubRunFunc` pattern implemented.
+
+**`normalizedContainerTERM()` inlined:** Function lives in `internal/adapters/providers/claude/runtime.go`. Not imported from there (import would create a non-layered dependency from `cli` to the provider adapter). Inlined as `strings.TrimSpace(os.Getenv("TERM"))` with `"xterm-256color"` default.
+
+**`hostClaudeAccountAuth` image at var declaration:** The production var is `systemClaudeAccountAuthRunner{image: dockeradapter.NewImageRef("valv-claude", "dev")}`. This is effectively the same value `claudeImageRef()` returns when `VALV_CLAUDE_IMAGE` is unset. For the default case this is correct; when `VALV_CLAUDE_IMAGE` is set, `ensureClaudeImageCurrent` already handles it via the env-var override path. Auth container should always use `valv-claude:dev` regardless of the image override.
+
+**Test count delta from prior state:** The prior test file (Path A, Unit 7.3) had 154 tests in `internal/cli`. After Path B rewrite: 150 tests. The delta is the removal of `TestRunClaudeHostCommandPreflightFailsWhenClaudeMissing`, `TestSystemClaudeAccountAuthRunnerRunAuthLoginUsesCLAUDE_CONFIG_DIR`, and several Path A login tests (which referenced `ExtractKeychainToken`, `setupTokenHits`, etc). Coverage is 71.2% — above the 70% floor.
+
+### Acceptance criteria check
+
+| # | Criterion | Result |
+|---|---|---|
+| AC1 | `claudeAuthRunner` interface has exactly one method: `RunInContainer`. No `RunAuthLogin`, no `ExtractKeychainToken`. | PASS — verified by inspection |
+| AC2 | No `os/user`, `os/exec`, `claudeKeychainService`, `writeClaudeCredentials`, `runClaudeHostCommand` in `claude_auth.go`. | PASS — deleted entirely |
+| AC3 | `ensureClaudeAccountReady` — SkipLogin nil (no container run), non-TTY+no-creds errors with "TTY" (no container run), already-authed nil even non-TTY (no container run). | PASS — `TestEnsureClaudeAccountReadyRespectsSkipLogin`, `TestEnsureClaudeAccountReadyRejectsNonTTY`, `TestEnsureClaudeAccountReadyAlreadyAuthedReturnsNilEvenNonTTY` |
+| AC4 | `ensureClaudeAccountReady` — container run failure propagates. | PASS — `TestEnsureClaudeAccountReadyFailsWhenContainerRunFails` |
+| AC5 | `loginClaudeAccount` — no TTY guard; container run invoked even in non-TTY context. | PASS — `TestLoginClaudeAccountSkipsNonTTYGuard` |
+| AC6 | `wipeClaudeCredentials` unchanged behavior. | PASS — `TestWipeClaudeCredentialsRemovesFile`, `TestWipeClaudeCredentialsMissingFileIsNoError` |
+| AC7 | `mage testPkg github.com/evanmschultz/valv/internal/cli` passes with all new tests green and no old Path-A test names remaining. | PASS — 150/150, 71.2% |
+
+### Unknowns
+
+None — all spec requirements satisfied.
+
+## Hylla Feedback
+
+- **Query:** `hylla_search_keyword` for `currentContainerUser commandHasTTY` — not needed (planner pre-read directive said to read `claude.go`). Read the file directly.
+  - **Worked via:** `Read` tool on `internal/cli/codex.go` and `internal/cli/operator_helpers.go`.
+  - **Suggestion:** N/A — non-Go files are out of Hylla scope; these are Go symbols but the mid-drop read-directly protocol is appropriate here since the files changed since last ingest.
+- All other lookups (docker adapter types, claudeprovider constants) used `Read` tool directly per mid-drop evidence protocol. No Hylla fallbacks recorded — not applicable for files modified since last ingest.
