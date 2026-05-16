@@ -40,5 +40,7 @@ cover.out
 # Tooling artifacts
 .gocache/
 
-# Claude Code session state (per-project, never tracked)
-.claude/
+# Per-developer local overrides — never tracked.
+# Project-shared .claude/ files (CLAUDE.md, agents, etc.) DO get tracked.
+*.local.json
+.claude/settings.local.json
