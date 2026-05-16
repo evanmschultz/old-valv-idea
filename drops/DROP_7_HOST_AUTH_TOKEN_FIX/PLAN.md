@@ -373,7 +373,7 @@ Test cases:
 
 ### Unit 7.8 — Wire always-latest into `ensureClaudeImageCurrent` + `runManageUpdateClaude`
 
-**state:** todo
+**state:** done
 **blocked_by:** 7.5, 7.7
 **paths:** `internal/cli/claude.go`, `internal/cli/manage.go`
 **packages:** `internal/cli`

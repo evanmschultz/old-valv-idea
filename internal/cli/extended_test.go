@@ -38,6 +38,17 @@ func stubCodexVersionResolver(t *testing.T, version string) {
 	})
 }
 
+func stubClaudeVersionResolver(t *testing.T, version string) {
+	t.Helper()
+	previous := claudeVersionResolverFactory
+	claudeVersionResolverFactory = func(*http.Client) imagesservice.VersionResolver {
+		return staticCLIResolver(version)
+	}
+	t.Cleanup(func() {
+		claudeVersionResolverFactory = previous
+	})
+}
+
 type statusStubService struct {
 	status manageservice.StatusResult
 	err    error

@@ -1150,15 +1150,15 @@ func runManageUpdateClaude(cmd *cobra.Command, paths config.Paths, mode output.M
 		return fmt.Errorf("manage update: initialize image service: %w", err)
 	}
 	defer closeImages()
-	var result imagesservice.BuildResult
+	var result imagesservice.EnsureResult
 	err = runWithCLIQuietSpinner(
 		cmd.ErrOrStderr(),
-		"Building provider image",
-		"Provider image built",
-		"Provider image build failed",
+		"Checking provider image",
+		"Provider image check complete",
+		"Provider image update failed",
 		func() error {
 			var runErr error
-			result, runErr = service.Build(cmd.Context(), imagesservice.BuildRequest{Version: imagesservice.DefaultClaudeCLIVersion})
+			result, runErr = service.EnsureLatest(cmd.Context(), imagesservice.EnsureRequest{})
 			return runErr
 		},
 	)
@@ -1169,7 +1169,11 @@ func runManageUpdateClaude(cmd *cobra.Command, paths config.Paths, mode output.M
 	for _, tag := range result.Tags {
 		tagValues = append(tagValues, tag.String())
 	}
-	return output.WriteRecord(cmd.OutOrStdout(), mode, "Provider image built", []output.Field{{Label: "provider", Value: string(domain.ProviderClaude), Muted: true}, {Label: "image", Value: result.Image.String(), Identifier: true}, {Label: "tags", Value: strings.Join(tagValues, ", "), Muted: true}, {Label: "version", Value: result.Version, Identifier: true}, {Label: "context", Value: result.ContextDir, Muted: true}})
+	heading := "Provider image built"
+	if result.Action == imagesservice.EnsureActionUpToDate {
+		heading = "Provider image up to date"
+	}
+	return output.WriteRecord(cmd.OutOrStdout(), mode, heading, []output.Field{{Label: "provider", Value: string(domain.ProviderClaude), Muted: true}, {Label: "image", Value: result.Image.String(), Identifier: true}, {Label: "tags", Value: strings.Join(tagValues, ", "), Muted: true}, {Label: "version", Value: result.Version, Identifier: true}, {Label: "checked at", Value: result.LatestCheckedAt.Format(time.RFC3339), Muted: true}, {Label: "context", Value: result.ContextDir, Muted: true}})
 }
 
 func newManageCleanupCommand(paths config.Paths, opts *rootOptions) *cobra.Command {

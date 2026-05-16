@@ -25,8 +25,9 @@ import (
 )
 
 var (
-	errSelectionCanceled        = errors.New("selection canceled")
-	codexVersionResolverFactory = imagesservice.NewCodexVersionResolver
+	errSelectionCanceled         = errors.New("selection canceled")
+	codexVersionResolverFactory  = imagesservice.NewCodexVersionResolver
+	claudeVersionResolverFactory = imagesservice.NewClaudeVersionResolver
 )
 
 func openManageService(cmd *cobra.Command, paths config.Paths) (manageservice.Service, func(), error) {
@@ -96,7 +97,7 @@ func openImagesService(cmd *cobra.Command, paths config.Paths, provider domain.P
 			_ = store.Close()
 			return imagesservice.Service{}, nil, err
 		}
-		options.Resolver = nil
+		options.Resolver = claudeVersionResolverFactory(nil)
 		options.Repository = claudeImageRepository()
 		options.DefaultTag = claudeImageTag()
 		options.Provider = domain.ProviderClaude

@@ -17,7 +17,6 @@ import (
 	"github.com/evanmschultz/valv/internal/config"
 	"github.com/evanmschultz/valv/internal/domain"
 	"github.com/evanmschultz/valv/internal/pathutil"
-	imagesservice "github.com/evanmschultz/valv/internal/services/images"
 )
 
 func TestManageAccountAddCreatesIsolatedNamedAccountAndBindsProject(t *testing.T) {
@@ -264,8 +263,10 @@ func writeTestCodexAuth(t *testing.T, homePath, email, name string) {
 }
 
 func TestRunManageUpdateClaudeBuildsImage(t *testing.T) {
+	const stubbedVersion = "2.2.0"
 	paths := testCodexPaths(t)
 	logPath := installFakeDocker(t)
+	stubClaudeVersionResolver(t, stubbedVersion)
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -288,10 +289,13 @@ func TestRunManageUpdateClaudeBuildsImage(t *testing.T) {
 	if !strings.Contains(stdout.String(), "image=valv-claude:dev") {
 		t.Fatalf("unexpected update output %q missing image=valv-claude:dev", stdout.String())
 	}
-	if !strings.Contains(stdout.String(), "version="+imagesservice.DefaultClaudeCLIVersion) {
-		t.Fatalf("unexpected update output %q missing version=%s", stdout.String(), imagesservice.DefaultClaudeCLIVersion)
+	if !strings.Contains(stdout.String(), "version="+stubbedVersion) {
+		t.Fatalf("unexpected update output %q missing version=%s", stdout.String(), stubbedVersion)
 	}
-	for _, want := range []string{"Building provider image", "Provider image built"} {
+	if !strings.Contains(stdout.String(), "checked_at=") {
+		t.Fatalf("unexpected update output %q missing checked_at field", stdout.String())
+	}
+	for _, want := range []string{"Checking provider image", "Provider image check complete"} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Fatalf("stderr = %q, want substring %q", stderr.String(), want)
 		}
@@ -303,7 +307,7 @@ func TestRunManageUpdateClaudeBuildsImage(t *testing.T) {
 	}
 
 	logContent := mustReadFile(t, logPath)
-	wantBuildArg := fmt.Sprintf("--build-arg CLAUDE_VERSION=%s", imagesservice.DefaultClaudeCLIVersion)
+	wantBuildArg := fmt.Sprintf("--build-arg CLAUDE_VERSION=%s", stubbedVersion)
 	for _, want := range []string{"buildx build", wantBuildArg, "-t valv-claude:dev", "--label io.valv.provider=claude"} {
 		if !strings.Contains(logContent, want) {
 			t.Fatalf("unexpected docker log %q missing %q", logContent, want)

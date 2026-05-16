@@ -4,6 +4,45 @@ Append a `## Unit 7.M — Round K` section per build attempt. See `main/drops/WO
 
 <!-- units filled in by planner, then by builder during Phase 4 -->
 
+## Unit 7.8 — Round 1
+
+**Date:** 2026-05-16
+**State at start:** todo → in_progress → done
+
+### Files touched
+- `internal/cli/operator_helpers.go` — added `claudeVersionResolverFactory` package var; wired it in `openImagesService` Claude case (replacing `options.Resolver = nil`).
+- `internal/cli/claude.go` — `ensureClaudeImageCurrent`: removed stale "pinned-version fast path" comment; replaced `service.Build(cmd.Context(), imagesservice.BuildRequest{Version: imagesservice.DefaultClaudeCLIVersion})` with `service.EnsureLatest(cmd.Context(), imagesservice.EnsureRequest{AllowExistingOnCheckFail: true})`.
+- `internal/cli/manage.go` — `runManageUpdateClaude`: switched result type from `BuildResult` → `EnsureResult`; switched spinner text to Codex mirror ("Checking provider image" / "Provider image check complete" / "Provider image update failed"); switched call to `service.EnsureLatest(cmd.Context(), imagesservice.EnsureRequest{})`; added `checked_at` output field (RFC3339); added heading branch for `EnsureActionUpToDate`.
+- `internal/cli/extended_test.go` — added `stubClaudeVersionResolver` helper (parallel to `stubCodexVersionResolver`).
+- `internal/cli/manage_test.go` — updated `TestRunManageUpdateClaudeBuildsImage`: added `stubClaudeVersionResolver(t, "2.2.0")`, updated spinner assertions, updated version assertion, updated build-arg assertion, removed now-unused `imagesservice` import.
+
+### Mage targets run and result
+- `mage testPkg github.com/evanmschultz/valv/internal/cli` — GREEN 154/154, 71.9% coverage
+- `mage test` — GREEN 421/421, all packages above 60% floor
+
+### Design notes
+- `claudeVersionResolverFactory` is a package-level `var` (same pattern as `codexVersionResolverFactory`) so tests can swap it out with `stubClaudeVersionResolver` without needing dependency injection plumbing.
+- `openImagesService` now passes `claudeVersionResolverFactory(nil)` explicitly for Claude rather than relying on `imagesservice.New()`'s auto-wire. Both paths produce identical resolvers; the explicit factory var is what enables test stubbing.
+- The `imagesservice.New()` Claude auto-wire (from Unit 7.7) still fires as a fallback if `options.Resolver == nil`, but since we now always pass a non-nil resolver, the auto-wire is bypassed cleanly.
+- The test output renderer renders field labels with underscores replacing spaces (e.g. `checked_at=` not `checked at=`). Initial test assertion used `"checked at="` and failed; corrected to `"checked_at="`.
+- No golden fixtures exist for `runManageUpdateClaude` — no `mage goldenUpdate` needed.
+- VALV_CLAUDE_IMAGE env override path confirmed untouched: `ensureClaudeImageCurrent` still exits early via `ensureClaudeImageAvailable` when the env is set.
+
+### Acceptance criteria check
+| # | Criterion | Result |
+|---|---|---|
+| AC1 | `ensureClaudeImageCurrent` no longer references `imagesservice.BuildRequest` or `DefaultClaudeCLIVersion` in its non-`VALV_CLAUDE_IMAGE` path | PASS |
+| AC2 | `ensureClaudeImageCurrent` calls `service.EnsureLatest` with `AllowExistingOnCheckFail: true` | PASS |
+| AC3 | `runManageUpdateClaude` calls `service.EnsureLatest` (not `service.Build`); output includes `checked_at` field | PASS |
+| AC4 | `mage testPkg github.com/evanmschultz/valv/internal/cli` passes | PASS — 154/154 |
+| AC5 | `mage test` passes (full suite, race detector, 70% per-package coverage floor) | PASS — 421/421 |
+
+### Unknowns
+- None.
+
+## Hylla Feedback
+- N/A — all evidence gathered via `Read` on local files and `mage` runs. No Hylla queries were needed; the changed symbols were all in local uncommitted files (delta since last ingest).
+
 ## Unit 7.1 — Round 1
 
 **Date:** 2026-05-15

@@ -187,9 +187,7 @@ func ensureClaudeImageCurrent(cmd *cobra.Command, paths config.Paths) error {
 		return fmt.Errorf("initialize image updater: %w", err)
 	}
 	defer closeImages()
-	// Claude uses pinned-version fast path: Build with DefaultClaudeCLIVersion,
-	// not EnsureLatest (which requires a resolver Claude does not have).
-	_, err = service.Build(cmd.Context(), imagesservice.BuildRequest{Version: imagesservice.DefaultClaudeCLIVersion})
+	_, err = service.EnsureLatest(cmd.Context(), imagesservice.EnsureRequest{AllowExistingOnCheckFail: true})
 	if err != nil {
 		return err
 	}
