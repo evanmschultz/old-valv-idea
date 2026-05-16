@@ -525,3 +525,96 @@ None.
 ### Hylla Feedback
 
 N/A — this QA pass touched only files modified during this drop (not yet reingested at the post-Unit-7.7 commit). All evidence reads were direct `Read` calls per mid-drop evidence protocol; Hylla was not queried for this unit.
+
+---
+
+## Unit 7.5 — Round 2
+
+**Date:** 2026-05-15
+**Reviewer:** go-qa-proof-agent
+**Verdict:** pass
+
+Round 2 lands three targeted fixes for R1 falsification findings: image-ensure guard on the auth path (BLOCK 1), `claudeImageRef()` symmetry between auth and launch (CONCERN 1), and terminal locale-env passthrough on the auth container (CONCERN 2). Independent verification confirms all three fixes are in place at the spec-locked sites and each is pinned by at least one new behavior test.
+
+### Evidence reviewed
+
+- `git diff HEAD~1 HEAD` (commit `d5d1fa6 fix(cli): make Claude auth path complete on fresh install`) — 244 lines added, 3 lines deleted, 5 files (`internal/adapters/providers/claude/runtime.go`, `internal/cli/claude_auth.go`, `internal/cli/manage.go`, `internal/cli/claude_auth_test.go`, `internal/cli/manage_test.go`) plus worklog.
+- Full read of `internal/cli/claude_auth.go` (200 lines post-R2).
+- `internal/cli/manage.go` lines 485–525 (FIX 1 guard in `runManageAccountAdd`) and 595–620 (FIX 1 guard in `runManageAccountSwitch`).
+- `internal/adapters/providers/claude/runtime.go` lines 115–127 (internal caller updated) and 283–302 (exported `TerminalEnvPassthrough` declaration).
+- `internal/cli/claude_image.go` (`claudeImageRef` semantics — confirms `VALV_CLAUDE_IMAGE` parsing).
+- `internal/adapters/docker/types.go` (`ContainerRunRequest.EnvPassthrough []string`, `buildRunLikeArgs` emits `-e KEY` per name).
+- `internal/cli/claude.go` lines 181–214 (`ensureClaudeImageCurrent` two-branch behavior: `VALV_CLAUDE_IMAGE`→`docker inspect`, otherwise→`openImagesService.Build`).
+- `BUILDER_WORKLOG.md` Unit 7.5 Round 2 entry (lines 459–513).
+- `BUILDER_QA_FALSIFICATION.md` Unit 7.5 Round 1 findings (BLOCK 1, CONCERN 1, CONCERN 2) — re-read to confirm scope of each fix.
+- Independent mage reruns (see numerical table below).
+
+### Fix-by-fix verification
+
+| # | R1 finding | R2 fix in code | R2 test coverage | Result |
+|---|---|---|---|---|
+| **BLOCK 1** | `runManageAccountAdd` / `runManageAccountSwitch` did not call `ensureClaudeImageCurrent` before `ensureManagedAccountReady` for Claude → fresh-install smoke test would fail with "image not found" before any OAuth prompt | `manage.go:497–501` (add) and `manage.go:612–616` (switch) gate on `provider == domain.ProviderClaude && !skipLogin`, then call `ensureClaudeImageCurrent(cmd, paths)` and propagate errors as `"manage account add: %w"` / `"manage account switch: %w"` | `TestManageAccountAddClaudeWithSkipLoginSkipsImageEnsure` (`manage_test.go:382–406`) — runs `account add claude work --skip-login --no-bind` without a fake docker installed; succeeds only because the `!skipLogin` guard skips image-ensure (otherwise `openImagesService→Build` would fail with no docker). `TestManageAccountAddClaudeWithExistingCredsAndImageOverrideSucceeds` (`manage_test.go:410–456`) — sets `VALV_CLAUDE_IMAGE`, installs fake docker, pre-writes creds, asserts the full chain (`ensureClaudeImageCurrent`→`ensureManagedAccountReady`) succeeds. | **CONFIRMED** |
+| **CONCERN 1** | `hostClaudeAccountAuth` hardcoded `dockeradapter.NewImageRef("valv-claude", "dev")`, ignoring `VALV_CLAUDE_IMAGE` — launch path used `claudeImageRef()` so auth/launch could diverge | `claude_auth.go:46–48`: package-level var now declares `image: claudeImageRef()` instead of the hardcoded ref. Inline comment at `:42–45` documents the symmetry rationale. | `TestSystemClaudeAccountAuthRunnerUsesClaudeImageRef` (`claude_auth_test.go:417–428`) — sets `t.Setenv("VALV_CLAUDE_IMAGE", "test/myimg:v2")`, constructs `systemClaudeAccountAuthRunner{image: claudeImageRef()}`, asserts `runner.image.String() == "test/myimg:v2"`. Test exercises the same helper used at the production var-init site. | **CONFIRMED (with caveat — see Spec finding 1)** |
+| **CONCERN 2** | Launch path forwarded `LANG`, `LC_CTYPE`, `COLORTERM`, `TERM_PROGRAM`, `TERM_PROGRAM_VERSION` via `EnvPassthrough` (`terminalEnvPassthrough()` in `runtime.go`); auth container did NOT — TUI prompt could mis-render through Docker pty | `runtime.go:283–302`: function renamed `terminalEnvPassthrough` → `TerminalEnvPassthrough` with Go doc comment; internal caller at `runtime.go:126` updated; `claude_auth.go:88` sets `EnvPassthrough: claudeprovider.TerminalEnvPassthrough()` on the auth `ContainerRunRequest`. | `TestSystemClaudeAccountAuthRunnerPassesThroughTerminalEnv` (`claude_auth_test.go:434–473`) — sets `LANG`/`LC_CTYPE` via `t.Setenv`, runs `RunInContainer` via a `stubAuthContainerExecutor` that captures the request, asserts the captured `ContainerRunRequest.EnvPassthrough` contains both `LANG` and `LC_CTYPE`. Real-end-to-end assertion through the docker request layer. | **CONFIRMED** |
+
+### Acceptance criteria verification (R1 ACs forward + R2 ACs added)
+
+| # | Criterion | Evidence | Result |
+|---|---|---|---|
+| AC1 (R1) | `claudeAuthRunner` has exactly one method `RunInContainer` | `claude_auth.go:32–34` — unchanged from R1 | pass |
+| AC2 (R1) | No `os/user`, `os/exec`, `claudeKeychainService`, `writeClaudeCredentials`, `runClaudeHostCommand` in `claude_auth.go` | import block `claude_auth.go:3–19`; full-file read — no Path A artefacts; R2 added only `claudeImageRef()` usage at `:47` and `EnvPassthrough` field at `:88` | pass |
+| AC3 (R1) | `ensureClaudeAccountReady` order: SkipLogin → already-authed → non-TTY → notice → RunInContainer → ReadAccountIdentity | `claude_auth.go:121–158` — order preserved unchanged from R1 | pass |
+| AC4 (R1) | Container-run failure propagates as `%w`-wrapped error | `claude_auth.go:148–150` (`"run claude auth container for account %q: %w"`) — unchanged | pass |
+| AC5 (R1) | `loginClaudeAccount` has no TTY guard | `claude_auth.go:168–189` — no `commandHasTTY` call | pass |
+| AC6 (R1) | `wipeClaudeCredentials` unchanged | `claude_auth.go:193–199` — byte-identical to R1 | pass |
+| AC7 (R1) | `mage testPkg internal/cli` passes ≥70% | independent rerun: 154/154 pass, 71.9% | pass |
+| AC-R2-1 | `ensureClaudeImageCurrent` called before `ensureManagedAccountReady` for Claude in `runManageAccountAdd` | `manage.go:497–501` — guard placed between profile creation and `ensureManagedAccountReady` call at `:502` | pass |
+| AC-R2-2 | Same guard in `runManageAccountSwitch` | `manage.go:612–616` — guard placed between profile resolution at `:602` and `ensureManagedAccountReady` at `:617` | pass |
+| AC-R2-3 | Guard gated on `!skipLogin` | `manage.go:497` and `:612` — both use `provider == domain.ProviderClaude && !skipLogin`. `TestManageAccountAddClaudeWithSkipLoginSkipsImageEnsure` proves SkipLogin path bypasses image-ensure | pass |
+| AC-R2-4 | `claudeImageRef()` used in `hostClaudeAccountAuth` var | `claude_auth.go:47` — `image: claudeImageRef()` (was `dockeradapter.NewImageRef("valv-claude", "dev")` in R1) | pass |
+| AC-R2-5 | `ContainerRunRequest.EnvPassthrough` populated from `TerminalEnvPassthrough()` | `claude_auth.go:88` — `EnvPassthrough: claudeprovider.TerminalEnvPassthrough()` in the `RunInContainer` body's request literal | pass |
+| AC-R2-6 | `TerminalEnvPassthrough` exported from `clauderuntime` with doc comment | `runtime.go:283–286` (doc) + `:287` (declaration); internal caller at `:126` updated to use the exported name | pass |
+| AC-R2-7 | `mage testPkg internal/adapters/providers/claude` GREEN | independent rerun: 21/21 pass, 78.4% | pass |
+| AC-R2-8 | `mage testPkg internal/services/claude` GREEN | independent rerun: 17/17 pass, 81.0% | pass |
+
+### Spec conformance findings
+
+- 1.1 [Axis: spec-conformance] [severity: low] `TestSystemClaudeAccountAuthRunnerUsesClaudeImageRef` (`claude_auth_test.go:417–428`) verifies the **helper** `claudeImageRef()` honors `VALV_CLAUDE_IMAGE`, not the **package-level var** `hostClaudeAccountAuth` declared at `claude_auth.go:46–48`. The package-level var captures the value at package init time, before any `t.Setenv` in tests can take effect. The R2 builder worklog (line 509) already calls this out under Unknowns. The production code is functionally correct — the env var is set before binary launch in real usage — but the test does not pin the var-init-site behavior. Low severity; future polish could replace the package-level var with a lazy getter so tests can observe the override on the actual production code path. → `claude_auth.go:46` → optionally convert `hostClaudeAccountAuth` to a function returning a freshly-resolved runner, or add a build-time-only test that compiles with a fresh package import to observe the package-init value.
+- 1.2 [Axis: spec-conformance] [severity: low] `TestManageAccountAddClaudeWithExistingCredsAndImageOverrideSucceeds` (`manage_test.go:410–456`) takes the `VALV_CLAUDE_IMAGE`-set branch of `ensureClaudeImageCurrent` (which calls `ensureClaudeImageAvailable` → `docker image inspect`). It does NOT exercise the heavy path (`openImagesService` → `service.Build`). BLOCK 1 protection on a fresh CI runner with no `VALV_CLAUDE_IMAGE` set requires the heavy path to succeed at runtime — but that path takes minutes (real docker build) and is not unit-testable. The smoke test in PLAN.md lines 28–40 remains the only authoritative gate for the heavy-path behavior. Acceptable for the R2 scope (BLOCK 1 was about the GUARD being present, not the heavy path itself); flagged because R2 testing did not (and cannot, in a unit) prove the full fresh-install chain end-to-end.
+
+### Idiomatic Go checks
+
+- **Error wrapping** — every new boundary uses `%w`: `manage.go:499` (`"manage account add: %w"`), `:614` (`"manage account switch: %w"`), `claude_auth.go:149` (unchanged, `"run claude auth container ...: %w"`). All clean.
+- **Doc comments** — `TerminalEnvPassthrough` doc at `runtime.go:283–286` starts with the identifier name and explains both callers; new test functions have function-level docs explaining the R1 finding each pins.
+- **No token logging** — all R2 changes are about routing env-var names and image refs; nothing inspects credential contents. Verified clean.
+- **Mage-only** — all three package tests run via `mage testPkg`; no raw `go test`. Verified by independent reruns.
+- **`t.Parallel()` discipline** — `TestManageAccountAddClaudeWithSkipLoginSkipsImageEnsure` uses `t.Parallel()` (no env mutation). `TestManageAccountAddClaudeWithExistingCredsAndImageOverrideSucceeds` and `TestSystemClaudeAccountAuthRunnerUsesClaudeImageRef` / `...PassesThroughTerminalEnv` omit `t.Parallel()` because they use `t.Setenv` — correct per Go 1.26 rules.
+
+### Numerical claims independent verification
+
+| Claim | Verified |
+|---|---|
+| `mage testPkg internal/cli` GREEN 154/154 71.9% | live rerun: 154 passed, 0 failed, `internal/cli 71.9%`, threshold met |
+| `mage testPkg internal/adapters/providers/claude` GREEN 21/21 78.4% | live rerun: 21 passed, 0 failed, `78.4%`, threshold met |
+| `mage testPkg internal/services/claude` GREEN 17/17 81.0% | live rerun: 17 passed, 0 failed, `81.0%`, threshold met |
+| 4 new tests added (2 in `manage_test.go`, 2 in `claude_auth_test.go`) | confirmed via `git diff HEAD~1 HEAD`: `manage_test.go +74 lines` containing `TestManageAccountAddClaudeWithSkipLoginSkipsImageEnsure` + `TestManageAccountAddClaudeWithExistingCredsAndImageOverrideSucceeds`; `claude_auth_test.go +77 lines` containing `stubAuthContainerExecutor` + `TestSystemClaudeAccountAuthRunnerUsesClaudeImageRef` + `TestSystemClaudeAccountAuthRunnerPassesThroughTerminalEnv` |
+| 5 files touched | `git diff --stat HEAD~1 HEAD` confirms 5 source files + 1 worklog = `runtime.go (+5)`, `claude_auth.go (+11/-1)`, `manage.go (+17)`, `claude_auth_test.go (+76)`, `manage_test.go (+74)`, plus `BUILDER_WORKLOG.md (+58)` |
+
+### Unknowns
+
+- Whether `claude` inside the auth container actually renders the OAuth TUI correctly with `LANG`/`LC_CTYPE` forwarded — only live smoke test resolves this (the unit test proves the env names are present in the docker request, not that claude's TUI renders correctly). Routes to dev smoke test per PLAN.md lines 28–40.
+- Whether the heavy path (`openImagesService` → `service.Build`) succeeds end-to-end on a fresh CI runner without `VALV_CLAUDE_IMAGE` — only live smoke test resolves; unit test only covers the lighter `docker inspect` branch.
+- Package-level var `hostClaudeAccountAuth` captures `claudeImageRef()` at init time — `VALV_CLAUDE_IMAGE` must be in the environment when valv launches. The R2 test does not pin this var-init-time behavior (it tests the helper directly). Production reality is fine because env vars are set before launch.
+
+### Summary
+
+PASS. All three R1 falsification findings (BLOCK 1 + CONCERN 1 + CONCERN 2) are closed by surgical fixes at the spec-locked sites, with each fix pinned by at least one new behavior-asserting test. All seven R1 acceptance criteria continue to pass (verified by 154/154 test rerun); eight new R2 acceptance criteria all verified by code inspection + test + mage rerun. Coverage at or above the AGENTS.md 70% per-package floor across all three affected packages (`internal/cli 71.9%`, `internal/adapters/providers/claude 78.4%`, `internal/services/claude 81.0%`). Two low-severity spec-conformance findings recorded as future-polish notes; neither blocks the R2 close.
+
+### Hylla Feedback
+
+- **Query:** `hylla_search_keyword` for `installFakeDocker` (visibility=private, internal=include_internal, fields=content) — returned the symbol at `internal/cli/extended_test.go` on first try. Used to confirm the helper exists for the new `manage_test.go` test.
+  - **Worked correctly.**
+- **Query:** `hylla_search_keyword` for `openImagesService` — same parameters — returned the symbol at `internal/cli/operator_helpers.go` plus its callers (`runManageUpdateClaude`, `ensureClaudeImageCurrent`, etc.). Used to confirm `ensureClaudeImageCurrent`'s branching behavior.
+  - **Worked correctly.**
+- All other lookups (claude_auth.go body, manage.go body, runtime.go body, docker types) went through direct `Read` per mid-drop evidence protocol (these files were modified post-snapshot-11). No Hylla fallbacks were needed for committed-but-stale code, and no Hylla query missed.
+

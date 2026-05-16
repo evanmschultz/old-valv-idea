@@ -843,3 +843,85 @@ All 15 spawn-prompt attack vectors plus three invented (env-passthrough drift, m
   - **Suggestion**: when both visibility filters and internal-mode flags are set, a same-package unexported function should still be discoverable by `tail_symbol`. Either tighten the docs on which flag combination returns unexported symbols, or surface them by default for in-artifact queries.
 
 ---
+
+## Unit 7.5 — Round 2
+
+**Date:** 2026-05-15
+**Verdict:** pass
+
+### Attack vectors probed
+
+All 15 spawn-prompt attack vectors plus 4 invented (Codex-regression, `runManageAccountSwitch` test gap, empty-env-passthrough edge, `--no-bind` interaction).
+
+- **A1 (`!skipLogin` gating off-by-one).** REFUTED. `TestManageAccountAddClaudeWithSkipLoginSkipsImageEnsure` (manage_test.go:385) explicitly does NOT install `installFakeDocker`. If the gate dropped the `!skipLogin` clause and called `ensureClaudeImageCurrent`, the test would fail at `findDockerBinary` lookup. The gate is real and behavior-pinned. Code at manage.go:497: `if provider == domain.ProviderClaude && !skipLogin { ... }`.
+- **A2 (image-ensure on already-authed reinvocation).** REFUTED (NOTE). `ensureClaudeImageCurrent` runs BEFORE `ensureManagedAccountReady`, so a second `valv account add claude work` invocation against an authed profile still incurs a docker-inspect or images-service round-trip even though the auth path short-circuits at the already-authed check. Symmetric with Codex launch-path's always-running `ensureCodexImageCurrent`. Acceptable cost; documented.
+- **A3 (`claudeImageRef()` evaluated at package init time).** REFUTED with caveat. `claudeImageRef()` (claude_image.go:13-25) reads `VALV_CLAUDE_IMAGE` at call-time. The package-level `hostClaudeAccountAuth` var (claude_auth.go:46-48) calls `claudeImageRef()` ONCE at package init. In production this captures the launch-time env (correct: CLI invocations set env before init). In tests, `t.Setenv` after package init does NOT retroactively change the package var — but the R2 test does NOT rely on it (constructs a fresh runner inline). Builder explicitly documented this caveat in BUILDER_WORKLOG.md:509. Not a counterexample.
+- **A4 (FIX 2 test verifies helper, not package var).** REFUTED. `TestSystemClaudeAccountAuthRunnerUsesClaudeImageRef` (claude_auth_test.go:416) builds `systemClaudeAccountAuthRunner{image: claudeImageRef()}` inline AFTER `t.Setenv("VALV_CLAUDE_IMAGE", "test/myimg:v2")` — this verifies the construction PATTERN (the same `image: claudeImageRef()` literal used in the package-var initializer at claude_auth.go:47). Production behaviour follows by mechanical equivalence: package-init reads env at startup, test reads env at call. Pattern correctness is pinned; package-var init-time semantics rely on CLI semantics (env-before-launch).
+- **A5 (`TerminalEnvPassthrough` returns mutable slice).** REFUTED. runtime.go:295-301 builds a fresh `out := make([]string, 0, len(names))` per call. Callers cannot mutate shared state. No append-with-grow leak. Defensive copy implicit in the construction.
+- **A6 (env passthrough sufficiency for OAuth TUI).** REFUTED (NOTE). Context7 query against `/websites/code_claude` confirms claude OAuth+container is a documented terminal-rendering friction zone (WSL/SSH/devcontainer). The forwarded vars (runtime.go:288-294: `COLORTERM`, `TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, `LANG`, `LC_CTYPE`) match the launch-path set. Anthropic docs do not mandate this specific list; the fix is defensive symmetry with the launch path. Whether this actually fixes the OAuth TUI rendering across pty is a live smoke-test question — not code-falsifiable.
+- **A7 (Go doc comment convention).** REFUTED. `go doc github.com/evanmschultz/valv/internal/adapters/providers/claude TerminalEnvPassthrough` returns the comment starting with the function name (`TerminalEnvPassthrough returns ...`). godoc/golint convention met.
+- **A8 (provider-dispatch placement).** REFUTED. `provider` is the original `runManageAccountAdd` argument (manage.go:462) — never zero-valued. The guard at manage.go:497 fires after `service.CreateProfile` (manage.go:488), so the profile exists before the image-ensure step. Codex calls skip the guard via the `provider == domain.ProviderClaude` clause. Verified by reading manage.go:462-501 inline.
+- **A9 (error propagation from `ensureClaudeImageCurrent`).** REFUTED. manage.go:498-500 (`return fmt.Errorf("manage account add: %w", err)`) and manage.go:613-615 (`return fmt.Errorf("manage account switch: %w", err)`) both `%w`-wrap the underlying error. Errors propagate; no swallow.
+- **A10 (latency cost on already-existing image).** REFUTED (covered by A2). Symmetric with Codex launch cost; acceptable.
+- **A11 (SkipLogin + missing image + subsequent launch).** REFUTED. `runClaudeCommand` (claude.go:113) calls `ensureClaudeImageCurrent` unconditionally on every `valv claude` invocation. So a user who runs `valv account add claude work --skip-login` without the image, then later runs `valv claude`, gets the image build at launch time. Edge case covered upstream.
+- **A12 (`t.Setenv` parallel-test race).** REFUTED. All three env-setting tests omit `t.Parallel()`:
+  - `TestSystemClaudeAccountAuthRunnerUsesClaudeImageRef` (claude_auth_test.go:416) — no `t.Parallel()`.
+  - `TestSystemClaudeAccountAuthRunnerPassesThroughTerminalEnv` (claude_auth_test.go:435) — no `t.Parallel()`.
+  - `TestManageAccountAddClaudeWithExistingCredsAndImageOverrideSucceeds` (manage_test.go:418) — no `t.Parallel()`.
+  - `TestManageAccountAddClaudeWithSkipLoginSkipsImageEnsure` (manage_test.go:385) DOES call `t.Parallel()` because it never sets env — safe.
+  Go 1.26's panic-on-mismatch rule honored across the board.
+- **A13 (`runManageAccountSwitch` target-provider dispatch).** REFUTED. `resolveProfileSwitchTarget` (manage.go:585) yields the TARGET `provider`. The guard at manage.go:612 (`if provider == domain.ProviderClaude && !skipLogin`) fires on the target. Switching FROM Codex TO Claude correctly ensures the Claude image; FROM Claude TO Codex correctly skips.
+- **A14 (`mage` re-run flake check).** REFUTED. Independent re-runs of all three packages:
+  - `mage testPkg github.com/evanmschultz/valv/internal/cli` → 154/154 pass, 71.9% coverage. Matches worklog.
+  - `mage testPkg github.com/evanmschultz/valv/internal/adapters/providers/claude` → 21/21 pass, 78.4% coverage. Matches.
+  - `mage testPkg github.com/evanmschultz/valv/internal/services/claude` → 17/17 pass, 81.0% coverage. Matches.
+  No flakes; no race detector hits.
+- **A15 (Anthropic devcontainer docs cross-check).** NOTE. Context7 docs confirm OAuth TTY rendering issues in container contexts but do not enumerate required env vars. FIX 3 is defensive symmetry with the launch-path passthrough — acceptable design choice, gated on live smoke test.
+- **A16 (invented — Codex regression).** REFUTED. The guard short-circuits on `provider == domain.ProviderClaude`. Reading manage.go:462-535 confirms Codex's pre-existing flow (`service.CreateProfile` → `ensureManagedAccountReady` → bind/output) is byte-for-byte preserved. Existing Codex tests `TestManageAccountAddCreatesIsolatedNamedAccountAndBindsProject` etc. all pass per the GREEN re-run.
+- **A17 (invented — `runManageAccountSwitch` has zero test coverage).** **CONCERN — not a counterexample.** The R2 guard was added to BOTH `runManageAccountAdd` AND `runManageAccountSwitch`, but only the add-path has test coverage. Hylla `hylla_search_keyword runManageAccountSwitch` (with `id_search_mode=tail_symbol`, `visibility_mode=include_private`) returns ONLY the production definition + cobra wrapper — zero test callers. A future regression that drops the switch-path guard or its `!skipLogin` clause would pass `mage test` green. Code is correct by mirror-construction (byte-for-byte parity with add-path verified by `git diff`), but symmetry-by-inspection is the only gate. NOT BLOCK because the add-path test pins the pattern; pattern is duplicated mechanically. Recommendation: a follow-up unit could add `TestManageAccountSwitchClaudeWithSkipLoginSkipsImageEnsure` to close the symmetry gap.
+- **A18 (invented — empty env passthrough when no host vars set).** REFUTED. runtime.go:295-300 — when neither `COLORTERM`/`LANG`/`LC_CTYPE`/`TERM_PROGRAM`/`TERM_PROGRAM_VERSION` is set on host, `out` is `[]string{}` (zero-length slice from `make`). `ContainerRunRequest.EnvPassthrough = []string{}` is valid — `docker run -e VAR` only gets emitted for each name in the list, and the empty list emits nothing. No panic, no malformed argv. The new test explicitly sets `LANG`/`LC_CTYPE` and asserts they appear in the passthrough — happy path covered.
+- **A19 (invented — `--no-bind` flag interaction).** REFUTED. `--no-bind` only affects whether `service.BindProject` runs (manage.go:506). The image-ensure + auth flow runs regardless. `TestManageAccountAddClaudeWithExistingCredsAndImageOverrideSucceeds` uses `--no-bind` and verifies the full flow including the image-ensure step succeeds.
+
+### Findings
+
+- **NOTE A2 (image-ensure latency on second add).** Already-authed reinvocations still incur a docker-inspect / images-service round-trip. Symmetric with Codex launch-path semantics. Acceptable. Document in release notes if relevant.
+- **NOTE A3+A4 (FIX 2 test verifies pattern not package-var init).** R2 worklog Unknowns already routes this to dev (BUILDER_WORKLOG.md:509). Production correctness rests on the env-before-launch CLI invariant — not testable in-process. Symmetric with `claudeImageRef()`'s call-time semantics in `claude.go:96`. Acceptable.
+- **NOTE A6 + A15 (env passthrough live verification).** Whether `LANG`/`LC_CTYPE` passthrough actually fixes the OAuth TUI rendering through Docker pty is a live smoke-test question. R1 CONCERN 2 anticipated this; FIX 3 is defensive symmetry with the launch path. Gate on smoke test.
+- **CONCERN A17 (`runManageAccountSwitch` test gap).** Guard added to switch-path but no test exercises it. Pattern is byte-for-byte mirror of the add-path; add-path test pins the pattern. Recommendation: add `TestManageAccountSwitchClaudeWithSkipLoginSkipsImageEnsure` (and a positive-path twin mirroring `TestManageAccountAddClaudeWithExistingCredsAndImageOverrideSucceeds`) in a follow-up to close the symmetry gap. Not blocking R2 because the structural mirror is verifiable by code inspection.
+
+### R1 finding closure
+
+- **BLOCK 1 (missing `ensureClaudeImageCurrent` on auth path):** **CLOSED.** manage.go:497-501 (add) and manage.go:612-616 (switch) both call `ensureClaudeImageCurrent(cmd, paths)` gated on `provider == domain.ProviderClaude && !skipLogin`. `TestManageAccountAddClaudeWithExistingCredsAndImageOverrideSucceeds` exercises the path positively. `TestManageAccountAddClaudeWithSkipLoginSkipsImageEnsure` proves the SkipLogin gate by absence of fake docker (would fail at lookup if guard broken). Switch-path closure is by mirror-construction (A17 above).
+- **CONCERN 1 (`VALV_CLAUDE_IMAGE` drift between auth and launch):** **CLOSED.** claude_auth.go:46-48 uses `claudeImageRef()` instead of the hardcoded `dockeradapter.NewImageRef("valv-claude", "dev")`. `TestSystemClaudeAccountAuthRunnerUsesClaudeImageRef` (claude_auth_test.go:416) pins the env-respect contract for the construction pattern. Production package-var init-timing caveat documented in worklog Unknowns and acceptable per CLI semantics (A3/A4 above).
+- **CONCERN 2 (`EnvPassthrough` drift on auth container):** **CLOSED.** runtime.go:287-301 exports `TerminalEnvPassthrough` with Go-doc comment and is called by both PrepareRuntime (runtime.go:126) and the auth runner (claude_auth.go:88). `TestSystemClaudeAccountAuthRunnerPassesThroughTerminalEnv` (claude_auth_test.go:435) asserts `LANG`/`LC_CTYPE` are in the auth-container's `EnvPassthrough`. Live OAuth-render verification remains a smoke-test question (A6/A15 NOTE).
+
+### Counterexamples
+
+None CONFIRMED.
+
+### Unknowns
+
+- Live smoke test outcome (`mage install` + fresh-install `valv account add claude work`) — routed to dev per R2 worklog. Not code-falsifiable.
+- Whether the env passthrough actually fixes the OAuth TUI rendering (A6/A15) — same as above, dev smoke test.
+- A17 test gap (`runManageAccountSwitch`) — non-blocking, follow-up recommendation.
+
+### Verdict
+
+**PASS.** R2 closes all three R1 findings with file:line evidence and behavior-pinned tests:
+- BLOCK 1: guard added to BOTH `runManageAccountAdd` and `runManageAccountSwitch`, gated on `!skipLogin`, positively tested via `TestManageAccountAddClaudeWithExistingCredsAndImageOverrideSucceeds` and negatively pinned via `TestManageAccountAddClaudeWithSkipLoginSkipsImageEnsure`.
+- CONCERN 1: `claudeImageRef()` replaces hardcoded ref; helper pattern tested.
+- CONCERN 2: `TerminalEnvPassthrough` exported with Go-doc convention; auth runner wires it; locale-var passthrough tested.
+
+No introduced regressions: Codex flow untouched (mirror of pre-R2), test count delta consistent (151→154), coverage 71.9% (above 70% floor), all three package-level `mage testPkg` runs GREEN with matching counts. The three NOTEs and one CONCERN are recommendations for future polish, not R2 defects. Live smoke test remains the integration gate.
+
+## Hylla Feedback
+
+- **Query:** `hylla_search_keyword` for `installFakeDocker` (`fields=content`, `visibility_mode=include_private`, `test_mode=include_tests`).
+  - **Worked correctly.** Hylla returned the test-helper definition in `extended_test.go` plus all caller tests (8 callers across extended_test.go + manage_test.go). The summary docstring described the shell-script content + log path return — sufficient on its own without reading the file. Confirms `installFakeDocker` is a `t.Setenv("PATH", ...)`-based fake docker that exits 0 unless specific env-overrides are set.
+  - **Suggestion:** None — ideal hit.
+- **Query:** `hylla_search_keyword` for `runManageAccountSwitch` (`tail_symbol`, `visibility_mode=include_private`).
+  - **Worked correctly.** Returned exactly 2 results: the production definition + the cobra command wrapper. Zero test callers — directly evidenced the A17 test-gap concern.
+  - **Suggestion:** None.
+- Other code reads (claude_auth.go, runtime.go, manage.go, claude_auth_test.go, manage_test.go) used `Read` tool directly per mid-drop staleness protocol — these files were modified in `d5d1fa6` after the last Hylla snapshot. No fallback miss to log.
+
+---
