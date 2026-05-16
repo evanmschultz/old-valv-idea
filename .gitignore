@@ -39,3 +39,6 @@ cover.out
 
 # Tooling artifacts
 .gocache/
+
+# Claude Code session state (per-project, never tracked)
+.claude/
