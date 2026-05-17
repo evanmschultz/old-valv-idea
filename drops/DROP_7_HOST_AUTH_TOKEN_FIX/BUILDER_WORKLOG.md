@@ -114,6 +114,60 @@ N/A — task touched only files modified in DROP_7 which are not yet reingested.
 
 ---
 
+## Unit 7.11 — Round 3
+
+**Date:** 2026-05-16
+**State at start:** R2 done; R3 required → in_progress (R3 start) → done (R3 close)
+**Why Round 3:** Dev correction 2026-05-16: the manual `c`-key OSC-52 copy + Ctrl-C × 2 exit IS the canonical UX for Claude OAuth — not a workaround. R1 URL detection + browser auto-open + R2 creds-watcher SIGTERM + R2 line-wrap buffering all come out.
+
+### Files touched
+- `internal/cli/claude_auth.go` — stripped ~250 LOC: `oauthURLRegex`, `urlOpener` interface + `defaultURLOpener`, `credsWatcher` interface + `defaultCredsWatcher`, `urlBufferCap`, `lineScanner` type + `Write` + `newLineScanner` + `stripURLWhitespace`, `externalCommand` var, goroutine + `sync.Once` + `atomic.Bool credDetected` + `sync.WaitGroup` + `docker stop` SIGTERM + success notice. Removed imports: `os/exec`, `regexp`, `sync`, `sync/atomic`. `urlOpener` + `credsWatcher` fields stripped from `systemClaudeAccountAuthRunner`. `RunInContainer` reduced to ~30 LOC.
+- `internal/cli/claude_auth_test.go` — stripped ~500 LOC: 12 deleted tests (`TestLineScannerForwardsAllBytes`, `TestLineScannerDetectsOAuthURL`, `TestLineScannerDetectsURLAcrossTwoWrites`, `TestLineScannerPlatformConsoleURL`, `TestLineScannerOnceGuardFiresOnce`, `TestLineScannerStripsANSIFromOAuthURL`, `TestLineScannerDetectsURLAcrossMultipleLines`, `TestRunInContainerOpensBrowserOnURLDetect`, `TestRunInContainerDoesNotOpenWhenNoURL`, `TestRunInContainerSigtermsOnCredsWrite`, `TestRunInContainerSurvivesContainerExitBeforeCreds`, `TestRunInContainerCancelsPollerOnContextCancel`). Deleted 2 stub types: `stubURLOpener`, `stubCredsWatcher`. Deleted `callbackExecutor` (no longer used). Deleted `writeCredsFile` (unused dead code). Removed imports: `os/exec`, `sync`.
+- `main/README.md` — added "Claude OAuth" section (~18 lines) after "Common Commands", documenting `c`-key OSC-52 copy, browser flow, and Ctrl-C × 2 exit pattern.
+
+### LOC deltas
+- `claude_auth.go`: 422 → 195 LOC (~−227 LOC)
+- `claude_auth_test.go`: 963 → 370 LOC (~−593 LOC)
+- `README.md`: 78 → 96 LOC (+18 LOC)
+
+### Design notes (subtractive round)
+- Subtractive round: net LOC delta is large-negative per plan. No new logic introduced.
+- FIX 1 wipe (`wipeClaudeCredentials` at start of `loginClaudeAccount`) PRESERVED — this is independent of auto-exit machinery and must survive R3. `TestLoginClaudeAccountWipesExistingCredsBeforeRunning` confirms it passes.
+- `time` import retained — `time.Now().UTC().UnixNano()` for container name timestamp.
+- `laslig` import retained — `writeCLINotice` still called in `ensureClaudeAccountReady` and `loginClaudeAccount`.
+- `strings` import retained — `strings.TrimSpace` in multiple functions.
+- `stubAuthContainerExecutor` retained — still used by `TestSystemClaudeAccountAuthRunnerPassesThroughTerminalEnv`.
+- `writeCredsToDir` retained — used by `TestLoginClaudeAccountSucceeds` and `TestLoginClaudeAccountWipesExistingCredsBeforeRunning`.
+- `writeCredsFile` deleted — was defined in R1 but never called in any surviving test. Dead code removal.
+
+### Mage targets run and result
+- `mage testPkg github.com/evanmschultz/valv/internal/cli` — GREEN 158/158, 72.5% coverage
+- `mage test` — GREEN 432/432 across 20 packages, all ≥60%, `internal/cli` 72.5%
+
+Note: total test count dropped from 444 (post-R2) to 432 because the 12 deleted tests are gone. 158 tests in `internal/cli` (was 170).
+
+### Acceptance criteria check
+
+| # | Criterion | Result |
+|---|---|---|
+| AC1-R3 | `claude_auth.go` no longer contains `oauthURLRegex`, `urlOpener`, `credsWatcher`, `lineScanner`, `urlBufferCap`, `stripURLWhitespace`, `externalCommand` | PASS — all stripped, verified by write |
+| AC2-R3 | `RunInContainer` is ≤40 LOC. No goroutines. No `sync.Once`. No `atomic.Bool`. No `docker stop` call | PASS — ~30 LOC, confirmed by write |
+| AC3-R3 | `claude_auth.go` no longer imports `os/exec`, `regexp`, `sync`, `sync/atomic` | PASS — import block reduced to 10 imports |
+| AC4-R3 | `claude_auth_test.go` no longer contains the 12 deleted tests or the 2 deleted stub types | PASS — verified by write |
+| AC5-R3 | `loginClaudeAccount` retains `wipeClaudeCredentials` first-statement | PASS — `TestLoginClaudeAccountWipesExistingCredsBeforeRunning` passes |
+| AC6-R3 | `mage testPkg github.com/evanmschultz/valv/internal/cli` GREEN, coverage ≥70% | PASS — 158/158, 72.5% |
+| AC7-R3 | `mage test` GREEN full suite | PASS — 432/432 |
+| AC8-R3 | `main/README.md` contains "Claude OAuth" section documenting `c`-key copy + Ctrl-C × 2 exit | PASS — section added |
+
+### Unknowns
+- None blocking. R3 is a clean subtractive round. All surviving tests pass. FIX 1 wipe preserved and verified.
+
+## Hylla Feedback
+
+N/A — task touched only files modified in DROP_7 which are not yet reingested. All evidence sourced from direct `Read` tool calls (mid-drop, Hylla stale for `claude_auth.go` / `claude_auth_test.go`). Hylla queries not attempted.
+
+---
+
 ## Unit 7.10 — Round 2
 
 **Date:** 2026-05-16

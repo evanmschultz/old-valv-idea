@@ -565,7 +565,7 @@ R1 QA proof PASS + R1 QA falsification PASS with one CONFIRMED counterexample (A
 
 ### Unit 7.11 — Auth UX (R1+R2 auto-open machinery, R3 strip — dev correction 2026-05-16)
 
-**state:** R2 done; R3 required (strip auto-open machinery per dev correction 2026-05-16 — manual `c`-key OSC-52 copy + Ctrl-C × 2 exit IS the canonical UX, not a workaround)
+**state:** done
 **blocked_by:** 7.5 R2 (done) — depends on the `RunInContainer` orchestration code
 **paths:** `internal/cli/claude_auth.go`, `internal/cli/claude_auth_test.go`, `main/README.md` (R3 adds Claude OAuth section)
 **packages:** `internal/cli`

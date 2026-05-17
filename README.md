@@ -48,6 +48,26 @@ mage dev:clean
 
 The disposable dev-home path is separate from your real home directory and keeps local validation from polluting host-backed provider state.
 
+## Claude OAuth
+
+When you run `valv account add claude <name>`, Valv starts a managed container
+running the Claude CLI and bind-mounts the account's home directory. Claude
+auto-detects the missing credentials and prints an OAuth URL in the terminal.
+
+To complete the flow:
+
+1. Press `c` in the Claude TUI — this copies the URL to the clipboard via
+   OSC-52, bypassing terminal line-wrap whitespace that would corrupt the URL
+   if you tried to mouse-select it.
+2. Paste the URL into your browser and complete the OAuth flow.
+3. Paste the authorization code back into the terminal when prompted.
+4. Press Ctrl-C twice to exit the container. Claude prints
+   `Press Ctrl-C again to exit` between the two presses.
+
+The bind-mounted `.credentials.json` is written by the container natively and
+persists in the account's managed home directory. Subsequent `valv claude`
+launches read it without re-auth.
+
 ## Repository Layout
 
 This repo uses a bare-root Git layout with worktrees.

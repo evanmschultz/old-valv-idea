@@ -1,8 +1,10 @@
 package cli
 
-// claude_auth_test.go — Unit 7.5 full rewrite + Unit 7.11 UX-polish additions.
-// Covers the in-container Claude auth flow (Path B) added in Unit 7.5, plus
-// the URL-auto-open and creds-watcher/SIGTERM behaviour from Unit 7.11.
+// claude_auth_test.go — Unit 7.5 full rewrite (Path B in-container auth).
+// R3: auto-open machinery stripped per dev correction 2026-05-16.
+// The 16 surviving tests cover: ensureClaudeAccountReady, loginClaudeAccount,
+// wipeClaudeCredentials, logoutManagedAccount integration, ReadAccountIdentity
+// integration, and systemClaudeAccountAuthRunner behaviour.
 
 import (
 	"bytes"
@@ -10,10 +12,8 @@ import (
 	"errors"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -62,14 +62,24 @@ func newTestClaudeCmd() *cobra.Command {
 	return cmd
 }
 
-// writeCredsFile writes a minimal .credentials.json to dir, simulating the
-// container having completed OAuth and written credentials natively.
-func writeCredsFile(t *testing.T, dir string) {
-	t.Helper()
+// writeCredsToDir writes a minimal .credentials.json to dir without needing a
+// testing.T (used from stubRunFunc callbacks).
+func writeCredsToDir(dir string) {
 	credPath := filepath.Join(dir, ".credentials.json")
 	if err := os.WriteFile(credPath, []byte(`{"claudeAiOauth":{"accessToken":"tok"}}`), 0o600); err != nil {
-		t.Fatalf("WriteFile(%q) error = %v", credPath, err)
+		panic("writeCredsToDir: " + err.Error())
 	}
+}
+
+// stubAuthContainerExecutor captures ContainerRunRequest for assertions.
+type stubAuthContainerExecutor struct {
+	lastRequest dockeradapter.ContainerRunRequest
+	err         error
+}
+
+func (s *stubAuthContainerExecutor) Run(_ context.Context, req dockeradapter.ContainerRunRequest) error {
+	s.lastRequest = req
+	return s.err
 }
 
 // --- ensureClaudeAccountReady tests ---
@@ -317,15 +327,6 @@ func TestLoginClaudeAccountSucceeds(t *testing.T) {
 	}
 }
 
-// writeCredsToDir writes a minimal .credentials.json to dir without needing a
-// testing.T (used from stubRunFunc callbacks).
-func writeCredsToDir(dir string) {
-	credPath := filepath.Join(dir, ".credentials.json")
-	if err := os.WriteFile(credPath, []byte(`{"claudeAiOauth":{"accessToken":"tok"}}`), 0o600); err != nil {
-		panic("writeCredsToDir: " + err.Error())
-	}
-}
-
 // --- wipeClaudeCredentials tests ---
 
 // TestWipeClaudeCredentialsRemovesFile verifies that an existing
@@ -399,23 +400,11 @@ func TestReadAccountIdentityReturnsLoggedOutWhenNoCreds(t *testing.T) {
 	}
 }
 
-// --- systemClaudeAccountAuthRunner unit tests (FIX 2 + FIX 3) ---
-
-// stubAuthContainerExecutor captures ContainerRunRequest for assertions.
-type stubAuthContainerExecutor struct {
-	lastRequest dockeradapter.ContainerRunRequest
-	err         error
-}
-
-func (s *stubAuthContainerExecutor) Run(_ context.Context, req dockeradapter.ContainerRunRequest) error {
-	s.lastRequest = req
-	return s.err
-}
+// --- systemClaudeAccountAuthRunner unit tests ---
 
 // TestSystemClaudeAccountAuthRunnerUsesClaudeImageRef verifies that the
 // production runner respects the VALV_CLAUDE_IMAGE override — the same env var
 // that the launch path honours — rather than a hardcoded ref.
-// This pins FIX 2 (CONCERN 1 from R1 falsification).
 func TestSystemClaudeAccountAuthRunnerUsesClaudeImageRef(t *testing.T) {
 	t.Setenv("VALV_CLAUDE_IMAGE", "test/myimg:v2")
 
@@ -434,7 +423,6 @@ func TestSystemClaudeAccountAuthRunnerUsesClaudeImageRef(t *testing.T) {
 // terminal locale variables that launch-path PrepareRuntime also passes through.
 // Without these, the claude TUI prompt may render incorrectly through the Docker
 // pty — the same class of failure that affected DROP_6.2.
-// This pins FIX 3 (CONCERN 2 from R1 falsification).
 func TestSystemClaudeAccountAuthRunnerPassesThroughTerminalEnv(t *testing.T) {
 	// Set at least one env var that terminalEnvPassthrough tracks.
 	t.Setenv("LANG", "en_US.UTF-8")
@@ -475,369 +463,7 @@ func TestSystemClaudeAccountAuthRunnerPassesThroughTerminalEnv(t *testing.T) {
 	}
 }
 
-// ── Unit 7.11 stubs ──────────────────────────────────────────────────────────
-
-// stubURLOpener records Open calls for assertions. Implements urlOpener.
-type stubURLOpener struct {
-	openedURLs []string
-	err        error
-}
-
-func (s *stubURLOpener) Open(_ context.Context, url string) error {
-	s.openedURLs = append(s.openedURLs, url)
-	return s.err
-}
-
-// stubCredsWatcher signals credential detection without touching the filesystem.
-// WaitForCreds returns s.err immediately.
-type stubCredsWatcher struct {
-	err       error
-	callCount int
-}
-
-func (s *stubCredsWatcher) WaitForCreds(_ context.Context, _ string) error {
-	s.callCount++
-	return s.err
-}
-
-// callbackExecutor is an authContainerExecutor that calls an onRun function
-// and returns a configurable error. Tests use it to simulate the executor
-// performing side-effects (e.g. writing bytes into a writer).
-type callbackExecutor struct {
-	lastRequest dockeradapter.ContainerRunRequest
-	err         error
-	onRun       func()
-}
-
-func (e *callbackExecutor) Run(_ context.Context, req dockeradapter.ContainerRunRequest) error {
-	e.lastRequest = req
-	if e.onRun != nil {
-		e.onRun()
-	}
-	return e.err
-}
-
-// ── lineScanner unit tests ───────────────────────────────────────────────────
-
-// TestLineScannerForwardsAllBytes verifies that all bytes written to the
-// lineScanner reach the inner writer unchanged.
-func TestLineScannerForwardsAllBytes(t *testing.T) {
-	t.Parallel()
-
-	var buf bytes.Buffer
-	var matches []string
-	scanner := newLineScanner(&buf, func(url string) { matches = append(matches, url) })
-
-	input := "line one\nline two\n"
-	if _, err := scanner.Write([]byte(input)); err != nil {
-		t.Fatalf("Write() error = %v", err)
-	}
-	if got := buf.String(); got != input {
-		t.Fatalf("forwarded bytes = %q, want %q", got, input)
-	}
-	if len(matches) != 0 {
-		t.Fatalf("matches = %v, want none (no OAuth URL in input)", matches)
-	}
-}
-
-// TestLineScannerDetectsOAuthURL verifies that oauthURLRegex is matched when
-// the Claude subscription OAuth URL appears in a complete line.
-func TestLineScannerDetectsOAuthURL(t *testing.T) {
-	t.Parallel()
-
-	const oauthURL = "https://claude.com/cai/oauth/authorize?code=abc&state=xyz"
-	input := "Open this URL to complete auth:\n" + oauthURL + "\n"
-
-	var buf bytes.Buffer
-	var matches []string
-	scanner := newLineScanner(&buf, func(url string) { matches = append(matches, url) })
-
-	if _, err := scanner.Write([]byte(input)); err != nil {
-		t.Fatalf("Write() error = %v", err)
-	}
-
-	if len(matches) != 1 {
-		t.Fatalf("matches count = %d, want 1; matches = %v", len(matches), matches)
-	}
-	if matches[0] != oauthURL {
-		t.Fatalf("matched URL = %q, want %q", matches[0], oauthURL)
-	}
-	// Inner writer must have received all bytes.
-	if got := buf.String(); got != input {
-		t.Fatalf("forwarded bytes = %q, want %q", got, input)
-	}
-}
-
-// TestLineScannerDetectsURLAcrossTwoWrites verifies that a URL straddling two
-// Write calls is detected correctly (the falsification-driven line-buffer
-// refinement from D1).
-func TestLineScannerDetectsURLAcrossTwoWrites(t *testing.T) {
-	t.Parallel()
-
-	// The URL is split across two Write calls: first chunk has no '\n', so the
-	// scanner buffers it. The second chunk completes the line with '\n'.
-	part1 := "https://claude.com/cai"
-	part2 := "/oauth/authorize?foo=bar\n"
-	wantURL := "https://claude.com/cai/oauth/authorize?foo=bar"
-
-	var buf bytes.Buffer
-	var matches []string
-	scanner := newLineScanner(&buf, func(url string) { matches = append(matches, url) })
-
-	if _, err := scanner.Write([]byte(part1)); err != nil {
-		t.Fatalf("Write(part1) error = %v", err)
-	}
-	// No newline yet — no match expected.
-	if len(matches) != 0 {
-		t.Fatalf("matches after part1 = %v, want none (no newline yet)", matches)
-	}
-
-	if _, err := scanner.Write([]byte(part2)); err != nil {
-		t.Fatalf("Write(part2) error = %v", err)
-	}
-	if len(matches) != 1 {
-		t.Fatalf("matches count = %d, want 1; matches = %v", len(matches), matches)
-	}
-	if matches[0] != wantURL {
-		t.Fatalf("matched URL = %q, want %q", matches[0], wantURL)
-	}
-}
-
-// TestLineScannerPlatformConsoleURL verifies the Console (platform.claude.com)
-// OAuth path is also matched by the regex.
-func TestLineScannerPlatformConsoleURL(t *testing.T) {
-	t.Parallel()
-
-	const oauthURL = "https://platform.claude.com/oauth/authorize?response_type=code"
-	input := oauthURL + "\n"
-
-	var buf bytes.Buffer
-	var matches []string
-	scanner := newLineScanner(&buf, func(url string) { matches = append(matches, url) })
-
-	if _, err := scanner.Write([]byte(input)); err != nil {
-		t.Fatalf("Write() error = %v", err)
-	}
-	if len(matches) != 1 || matches[0] != oauthURL {
-		t.Fatalf("matches = %v, want [%q]", matches, oauthURL)
-	}
-}
-
-// TestLineScannerOnceGuardFiresOnce verifies that when the same URL appears on
-// multiple lines, the onMatch callback is called for each matching line (the
-// once-per-session guard lives in RunInContainer via sync.Once, not in
-// lineScanner itself — lineScanner calls onMatch on every match).
-func TestLineScannerOnceGuardFiresOnce(t *testing.T) {
-	t.Parallel()
-
-	const oauthURL = "https://claude.com/cai/oauth/authorize?code=dup"
-	input := oauthURL + "\n" + oauthURL + "\n"
-
-	var buf bytes.Buffer
-	var callCount int
-	scanner := newLineScanner(&buf, func(_ string) { callCount++ })
-
-	if _, err := scanner.Write([]byte(input)); err != nil {
-		t.Fatalf("Write() error = %v", err)
-	}
-	// lineScanner calls onMatch twice (once per line). The sync.Once dedup
-	// lives in RunInContainer, not here.
-	if callCount != 2 {
-		t.Fatalf("onMatch calls = %d, want 2 (sync.Once dedup is in RunInContainer)", callCount)
-	}
-}
-
-// ── RunInContainer unit tests (Unit 7.11) ────────────────────────────────────
-
-// TestRunInContainerOpensBrowserOnURLDetect verifies that when the OAuth URL
-// appears in the container stdout (written by the callbackExecutor into a
-// lineScanner-wrapped writer), RunInContainer calls urlOpener.Open exactly once
-// with the matching URL.
-//
-// Design: Since the production lineScanner wrapping only happens when executor
-// is nil, and we must inject a stub executor for test isolation, we exercise
-// the URL-open path by constructing a lineScanner outside RunInContainer,
-// writing the URL into it, and verifying the sync.Once-guarded opener fires.
-// The RunInContainer tests below verify goroutine lifecycle and creds detection.
-// The lineScanner tests above verify URL detection. Together they provide full
-// coverage of the URL-open integration.
-//
-// For this test we use a callbackExecutor that writes into a lineScanner the
-// test constructs to simulate the production wrapping path. The urlOpener is
-// injected into the runner; we call Open manually via the sync.Once wrapper
-// to confirm the integration contract.
-func TestRunInContainerOpensBrowserOnURLDetect(t *testing.T) {
-	t.Parallel()
-
-	const oauthURL = "https://claude.com/cai/oauth/authorize?code=test123"
-
-	opener := &stubURLOpener{}
-
-	// Simulate the lineScanner URL detection by writing into a scanner that
-	// fires the opener. This mirrors what RunInContainer does when executor==nil.
-	var buf bytes.Buffer
-	var once sync.Once
-	scanner := newLineScanner(&buf, func(url string) {
-		once.Do(func() { _ = opener.Open(context.Background(), url) })
-	})
-
-	// Simulate the container printing the OAuth URL line.
-	if _, err := scanner.Write([]byte(oauthURL + "\n")); err != nil {
-		t.Fatalf("scanner.Write() error = %v", err)
-	}
-
-	// The opener must have been called exactly once.
-	if len(opener.openedURLs) != 1 {
-		t.Fatalf("urlOpener.Open() calls = %d, want 1; opened = %v", len(opener.openedURLs), opener.openedURLs)
-	}
-	if opener.openedURLs[0] != oauthURL {
-		t.Fatalf("urlOpener.Open() url = %q, want %q", opener.openedURLs[0], oauthURL)
-	}
-
-	// Writing the URL again does not trigger a second open (sync.Once guard).
-	if _, err := scanner.Write([]byte(oauthURL + "\n")); err != nil {
-		t.Fatalf("scanner.Write(duplicate) error = %v", err)
-	}
-	if len(opener.openedURLs) != 1 {
-		t.Fatalf("urlOpener.Open() calls after duplicate = %d, want still 1", len(opener.openedURLs))
-	}
-
-	// Inner writer must have received all bytes.
-	if !strings.Contains(buf.String(), oauthURL) {
-		t.Fatalf("terminal output %q does not contain OAuth URL %q", buf.String(), oauthURL)
-	}
-}
-
-// TestRunInContainerDoesNotOpenWhenNoURL verifies that when the executor writes
-// no OAuth URL, the urlOpener is never called. We test via RunInContainer with
-// a callbackExecutor that writes non-URL content into the stderr buffer.
-func TestRunInContainerDoesNotOpenWhenNoURL(t *testing.T) {
-	t.Parallel()
-
-	opener := &stubURLOpener{}
-	watcher := &stubCredsWatcher{err: context.Canceled}
-
-	// Simulate the lineScanner receiving non-URL content.
-	var buf bytes.Buffer
-	var once sync.Once
-	scanner := newLineScanner(&buf, func(url string) {
-		once.Do(func() { _ = opener.Open(context.Background(), url) })
-	})
-
-	if _, err := scanner.Write([]byte("Some unrelated output line\n")); err != nil {
-		t.Fatalf("scanner.Write() error = %v", err)
-	}
-	_ = watcher // referenced for completeness
-
-	if len(opener.openedURLs) != 0 {
-		t.Fatalf("urlOpener.Open() calls = %d, want 0; opened = %v", len(opener.openedURLs), opener.openedURLs)
-	}
-}
-
-// TestRunInContainerSigtermsOnCredsWrite verifies that when the credsWatcher
-// returns nil (credentials found), RunInContainer:
-//   - returns nil (success, ignoring any non-zero exec.Run error from SIGTERM)
-//   - emits a success notice to stderr
-func TestRunInContainerSigtermsOnCredsWrite(t *testing.T) {
-	t.Parallel()
-
-	opener := &stubURLOpener{}
-	watcher := &stubCredsWatcher{err: nil} // nil = creds found immediately
-
-	// Intercept the docker stop subprocess call so the test does not require Docker.
-	origExternalCommand := externalCommand
-	t.Cleanup(func() { externalCommand = origExternalCommand })
-	externalCommand = func(_ string, _ ...string) *exec.Cmd {
-		// Return a no-op command (echo is available on all platforms).
-		return exec.Command("true")
-	}
-
-	var stderrBuf bytes.Buffer
-	stub := &callbackExecutor{err: nil}
-
-	runner := systemClaudeAccountAuthRunner{
-		executor:     stub,
-		image:        claudeImageRef(),
-		urlOpener:    opener,
-		credsWatcher: watcher,
-	}
-
-	err := runner.RunInContainer(context.Background(), t.TempDir(), nil, &bytes.Buffer{}, &stderrBuf)
-	if err != nil {
-		t.Fatalf("RunInContainer() error = %v, want nil (creds detected)", err)
-	}
-
-	// Success notice must be emitted to stderr.
-	if !strings.Contains(stderrBuf.String(), "Claude auth complete") {
-		t.Fatalf("stderr does not contain success notice; got: %q", stderrBuf.String())
-	}
-}
-
-// TestRunInContainerSurvivesContainerExitBeforeCreds verifies that when the
-// executor returns immediately and the credsWatcher returns a context error
-// (poller cancelled — container exited before creds appeared), RunInContainer
-// propagates the executor's error and does not leak goroutines.
-func TestRunInContainerSurvivesContainerExitBeforeCreds(t *testing.T) {
-	t.Parallel()
-
-	opener := &stubURLOpener{}
-	// Watcher returns context.Canceled — simulates context cancelled because
-	// container exited (RunInContainer calls cancel() before wg.Wait()).
-	watcher := &stubCredsWatcher{err: context.Canceled}
-
-	stubErr := errors.New("container: exited with code 1")
-	stub := &callbackExecutor{err: stubErr}
-
-	runner := systemClaudeAccountAuthRunner{
-		executor:     stub,
-		image:        claudeImageRef(),
-		urlOpener:    opener,
-		credsWatcher: watcher,
-	}
-
-	err := runner.RunInContainer(context.Background(), t.TempDir(), nil, &bytes.Buffer{}, &bytes.Buffer{})
-	// credDetected=false → propagate exec's error.
-	if err == nil {
-		t.Fatal("RunInContainer() error = nil, want executor error")
-	}
-	if !errors.Is(err, stubErr) {
-		t.Fatalf("RunInContainer() error = %v, want wrapping %v", err, stubErr)
-	}
-	// Test completing promptly (no deadlock) proves goroutine lifecycle is correct.
-}
-
-// TestRunInContainerCancelsPollerOnContextCancel verifies that when the parent
-// context is cancelled, RunInContainer returns promptly and the creds-watcher
-// goroutine exits via ctx.Err().
-func TestRunInContainerCancelsPollerOnContextCancel(t *testing.T) {
-	t.Parallel()
-
-	opener := &stubURLOpener{}
-	// Watcher that respects context cancellation (returns immediately on cancel).
-	watcher := &stubCredsWatcher{err: context.Canceled}
-
-	stub := &callbackExecutor{err: context.Canceled}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // pre-cancel to simulate parent context already done
-
-	runner := systemClaudeAccountAuthRunner{
-		executor:     stub,
-		image:        claudeImageRef(),
-		urlOpener:    opener,
-		credsWatcher: watcher,
-	}
-
-	err := runner.RunInContainer(ctx, t.TempDir(), nil, &bytes.Buffer{}, &bytes.Buffer{})
-	// Context already cancelled → exec returns context.Canceled.
-	// credDetected=false → propagate exec's error.
-	if err == nil {
-		t.Fatal("RunInContainer() error = nil, want context error")
-	}
-	// Test completing promptly proves poller goroutine exited via ctx.Done().
-}
-
-// ── Unit 7.11 Round 2 tests ──────────────────────────────────────────────────
+// --- Unit 7.11 Round 2 tests (preserved through R3) ---
 
 // TestLoginClaudeAccountWipesExistingCredsBeforeRunning verifies AC1-R2:
 // loginClaudeAccount wipes a pre-existing .credentials.json before invoking the
@@ -883,80 +509,5 @@ func TestLoginClaudeAccountWipesExistingCredsBeforeRunning(t *testing.T) {
 	// proving that wipeClaudeCredentials ran BEFORE RunInContainer was called.
 	if fileExistedAtRunTime {
 		t.Fatal("credentials file existed when RunInContainer was called; wipe must run before runner invocation")
-	}
-}
-
-// TestLineScannerStripsANSIFromOAuthURL verifies AC2-R2: ANSI escape sequences
-// in the OAuth URL line do not corrupt the URL passed to the onMatch callback.
-// The tightened regex character class excludes ESC bytes, so only the clean URL
-// prefix is captured.
-func TestLineScannerStripsANSIFromOAuthURL(t *testing.T) {
-	t.Parallel()
-
-	const cleanURL = "https://claude.com/cai/oauth/authorize?code=foo"
-	// Simulate claude TUI styling: ANSI reset sequence appended to the URL.
-	input := cleanURL + "\x1b[0m\n"
-
-	opener := &stubURLOpener{}
-	var buf bytes.Buffer
-	scanner := newLineScanner(&buf, func(url string) {
-		_ = opener.Open(context.Background(), url)
-	})
-
-	if _, err := scanner.Write([]byte(input)); err != nil {
-		t.Fatalf("Write() error = %v", err)
-	}
-
-	if len(opener.openedURLs) != 1 {
-		t.Fatalf("urlOpener.Open() calls = %d, want 1; opened = %v", len(opener.openedURLs), opener.openedURLs)
-	}
-	if strings.Contains(opener.openedURLs[0], "\x1b") {
-		t.Fatalf("urlOpener.Open() called with ANSI bytes in URL: %q; must be stripped", opener.openedURLs[0])
-	}
-}
-
-// TestLineScannerDetectsURLAcrossMultipleLines verifies AC3-R2: a long OAuth
-// URL that terminal line-wrap splits across two physical lines is eventually
-// detected via the buffered multi-line accumulation path. The onMatch callback
-// is called at least once with the full joined URL after both lines arrive.
-// (The single-line match on the first line may also fire with a partial URL;
-// deduplication is the caller's responsibility via sync.Once in RunInContainer.)
-func TestLineScannerDetectsURLAcrossMultipleLines(t *testing.T) {
-	t.Parallel()
-
-	// Simulate terminal line-wrap: URL split mid-query-string across two lines.
-	part1 := "https://claude.com/cai/oauth/authorize?code=foo\n"
-	part2 := "bar&baz=qux\n"
-	wantURL := "https://claude.com/cai/oauth/authorize?code=foobar&baz=qux"
-
-	var allMatches []string
-	var mu sync.Mutex
-	var buf bytes.Buffer
-	scanner := newLineScanner(&buf, func(url string) {
-		mu.Lock()
-		defer mu.Unlock()
-		allMatches = append(allMatches, url)
-	})
-
-	if _, err := scanner.Write([]byte(part1)); err != nil {
-		t.Fatalf("Write(part1) error = %v", err)
-	}
-	if _, err := scanner.Write([]byte(part2)); err != nil {
-		t.Fatalf("Write(part2) error = %v", err)
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-
-	// The full joined URL must appear in the set of matches (may not be the only one).
-	found := false
-	for _, u := range allMatches {
-		if u == wantURL {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Fatalf("full joined URL %q not found in onMatch calls %v; multi-line accumulation must detect it", wantURL, allMatches)
 	}
 }
