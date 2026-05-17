@@ -952,3 +952,84 @@ N/A — Hylla daemon was unreachable during this review (`dial tcp 127.0.0.1:908
 
 ---
 
+## Unit 7.11 — Round 1
+
+**Date:** 2026-05-16
+**Reviewer:** go-qa-proof-agent
+**Verdict:** pass
+
+### Evidence reviewed
+
+- `git diff HEAD~1 HEAD -- internal/cli/claude_auth.go internal/cli/claude_auth_test.go` — 187 +/12 - in production code, 369 + lines in tests.
+- `internal/cli/claude_auth.go` (375 LOC) read end-to-end.
+- `internal/cli/claude_auth_test.go` (839 LOC) read end-to-end.
+- PLAN.md `### Design decisions locked by planner (Unit 7.11)` D1–D10 (lines 634–798).
+- PLAN.md AC1–AC6 for Unit 7.11 (lines 621–626).
+- BUILDER_WORKLOG.md `## Unit 7.11 — Round 1` (lines 7–63).
+- `mage testPkg ./internal/cli` re-run by reviewer: **GREEN, 167/167, 72.6%**.
+- `mage test` re-run by reviewer: **GREEN, 441/441, 20 packages, all ≥60%**.
+
+### D1–D10 verification
+
+| Decision | Code evidence | Result |
+|---|---|---|
+| D1 — lineScanner wraps stdout AND stderr | `claude_auth.go:199-201` constructs `stdoutScanner` and `stderrScanner` from the same `onURL` closure; both passed to `NewSystemRunner` | CONFIRMED |
+| D1 refinement — line-buffer survives URL straddling two writes | `claude_auth.go:108-126` `lineScanner.Write` appends to `s.buf`, splits on `\n`, only emits/scans complete lines; partial buffer survives across calls. Test `TestLineScannerDetectsURLAcrossTwoWrites` (test:574-604) pins the behaviour | CONFIRMED |
+| D2 — URL regex literal matches spec | `claude_auth.go:29-31` `https://(?:claude\.com/cai\|platform\.claude\.com)/oauth/authorize\S*` — byte-for-byte identical to PLAN.md:654-657 | CONFIRMED |
+| D3 — `sync.Once` wraps the open call | `claude_auth.go:193-198` declares `var once sync.Once` and wraps `opener.Open(ctx, url)` inside `once.Do` | CONFIRMED |
+| D4 — `urlOpener` interface + `defaultURLOpener` via `exec.Command("open", url).Start()` | Interface at `claude_auth.go:42-44`; `defaultURLOpener.Open` at `:59-65` calls `exec.Command("open", url).Start()` (Start, not Run, so non-blocking) with errors swallowed and TODO comment for xdg-open/cmd at `:55-56` | CONFIRMED |
+| D5 — `credsWatcher` interface + default 500ms poll loop with ctx.Done() select | Interface at `claude_auth.go:49-51`; `defaultCredsWatcher.WaitForCreds` at `:71-85` uses `time.NewTicker(500*time.Millisecond)` + `defer ticker.Stop()` + `select { case <-ctx.Done(): return ctx.Err(); case <-ticker.C: os.Stat+Size>0 → return nil }` | CONFIRMED |
+| D6 — `docker stop --time 5 <containerName>` subprocess | `claude_auth.go:251` `externalCommand("docker", "stop", "--time", "5", containerName).Run()` with error swallowed by `_ =` (matches D6 "swallow error" semantics for already-gone container) | CONFIRMED |
+| D7 — `context.WithCancel` + `defer cancel()` at top | `claude_auth.go:171-172` `ctx, cancel := context.WithCancel(parentCtx); defer cancel()` | CONFIRMED |
+| D8 — `sync.Once` + `atomic.Bool credDetected` (NOT a channel) | `claude_auth.go:193` `var once sync.Once`; `:231` `var credDetected atomic.Bool`. Goroutine at `:248` `credDetected.Store(true)`; main reads `credDetected.Load()` at `:261`. No channel used for inter-goroutine creds signaling | CONFIRMED |
+| D9 — Non-context watcher errors → debug log, no SIGTERM | `claude_auth.go:240-244` `if err != context.Canceled && err != context.DeadlineExceeded { LoggerFromContext(ctx).Debug("creds watcher error, continuing without auto-exit", "err", err) }` then `return` (no `credDetected.Store`, no docker stop) | CONFIRMED |
+| D10 — `stubURLOpener` + `stubCredsWatcher` in test file | `stubURLOpener` at `claude_auth_test.go:481-489`; `stubCredsWatcher` at `:493-501`; both used directly in `RunInContainer` integration tests at `:758-763`, `:791-796`, `:824-829` | CONFIRMED |
+
+### Falsification refinements applied (planner Section 0 attacks 4, 8, 10)
+
+| Refinement | Code evidence | Result |
+|---|---|---|
+| Line-buffer scanner (URL across writes still detected) | `claude_auth.go:108-126` line buffering; `TestLineScannerDetectsURLAcrossTwoWrites` confirms split URL detected exactly once on second write | CONFIRMED |
+| stderr wrapped too (not just stdout) | `claude_auth.go:200` `stderrScanner := newLineScanner(stderr, onURL)` constructed and passed to `NewSystemRunner` alongside `stdoutScanner` | CONFIRMED |
+| atomic.Bool used (not bare bool) | `claude_auth.go:231` `var credDetected atomic.Bool`; reads/writes through `.Load()` / `.Store(true)`. `-race` clean in mage test rerun | CONFIRMED |
+
+### AC1–AC6 verification
+
+| # | Criterion | Code/test evidence | Result |
+|---|---|---|---|
+| AC1 | `RunInContainer` detects OAuth URL in container stdout and fires `urlOpener.Open(url)` exactly once | `claude_auth.go:193-201` sync.Once-guarded onURL closure feeds both stdout+stderr scanners. `TestRunInContainerOpensBrowserOnURLDetect` (test:669-709) writes URL twice into scanner; opener.openedURLs has exactly 1 entry. `TestLineScannerDetectsOAuthURL` (test:545-569) confirms regex match. | PASS |
+| AC2 | `RunInContainer` polls for `<homePath>/.credentials.json`; on appearance, SIGTERMs the container | `claude_auth.go:230` builds `credsPath`; `:234-252` goroutine polls via `watcher.WaitForCreds`, on nil sets `credDetected.Store(true)` and calls `externalCommand("docker","stop","--time","5",containerName).Run()`. `TestRunInContainerSigtermsOnCredsWrite` (test:741-774) verifies nil return + success notice when watcher.err=nil. | PASS |
+| AC3 | User-terminal output unaffected — stdout still flows through | `claude_auth.go:118` `s.inner.Write(line)` forwards every complete line. `TestLineScannerForwardsAllBytes` (test:524-541) verifies inner writer receives `"line one\nline two\n"` verbatim. `TestRunInContainerOpensBrowserOnURLDetect` further checks `buf.String()` contains the OAuth URL. | PASS |
+| AC4 | Poller goroutine does not leak when container exits before creds appear | `claude_auth.go:171-172, 257, 259` derives a cancellable ctx, calls `cancel()` after `containerExec.Run` returns, then `wg.Wait()`. `TestRunInContainerSurvivesContainerExitBeforeCreds` (test:780-807) runs with `watcher.err=context.Canceled` and stub executor returning immediately; test completes promptly with `-race` (mage uses `-race` unconditionally). | PASS |
+| AC5 | `mage testPkg github.com/evanmschultz/valv/internal/cli` GREEN, coverage ≥70% | Reproduced by reviewer: `tests: 167 passed: 167 failed: 0 ... internal/cli 72.6% Minimum package coverage: 60.0% [SUCCESS] Coverage threshold met` | PASS |
+| AC6 | `mage test` GREEN full suite | Reproduced by reviewer: `441 tests passed across 20 packages` with `internal/cli 72.6%`, all packages ≥60% | PASS |
+
+### Spec deviation review
+
+**Deviation 1: `sync.WaitGroup` added to `RunInContainer`.**
+- **Justified.** Builder's Section 0 Convergence finding correctly identifies a real race: the stub executor (`callbackExecutor.Run`) returns synchronously, so without `wg.Wait()`, the main goroutine could read `credDetected.Load()` (line 261) before the watcher goroutine has executed `credDetected.Store(true)` (line 248). With `-race` enabled in `mage test`, the atomic Load/Store would not flag this — atomics serialise; the issue is causal ordering, not data-race instrumentation.
+- **Placement correct.** `wg.Add(1)` at `:233` before goroutine launch. `defer wg.Done()` at `:235` inside goroutine. `wg.Wait()` at `:259` after `cancel()` so the goroutine receives the cancel signal before being awaited.
+- **Orthogonal to D8.** D8 forbids channels for **inter-goroutine creds notification** (proposed alternative was a `chan struct{}` to signal credentials discovered). The chosen design uses `atomic.Bool` for the signal — D8-compliant. `sync.WaitGroup` is **goroutine-completion synchronization**, a distinct mechanism that complements D8 rather than replacing it. No channel introduced for signaling.
+- **No new failure modes.** `wg.Wait()` runs **after** `cancel()` (`:257-259`). The cancelled ctx guarantees `defaultCredsWatcher.WaitForCreds` returns within ≤500ms via its `<-ctx.Done()` arm; stubs return synchronously. No deadlock path.
+
+**Deviation 2: `externalCommand` package-level test seam.**
+- **Justified.** Without it, `TestRunInContainerSigtermsOnCredsWrite` would require a real Docker daemon — the `docker stop` subprocess executes for real. Builder makes the production path transparent (`:273-275` default delegates to `exec.Command`); tests swap and restore via `t.Cleanup(func() { externalCommand = origExternalCommand })` (test:748-749).
+- **Test seam shape correct.** Package-level `var externalCommand = func(name string, args ...string) *exec.Cmd { return exec.Command(name, args...) }`. Production uses it transparently at `:251`; tests substitute a no-op (`exec.Command("true")`) via `t.Cleanup` restoration.
+- **No production-path leakage.** The default returns the exact same `*exec.Cmd` as direct `exec.Command`. Production behaviour is preserved bit-for-bit.
+
+### Mage targets
+
+- `mage testPkg ./internal/cli` — **GREEN, 167/167, 72.6%** (reproduced by reviewer).
+- `mage test` — **GREEN, 441/441 across 20 packages**, all packages at or above the 60% floor; `internal/cli` at 72.6%, well above the 70% threshold from AC5.
+
+### Unknowns
+
+- **U1 (carried from builder, unresolved by definition):** Real `docker run --rm` exit code under `docker stop` SIGTERM is not testable in unit scope. The `credDetected.Load()==true` branch overrides any `runErr` with nil at `:261-266`, which is the correct production semantic per the planner's "Additional implementation note: success notice and nil-return semantics" (PLAN.md:796-798). Will be exercised in dev smoke test.
+- **U2 (carried from builder):** Exact OAuth URL string emitted by `valv-claude:dev` runtime versus the `D2` regex. The regex covers both documented endpoints (`claude.com/cai` and `platform.claude.com`) per PLAN.md:582; if the real-run URL drifts, the regex update is a one-line fix and AC1 will manifest as "browser did not auto-open" at smoke test. Routed to dev for smoke verification — orchestrator-facing only.
+
+### Hylla Feedback
+
+N/A — task touched two files (`internal/cli/claude_auth.go`, `internal/cli/claude_auth_test.go`) that were modified in commit 4d85307 since the last Hylla ingest (snapshot 12). Direct `Read` + `git diff HEAD~1 HEAD` was the correct evidence path per CLAUDE.md § "Hylla Baseline" mid-drop protocol. One adjunct lookup (`LoggerFromContext` definition) used `hylla_search_keyword` against `github.com/evanmschultz/valv@main` and returned the correct hit in `internal/cli/root.go` cleanly — no miss.
+
+---
+

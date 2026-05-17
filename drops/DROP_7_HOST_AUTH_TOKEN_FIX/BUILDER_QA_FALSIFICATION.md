@@ -1309,3 +1309,91 @@ None CONFIRMED. The A6 mage-test-count mismatch is a reporting accuracy concern,
 - **Suggestion:** None for Hylla itself — daemon down is infra. The A1 attack (find-all-call-sites of `imagesservice.New` / `imagesservice.Options{}`) is the textbook use case for `hylla_search_keyword` + `hylla_refs_find`; falling back to per-file `Read` is feasible only because the cli package has a small import surface. On a larger codebase the A1 audit without Hylla would be substantially more expensive.
 
 ---
+
+## Unit 7.11 — Round 1
+
+**Date:** 2026-05-16
+**Verdict:** fail (one BLOCK + three CONCERNs)
+
+### Attack vectors probed
+
+- **A1 — lineScanner forwarding correctness (trailing partial line and Write contract).** CONFIRMED CONCERN. `lineScanner.Write` (`claude_auth.go:108-126`) only forwards bytes once a `\n` is seen. Bytes after the last `\n` accumulate in `s.buf` and are NEVER flushed — there is no `Flush()` method, no `Close()` drain, no end-of-stream hook. When the docker container exits and the reader goroutine returns, any trailing partial line is permanently lost. Concrete failure: claude's TUI cleanup phase commonly emits final cursor-reset / cursor-home bytes without a terminating `\n` — the user's terminal misses them. Severity: CONCERN, not BLOCK — real claude output is `\n`-heavy and the loss is cosmetic, but it IS a real bug. Recommendation: add a `Flush()` method that writes `s.buf` to inner and clears it; call it after `containerExec.Run` returns. Minor sibling issue: the Write contract is violated when `s.inner.Write` partially succeeds — code returns `(0, err)` even though some prior lines already reached inner; the docker reader does not retry from offset so practical impact is nil, but `io.Writer` godoc says `0 <= n <= len(p)` should reflect bytes consumed.
+
+- **A2 — URL match across `\n` boundary (TUI line-wrap).** CONFIRMED CONCERN. If claude's TUI wraps a long OAuth URL across `\n` boundaries (Ink-based renderers wrap at terminal width), `oauthURLRegex.FindString` (`claude_auth.go:121`) matches only the prefix up to the first `\n`. `\S` includes `\n` in its complement so the regex stops there. The `sync.Once` in `RunInContainer` (`claude_auth.go:193-198`) then permanently latches on the broken URL — `open` is called with the truncated URL and the auto-open feature is irreversibly broken for the session. Real-world likelihood: medium-low (depends on terminal width vs URL length), but irreversible-per-process when it fires.
+
+- **A3 — Regex over-match through ANSI escape codes.** CONFIRMED CONCERN. The OAuth URL is typically printed inside an ANSI-styled box (cyan/blue) by claude's TUI. The regex `\S*` (`claude_auth.go:30`) is non-greedy on whitespace only — ESC (`\x1b`, 0x1b) is non-whitespace per Go regexp (`\S` is `[^\t\n\f\r ]`), so trailing escape sequences like `\x1b[0m` get consumed into the captured URL. Counterexample: claude emits `https://claude.com/cai/oauth/authorize?code=foo\x1b[0m\n` on a single TUI line; `FindString` returns `https://claude.com/cai/oauth/authorize?code=foo\x1b[0m`. `exec.Command("open", url).Start()` (`claude_auth.go:63`) hands the URL with literal ESC bytes to macOS `open`, which silently fails or opens a malformed URL. The `sync.Once` then permanently latches on this broken URL — the user falls back to manual paste, defeating FIX A's entire purpose. **This is the most-likely-to-actually-fire failure mode** because claude TUI uses ANSI heavily by default. Recommendation: ANSI-strip the captured URL before passing to `urlOpener.Open` (e.g. regex out `\x1b\[[0-9;]*[A-Za-z]`), OR tighten the regex character class to URL-legal chars only (`[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]*`).
+
+- **A4 — sync.Once reset across multiple RunInContainer calls.** REFUTED. `var once sync.Once` is declared INSIDE `RunInContainer` (`claude_auth.go:193`). Each invocation gets a fresh `Once`. Second call from the same runner instance is not affected.
+
+- **A5 — atomic.Bool credDetected memory ordering.** REFUTED. Goroutine path: `credDetected.Store(true)` (line 248) happens BEFORE `defer wg.Done()` (line 235) fires (since deferred `Done` runs at goroutine return). Main path: `wg.Wait()` (line 259) happens-before `credDetected.Load()` (line 261). Go memory model: `wg.Done` synchronizes-with `wg.Wait` → Store happens-before Load. The WaitGroup actually makes the atomic ordering-redundant (a plain bool with WG fence would also be correct); the atomic is defensible defensive programming.
+
+- **A6 — `docker stop --time 5` adequacy.** REFUTED for creds correctness. The poller detects the creds file at non-zero size BEFORE sending the signal. The file is durable on the bind-mount. SIGKILL after 5s only kills in-flight network/cleanup, not the creds file. The 5s timeout is sufficient for the unit's stated goal (don't leave the user staring at a TUI after auth completes).
+
+- **A7 — docker stop race with main container exit.** REFUTED. Error from `externalCommand("docker", "stop", ...)` is explicitly swallowed via `_ =` (`claude_auth.go:251`). If claude exited cleanly before the watcher's poll tick, the stop call errors with "no such container" and the swallow is correct per spec D6.
+
+- **A8 — WaitGroup deadlock on goroutine panic.** REFUTED. `defer wg.Done()` is the first statement of the goroutine body (`claude_auth.go:235`). Panics inside `WaitForCreds` or the docker stop call still fire `Done`. The production `defaultCredsWatcher` has no panic surface (`os.Stat` + ticker + select). Injected watchers could panic but tests don't exercise it.
+
+- **A9 — Context cancellation propagation.** REFUTED. `defer cancel()` (line 172) fires when `RunInContainer` returns. Watcher's `select { ctx.Done; ticker.C }` (line 75-83) sees `ctx.Done` on next iteration. If the goroutine is inside `externalCommand(...).Run()` it doesn't see ctx.Done() until the subprocess returns, but `docker stop --time 5` has a bounded ≤5s lifetime so the goroutine cannot leak.
+
+- **A10 — `externalCommand` package-level test seam pollution.** REFUTED. `TestRunInContainerSigtermsOnCredsWrite` (`claude_auth_test.go:741`) mutates `externalCommand` and registers `t.Cleanup` to restore it. The mutation happens under `t.Parallel()`, but the only other parallel test that could read `externalCommand` is one whose goroutine reaches the docker stop call — and those parallel tests use `stubCredsWatcher{err: context.Canceled}` so their goroutine returns BEFORE reaching `externalCommand`. `mage test -race` GREEN 441/441 (run 2026-05-16 mid-review) — if a real race existed it would have been caught.
+
+- **A11 — stderr URL detection.** REFUTED for correctness. Wrapping both stdout and stderr is harmless because `sync.Once` dedups. Whether claude actually emits the URL on stderr is unverified but the wrapping itself doesn't introduce bugs.
+
+- **A12 — lineScanner unbounded buffer growth.** CONFIRMED NOTE. `s.buf = append(s.buf, p...)` (`claude_auth.go:109`) has no cap. An adversarial container emitting bytes without any `\n` would grow the buffer unboundedly → OOM. Real claude TUI is `\n`-heavy so realistic risk is low. Recommendation: add a `maxBufferSize` const (e.g. 1MB) — when exceeded, flush the partial buffer to inner without scanning and reset. Filed as NOTE because no concrete production trigger exists, but it's a hardening gap.
+
+- **A13 — 500ms poll vs claude's file-write atomicity / pre-existing creds.** CONFIRMED BLOCK. The `Size > 0` check (`claude_auth.go:80`) correctly filters zero-byte transient writes, so atomicity per se is fine. BUT — the same check makes the poller succeed IMMEDIATELY when `.credentials.json` already exists (size > 0). `loginClaudeAccount` (`claude_auth.go:343-364`) calls `RunInContainer` WITHOUT first wiping the existing creds. Pre-Unit-7.11 this worked because the container ran until the user Ctrl-C'd (overwriting creds via claude's natural re-auth). Post-Unit-7.11, the new poller sees the EXISTING creds file on the first 500ms tick, fires `docker stop`, kills the container before claude's TUI can complete the re-auth, and `RunInContainer` returns nil with "Claude auth complete" — but the credentials are STALE.
+
+  - **Caller chain (verified via Hylla):** `runManageAccountLogin` (`manage.go`) → `loginManagedAccount` (`account_auth.go`) → `loginClaudeAccount` (`claude_auth.go:343`) → `RunInContainer`. No wipe at any layer.
+  - **Concrete user repro:** `valv manage account login claude work` on an account that has an existing `.credentials.json`. Expected: user gets a fresh OAuth flow in browser, new creds replace old. Actual: container starts, poller's first 500ms tick detects the existing file, docker stop fires, user sees a 1-2s flash and "Claude auth complete" — but the credentials never refreshed.
+  - **`ensureClaudeAccountReady` is NOT affected** because it has an already-authed early-return (`claude_auth.go:302-304`) that fires before `RunInContainer`. The bug is specific to the explicit-re-login path.
+  - **Fix options:** (a) add `wipeClaudeCredentials(account.HomePath)` at the start of `loginClaudeAccount` (before `writeCLINotice`) — restores force-fresh semantics; (b) thread a `forceFresh bool` flag through `RunInContainer` that bypasses the poller. Option (a) is the cleaner fix and matches the documented intent of `loginClaudeAccount` ("explicit re-login").
+  - **Why this is BLOCK not CONCERN:** it's a real user-facing regression of an existing CLI surface (`valv manage account login`). The unit's test suite never exercises `loginClaudeAccount` against a pre-existing creds file with the real `defaultCredsWatcher`, so the regression was not surfaced by the build-test gates.
+
+- **A14 — `docker stop --time 5` flag spelling on Docker Desktop.** REFUTED. Modern Docker (since 1.13) supports `--time` for `docker stop`. Docker Desktop ships current Docker engine. Flag is correct.
+
+- **A15 — Test injection vs production parity.** CONFIRMED NOTE. All `RunInContainer` integration tests use `stubCredsWatcher` (`claude_auth_test.go:493-501`). The production `defaultCredsWatcher` (`claude_auth.go:71-85`) has zero direct test coverage. The logic is trivial (ticker → select → stat → size check → return), so visual inspection suffices for v0.1.0 — but a single integration-style test that exercises the real watcher against a temp file with a short ctx timeout would close the gap and would have CAUGHT the A13 BLOCK by writing a file before calling `RunInContainer`.
+
+- **A16 — Goroutine leak verification.** REFUTED. `TestRunInContainerSurvivesContainerExitBeforeCreds` does not use `runtime.NumGoroutine()`, but its mechanism IS valid leak proof: if the goroutine leaked, `wg.Wait()` (`claude_auth.go:259`) would block forever and the test would hang on `runner.RunInContainer`. Test completes promptly → goroutine returned. For the production `defaultCredsWatcher` path, the goroutine returns within ≤500ms of `defer cancel()` firing.
+
+- **A17 — `go test -race` execution.** REFUTED. `magefile.go:138` (`mage testPkg`) and `magefile.go:196` (`mage test`'s `runRepoTests`) both pass `-race`. `mage testPkg ./internal/cli` GREEN 167/167 (run 2026-05-16). `mage test` GREEN 441/441 across 20 packages. Race detector is clean for all atomic + WaitGroup + sync.Once + goroutine + externalCommand-mutation choreography exercised by the unit's tests.
+
+### Findings
+
+- **BLOCK 1 (from A13): `loginClaudeAccount` re-login regression.** `RunInContainer`'s new creds-poller short-circuits the explicit re-login flow when an account already has `.credentials.json`. Fix: add `wipeClaudeCredentials(account.HomePath)` at the start of `loginClaudeAccount` (before `writeCLINotice`). Optionally add a `loginClaudeAccount`-targeted test that pre-writes a creds file, calls `loginClaudeAccount` with a stub runner that records whether `RunInContainer` was actually reached (and `RunInContainer` should subsequently re-write the creds via the stub watcher). Severity: real user-facing regression of `valv manage account login claude <name>` on already-authed accounts.
+
+- **CONCERN 1 (from A1): Trailing partial line never flushed to terminal.** Bytes after the final `\n` sit in `s.buf` and are dropped when the docker reader returns. Realistic exposure: 1-10 final cleanup bytes from claude's TUI. Recommendation: add a `Flush()` method on `lineScanner` and call it after `containerExec.Run` returns (and before reading `credDetected`).
+
+- **CONCERN 2 (from A3): ANSI escape codes captured into OAuth URL.** Claude's TUI styles the OAuth URL with ANSI codes. The `\S*` regex captures trailing `\x1b[0m` (color reset) bytes into the URL. `open` receives a URL with literal ESC bytes and silently fails. `sync.Once` then permanently latches on the broken URL — auto-open is silently dead for the session. Most-likely-to-actually-fire failure mode in production. Recommendation: strip ANSI escape sequences before passing the URL to `urlOpener.Open`, OR tighten the regex character class to URL-legal characters only.
+
+- **CONCERN 3 (from A2): URL split by TUI line-wrap.** If claude's TUI wraps a long OAuth URL at terminal width, only the prefix matches and `sync.Once` latches on the truncated URL. Lower probability than CONCERN 2 but irreversible-per-process when it fires. Mitigation may need to be deferred — proper fix requires the TUI not to wrap, which Valv cannot control. At minimum, log a debug line with the captured URL so post-hoc diagnosis is possible.
+
+- **NOTE 1 (from A12): `lineScanner` buffer is unbounded.** No `maxBufferSize` cap. An adversarial / buggy container emitting bytes without `\n` would OOM. Realistic trigger absent. Optional hardening.
+
+- **NOTE 2 (from A15): Production `defaultCredsWatcher` has no direct unit coverage.** All RunInContainer integration tests stub the watcher. A single test that writes a real temp file and exercises the production `defaultCredsWatcher` would close the gap AND would have caught BLOCK 1 (by simply writing a creds file before calling `RunInContainer`).
+
+- **NOTE 3 (from A1b): `lineScanner.Write` returns 0 on partial-inner-write failure.** Code returns `(0, err)` even when prior lines were already forwarded successfully. Technically a violation of `io.Writer` contract (`0 <= n <= len(p)` should reflect bytes consumed), but the docker reader does not retry from offset so practical impact is nil.
+
+### Mage rerun
+
+- `mage testPkg ./internal/cli` (with `-race`) — GREEN 167/167, 72.6% coverage (matches builder's reported number).
+- `mage test` (with `-race`) — GREEN 441/441 across 20 packages, all packages ≥60% (matches builder's reported number).
+
+The green test suite does NOT exercise BLOCK 1 because:
+- `RunInContainer` integration tests use `stubCredsWatcher` that returns `nil` or `context.Canceled` directly and never touches the filesystem.
+- No test calls `loginClaudeAccount` with a pre-existing `.credentials.json` file under the real `defaultCredsWatcher` path.
+
+### Unknowns
+
+- **U1 — Whether claude 2.1.143's TUI actually emits the OAuth URL embedded in ANSI styling.** Probability assessed as high (TUI is Ink-based, styled output is the default), but unverified without a live dogfood run. CONCERN 2 hinges on this — if the URL is emitted as plain text outside styled context, the regex over-match is moot.
+- **U2 — Whether claude 2.1.143's TUI wraps long URLs at terminal width.** CONCERN 3 hinges on this.
+- **U3 — Exit code from `docker run --rm` under `docker stop` (builder's Unknown U1 from BUILDER_WORKLOG).** The `credDetected` guard handles non-zero exit correctly per the implementation, but the actual exit semantics are unverified. Not a blocker for this round.
+
+## Hylla Feedback
+
+- **Query:** `hylla_search_keyword` for `loginClaudeAccount` with `internal_mode=include_internal`, `visibility_mode=public_only` — zero results.
+  - **Missed because:** `loginClaudeAccount` is an unexported function (visibility=private) in `internal/cli`. The default `visibility_mode=public_only` filters it out. A QA-falsification review needs to reach unexported symbols routinely.
+  - **Worked via:** Re-ran with `visibility_mode=include_private` — returned the node successfully (alongside `loginManagedAccount` which calls it). Then `hylla_node_full` on `loginManagedAccount` and `runManageAccountLogin` to walk the caller chain.
+  - **Suggestion:** Consider making `visibility_mode=include_private` the default for `hylla_search_keyword` when `internal_mode=include_internal` is also set — the combination "internal-only symbols, but only public" is rarely what a caller wants and is the cause of frequent zero-result re-tries. Alternatively, surface a clearer error/hint in the response when the search would have matched a private symbol that the visibility filter excluded.
+- The Hylla snapshot is otherwise STALE for Unit 7.11's `claude_auth.go` changes (no reingest since Unit 7.5). All direct content reads went through `Read` per mid-drop evidence protocol. No further misses recorded.
+
+---
