@@ -1397,3 +1397,114 @@ The green test suite does NOT exercise BLOCK 1 because:
 - The Hylla snapshot is otherwise STALE for Unit 7.11's `claude_auth.go` changes (no reingest since Unit 7.5). All direct content reads went through `Read` per mid-drop evidence protocol. No further misses recorded.
 
 ---
+
+## Unit 7.11 — Round 2
+
+**Date:** 2026-05-16
+**Verdict:** fail (1 BLOCK confirmed, 1 CONCERN, 1 test-design gap)
+**Commit reviewed:** `660d538 fix(cli): unit 7.11 r2 wipe-before-login + ansi-safe url + line-wrap buffering`
+
+### Summary
+
+The orchestrator's hypothesized attack against FIX 3 (line-wrap buffering) is **CONFIRMED**. The buffer-scan correctly accumulates wrapped URL segments, but the production `sync.Once.Do` wrapper around the lineScanner's `onMatch` callback latches on the **first** match — which is the **partial** URL produced after part1's terminating newline. The longer, joined-via-buffer match fired after part2 is silently discarded because `sync.Once` is a no-op on subsequent calls. The unit test `TestLineScannerDetectsURLAcrossMultipleLines` passes only because it collects all matches into a slice without a `sync.Once` guard — production reality differs. FIX 1 and FIX 2 are correct.
+
+### Attack Attempts
+
+CONFIRMED = counterexample produced. REFUTED = attack tried, evidence rules it out. EXHAUSTED = honest attempt, no counterexample constructable.
+
+1. **FIX 3 — sync.Once latches on partial URL (orchestrator's primary attack).** **CONFIRMED — BLOCK 1.**
+
+   Evidence trail:
+   - **Production wiring** (`internal/cli/claude_auth.go:235-243`):
+     ```go
+     var once sync.Once
+     onURL := func(url string) {
+         once.Do(func() {
+             _ = opener.Open(ctx, url)
+         })
+     }
+     stdoutScanner := newLineScanner(stdout, onURL)
+     stderrScanner := newLineScanner(stderr, onURL)
+     ```
+     Both stdout and stderr scanners share the SAME closure with the SAME `sync.Once`.
+   - **`lineScanner.Write` fires onMatch on EVERY newline-terminated regex match** (`claude_auth.go:139-167`), no "is this longer than the previous match?" guard, no "did the previous line already match?" suppression.
+   - **Regex `[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]*` is zero-or-more greedy** — `part1 = "https://claude.com/cai/oauth/authorize?code=foo"` matches by itself because every char after `/authorize` is in the class.
+   - **`sync.Once` semantics confirmed via Context7** (`/golang/go` — `go_mem.html`): function runs exactly once on first call; subsequent `Do` calls return without re-invoking.
+   - **Test author acknowledges the gap** at `claude_auth_test.go:922-923`: *"The single-line match on the first line may also fire with a partial URL; deduplication is the caller's responsibility via sync.Once in RunInContainer."* — but that "deduplication" is precisely the bug, because sync.Once latches the FIRST (shortest) match, not the LONGEST.
+
+   Concrete trace under wrapped URL:
+   1. Claude TUI prints `https://claude.com/cai/oauth/authorize?code=foo\n` (terminal wrapped at width N).
+   2. `stdoutScanner.Write` → `urlBuf = "https://claude.com/cai/oauth/authorize?code=foo\n"` → stripped → regex matches `"https://claude.com/cai/oauth/authorize?code=foo"`.
+   3. `onMatch(partial)` fires → `sync.Once.Do` runs → `opener.Open(ctx, partial)`. **Host browser opens partial URL.**
+   4. Claude TUI prints `bar&baz=qux\n`.
+   5. `stdoutScanner.Write` → `urlBuf = "https://claude.com/cai/oauth/authorize?code=foo\nbar&baz=qux\n"` → stripped → regex matches `"https://claude.com/cai/oauth/authorize?code=foobar&baz=qux"`.
+   6. `onMatch(full)` fires → `sync.Once.Do` is a no-op. **Full URL silently discarded.**
+   7. End state: browser at partial URL, OAuth flow rejected because `code=foo` is not the true code emitted by the server. Same observable failure as the pre-R2 line-wrap bug.
+
+   Test fidelity gap: `TestLineScannerDetectsURLAcrossMultipleLines` (`claude_auth_test.go:924-962`) passes because it collects `allMatches` without sync.Once. The full URL appears in the slice on the SECOND onMatch call. Production discards that second call.
+
+   **Remediation suggestions (from orchestrator's prompt, plus my additions):**
+   - **(c) Match-on-extension only** — only fire `onMatch` when the line just appended did NOT itself match the regex on its own (i.e., we're confident we're extending a wrapped URL rather than introducing a fresh single-line URL). Single-line URLs still hit the wrap-buffer's match path because their terminating newline triggers the same `FindString` over the just-appended single line, which IS a complete URL.
+     - This is the cleanest fix IMO. Concretely:
+       ```go
+       prevStripped := strings.Map(stripURLWhitespace, /* urlBuf BEFORE appending lineStr */)
+       prevMatch := oauthURLRegex.FindString(prevStripped)
+       s.urlBuf.WriteString(lineStr)
+       stripped := strings.Map(stripURLWhitespace, s.urlBuf.String())
+       m := oauthURLRegex.FindString(stripped)
+       lineOnlyMatch := oauthURLRegex.FindString(strings.Map(stripURLWhitespace, lineStr))
+       // Fire only the LONGEST match seen so far for this URL session.
+       if m != "" && m != prevMatch {
+           s.onMatch(m)
+       }
+       ```
+       But this still triggers sync.Once on the first full-line URL — which is what we WANT. The issue is only when a SECOND, longer match arrives later. Naive "only fire if new match is longer" inside the scanner + drop `sync.Once` in `RunInContainer` (or replace sync.Once with "always invoke; opener is idempotent / no-op on duplicate URL") is the cleanest path.
+   - **(b) Defer-by-timeout (debounce)** — collect the longest match within a 100-200ms window, then fire. Pragmatic but adds timing complexity. Likely the right shape for a TUI that prints the URL line then ANSI-styles around it.
+   - **(d) Cleaner alternative**: drop `sync.Once` from `RunInContainer` entirely; have `lineScanner` track the longest match it's seen and only call `onMatch` when the longest grows. Move the "open exactly once" guard into the `opener` or a small wrapper that compares `url` to the last URL opened. This separates the two concerns: scanner = "tell me the BEST URL you've seen", opener wrapper = "open exactly one URL per session, idempotent".
+
+2. **FIX 3 — 4 KiB buffer cap interacts badly with terminal-wrapped URLs after a long preamble.** **CONFIRMED as CONCERN 2** (lower severity than BLOCK 1).
+
+   - `urlBufferCap = 4096`. If claude prints >4 KiB of preamble (warnings, banner, ANSI-styled help text) before the URL, the wrap detection between part1 and part2 of a subsequent wrapped URL fails: the cap-overflow branch (`claude_auth.go:154-159`) `Reset()`s `urlBuf` between part1 and part2 if their combined append straddles the cap.
+   - Specifically, if part1 is the line that pushes urlBuf past 4096, urlBuf resets and `urlBuf.WriteString(part1)` makes urlBuf = part1 alone. So part1 itself still gets matched (as a partial URL) and sync.Once latches the partial — falls into BLOCK 1's trace anyway, so this CONCERN is mostly subsumed.
+   - A NARROWER scenario where this CONCERN bites independently: if the cap-overflow happens BETWEEN part1 and part2 (urlBuf has accumulated part1 plus prior content, exceeds cap, resets — then part2 arrives and urlBuf = part2 alone). Then part2's regex scan against `bar&baz=qux` finds no `https://...` prefix → no match fires. The full URL is never seen at all.
+   - **Mitigation:** raise the cap, or make the reset behavior smarter (keep the last N bytes of urlBuf to preserve cross-line URL context). Real OAuth URLs from claude are ~150-300 chars; cap at 4 KiB has ample room IF preamble is small. The pre-R2 dogfood log would help calibrate.
+
+3. **FIX 3 — Test fidelity gap.** **CONFIRMED as CONCERN 3** (test design issue, not a production bug per se but a process gap).
+
+   - `TestLineScannerDetectsURLAcrossMultipleLines` deliberately does NOT model the production `sync.Once.Do` wrapper around `onMatch`. The test asserts the full URL is somewhere in the `allMatches` slice (line 952-960) but does not assert which match was FIRST. A test that mirrored production wiring — `var once sync.Once; scanner := newLineScanner(&buf, func(url string){ once.Do(func(){ opened = append(opened, url) }) })` — would have caught BLOCK 1 by asserting `opened[0] == wantURL`.
+   - **Remediation**: add a `TestLineScannerWithSyncOnceLatchesLongest` regression test in the R3 cycle that mirrors the production wiring exactly, asserts the URL passed to `opener.Open` is the FULL URL not the partial.
+
+4. **FIX 1 — wipeClaudeCredentials failure-mode coverage.** REFUTED. `os.Remove` errors (other than `IsNotExist`) propagate cleanly via `fmt.Errorf("remove %q: %w", ...)` at `claude_auth.go:418`. Test `TestWipeClaudeCredentialsRemovesFile` covers the success path; `TestWipeClaudeCredentialsMissingFileIsNoError` covers the IsNotExist branch. Minor test gap: no test exercises the read-only-directory / EROFS branch, but the error wrapping path is straightforward and not a blocker. The wipe also runs BEFORE `RunInContainer` (verified by `TestLoginClaudeAccountWipesExistingCredsBeforeRunning` at `claude_auth_test.go:847-887`) — so if wipe fails, the runner is never invoked, which is the correct fail-closed behavior.
+
+5. **FIX 1 — Edge case: empty/whitespace `account.HomePath`.** REFUTED as a FIX 1 defect; routed as upstream concern. If `account.HomePath == ""`, `filepath.Join("", ".credentials.json")` = `".credentials.json"` (relative to cwd) — `os.Remove(".credentials.json")` could either remove a file in the current working directory (security concern) or return `IsNotExist`. This is an upstream path-validation gap, not a regression introduced by FIX 1. Recommend deferring to a future hardening pass; not a blocker for this round.
+
+6. **FIX 2 — Regex character class correctness.** REFUTED. The class `[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]*` covers:
+   - All RFC 3986 `unreserved`: `A-Za-z0-9` + `-._~` (hyphen at end of class, idiomatic Go regex).
+   - All `gen-delims`: `:/?#[]@`.
+   - All `sub-delims`: `!$&'()*+,;=`.
+   - `%` for percent-encoding.
+   The class deliberately excludes whitespace and ESC (`\x1b`) so ANSI sequences appended by claude's TUI styling do not pollute the URL. **No counterexample found.** `TestLineScannerStripsANSIFromOAuthURL` (`claude_auth_test.go:893-916`) pins the ANSI-strip behavior with the input `cleanURL + "\x1b[0m\n"`. Test passes; the `\x1b` byte is outside the class so the regex correctly terminates the match at the first invalid char.
+
+7. **FIX 2 — Regex ReDoS / catastrophic backtracking.** REFUTED. Go's `regexp` package uses RE2 (linear-time, no backtracking). A `[…]*` class can never produce catastrophic backtracking. EXHAUSTED.
+
+8. **FIX 3 — Race condition under concurrent stdout+stderr writes.** REFUTED. Two separate `lineScanner` instances each own their own `buf` / `urlBuf` (no shared mutable state between scanners). The shared closure mutates only `sync.Once` (goroutine-safe by definition) and calls `opener.Open` (assumed goroutine-safe). `mage testPkg ./internal/cli` ran with `-race` and passed cleanly (170/170 tests, race-clean).
+
+9. **mage gate.** All evidence-gathering used `mage testPkg ./internal/cli` — no raw `go test` invocations. Result: 170 tests pass, 72.7% coverage, race-clean. The green test suite does NOT exercise BLOCK 1 because the existing line-wrap test bypasses the production `sync.Once` wrapper.
+
+### Routing
+
+- **BLOCK 1 → builder for Unit 7.11 R3.** The production `sync.Once` + lineScanner `onMatch` interaction defeats the line-wrap fix. Builder must restructure the open-exactly-once guard to fire on the LONGEST match, not the FIRST. Suggested remediation (d) above is the cleanest IMO; let the builder pick.
+- **CONCERN 2 → builder for R3 OR triage with dev.** 4 KiB buffer cap + long preamble + line-wrap interaction. Likely fine in practice but worth empirical validation against the dogfood log before deciding.
+- **CONCERN 3 → builder for R3.** Add a `TestLineScannerWithSyncOnceLatchesLongest`-style regression test that mirrors production wiring so the fix can't silently regress.
+- **FIX 1 + FIX 2 → PASS.** No remediation needed.
+
+### Unknowns
+
+- **U1 — Empirical claude-CLI wrap behavior.** Confirming the bug as user-observable requires reproducing in a narrow TTY (terminal width < URL length). The PLAN.md "Path B in-container auth WORKS end-to-end" note suggests the dev's terminal is wide enough that wrapping doesn't trigger. A narrow-pty dogfood pass would harden the evidence — but the code-level counterexample is independent of empirical verification.
+- **U2 — Whether the partial URL `?code=foo` (or its real equivalent) opens a valid-looking but broken claude.com page**, or whether claude.com returns a friendly error. UX impact gradient TBD; the correctness gap is independent of UX gradient.
+
+### Hylla Feedback
+
+N/A — Hylla snapshot remains stale for Unit 7.11 R2's `claude_auth.go` changes (no reingest since Unit 7.5). All direct content reads went through `Read` and `git show` per mid-drop evidence protocol. Stdlib `sync.Once` semantics verified via Context7 `/golang/go`. No Hylla query attempted for this round; no misses to record.
+
+---

@@ -1033,3 +1033,73 @@ N/A — task touched two files (`internal/cli/claude_auth.go`, `internal/cli/cla
 
 ---
 
+## Unit 7.11 — Round 2
+
+**Date:** 2026-05-16
+**Reviewer:** go-qa-proof-agent
+**Commit reviewed:** `660d538` — fix(cli): unit 7.11 r2 wipe-before-login + ansi-safe url + line-wrap buffering
+**Verdict:** pass
+
+### Three R2 fixes verified
+
+**FIX 1 — wipe before login (BLOCK 1):**
+- Code at `internal/cli/claude_auth.go:387-411` — `loginClaudeAccount` calls `wipeClaudeCredentials(account.HomePath)` as its first statement before `writeCLINotice` and `runner.RunInContainer`.
+- `wipeClaudeCredentials` (`:415-421`) removes `.credentials.json` if present; missing-file is not an error.
+- `ensureClaudeAccountReady` (`:338-376`) intentionally NOT modified — it retains its "creds exist → return nil" early-return (correct: `ensure` does not force re-auth; only `login` does).
+
+**FIX 2 — ANSI-safe URL regex (CONCERN 2):**
+- Code at `internal/cli/claude_auth.go:31-33` — character class changed from `\S*` to `[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]*`.
+- The class is RFC 3986 unreserved + reserved + percent-encoding. ESC byte `\x1b` (0x1b) is NOT in this class. Regex match terminates at the first ANSI byte, producing a clean URL.
+
+**FIX 3 — multi-line URL accumulation (CONCERN 3, option a):**
+- Code at `internal/cli/claude_auth.go:113-118` adds `urlBuf strings.Builder` field.
+- `stripURLWhitespace` helper (`:128-133`) drops `\n`/`\r`/` `/`\t` via `strings.Map`.
+- Write loop (`:139-168`): per-line, accumulate into `urlBuf` (capped at `urlBufferCap = 4096` bytes; reset when cap exceeded), then run regex on `strings.Map(stripURLWhitespace, urlBuf.String())`. Whitespace strip rejoins terminal line-wrap splits. **Note**: the per-line scan was removed entirely; all URL detection routes through the buffer-scan path. Worklog accurately documents this.
+
+### Acceptance criteria verification
+
+| # | Criterion | Evidence | Result |
+|---|---|---|---|
+| AC1-R2 | `loginClaudeAccount` wipes `.credentials.json` before invoking the runner | `claude_auth.go:387-391` (wipe is first statement) + `TestLoginClaudeAccountWipesExistingCredsBeforeRunning` (`claude_auth_test.go:847-887`) checks `fileExistedAtRunTime=false` from inside `stubRunFunc` — proves ordering, not just both-ran | pass |
+| AC2-R2 | ANSI escape sequences do not corrupt URL passed to `urlOpener.Open` | Regex at `claude_auth.go:31-33` excludes `\x1b` from class + `TestLineScannerStripsANSIFromOAuthURL` (`claude_auth_test.go:893-916`) writes `URL + "\x1b[0m\n"` and asserts `!strings.Contains(opened[0], "\x1b")` | pass |
+| AC3-R2 | URL detection survives terminal line-wrap (option a buffering) | `urlBuf` + `stripURLWhitespace` at `claude_auth.go:113-167` + `TestLineScannerDetectsURLAcrossMultipleLines` (`claude_auth_test.go:924-962`) splits URL across `part1`/`part2` and asserts full joined URL appears in `allMatches` | pass |
+| AC4-R2 | `mage testPkg github.com/evanmschultz/valv/internal/cli` green, coverage ≥70% | Reviewer ran `mage testPkg github.com/evanmschultz/valv/internal/cli`: `tests: 170 passed: 170 failed: 0`, `github.com/evanmschultz/valv/internal/cli 72.7%` (mage gate is 60%, AGENTS.md target 70% — comfortably above both) | pass |
+| AC5-R2 | `mage test` green full suite | Reviewer ran `mage test`: `tests: 444 passed: 444 failed: 0` across 20 packages; all packages ≥60% | pass |
+
+### Non-vacuous test verification
+
+- **AC1-R2 test** — under R1 code (no wipe in `loginClaudeAccount`), the stale `.credentials.json` would still exist when `stubRunFunc` fires `os.Stat` → `fileExistedAtRunTime=true` → `t.Fatal` triggers. Under R2, wipe removes the file first → `fileExistedAtRunTime=false` → passes. Test distinguishes R1 from R2.
+- **AC2-R2 test** — under R1 regex `\S*`, neither `\x1b` nor `[0m` are whitespace, so they would be captured. `strings.Contains(opened[0], "\x1b") = true` → `t.Fatal`. Under R2 character class, `\x1b` not in class → match terminates at `?code=foo` → assertion passes. Test distinguishes R1 from R2.
+- **AC3-R2 test** — under R1 (no `urlBuf`, per-line scan only), `part2` = `"bar&baz=qux\n"` has no `https://` prefix → no match. Full joined URL would never appear in `allMatches` → `t.Fatal`. Under R2 buffer-scan, joined accumulation matches the full URL. Test distinguishes R1 from R2.
+
+### Idiomatic Go + spec-conformance checks
+
+- **Doc comments**: `urlBufferCap` (`:89-93`), `lineScanner` (`:95-112`), `stripURLWhitespace` (`:124-127`), `Write` (`:135-138`), `oauthURLRegex` (`:25-30`), `loginClaudeAccount` (`:378-386`), `wipeClaudeCredentials` (`:413-414`) — all present, each starting with the identifier name. ✓
+- **Error wrapping**: new `wipeClaudeCredentials` call in `loginClaudeAccount` returns the wipe error unmodified (`:388-390`). `wipeClaudeCredentials` itself wraps with `fmt.Errorf("remove %q: %w", credPath, err)` (`:417-418`). ✓
+- **Concurrency**: no new goroutines. `lineScanner.Write` operates on a single Write context; `urlBuf` is not shared across goroutines. Existing `WaitForCreds` goroutine in `RunInContainer` (`:276-294`) untouched and still context-cancellable. ✓
+- **Race**: `mage testPkg` ran with `-race` (per magefile) — no data race reported.
+- **Mage discipline**: reviewer used `mage testPkg github.com/evanmschultz/valv/internal/cli` and `mage test` — no raw `go test`/`go build`/`go vet`. ✓
+- **Spec-conformance with PLAN.md R2 fixes**: all three FIXes match the R2 unit specification (BLOCK 1 stale-creds → premature stop; CONCERN 2 ANSI; CONCERN 3 line-wrap).
+
+### Worklog-to-code consistency
+
+- Worklog claims `internal/cli/claude_auth.go` and `internal/cli/claude_auth_test.go` modified — confirmed via `git show 660d538 --stat`. ✓
+- Worklog claims 3 new tests with exact names — all three present at `claude_auth_test.go:847`, `:893`, `:924`. ✓
+- Worklog claims per-line scan was REMOVED — confirmed by reading lines `139-168`: only buffer-scan remains. ✓
+- Worklog notes the test allows multiple matches (per-line + full-join); reviewer notes that since per-line was removed, in practice typically one match per line-group fires. Both are consistent.
+- AC4-R2 row in worklog says "coverage ≥70%" — the mage gate is 60% with TODO to restore to 70% (`magefile.go:23-24`); measured 72.7% satisfies both. Not a finding.
+
+### Observations (non-blocking)
+
+- **Greedy regex across multiple URLs in one accumulated buffer**: with the new character class `[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]*`, if two OAuth URLs appear in `urlBuf` (e.g., URL1 then URL2 both stripped of whitespace), the regex greedy match would consume both as one mega-URL (every byte of URL2 is in the class). This affects `TestLineScannerOnceGuardFiresOnce` (line 630): the second `onMatch` call gets a concatenated URL string, not the second URL alone. The test only checks `callCount`, not URL value, so it passes. In production, `sync.Once` in `RunInContainer` (`:235-240`) guarantees only the FIRST match opens the browser, and that first match is clean. Non-blocking, but worth noting in case of future test additions that assert URL values across multiple URLs.
+- **urlBuf never resets after a successful match**: every subsequent line accumulates onto an already-found URL forever. In practice the cap (4096 bytes) eventually rotates. Not a finding because `sync.Once` ensures only the first detection matters in production.
+
+### Hylla Feedback
+
+- **Query**: `hylla_search_keyword query="stubURLOpener writeCredsToDir" artifact_ref=github.com/evanmschultz/valv@main test_mode=include_tests`
+- **Missed because**: `claude_auth_test.go` was modified in commit `4d85307` (Unit 7.11 R1) and again in `660d538` (R2), both AFTER the last Hylla ingest (snapshot 12). The `stubURLOpener` helper was added in 7.11 R1 and is not yet ingested. The `writeCredsToDir` helper, present in an earlier commit, DID return cleanly from Hylla.
+- **Worked via**: `Read` of `claude_auth_test.go` at offset 400 — located `stubURLOpener` definition at line 481.
+- **Suggestion**: This is the expected mid-drop pattern documented in CLAUDE.md § "Hylla Baseline" — Hylla is stale for files changed since last ingest. No Hylla improvement needed; the fallback is correct.
+
+---
+
