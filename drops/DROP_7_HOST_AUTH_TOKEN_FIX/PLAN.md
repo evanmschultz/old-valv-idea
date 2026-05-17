@@ -565,7 +565,7 @@ R1 QA proof PASS + R1 QA falsification PASS with one CONFIRMED counterexample (A
 
 ### Unit 7.11 — Auth UX polish: host browser auto-open + clean exit on creds-write
 
-**state:** R1 done; R2 required (see "Round 2 scope" appended below)
+**state:** done
 **blocked_by:** 7.5 R2 (done) — depends on the `RunInContainer` orchestration code
 **paths:** `internal/cli/claude_auth.go`, `internal/cli/claude_auth_test.go`, possibly a small new helper file in `internal/cli/` (planner's choice)
 **packages:** `internal/cli`
@@ -827,17 +827,19 @@ Builder picks option (a) unless real claude output trips a corner case the test 
 
 **Test:** new `TestLineScannerStripsANSIFromOAuthURL` — feed `"https://claude.com/cai/oauth/authorize?code=foo\x1b[0m\n"` to the lineScanner; assert `urlOpener.Open` was called with a URL that does NOT contain `\x1b`.
 
-**FIX 3 — CONCERN 3 (dev decision pending): OAuth URL split by terminal line-wrap.**
+**FIX 3 — CONCERN 3 (dev-locked 2026-05-16 to option a): OAuth URL split by terminal line-wrap.**
 
 Long OAuth URLs wrapped at terminal width are split by `\n` mid-URL. R1 regex matches only the prefix → broken URL → `sync.Once` latches → broken `open` call. Same class of bug as the Anthropic `Unknown scope` line-wrap issue we already hit.
 
-**Two options for builder to discuss with dev FIRST:**
-- **Option a (handle it):** buffer multiple lines in `lineScanner`; on every newline-terminated chunk, also try matching the regex across the accumulated buffer with whitespace stripped. ~30 LOC. Adds buffered-state to the scanner.
-- **Option b (defer):** add a TODO comment + worklog NOTE; smoke-test will tell whether it actually fires in production. If claude 2.1.143 emits the URL on a wide-enough buffer that terminal wrap never hits it, this is theoretical and can defer to DROP_11 cleanup.
+**Locked approach (option a — full buffering + test):** buffer multiple lines in `lineScanner`; on every newline-terminated chunk, also try matching the regex across the accumulated buffer with whitespace stripped. ~30 LOC. Adds buffered-state to the scanner.
 
-**Dev triage required** before builder picks. Orchestrator routes the decision when builder spawns.
+**Implementation notes:**
+- Maintain a `urlBuffer strings.Builder` field on `lineScanner` (or equivalent), populated on every `Write`.
+- After each `\n`-terminated emission, run the tightened FIX-2 regex against `strings.Map(stripWhitespace, urlBuffer.String())` to detect a URL that crossed a line boundary.
+- On match → `sync.Once.Do(urlOpener.Open(joined))` as before. Whitespace stripping is the join operation (terminal wrap inserts `\n` but no other URL-breaking characters mid-URL).
+- Cap buffer growth at a reasonable bound (e.g. 4 KiB) and discard once a non-URL line has been seen long enough — keeps memory bounded if claude never prints an OAuth URL.
 
-**Test (if option a chosen):** new `TestLineScannerDetectsURLAcrossMultipleLines` — feed `"https://claude.com/cai/oauth/authorize?code=foo\nbar&baz=qux\n"` across two `Write` calls; assert `urlOpener.Open` was called with the full joined URL.
+**Test:** new `TestLineScannerDetectsURLAcrossMultipleLines` — feed `"https://claude.com/cai/oauth/authorize?code=foo\nbar&baz=qux\n"` across two `Write` calls; assert `urlOpener.Open` was called with the full joined URL.
 
 **Optional addition from QA falsification N12:** add an AC requiring the dev-smoke-test confirmation as a pre-Phase-7 gate, encoded in DROP_7 PLAN.md. Captured here as: AC4-extra. Builder may add it inline if light; otherwise it's an orchestrator-managed Phase-6 → Phase-7 gate.
 
@@ -845,7 +847,7 @@ Long OAuth URLs wrapped at terminal width are split by `\n` mid-URL. R1 regex ma
 
 - AC1-R2: `loginClaudeAccount` wipes `.credentials.json` before invoking the runner. Verified by test.
 - AC2-R2: ANSI escape sequences in the OAuth URL stream do not corrupt the URL passed to `urlOpener.Open`. Verified by test.
-- AC3-R2 (conditional on option a): URL detection survives terminal line-wrap. Verified by test.
+- AC3-R2: URL detection survives terminal line-wrap (option a buffering). Verified by `TestLineScannerDetectsURLAcrossMultipleLines`.
 - AC4-R2: `mage testPkg ./internal/cli` GREEN, coverage ≥70%.
 - AC5-R2: `mage test` GREEN full suite (assumes no return of pre-existing tmpfs flake; if it returns, environmental).
 - AC6-R2 (orchestrator-managed): dev smoke test on `valv account add claude hylla` shows browser auto-opens AND `valv claude` launches without re-auth — encoded as gate for DROP_7 Phase-7 close.

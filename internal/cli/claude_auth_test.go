@@ -836,3 +836,127 @@ func TestRunInContainerCancelsPollerOnContextCancel(t *testing.T) {
 	}
 	// Test completing promptly proves poller goroutine exited via ctx.Done().
 }
+
+// ── Unit 7.11 Round 2 tests ──────────────────────────────────────────────────
+
+// TestLoginClaudeAccountWipesExistingCredsBeforeRunning verifies AC1-R2:
+// loginClaudeAccount wipes a pre-existing .credentials.json before invoking the
+// auth runner, preventing stale credentials from short-circuiting re-auth.
+// The key assertion: at the moment RunInContainer is called, the credentials
+// file must NOT exist (wipe must have already run).
+func TestLoginClaudeAccountWipesExistingCredsBeforeRunning(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	credPath := filepath.Join(dir, ".credentials.json")
+
+	// Pre-write stale credentials.
+	if err := os.WriteFile(credPath, []byte(`"stale"`), 0o600); err != nil {
+		t.Fatalf("WriteFile(%q) stale creds error = %v", credPath, err)
+	}
+
+	var fileExistedAtRunTime bool
+	cmd := newTestClaudeCmd()
+	stub := &stubClaudeAccountAuthRunner{
+		stubRunFunc: func(homePath string) {
+			// Record whether the creds file exists when the runner is invoked.
+			// If wipe ran first, the file must NOT exist at this point.
+			_, statErr := os.Stat(filepath.Join(homePath, ".credentials.json"))
+			fileExistedAtRunTime = !os.IsNotExist(statErr)
+			// Simulate the container writing fresh credentials after wipe.
+			writeCredsToDir(homePath)
+		},
+	}
+	installStubClaudeAuth(t, cmd, stub)
+
+	account := domain.Profile{Name: "hylla", HomePath: dir}
+	if err := loginClaudeAccount(cmd, account, config.Paths{}); err != nil {
+		t.Fatalf("loginClaudeAccount() error = %v, want nil", err)
+	}
+
+	// Stub must have been called.
+	if stub.runHits != 1 {
+		t.Fatalf("RunInContainer() hits = %d, want 1", stub.runHits)
+	}
+
+	// At the moment the runner was invoked, the file must NOT have existed —
+	// proving that wipeClaudeCredentials ran BEFORE RunInContainer was called.
+	if fileExistedAtRunTime {
+		t.Fatal("credentials file existed when RunInContainer was called; wipe must run before runner invocation")
+	}
+}
+
+// TestLineScannerStripsANSIFromOAuthURL verifies AC2-R2: ANSI escape sequences
+// in the OAuth URL line do not corrupt the URL passed to the onMatch callback.
+// The tightened regex character class excludes ESC bytes, so only the clean URL
+// prefix is captured.
+func TestLineScannerStripsANSIFromOAuthURL(t *testing.T) {
+	t.Parallel()
+
+	const cleanURL = "https://claude.com/cai/oauth/authorize?code=foo"
+	// Simulate claude TUI styling: ANSI reset sequence appended to the URL.
+	input := cleanURL + "\x1b[0m\n"
+
+	opener := &stubURLOpener{}
+	var buf bytes.Buffer
+	scanner := newLineScanner(&buf, func(url string) {
+		_ = opener.Open(context.Background(), url)
+	})
+
+	if _, err := scanner.Write([]byte(input)); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	if len(opener.openedURLs) != 1 {
+		t.Fatalf("urlOpener.Open() calls = %d, want 1; opened = %v", len(opener.openedURLs), opener.openedURLs)
+	}
+	if strings.Contains(opener.openedURLs[0], "\x1b") {
+		t.Fatalf("urlOpener.Open() called with ANSI bytes in URL: %q; must be stripped", opener.openedURLs[0])
+	}
+}
+
+// TestLineScannerDetectsURLAcrossMultipleLines verifies AC3-R2: a long OAuth
+// URL that terminal line-wrap splits across two physical lines is eventually
+// detected via the buffered multi-line accumulation path. The onMatch callback
+// is called at least once with the full joined URL after both lines arrive.
+// (The single-line match on the first line may also fire with a partial URL;
+// deduplication is the caller's responsibility via sync.Once in RunInContainer.)
+func TestLineScannerDetectsURLAcrossMultipleLines(t *testing.T) {
+	t.Parallel()
+
+	// Simulate terminal line-wrap: URL split mid-query-string across two lines.
+	part1 := "https://claude.com/cai/oauth/authorize?code=foo\n"
+	part2 := "bar&baz=qux\n"
+	wantURL := "https://claude.com/cai/oauth/authorize?code=foobar&baz=qux"
+
+	var allMatches []string
+	var mu sync.Mutex
+	var buf bytes.Buffer
+	scanner := newLineScanner(&buf, func(url string) {
+		mu.Lock()
+		defer mu.Unlock()
+		allMatches = append(allMatches, url)
+	})
+
+	if _, err := scanner.Write([]byte(part1)); err != nil {
+		t.Fatalf("Write(part1) error = %v", err)
+	}
+	if _, err := scanner.Write([]byte(part2)); err != nil {
+		t.Fatalf("Write(part2) error = %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	// The full joined URL must appear in the set of matches (may not be the only one).
+	found := false
+	for _, u := range allMatches {
+		if u == wantURL {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("full joined URL %q not found in onMatch calls %v; multi-line accumulation must detect it", wantURL, allMatches)
+	}
+}

@@ -23,11 +23,13 @@ import (
 )
 
 // oauthURLRegex matches the OAuth authorization URLs emitted by the Claude CLI
-// on both the subscription path and the Console path. \S* captures the rest of
-// the non-whitespace URL token (query params, fragments) without consuming
-// newlines or trailing whitespace.
+// on both the subscription path and the Console path. The character class is
+// restricted to URL-valid characters only (RFC 3986 + percent-encoding), so
+// ANSI escape sequences (\x1b[…m) that claude's TUI may append to the URL line
+// are never captured. This prevents corrupted URLs from being passed to the
+// browser opener when the terminal styles the URL line.
 var oauthURLRegex = regexp.MustCompile(
-	`https://(?:claude\.com/cai|platform\.claude\.com)/oauth/authorize\S*`,
+	`https://(?:claude\.com/cai|platform\.claude\.com)/oauth/authorize[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]*`,
 )
 
 // authContainerExecutor is the local interface over docker.Executor.Run so that
@@ -84,17 +86,34 @@ func (defaultCredsWatcher) WaitForCreds(ctx context.Context, path string) error 
 	}
 }
 
-// lineScanner is a scanning io.Writer that buffers incoming bytes and invokes
-// onMatch for each complete line that matches oauthURLRegex. All bytes are also
-// forwarded to the inner writer unchanged.
+// urlBufferCap is the maximum byte capacity of lineScanner.urlBuf. Once the
+// accumulated URL buffer exceeds this limit it is cleared. OAuth URLs are
+// typically well under 1 KiB; 4 KiB gives ample headroom for any realistic
+// terminal line-wrap scenario while keeping memory bounded.
+const urlBufferCap = 4096
+
+// lineScanner is a scanning io.Writer that buffers incoming bytes, forwards
+// them to an inner writer, and detects OAuth URL patterns across both single
+// and multi-line output.
 //
-// Buffer semantics: bytes accumulate until a '\n' is encountered; each complete
-// line is forwarded and scanned atomically. A trailing partial line (no '\n'
-// yet) is forwarded on the next Write that completes it, so the user's terminal
-// always receives all bytes in order.
+// Single-line detection: on each newline-terminated line, scan the accumulated
+// URL buffer (with whitespace stripped) for oauthURLRegex. URLs that fit on
+// one line are detected on their terminating newline.
+//
+// Multi-line detection (terminal line-wrap): long OAuth URLs printed by the
+// Claude CLI may wrap at the terminal width, inserting a physical '\n'
+// mid-URL. The urlBuf accumulates all content; stripping whitespace before
+// matching rejoins the wrapped segments. The buffer is capped at urlBufferCap
+// to keep memory bounded.
+//
+// Buffer semantics: bytes accumulate in buf until a '\n' is encountered; each
+// complete line is forwarded to the inner writer and appended to urlBuf. A
+// trailing partial line (no '\n' yet) is forwarded on the next Write that
+// completes it, so the user's terminal always receives all bytes in order.
 type lineScanner struct {
 	inner   io.Writer
 	buf     []byte
+	urlBuf  strings.Builder
 	onMatch func(string)
 }
 
@@ -102,9 +121,21 @@ func newLineScanner(inner io.Writer, onMatch func(string)) *lineScanner {
 	return &lineScanner{inner: inner, onMatch: onMatch}
 }
 
-// Write appends p to the buffer, processes complete lines (splitting on '\n'),
-// forwards them to the inner writer, and calls onMatch for any line that
-// matches oauthURLRegex.
+// stripURLWhitespace is used with strings.Map to remove all whitespace
+// characters from the accumulated URL buffer before regex matching. Terminal
+// line-wrap inserts '\n' (and sometimes '\r') mid-URL; stripping these
+// characters rejoins the wrapped URL segments without altering other characters.
+func stripURLWhitespace(r rune) rune {
+	if r == '\n' || r == '\r' || r == ' ' || r == '\t' {
+		return -1 // drop
+	}
+	return r
+}
+
+// Write appends p to the line buffer, processes complete lines (splitting on
+// '\n'), forwards them to the inner writer, appends each line to the URL
+// accumulation buffer, and calls onMatch if a URL is found in the stripped
+// accumulated buffer.
 func (s *lineScanner) Write(p []byte) (int, error) {
 	s.buf = append(s.buf, p...)
 	for {
@@ -118,7 +149,18 @@ func (s *lineScanner) Write(p []byte) (int, error) {
 		if _, err := s.inner.Write(line); err != nil {
 			return 0, err
 		}
-		if m := oauthURLRegex.FindString(string(line)); m != "" {
+		// Accumulate into the URL buffer (bounded by urlBufferCap).
+		lineStr := string(line)
+		if s.urlBuf.Len()+len(lineStr) > urlBufferCap {
+			// Cap exceeded: discard accumulated content and start fresh with this
+			// line, keeping the most recent content for cross-line matching.
+			s.urlBuf.Reset()
+		}
+		s.urlBuf.WriteString(lineStr)
+		// Try matching the regex on the whitespace-stripped accumulation.
+		// Whitespace stripping rejoins URLs that terminal line-wrap split with '\n'.
+		stripped := strings.Map(stripURLWhitespace, s.urlBuf.String())
+		if m := oauthURLRegex.FindString(stripped); m != "" {
 			s.onMatch(m)
 		}
 	}
@@ -337,10 +379,15 @@ func ensureClaudeAccountReady(cmd *cobra.Command, account domain.Profile, option
 // non-TTY guard. Used by loginManagedAccount for explicit re-login.
 //
 // Step order:
-//  1. writeCLINotice to announce login.
-//  2. RunInContainer → if error → return.
-//  3. ReadAccountIdentity → if not LoggedIn → return error.
+//  1. wipeClaudeCredentials to force fresh auth (prevents stale creds from
+//     short-circuiting the creds-watcher's first tick).
+//  2. writeCLINotice to announce login.
+//  3. RunInContainer → if error → return.
+//  4. ReadAccountIdentity → if not LoggedIn → return error.
 func loginClaudeAccount(cmd *cobra.Command, account domain.Profile, _ config.Paths) error {
+	if err := wipeClaudeCredentials(account.HomePath); err != nil {
+		return err
+	}
 	if err := writeCLINotice(
 		cmd.ErrOrStderr(),
 		laslig.NoticeInfoLevel,

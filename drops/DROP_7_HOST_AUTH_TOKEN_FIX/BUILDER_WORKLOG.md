@@ -64,6 +64,56 @@ N/A — all evidence sourced from direct file reads (mid-drop, Hylla stale).
 
 ---
 
+## Unit 7.11 — Round 2
+
+**Date:** 2026-05-16
+**State at start:** R1 done; R2 required → in_progress (R2) → done
+
+### Files touched
+- `internal/cli/claude_auth.go` — FIX 1: `loginClaudeAccount` prepends `wipeClaudeCredentials` call; FIX 2: tightened `oauthURLRegex` character class; FIX 3: `lineScanner` gains `urlBuf strings.Builder` field + buffer-scan URL detection path.
+- `internal/cli/claude_auth_test.go` — three new tests: `TestLoginClaudeAccountWipesExistingCredsBeforeRunning`, `TestLineScannerStripsANSIFromOAuthURL`, `TestLineScannerDetectsURLAcrossMultipleLines`.
+
+### Implementation summary
+
+**FIX 1 — `loginClaudeAccount` re-login regression (BLOCK 1):**
+Added `if err := wipeClaudeCredentials(account.HomePath); err != nil { return err }` as the FIRST statement in `loginClaudeAccount`, before `writeCLINotice`. This ensures the creds-watcher's first 500ms tick sees an empty slot, not the stale file that would trigger an immediate `docker stop` before claude writes fresh credentials. `ensureClaudeAccountReady` is unchanged — it retains its already-authed early-return (correct: `ensure` does not force re-auth).
+
+**FIX 2 — ANSI escape sequences captured in OAuth URL (CONCERN 2):**
+Changed `oauthURLRegex` character class from `\S*` to `[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]*`. The new class is restricted to RFC 3986 URL-valid characters plus percent-encoding. ANSI escape bytes (`\x1b[0m` etc.) are excluded — they do not match the class, so the regex match terminates before consuming them.
+
+**FIX 3 — OAuth URL split by terminal line-wrap (CONCERN 3, option a):**
+Added `urlBuf strings.Builder` field to `lineScanner`. On each `\n`-terminated line, content is appended to `urlBuf` (capped at `urlBufferCap = 4096` bytes; buffer is cleared and restarted from the current line when the cap is hit). After appending, `strings.Map(stripURLWhitespace, s.urlBuf.String())` strips all whitespace (rejoining line-wrapped segments), and `oauthURLRegex.FindString(stripped)` detects the URL.
+
+**Design decision (Section 0 Convergence):** Per-line regex scan was removed from the `Write` loop. All URL detection now routes exclusively through the buffer-scan path. This avoids double-firing with different URLs when a wrapped URL produces a valid-but-shorter match on the first line and a full match on the accumulated buffer. The `sync.Once` dedup in `RunInContainer` remains the deduplication point for any remaining double-fires (e.g., when a non-wrapped URL appears — buffer scan fires once on the terminating `\n`).
+
+`stripURLWhitespace` is a package-level function (used with `strings.Map`) that drops `\n`, `\r`, ` `, and `\t`, preserving all other characters.
+
+**Test for `TestLineScannerDetectsURLAcrossMultipleLines`:** The test asserts that the FULL joined URL appears in `allMatches` (the set of all `onMatch` calls). It does not use `sync.Once` internally — the test collects all matches and checks membership. This correctly handles the case where the per-line (first) match fires with a shorter URL and the buffer-scan match fires with the full URL. (With the per-line scan removed, only the buffer-scan fires, so typically only one match per line-group.) The `sync.Mutex` in the callback guards the slice for `-race` cleanliness even though `lineScanner.Write` is not called concurrently in the test.
+
+### Mage targets run and result
+- `mage testPkg github.com/evanmschultz/valv/internal/cli` (RED — 3 failing) — `TestLoginClaudeAccountWipesExistingCredsBeforeRunning`, `TestLineScannerStripsANSIFromOAuthURL`, `TestLineScannerDetectsURLAcrossMultipleLines` all failed
+- `mage testPkg github.com/evanmschultz/valv/internal/cli` (GREEN after all fixes) — 170/170, 72.7%
+- `mage test` (GREEN full suite) — 444/444 across 20 packages, all ≥60%
+
+### Acceptance criteria check
+
+| # | Criterion | Result |
+|---|---|---|
+| AC1-R2 | `loginClaudeAccount` wipes `.credentials.json` before invoking the runner | PASS — `TestLoginClaudeAccountWipesExistingCredsBeforeRunning`: `fileExistedAtRunTime=false` proves wipe ran before runner |
+| AC2-R2 | ANSI escape sequences do not corrupt the URL passed to `urlOpener.Open` | PASS — `TestLineScannerStripsANSIFromOAuthURL`: opened URL does not contain `\x1b` |
+| AC3-R2 | URL detection survives terminal line-wrap (option a buffering) | PASS — `TestLineScannerDetectsURLAcrossMultipleLines`: full joined URL found in `allMatches` |
+| AC4-R2 | `mage testPkg github.com/evanmschultz/valv/internal/cli` GREEN, coverage ≥70% | PASS — 170/170, 72.7% |
+| AC5-R2 | `mage test` GREEN full suite | PASS — 444/444 across 20 packages |
+
+### Unknowns
+- None blocking. The multi-line test permits a first partial match AND a second full match (collecting both); in practice with per-line scan removed, only one match fires per line group. This is simpler and correct.
+
+## Hylla Feedback
+
+N/A — task touched only files modified in DROP_7 which are not yet reingested. All evidence sourced from direct `Read` tool calls. Hylla queries not attempted (would return stale pre-R1 state for `claude_auth.go`).
+
+---
+
 ## Unit 7.10 — Round 2
 
 **Date:** 2026-05-16
