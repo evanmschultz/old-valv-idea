@@ -563,13 +563,13 @@ R1 QA proof PASS + R1 QA falsification PASS with one CONFIRMED counterexample (A
 
 ---
 
-### Unit 7.11 — Auth UX polish: host browser auto-open + clean exit on creds-write
+### Unit 7.11 — Auth UX (R1+R2 auto-open machinery, R3 strip — dev correction 2026-05-16)
 
-**state:** done
+**state:** R2 done; R3 required (strip auto-open machinery per dev correction 2026-05-16 — manual `c`-key OSC-52 copy + Ctrl-C × 2 exit IS the canonical UX, not a workaround)
 **blocked_by:** 7.5 R2 (done) — depends on the `RunInContainer` orchestration code
-**paths:** `internal/cli/claude_auth.go`, `internal/cli/claude_auth_test.go`, possibly a small new helper file in `internal/cli/` (planner's choice)
+**paths:** `internal/cli/claude_auth.go`, `internal/cli/claude_auth_test.go`, `main/README.md` (R3 adds Claude OAuth section)
 **packages:** `internal/cli`
-**Round 5 scope addition (added 2026-05-16):** UX polish identified during dogfood smoke test. Auth flow works end-to-end; two ergonomic gaps remain.
+**Round 5 scope addition (added 2026-05-16):** UX polish identified during dogfood smoke test. Auth flow works end-to-end; two ergonomic gaps remain. **R1+R2 built auto-open + auto-exit machinery; R3 strips it per dev correction.**
 
 **Orchestrator-locked scope (planner decomposes):**
 
@@ -858,16 +858,97 @@ Long OAuth URLs wrapped at terminal width are split by `\n` mid-URL. R1 regex ma
 
 ---
 
-### Ctrl-C UX interim guidance (until Unit 7.11 R2 lands)
+### Ctrl-C UX (canonical — Unit 7.11 R3 confirms this is the final exit pattern)
 
-Confirmed working pattern from dogfood 2026-05-16: after completing OAuth in browser and pasting code back, claude does NOT auto-exit. Users must press Ctrl-C twice:
+Confirmed working pattern from dogfood 2026-05-16: after completing OAuth in browser and pasting code back, claude does NOT auto-exit. Users press Ctrl-C twice:
 
 1. First Ctrl-C → claude prints `Press Ctrl-C again to exit`.
 2. Second Ctrl-C → claude exits cleanly, container removes (`--rm`).
 
 Three to four total presses sometimes needed if claude's TUI is mid-render. Wait for the `Press Ctrl-C again to exit` line before the second tap.
 
-**Unit 7.11's FIX B obsoletes this guidance** — once it lands, claude's container auto-exits when `.credentials.json` is written. Document this as obsolete in the user-facing docs (when those exist) post-7.11.
+**Per dev correction 2026-05-16, this is the canonical UX** — Unit 7.11 R3 strips the R1+R2 auto-open + auto-exit machinery and documents this pattern in the README. No auto-mation planned to replace it.
+
+---
+
+### Unit 7.11 — Round 3 scope (added 2026-05-16, supersedes R1+R2 auto-open machinery)
+
+**Strategic correction:** dev established 2026-05-16 that the manual `c`-key OSC-52 copy + Ctrl-C × 2 exit IS the canonical UX for Claude OAuth — not a workaround to be replaced by auto-open. R1's URL detection + browser auto-open + creds-watcher SIGTERM + R2's line-wrap buffering all come out. This is a SUBTRACTIVE round: net LOC delta is large-negative.
+
+**Locked scope (six items):**
+
+**1. STRIP from `internal/cli/claude_auth.go`** (~250 LOC):
+
+- `oauthURLRegex` const + doc comment.
+- `urlOpener` interface + `defaultURLOpener` impl + macOS `open` call.
+- `credsWatcher` interface + `defaultCredsWatcher` impl + 500ms ticker.
+- `urlBufferCap` const + `lineScanner` type + `Write` method + `stripURLWhitespace` helper.
+- All in-`RunInContainer` URL-detection + creds-watching scaffolding: derived context + cancel, opener fallback, watcher fallback, lineScanner-wrapped writers, goroutine + `sync.Once` URL guard, `atomic.Bool credDetected`, `sync.WaitGroup`, `docker stop --time 5 <name>` SIGTERM, "Claude auth complete" success notice, `externalCommand` package var.
+- `urlOpener` + `credsWatcher` fields on `systemClaudeAccountAuthRunner`.
+- Unused imports: `os/exec`, `regexp`, `sync`, `sync/atomic`. (`time` stays for container-name nano-suffix.)
+
+**2. SIMPLIFY `RunInContainer` to ~30 LOC:**
+
+- Build `dockeradapter.ContainerRunRequest` (env, mounts, args, TTY, etc.) — same shape as R1+R2 minus the lineScanner-wrapped writers.
+- Construct executor (when nil) via `dockeradapter.NewExecutor(dockeradapter.NewSystemRunner("docker", stdin, stdout, stderr))` — raw writers, no wrapping.
+- `containerExec.Run(ctx, request)`.
+- Return error from Run directly. No success notice. Container exits when user Ctrl-C's or claude itself exits.
+
+**3. KEEP unchanged:**
+
+- `authContainerExecutor` interface.
+- `claudeAuthRunner` interface (one method, same signature).
+- `systemClaudeAccountAuthRunner` (image + executor fields only after strip).
+- `claudeAuthRunnerKey`, `hostClaudeAccountAuth`, `claudeAuthRunnerFromContext`.
+- `ensureClaudeAccountReady` (callers untouched; just calls simpler `RunInContainer`).
+- `loginClaudeAccount` (with R2 FIX 1 wipe — `wipeClaudeCredentials(account.HomePath)` at start preserves force-relogin semantics independent of auto-exit).
+- `wipeClaudeCredentials`.
+
+**4. STRIP from `internal/cli/claude_auth_test.go`** (12 tests + 2 stubs, ~500 LOC):
+
+- `TestLineScannerForwardsAllBytes`, `TestLineScannerDetectsOAuthURL`, `TestLineScannerDetectsURLAcrossTwoWrites`, `TestLineScannerPlatformConsoleURL`, `TestLineScannerOnceGuardFiresOnce`, `TestLineScannerStripsANSIFromOAuthURL`, `TestLineScannerDetectsURLAcrossMultipleLines`.
+- `TestRunInContainerOpensBrowserOnURLDetect`, `TestRunInContainerDoesNotOpenWhenNoURL`, `TestRunInContainerSigtermsOnCredsWrite`, `TestRunInContainerSurvivesContainerExitBeforeCreds`, `TestRunInContainerCancelsPollerOnContextCancel`.
+- `stubURLOpener`, `stubCredsWatcher` types and any helpers (`installFakeURLOpener` etc.) that become unused.
+- Test-file imports that go unused after the strip.
+
+**5. KEEP unchanged** (all 16 surviving tests):
+
+- All 6 `TestEnsureClaudeAccountReady*`.
+- All 4 `TestLoginClaudeAccount*` (including R2's `TestLoginClaudeAccountWipesExistingCredsBeforeRunning`).
+- Both `TestWipeClaudeCredentials*`.
+- `TestLogoutManagedAccountWipesClaudeCredentials`.
+- `TestReadAccountIdentityReturnsLoggedOutWhenNoCreds`.
+- `TestSystemClaudeAccountAuthRunnerUsesClaudeImageRef`.
+- `TestSystemClaudeAccountAuthRunnerPassesThroughTerminalEnv`.
+
+**6. ADD to `main/README.md`** — new section "Claude OAuth" (~10-15 lines):
+
+- When `valv account add claude <name>` runs, the Claude CLI prompts for OAuth in-terminal.
+- Press `c` (Claude TUI's clean-copy keybind) to copy the URL to the clipboard via OSC-52 — bypasses terminal line-wrap whitespace that would otherwise corrupt the URL when mouse-selecting.
+- Paste URL into browser, complete OAuth, paste code back into the terminal.
+- When done, press Ctrl-C twice to exit the container (claude prints `Press Ctrl-C again to exit` between presses).
+- Bind-mounted `.credentials.json` is persisted; subsequent `valv claude` launches read it natively without re-auth.
+
+**Acceptance criteria (R3):**
+
+- AC1-R3: `internal/cli/claude_auth.go` no longer contains `oauthURLRegex`, `urlOpener`, `credsWatcher`, `lineScanner`, `urlBufferCap`, `stripURLWhitespace`, `externalCommand`. Verified by grep.
+- AC2-R3: `RunInContainer` is ≤40 LOC (target ~30). No goroutines. No `sync.Once`. No `atomic.Bool`. No `docker stop` subprocess call. Verified by reading the function.
+- AC3-R3: `internal/cli/claude_auth.go` no longer imports `os/exec`, `regexp`, `sync`, `sync/atomic`. Verified by reading the import block.
+- AC4-R3: `internal/cli/claude_auth_test.go` no longer contains the 12 deleted tests or the 2 deleted stub types. Verified by grep.
+- AC5-R3: `loginClaudeAccount` retains the `wipeClaudeCredentials` first-statement (FIX 1 preserved). Verified by `TestLoginClaudeAccountWipesExistingCredsBeforeRunning` still passing.
+- AC6-R3: `mage testPkg github.com/evanmschultz/valv/internal/cli` GREEN, coverage ≥70%.
+- AC7-R3: `mage test` GREEN full suite.
+- AC8-R3: `main/README.md` contains a "Claude OAuth" or equivalent section documenting the `c`-key copy + Ctrl-C × 2 exit pattern.
+
+**Verification target:** `mage testPkg github.com/evanmschultz/valv/internal/cli` then `mage test`.
+
+**Do NOT:**
+- Re-introduce auto-open in any form.
+- Add cross-platform `open` branching anywhere.
+- Add fsnotify-based watcher.
+- "Polish" the manual workflow with code beyond the README note.
+
+**Rationale memory:** see global feedback memory `feedback_manual_workflow_is_the_decision.md` — when dev signals the manual workflow IS the spec, do not propose code to obviate it.
 
 ---
 
