@@ -565,7 +565,7 @@ R1 QA proof PASS + R1 QA falsification PASS with one CONFIRMED counterexample (A
 
 ### Unit 7.11 — Auth UX polish: host browser auto-open + clean exit on creds-write
 
-**state:** done
+**state:** R1 done; R2 required (see "Round 2 scope" appended below)
 **blocked_by:** 7.5 R2 (done) — depends on the `RunInContainer` orchestration code
 **paths:** `internal/cli/claude_auth.go`, `internal/cli/claude_auth_test.go`, possibly a small new helper file in `internal/cli/` (planner's choice)
 **packages:** `internal/cli`
@@ -801,7 +801,62 @@ After `exec.Run` returns: if `credDetected.Load() == true`, treat the run as a s
 
 ---
 
-### Ctrl-C UX interim guidance (until Unit 7.11 lands)
+### Unit 7.11 — Round 2 scope (added 2026-05-16)
+
+R1 QA falsification returned `fail` with one BLOCK + three CONCERNs. Dev directed pause to do CLI surface audit (now captured as DROP_9). R2 finishes Unit 7.11 — close DROP_7 cannot proceed without it. Builder appends `## Unit 7.11 — Round 2` to BUILDER_WORKLOG.md. Flip `state: R1 done; R2 required` → `in_progress` at R2 start; → `done` at R2 close.
+
+**Three fixes (dev-approved bundle 2026-05-16):**
+
+**FIX 1 — BLOCK 1: `loginClaudeAccount` re-login regression.**
+
+Pre-existing `.credentials.json` causes the new creds-watcher's first 500ms tick to short-circuit the re-auth: `docker stop` fires before claude can write fresh creds, function returns nil + "Claude auth complete" notice, but credentials are STALE. Affects `valv manage account login claude <name>` on already-authed accounts (and post-DROP_9, the renamed equivalent path).
+
+**Fix:** add `if err := wipeClaudeCredentials(account.HomePath); err != nil { return err }` at the start of `loginClaudeAccount` (`claude_auth.go` — currently around the function's existing body start, after `writeCLINotice`). This restores force-fresh semantics. The auth-container then starts with an empty `.credentials.json` slot, watcher correctly waits for the new file. `ensureClaudeAccountReady` already has the already-authed early-return so its semantics are unchanged.
+
+**Test:** new `TestLoginClaudeAccountWipesExistingCredsBeforeRunning` — pre-write `.credentials.json` with `"stale"`, call `loginClaudeAccount` with a stub executor that returns immediately, stub watcher that detects new creds after a brief delay; assert pre-existing creds were wiped (file content is the new write, not `"stale"`).
+
+**FIX 2 — CONCERN 2: ANSI escape sequences captured in OAuth URL.**
+
+R1 regex is `https://(?:claude\.com/cai|platform\.claude\.com)/oauth/authorize\S*`. The `\S*` non-whitespace-greedy match consumes ANSI escape bytes (`\x1b[0m` etc.) when claude's TUI styles the URL line. `urlOpener.Open` then receives a URL with literal ESC bytes; `exec.Command("open", url).Start()` silently fails; `sync.Once` permanently latches.
+
+**Fix (option a — preferred):** tighten the regex character class to URL-valid characters only. New pattern: `https://(?:claude\.com/cai|platform\.claude\.com)/oauth/authorize[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]*`. Same OAuth-URL coverage, no ANSI ingest.
+
+**Fix (option b — fallback if regex change is fragile):** strip ANSI before regex match using a simple `ansiStripper` step in the `lineScanner` pipeline.
+
+Builder picks option (a) unless real claude output trips a corner case the test misses. Document the choice.
+
+**Test:** new `TestLineScannerStripsANSIFromOAuthURL` — feed `"https://claude.com/cai/oauth/authorize?code=foo\x1b[0m\n"` to the lineScanner; assert `urlOpener.Open` was called with a URL that does NOT contain `\x1b`.
+
+**FIX 3 — CONCERN 3 (dev decision pending): OAuth URL split by terminal line-wrap.**
+
+Long OAuth URLs wrapped at terminal width are split by `\n` mid-URL. R1 regex matches only the prefix → broken URL → `sync.Once` latches → broken `open` call. Same class of bug as the Anthropic `Unknown scope` line-wrap issue we already hit.
+
+**Two options for builder to discuss with dev FIRST:**
+- **Option a (handle it):** buffer multiple lines in `lineScanner`; on every newline-terminated chunk, also try matching the regex across the accumulated buffer with whitespace stripped. ~30 LOC. Adds buffered-state to the scanner.
+- **Option b (defer):** add a TODO comment + worklog NOTE; smoke-test will tell whether it actually fires in production. If claude 2.1.143 emits the URL on a wide-enough buffer that terminal wrap never hits it, this is theoretical and can defer to DROP_11 cleanup.
+
+**Dev triage required** before builder picks. Orchestrator routes the decision when builder spawns.
+
+**Test (if option a chosen):** new `TestLineScannerDetectsURLAcrossMultipleLines` — feed `"https://claude.com/cai/oauth/authorize?code=foo\nbar&baz=qux\n"` across two `Write` calls; assert `urlOpener.Open` was called with the full joined URL.
+
+**Optional addition from QA falsification N12:** add an AC requiring the dev-smoke-test confirmation as a pre-Phase-7 gate, encoded in DROP_7 PLAN.md. Captured here as: AC4-extra. Builder may add it inline if light; otherwise it's an orchestrator-managed Phase-6 → Phase-7 gate.
+
+**Acceptance criteria (R2, in addition to R1's preserved ACs):**
+
+- AC1-R2: `loginClaudeAccount` wipes `.credentials.json` before invoking the runner. Verified by test.
+- AC2-R2: ANSI escape sequences in the OAuth URL stream do not corrupt the URL passed to `urlOpener.Open`. Verified by test.
+- AC3-R2 (conditional on option a): URL detection survives terminal line-wrap. Verified by test.
+- AC4-R2: `mage testPkg ./internal/cli` GREEN, coverage ≥70%.
+- AC5-R2: `mage test` GREEN full suite (assumes no return of pre-existing tmpfs flake; if it returns, environmental).
+- AC6-R2 (orchestrator-managed): dev smoke test on `valv account add claude hylla` shows browser auto-opens AND `valv claude` launches without re-auth — encoded as gate for DROP_7 Phase-7 close.
+
+**Verification target:** `mage testPkg github.com/evanmschultz/valv/internal/cli` then `mage test` then dev smoke test.
+
+**YAGNI hardened:** three fixes only (with FIX 3 conditional on dev triage). Do NOT introduce new interfaces, new cross-platform `open` branching (TODO sufficient), or fsnotify-based watcher migration.
+
+---
+
+### Ctrl-C UX interim guidance (until Unit 7.11 R2 lands)
 
 Confirmed working pattern from dogfood 2026-05-16: after completing OAuth in browser and pasting code back, claude does NOT auto-exit. Users must press Ctrl-C twice:
 
