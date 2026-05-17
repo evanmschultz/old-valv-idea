@@ -1103,3 +1103,84 @@ N/A — task touched two files (`internal/cli/claude_auth.go`, `internal/cli/cla
 
 ---
 
+## Unit 7.11 — Round 3
+
+**Date:** 2026-05-16
+**Reviewer:** go-qa-proof-agent
+**Verdict:** pass
+
+**Round scope:** subtractive R3 — strip R1+R2 auto-open machinery (URL detection + browser auto-open + creds-watcher SIGTERM + line-wrap buffering); preserve R2 FIX 1 (wipe-before-`loginClaudeAccount`); add README "Claude OAuth" section documenting the manual `c`-key + Ctrl-C × 2 flow.
+
+**Commit reviewed:** `b1df09a refactor(cli): unit 7.11 r3 strip auto-open machinery`.
+
+### Acceptance criteria verification
+
+| # | Criterion | Evidence | Result |
+|---|---|---|---|
+| AC1-R3 | `claude_auth.go` no longer contains `oauthURLRegex`, `urlOpener`, `credsWatcher`, `lineScanner`, `urlBufferCap`, `stripURLWhitespace`, `externalCommand` | `rg -n "oauthURLRegex\|urlOpener\|credsWatcher\|lineScanner\|urlBufferCap\|stripURLWhitespace\|externalCommand" internal/cli/claude_auth.go` returns **0 matches**. Whole-tree search across `internal/`, `cmd/`, `magefile.go` also returns 0 matches — no orphan references | pass |
+| AC2-R3 | `RunInContainer` ≤40 LOC; no goroutines / `sync.Once` / `atomic.Bool` / `docker stop` subprocess | `claude_auth.go:64-102` spans 39 source lines. `rg -n "go func\|sync\.\|atomic\.\|docker stop" internal/cli/claude_auth.go` returns **0 matches**. The function builds a `dockeradapter.ContainerRunRequest`, optionally constructs an executor when nil, and calls `containerExec.Run(ctx, request)`. No concurrency primitives, no SIGTERM logic | pass |
+| AC3-R3 | `claude_auth.go` no longer imports `os/exec`, `regexp`, `sync`, `sync/atomic` | `rg -n "\"os/exec\"\|\"regexp\"\|\"sync\"\|\"sync/atomic\"" internal/cli/claude_auth.go` returns **0 matches**. Import block (`claude_auth.go:3-19`) is `context`, `fmt`, `io`, `os`, `path/filepath`, `strings`, `time` + 6 module imports (laslig, cobra, 4× internal/valv) | pass |
+| AC4-R3 | `claude_auth_test.go` no longer contains the 12 deleted tests or 2 deleted stubs (`stubURLOpener`, `stubCredsWatcher`) | `rg -n "TestLineScannerForwardsAllBytes\|TestLineScannerDetectsOAuthURL\|TestLineScannerDetectsURLAcrossTwoWrites\|TestLineScannerPlatformConsoleURL\|TestLineScannerOnceGuardFiresOnce\|TestLineScannerStripsANSIFromOAuthURL\|TestLineScannerDetectsURLAcrossMultipleLines\|TestRunInContainerOpensBrowserOnURLDetect\|TestRunInContainerDoesNotOpenWhenNoURL\|TestRunInContainerSigtermsOnCredsWrite\|TestRunInContainerSurvivesContainerExitBeforeCreds\|TestRunInContainerCancelsPollerOnContextCancel\|stubURLOpener\|stubCredsWatcher" internal/cli/claude_auth_test.go` returns **0 matches**. `rg -c "^func Test"` returns **16** — the exact surviving-test list from PLAN.md §5 | pass |
+| AC5-R3 | `loginClaudeAccount` retains `wipeClaudeCredentials` first-statement; `TestLoginClaudeAccountWipesExistingCredsBeforeRunning` passes | `claude_auth.go:172-175` — `loginClaudeAccount` opens with `if err := wipeClaudeCredentials(account.HomePath); err != nil { return err }`. `claude_auth_test.go:473-513` defines `TestLoginClaudeAccountWipesExistingCredsBeforeRunning`, which pre-writes stale creds, intercepts the runner with a callback that records whether the creds file exists at invocation time, and asserts `fileExistedAtRunTime == false`. `mage testPkg` confirms this test in the 158/158 PASS | pass |
+| AC6-R3 | `mage testPkg github.com/evanmschultz/valv/internal/cli` GREEN, coverage ≥70% | Re-ran in this QA session: `tests: 158`, `passed: 158`, `failed: 0`. Coverage `github.com/evanmschultz/valv/internal/cli 72.5%` — exceeds 70% AC threshold | pass |
+| AC7-R3 | `mage test` GREEN full suite | Re-ran in this QA session: `tests: 432`, `passed: 432`, `failed: 0`, across **20 packages**. All packages ≥60% (mage's enforced floor); `internal/cli` 72.5%. All other touched layers green: `internal/services/claude` 81.0%, `internal/adapters/providers/claude` 78.4% | pass |
+| AC8-R3 | `README.md` "Claude OAuth" section documenting `c`-key copy + Ctrl-C × 2 exit pattern | `README.md:51` opens `## Claude OAuth`. Lines 51-69 enumerate: (1) `c`-key OSC-52 copy with rationale about line-wrap whitespace, (2) browser paste, (3) auth-code paste-back, (4) Ctrl-C × 2 exit pattern with the literal "Press Ctrl-C again to exit" hint string. All four PLAN.md §6 bullets present | pass |
+
+### Surviving-test coverage map (no test gap from strip)
+
+| Kept code path | Covering test |
+|---|---|
+| `ensureClaudeAccountReady` SkipLogin short-circuit | `TestEnsureClaudeAccountReadyRespectsSkipLogin` |
+| `ensureClaudeAccountReady` already-authed fast path | `TestEnsureClaudeAccountReadyAlreadyAuthedReturnsNilEvenNonTTY` |
+| `ensureClaudeAccountReady` non-TTY guard | `TestEnsureClaudeAccountReadyRejectsNonTTY` |
+| `ensureClaudeAccountReady` container-run failure | `TestEnsureClaudeAccountReadyFailsWhenContainerRunFails` |
+| `ensureClaudeAccountReady` post-run LoggedIn check failure | `TestEnsureClaudeAccountReadyFailsWhenNotLoggedInAfterContainer` |
+| `ensureClaudeAccountReady` happy path | `TestEnsureClaudeAccountReadySucceeds` |
+| `loginClaudeAccount` non-TTY bypass (no guard) | `TestLoginClaudeAccountSkipsNonTTYGuard` |
+| `loginClaudeAccount` container-run failure | `TestLoginClaudeAccountFailsWhenContainerRunFails` |
+| `loginClaudeAccount` happy path | `TestLoginClaudeAccountSucceeds` |
+| **`loginClaudeAccount` FIX 1 wipe (R2 preservation)** | **`TestLoginClaudeAccountWipesExistingCredsBeforeRunning`** |
+| `wipeClaudeCredentials` removes file | `TestWipeClaudeCredentialsRemovesFile` |
+| `wipeClaudeCredentials` no-op on missing | `TestWipeClaudeCredentialsMissingFileIsNoError` |
+| `logoutManagedAccount` invokes wipe | `TestLogoutManagedAccountWipesClaudeCredentials` |
+| `ReadAccountIdentity` logged-out path | `TestReadAccountIdentityReturnsLoggedOutWhenNoCreds` |
+| `systemClaudeAccountAuthRunner` image-ref wiring | `TestSystemClaudeAccountAuthRunnerUsesClaudeImageRef` |
+| `systemClaudeAccountAuthRunner` env passthrough | `TestSystemClaudeAccountAuthRunnerPassesThroughTerminalEnv` |
+
+All 16 surviving tests map to at least one kept production code path. No path is left untested by the strip.
+
+### Builder claim cross-check
+
+| Builder claim (BUILDER_WORKLOG.md) | Measured | Verdict |
+|---|---|---|
+| `mage testPkg internal/cli` 158/158 GREEN, 72.5% coverage | 158/158 GREEN, 72.5% | matches |
+| `mage test` 432/432 GREEN across 20 packages | 432/432 GREEN across 20 packages | matches |
+| `internal/cli` coverage ≥70% | 72.5% | matches |
+| `claude_auth.go` post-strip LOC | Builder said "422 → 195 (~−227)". Actual `wc -l`: pre-R3 421, post-R3 206 (−215) | **imprecise but directionally correct** (off by 11 LOC; no AC depends on it) |
+| `claude_auth_test.go` post-strip LOC | Builder said "963 → 370 (~−593)". Actual `wc -l`: pre-R3 962, post-R3 513 (−449) | **imprecise but directionally correct** (off by 143 LOC; no AC depends on it) |
+| `git diff HEAD~1 --stat` for the 3 touched files | `51 insertions, 695 deletions` confirms large subtractive round | matches |
+
+The LOC-delta metadata in BUILDER_WORKLOG.md (`claude_auth.go: 422 → 195`, `claude_auth_test.go: 963 → 370`) does not match measured `wc -l` (`421 → 206`, `962 → 513`). The discrepancies are non-load-bearing — no AC is conditioned on those exact totals; AC2's only LOC constraint (`RunInContainer` ≤40) is met at 39. Surfaced as observation, not finding.
+
+### Findings
+
+None. All 8 ACs verified by independent code-read + ripgrep + mage re-run.
+
+### Observations (non-blocking)
+
+- BUILDER_WORKLOG.md §"LOC deltas" table reports `195` / `370` post-strip line counts that disagree with measured `wc -l` (`206` / `513`). The strip itself is real and complete (verified symbol-by-symbol), but the worklog metadata is sloppy. Suggest tightening LOC bookkeeping in future subtractive rounds, but no R3 AC is affected.
+
+### Reasoning certificate
+
+- **Premises:** the 8 R3 ACs from PLAN.md §"Acceptance criteria (R3)".
+- **Evidence:** ripgrep across the touched files + whole-tree, direct `Read` of `claude_auth.go` (all 207 source lines) and `claude_auth_test.go` (16 surviving Test funcs), `mage testPkg internal/cli` rerun (158/158, 72.5%), `mage test` rerun (432/432 across 20 pkgs), `README.md` lines 51-69, `git diff HEAD~1 --stat`.
+- **Trace or cases:** every AC bullet maps 1:1 to an evidence pointer above; surviving-test-coverage table verifies the strip did not orphan any kept production code path; cross-check table confirms builder's mage-result claims are reproducible.
+- **Conclusion:** PASS — R3 is a clean subtractive round that achieves every locked scope item from PLAN.md §"Locked scope (six items)" without breaking the wipe-before-login FIX 1 preservation or reducing test coverage below 70% on the touched package.
+- **Unknowns:** none blocking. Observation: BUILDER_WORKLOG.md LOC-delta numbers are imprecise (no AC affected).
+
+### Hylla Feedback
+
+N/A — Unit 7.11 R3 touches only `internal/cli/claude_auth.go`, `internal/cli/claude_auth_test.go`, and `README.md`. All three files have been modified since the last Hylla ingest (snapshot 12) by earlier R1+R2 commits plus this R3 commit; Hylla is known-stale per CLAUDE.md § "Hylla Baseline". README.md is non-Go and out of Hylla's scope regardless. All evidence sourced from `Read` + `rg` + `mage` re-runs.
+
+---
+

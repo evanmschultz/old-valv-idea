@@ -1508,3 +1508,158 @@ CONFIRMED = counterexample produced. REFUTED = attack tried, evidence rules it o
 N/A — Hylla snapshot remains stale for Unit 7.11 R2's `claude_auth.go` changes (no reingest since Unit 7.5). All direct content reads went through `Read` and `git show` per mid-drop evidence protocol. Stdlib `sync.Once` semantics verified via Context7 `/golang/go`. No Hylla query attempted for this round; no misses to record.
 
 ---
+
+## Unit 7.11 — Round 3
+
+**Date:** 2026-05-16
+**Verdict:** pass
+**R3 commit:** `b1df09a refactor(cli): unit 7.11 r3 strip auto-open machinery`
+**Round nature:** SUBTRACTIVE — per dev correction 2026-05-16, R1+R2 auto-open machinery was misdesigned; manual `c`-key OSC-52 copy + Ctrl-C × 2 IS the canonical Claude OAuth UX. R3 strips ~250 LOC of production code + ~593 LOC of test code that targeted the deleted machinery, and updates README to document the actual UX. FIX 1 (wipe-before-`loginClaudeAccount`) PRESERVED.
+
+### Attack Attempts
+
+Numbered per the spawn-prompt attack vectors. CONFIRMED = counterexample produced (none in R3). REFUTED = attack tried, evidence rules it out. EXHAUSTED = honest attempt, no counterexample constructable.
+
+1. **Behavioral regression check — simplified `RunInContainer` request shape vs R2.** REFUTED. I extracted R2's `claude_auth.go` via `git show HEAD~1:internal/cli/claude_auth.go` and compared the `request := dockeradapter.ContainerRunRequest{...}` literal field-by-field against the current `claude_auth.go:75-99`:
+
+   | Field | R2 (lines 246-270) | R3 (lines 75-99) | Match |
+   |---|---|---|---|
+   | `Name` | `containerName` (`valv-claude-auth-%d`) | same | yes |
+   | `Image` | `r.image` | same | yes |
+   | `Env["CLAUDE_CONFIG_DIR"]` | `claudeprovider.ContainerClaudeDir` | same | yes |
+   | `Env["HOME"]` | `claudeprovider.ContainerHomeDir` | same | yes |
+   | `Env["LOGNAME"]` | `"valv"` | same | yes |
+   | `Env["TERM"]` | `termValue` (env with `xterm-256color` fallback) | same | yes |
+   | `Env["USER"]` | `"valv"` | same | yes |
+   | `EnvPassthrough` | `claudeprovider.TerminalEnvPassthrough()` | same | yes |
+   | `Mounts` | `[NewMountSpec(homePath, ContainerClaudeDir, false)]` | same | yes |
+   | `Args` | `[]string{}` | same | yes |
+   | `Interactive` | `stdin != nil` | same | yes |
+   | `TTY` | `commandHasTTY(stdin)` | same | yes |
+   | `Init` | `true` | same | yes |
+   | `Remove` | `true` | same | yes |
+   | `User` | `currentContainerUser()` | same | yes |
+
+   Byte-identical. The only `RunInContainer` differences vs R2 are: deleted `parentCtx`/`cancel` derivation, deleted `lineScanner`-wrapped writer construction (now passes raw `stdout`/`stderr` straight to `NewSystemRunner`), deleted post-`Run` goroutine + creds-watcher + `docker stop` SIGTERM + success notice. The container itself is launched with the same shape.
+
+2. **Test-coverage gap on request shape.** EXHAUSTED, no R3-introduced counterexample, but documented pre-existing CONCERN. The 12 deleted tests (`TestRunInContainerOpensBrowserOnURLDetect`, `TestRunInContainerDoesNotOpenWhenNoURL`, `TestRunInContainerSigtermsOnCredsWrite`, `TestRunInContainerSurvivesContainerExitBeforeCreds`, `TestRunInContainerCancelsPollerOnContextCancel`, and the 7 `TestLineScanner*` tests) all targeted the auto-open machinery — none asserted the static `ContainerRunRequest` shape (Image, Env, Mounts, Init, Remove, User). The two surviving runner-targeted tests are:
+
+   - `TestSystemClaudeAccountAuthRunnerUsesClaudeImageRef` — asserts `runner.image == "test/myimg:v2"` after `VALV_CLAUDE_IMAGE=test/myimg:v2`.
+   - `TestSystemClaudeAccountAuthRunnerPassesThroughTerminalEnv` — asserts `len(stub.lastRequest.EnvPassthrough) > 0` AND contains `LANG` + `LC_CTYPE`.
+
+   Neither asserts `Env["CLAUDE_CONFIG_DIR"]`, `Env["HOME"]`, `Env["LOGNAME"]`, `Env["USER"]`, `Env["TERM"]` fallback, `Mounts[0]` source/target/read-only, `Args == []string{}`, `Init == true`, `Remove == true`, `User == currentContainerUser()`. The stub captures `lastRequest` so the assertion infrastructure exists, but only `EnvPassthrough` is checked.
+
+   **Why this isn't an R3-introduced counterexample:** the identical gap existed in R2 — the deleted `TestRunInContainer*` tests focused on goroutine/sigterm/URL-detect logic, NOT on static request fields. The static-shape gap is inherited unchanged. The mage-green end-to-end paths (`TestEnsureClaudeAccountReadySucceeds`, `TestLoginClaudeAccountSucceeds`) exercise the runner via the production code path — the request shape is verified transitively by the code compiling + the docker-stub `executor` accepting whatever is passed without runtime panic.
+
+   **Recommendation (CONCERN, non-blocking):** in a future drop (likely DROP_9 CLI audit or a hardening pass), extend `TestSystemClaudeAccountAuthRunnerPassesThroughTerminalEnv` (rename to `…AssertsContainerRunRequestShape`) to assert every field on `lastRequest`. Two-line addition per field. Not blocking R3 because it isn't an R3-introduced regression — it's a long-standing weak spot.
+
+3. **FIX 1 still works.** REFUTED (attack lands a clean PASS). `loginClaudeAccount` first statement (`claude_auth.go:173-175`):
+
+   ```go
+   if err := wipeClaudeCredentials(account.HomePath); err != nil {
+       return err
+   }
+   ```
+
+   Then `writeCLINotice` → `RunInContainer` → `ReadAccountIdentity`. The wipe runs BEFORE the runner is invoked. `TestLoginClaudeAccountWipesExistingCredsBeforeRunning` (`claude_auth_test.go:473-513`) explicitly captures `fileExistedAtRunTime` inside the stub's `stubRunFunc` (which executes at the moment `RunInContainer` is called), then asserts `!fileExistedAtRunTime`. Test logic is sound; matches the FIX 1 invariant exactly. Builder WORKLOG reports test passing in `mage testPkg internal/cli` (158/158 green @ 72.5%).
+
+4. **Import block correctness.** REFUTED. `rg -n '"os/exec"|"regexp"|"sync"|"sync/atomic"' internal/cli/claude_auth.go internal/cli/claude_auth_test.go` returned ZERO matches. Surviving import block on `claude_auth.go` (lines 3-19): `context`, `fmt`, `io`, `os`, `path/filepath`, `strings`, `time`, `laslig`, `cobra`, `dockeradapter`, `claudeprovider`, `config`, `domain`. All justified:
+
+   - `context` — `RunInContainer(ctx ...)`, `claudeAuthRunnerFromContext`.
+   - `fmt` — `fmt.Errorf`, `fmt.Sprintf`.
+   - `io` — `io.Reader`, `io.Writer` on `claudeAuthRunner.RunInContainer`.
+   - `os` — `os.Getenv`, `os.Stat`, `os.IsNotExist`, `os.Remove`.
+   - `path/filepath` — `filepath.Join`.
+   - `strings` — `strings.TrimSpace`.
+   - `time` — `time.Now().UTC().UnixNano()` for container name uniqueness.
+   - `laslig` — `laslig.NoticeInfoLevel` for `writeCLINotice`.
+   - `cobra` — `cobra.Command` parameter on `ensureClaudeAccountReady` / `loginClaudeAccount`.
+   - `dockeradapter` — `ContainerRunRequest`, `MountSpec`, `ImageRef`, `NewExecutor`, `NewSystemRunner`, `NewMountSpec`.
+   - `claudeprovider` — `ContainerClaudeDir`, `ContainerHomeDir`, `TerminalEnvPassthrough`, `ReadAccountIdentity`.
+   - `config` — `config.Paths` param on `loginClaudeAccount` (unused inside body but part of the shared signature).
+   - `domain` — `domain.Profile`.
+
+   No stale imports; no missing imports. AC3-R3 satisfied.
+
+5. **README accuracy on Claude OAuth UX.** REFUTED. I read the diff against `README.md` (lines 48-68 of the new state) and cross-checked each claim:
+
+   - **Claim:** "Valv starts a managed container running the Claude CLI and bind-mounts the account's home directory." Verified by `RunInContainer` building `Mounts: [NewMountSpec(homePath, ContainerClaudeDir, false)]` (`claude_auth.go:90-92`) — false = not read-only = read-write bind mount. Accurate.
+   - **Claim:** "Press `c` in the Claude TUI — this copies the URL to the clipboard via OSC-52." Per dev attack-vector prompt: "This is Anthropic's documented Claude Code keybind — citation: claude.com/docs." Accepted as verified upstream.
+   - **Claim:** "Press Ctrl-C twice to exit the container. Claude prints `Press Ctrl-C again to exit` between the two presses." Per dev attack-vector prompt: "Dev-confirmed 2026-05-16." Accepted as verified upstream by personal smoke test.
+   - **Claim:** "The bind-mounted `.credentials.json` is written by the container natively and persists in the account's managed home directory." Verified via `claude_auth.go:90-92` (bind mount target = `ContainerClaudeDir`) + `ensureClaudeAccountReady` / `loginClaudeAccount` both calling `claudeprovider.ReadAccountIdentity(account.HomePath)` after the container run — they read the persisted creds back from the host-side bind-mount source. Accurate.
+   - **Claim:** "Subsequent `valv claude` launches read it without re-auth." Verified by `ensureClaudeAccountReady:128-130` short-circuiting on `info.Size() > 0` when `.credentials.json` exists. Accurate.
+
+   No inaccurate statements.
+
+6. **Out-of-scope edits.** REFUTED. `git diff HEAD~1 HEAD --stat` shows exactly 5 paths:
+
+   ```
+   README.md                                          |  20 +
+   drops/DROP_7_HOST_AUTH_TOKEN_FIX/BUILDER_WORKLOG.md|  54 +++
+   drops/DROP_7_HOST_AUTH_TOKEN_FIX/PLAN.md           |   2 +-
+   internal/cli/claude_auth.go                        | 233 +---------
+   internal/cli/claude_auth_test.go                   | 493 +--------------------
+   ```
+
+   All four locked-scope paths covered + the `PLAN.md` row-state update (planning convention, not source). Zero touches to `account_auth.go`, `claude.go`, services layer, or adapters. AC for "subtractive scope" satisfied.
+
+7. **Dead-code residue.** REFUTED. `rg -n 'externalCommand|oauthURLRegex|lineScanner|defaultURLOpener|defaultCredsWatcher|newLineScanner|stripURLWhitespace|urlOpener|credsWatcher|urlBufferCap'` over `internal/` + `cmd/` returned ZERO matches (all matches were inside drop-dir markdown — historical record, expected). No leftover stub imports, no leftover type references, no dangling field on `systemClaudeAccountAuthRunner` (struct now has only `executor` + `image`). Mage suite reports `internal/cli` GREEN 158/158 — if any "imported and not used" or "undeclared name" residue existed, the build would fail.
+
+8. **Container exit semantics on user Ctrl-C × 2.** EXHAUSTED, no R3-introduced counterexample, but documented as fragile coupling (CONCERN). In R3 `RunInContainer` returns `containerExec.Run(ctx, request)` directly. On Ctrl-C × 2:
+
+   - First Ctrl-C: Claude TUI catches SIGINT and prints "Press Ctrl-C again to exit" (per dev-confirmed UX).
+   - Second Ctrl-C: Claude exits. Exit code depends on Claude's signal handler implementation — if it calls `process.exit(0)` (Node TUI pattern) the docker exit is 0; if it lets the second SIGINT propagate as a hard kill, docker exit is 130.
+
+   If exit is 0 → `containerExec.Run` returns nil → `loginClaudeAccount` reaches `ReadAccountIdentity` → creds present → success.
+
+   If exit is non-zero → `containerExec.Run` returns an error → `loginClaudeAccount` wraps it as `"run claude auth container for account %q: %w"` and returns failure WITHOUT calling `ReadAccountIdentity`. The user sees an error even though OAuth succeeded and `.credentials.json` is on disk.
+
+   **Why this isn't an R3-introduced counterexample:** R2 had the symmetric problem — if creds-detection happened (`credDetected.Load() == true`) R2 returned nil regardless of runErr, but if creds did NOT detect (e.g., narrow-pty wrap bug from R2 BLOCK 1) R2 would return runErr non-nil with creds nonetheless persisted. R3 actually has a SIMPLER + MORE PREDICTABLE failure model: exit code 0 = pass, exit code non-zero = fail, no silent suppression. The dev has personally tested the Ctrl-C × 2 path end-to-end as working (per attack-vector prompt: "Dev-confirmed 2026-05-16"), which implies Claude's exit code on second-Ctrl-C is 0 in the canonical case.
+
+   **CONCERN (non-blocking) for the dev:** if a future Claude CLI release changes second-Ctrl-C handling to exit non-zero, `loginClaudeAccount` will spuriously fail despite valid creds. A recovery path that always calls `ReadAccountIdentity` regardless of `containerExec.Run` error — and treats `LoggedIn=true` as overriding the container error — would harden against this. Worth a DROP_9 CLI-audit consideration or a separate hardening drop. NOT an R3 build-QA fail.
+
+### Surviving-test inventory cross-check
+
+The R3 commit's test-deletion list (16 surviving tests per the WORKLOG R3 design note's header comment in `claude_auth_test.go:1-7`):
+
+- `TestEnsureClaudeAccountReadyRejectsNonTTY` (line 90)
+- `TestEnsureClaudeAccountReadyRespectsSkipLogin` (line 112)
+- `TestEnsureClaudeAccountReadyAlreadyAuthedReturnsNilEvenNonTTY` (line 143)
+- `TestEnsureClaudeAccountReadyFailsWhenContainerRunFails` (line 174)
+- `TestEnsureClaudeAccountReadyFailsWhenNotLoggedInAfterContainer` (line 202)
+- `TestEnsureClaudeAccountReadySucceeds` (line 226)
+- `TestLoginClaudeAccountSkipsNonTTYGuard` (line 267)
+- `TestLoginClaudeAccountFailsWhenContainerRunFails` (line 291)
+- `TestLoginClaudeAccountSucceeds` (line 312)
+- `TestWipeClaudeCredentialsRemovesFile` (line 334)
+- `TestWipeClaudeCredentialsMissingFileIsNoError` (line 353)
+- `TestLogoutManagedAccountWipesClaudeCredentials` (line 364)
+- `TestReadAccountIdentityReturnsLoggedOutWhenNoCreds` (line 386)
+- `TestSystemClaudeAccountAuthRunnerUsesClaudeImageRef` (line 408)
+- `TestSystemClaudeAccountAuthRunnerPassesThroughTerminalEnv` (line 426)
+- `TestLoginClaudeAccountWipesExistingCredsBeforeRunning` (line 473)
+
+16/16 present. Coverage areas: TTY guard, SkipLogin short-circuit, already-authed short-circuit, container-error propagation, post-container identity verification, success path with stub-written creds, no-TTY-guard on login path, wipe behaviour, logout integration, ReadAccountIdentity integration, image ref env override, terminal env passthrough, and FIX 1 wipe-before-run invariant. The full functional surface of the new (post-strip) flow is exercised.
+
+### Mage gate
+
+- Builder WORKLOG self-report: `mage testPkg github.com/evanmschultz/valv/internal/cli` → GREEN 158/158 @ 72.5%.
+- `mage test` → GREEN 432/432 across 20 packages, all ≥ 60% (internal/cli 72.5%).
+
+No raw `go test` invocations anywhere in WORKLOG. mage-only discipline maintained.
+
+### Routing
+
+- **R3 → PASS.** No counterexample produced. All eight attack vectors exhausted with no R3-introduced regression.
+- **CONCERN (deferred, non-blocking, DROP_9-or-later):** static-`ContainerRunRequest`-shape unit coverage gap on the auth runner (pre-existing). A single hardening test extension covers it.
+- **CONCERN (deferred, non-blocking, DROP_9-or-later):** Ctrl-C × 2 exit-code coupling. Currently dev-verified end-to-end as working in the canonical case (Claude exits 0). If a future Claude CLI changes the exit code, `loginClaudeAccount` should fall back to `ReadAccountIdentity` and treat `LoggedIn=true` as overriding the docker error. Hardening drop opportunity.
+
+### Unknowns
+
+- None blocking R3. The two CONCERNs above are routed to the orchestrator for triage; neither is an R3 build-QA fail.
+
+### Hylla Feedback
+
+N/A — R3 strip touched only `internal/cli/claude_auth.go` + `internal/cli/claude_auth_test.go` + `README.md` + drop dir mds. Hylla snapshot remains stale for the modified Go files (no reingest since Unit 7.5). All evidence sourced from `git show HEAD~1:internal/cli/claude_auth.go` (R2 baseline), `Read` of post-strip files, `git diff HEAD~1 HEAD --stat`, and `rg` for stale-symbol residue. No Hylla query attempted this round; no misses to record.
+
+---
