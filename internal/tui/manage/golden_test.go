@@ -37,3 +37,19 @@ func TestProfilePickerGolden(t *testing.T) {
 	final := tm.FinalModel(t, teatest.WithFinalTimeout(2*time.Second)).(ProfilePickerModel)
 	teatest.RequireEqualOutput(t, []byte(final.View().Content))
 }
+
+func TestProfilePickerGoldenClaude(t *testing.T) {
+	model := NewProfilePicker(domain.ProviderClaude, []domain.Profile{
+		{Name: "alpha-profile", HomePath: "/tmp/alpha-profile"},
+		{Name: "beta-profile", HomePath: "/tmp/beta-profile"},
+	})
+	tm := teatest.NewTestModel(t, model, teatest.WithInitialTermSize(96, 24))
+	t.Cleanup(func() { _ = tm.Quit() })
+	tm.Send(tea.WindowSizeMsg{Width: 96, Height: 24})
+
+	if err := tm.Quit(); err != nil {
+		t.Fatal(err)
+	}
+	final := tm.FinalModel(t, teatest.WithFinalTimeout(2*time.Second)).(ProfilePickerModel)
+	teatest.RequireEqualOutput(t, []byte(final.View().Content))
+}

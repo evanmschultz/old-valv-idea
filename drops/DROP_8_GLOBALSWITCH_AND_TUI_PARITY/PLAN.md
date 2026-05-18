@@ -27,7 +27,7 @@ Closes the remainder of focus-plan §6.6 + the dogfood binding-UX gap (dev hit "
 
 ### Unit 8.1 — Globalswitch Claude extension
 
-**State:** todo
+**State:** done
 **Paths:**
 - `internal/services/globalswitch/service.go`
 - `internal/services/globalswitch/service_test.go`
@@ -51,7 +51,7 @@ Closes the remainder of focus-plan §6.6 + the dogfood binding-UX gap (dev hit "
 
 ### Unit 8.2 — `valv account switch` cross-provider with `--provider` flag
 
-**State:** todo
+**State:** done
 **Paths:**
 - `internal/cli/manage.go`
 - `internal/cli/manage_test.go`
@@ -171,7 +171,7 @@ Closes the remainder of focus-plan §6.6 + the dogfood binding-UX gap (dev hit "
 
 ### Unit 8.6 — `tui/manage/picker.go` Claude golden parity
 
-**State:** todo
+**State:** done
 **Paths:**
 - `internal/tui/manage/golden_test.go`
 - `internal/tui/manage/testdata/TestProfilePickerGoldenClaude.golden` (new)

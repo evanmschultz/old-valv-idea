@@ -97,8 +97,8 @@ func TestSwitchRejectsUnsupportedProvider(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	if _, err := service.Switch(context.Background(), domain.Provider("claude"), "work"); err == nil {
-		t.Fatal("Switch() error = nil, want unsupported-provider failure")
+	if _, err := service.Switch(context.Background(), domain.Provider("unknown"), "work"); err == nil {
+		t.Fatal("Switch() error = nil, want unsupported-provider failure for unknown provider")
 	}
 }
 
@@ -194,6 +194,108 @@ func TestSwitchSkipsHostProcessGuardForDisposableHome(t *testing.T) {
 	}
 	if got, want := result.TargetPath, filepath.Join(devHome, ".codex"); got != want {
 		t.Fatalf("TargetPath = %q, want %q", got, want)
+	}
+}
+
+func TestSwitchClaudeTargetPath(t *testing.T) {
+	homeDir := t.TempDir()
+	stateDir := filepath.Join(homeDir, "state")
+	profileHome := filepath.Join(homeDir, "profiles", "claude", "alpha")
+	if err := os.MkdirAll(profileHome, 0o755); err != nil {
+		t.Fatalf("MkdirAll(profileHome) error = %v", err)
+	}
+
+	store := &stubStore{profile: domain.Profile{Name: "alpha", Provider: domain.ProviderClaude, HomePath: profileHome}}
+	service, err := New(Options{
+		Store:     store,
+		HomeDir:   homeDir,
+		StateDir:  stateDir,
+		IsRunning: func(context.Context, string) (bool, error) { return false, nil },
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	result, err := service.Switch(context.Background(), domain.ProviderClaude, "alpha")
+	if err != nil {
+		t.Fatalf("Switch() error = %v", err)
+	}
+
+	wantTarget := filepath.Join(homeDir, ".claude")
+	if result.TargetPath != wantTarget {
+		t.Fatalf("TargetPath = %q, want %q", result.TargetPath, wantTarget)
+	}
+	if result.BackupPath != "" {
+		t.Fatalf("BackupPath = %q, want empty (no pre-existing target)", result.BackupPath)
+	}
+
+	linkTarget, err := os.Readlink(wantTarget)
+	if err != nil {
+		t.Fatalf("Readlink(%q) error = %v", wantTarget, err)
+	}
+	if linkTarget != profileHome {
+		t.Fatalf("symlink target = %q, want %q", linkTarget, profileHome)
+	}
+
+	// Codex symlink must NOT be created.
+	codexTarget := filepath.Join(homeDir, ".codex")
+	if _, err := os.Lstat(codexTarget); !os.IsNotExist(err) {
+		t.Fatalf(".codex must not exist after Claude switch; Lstat error = %v", err)
+	}
+
+	// State must be written under the claude sub-directory.
+	if _, err := os.Stat(filepath.Join(stateDir, "global-switch", "claude", "current.json")); err != nil {
+		t.Fatalf("claude current.json missing: %v", err)
+	}
+}
+
+func TestSwitchClaudeBacksUpExistingDir(t *testing.T) {
+	homeDir := t.TempDir()
+	stateDir := filepath.Join(homeDir, "state")
+	profileHome := filepath.Join(homeDir, "profiles", "claude", "beta")
+	if err := os.MkdirAll(profileHome, 0o755); err != nil {
+		t.Fatalf("MkdirAll(profileHome) error = %v", err)
+	}
+
+	// Pre-create a real ~/.claude directory (not a symlink) to trigger backup.
+	claudeTarget := filepath.Join(homeDir, ".claude")
+	if err := os.MkdirAll(claudeTarget, 0o755); err != nil {
+		t.Fatalf("MkdirAll(.claude) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(claudeTarget, "settings.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	store := &stubStore{profile: domain.Profile{Name: "beta", Provider: domain.ProviderClaude, HomePath: profileHome}}
+	fixedNow := time.Date(2026, 5, 18, 10, 0, 0, 0, time.UTC)
+	service, err := New(Options{
+		Store:     store,
+		HomeDir:   homeDir,
+		StateDir:  stateDir,
+		Now:       func() time.Time { return fixedNow },
+		IsRunning: func(context.Context, string) (bool, error) { return false, nil },
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	result, err := service.Switch(context.Background(), domain.ProviderClaude, "beta")
+	if err != nil {
+		t.Fatalf("Switch() error = %v", err)
+	}
+	if result.BackupPath == "" {
+		t.Fatal("expected non-empty BackupPath for pre-existing real directory")
+	}
+
+	// Backup must live under global-switch/claude/backups.
+	wantBackupPrefix := filepath.Join(stateDir, "global-switch", "claude", "backups")
+	if !strings.HasPrefix(result.BackupPath, wantBackupPrefix) {
+		t.Fatalf("BackupPath = %q, want prefix %q", result.BackupPath, wantBackupPrefix)
+	}
+
+	// Original file must be in the backup.
+	if _, err := os.Stat(filepath.Join(result.BackupPath, "settings.json")); err != nil {
+		t.Fatalf("backup settings.json missing: %v", err)
 	}
 }
 

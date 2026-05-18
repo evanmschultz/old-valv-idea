@@ -456,6 +456,181 @@ func TestManageAccountAddClaudeWithExistingCredsAndImageOverrideSucceeds(t *test
 	}
 }
 
+// ----------------------------------------------------------------------------
+// Unit 8.2 — account switch cross-provider + --provider flag
+// ----------------------------------------------------------------------------
+
+// testCreateAccount is a helper that creates a named provider account in the
+// Valv store via the manage CLI, using --skip-login --no-bind so no auth or
+// project-binding side-effects occur.
+func testCreateAccount(t *testing.T, paths config.Paths, provider domain.Provider, accountName string) {
+	t.Helper()
+	runManage(t, paths, []string{"account", "add", string(provider), accountName, "--skip-login", "--no-bind"})
+}
+
+// runManageExpectError runs a manage command and asserts it fails. Returns
+// the combined error string so callers can check substrings.
+func runManageExpectError(t *testing.T, paths config.Paths, args []string) string {
+	t.Helper()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd := newManageCommand(paths, &rootOptions{})
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs(args)
+	installStubCodexAccountAuth(t, cmd, true)
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatalf("Execute(%v) expected error, got nil\nstdout=%s", args, stdout.String())
+	}
+	return err.Error()
+}
+
+// TestAccountSwitchWithProviderFlagSucceeds verifies that --provider codex
+// combined with an account name resolves and binds that account.
+func TestAccountSwitchWithProviderFlagSucceeds(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	projectRoot := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(filepath.Join(projectRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git) error = %v", err)
+	}
+	testCreateAccount(t, paths, domain.ProviderCodex, "work")
+
+	out := runManage(t, paths, []string{
+		"account", "switch", "work",
+		"--provider", "codex",
+		"--skip-login",
+		"--project", projectRoot,
+	})
+	for _, want := range []string{"Project binding updated", "provider=codex", "account=work"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("switch --provider codex work: output %q missing %q", out, want)
+		}
+	}
+}
+
+// TestAccountSwitchWithInvalidProviderFlagErrors verifies that an invalid
+// --provider value produces a parse error before any store access.
+func TestAccountSwitchWithInvalidProviderFlagErrors(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	errMsg := runManageExpectError(t, paths, []string{
+		"account", "switch", "--provider", "invalid-provider",
+	})
+	if !strings.Contains(errMsg, "invalid-provider") {
+		t.Fatalf("expected provider parse error containing %q, got %q", "invalid-provider", errMsg)
+	}
+}
+
+// TestAccountSwitchTwoArgBackcompat verifies that the existing two-arg form
+// "account switch codex work" (no --provider flag) continues to work via
+// step 2 (positional arg parses as provider).
+func TestAccountSwitchTwoArgBackcompat(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	projectRoot := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(filepath.Join(projectRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git) error = %v", err)
+	}
+	testCreateAccount(t, paths, domain.ProviderCodex, "hylla")
+
+	out := runManage(t, paths, []string{
+		"account", "switch", "codex", "hylla",
+		"--skip-login",
+		"--project", projectRoot,
+	})
+	for _, want := range []string{"Project binding updated", "provider=codex", "account=hylla"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("two-arg switch: output %q missing %q", out, want)
+		}
+	}
+}
+
+// TestAccountSwitchNameUniqueAcrossProviders verifies that when a single
+// account name exists in exactly one provider, the switch resolves it
+// without a --provider flag (step 3, unique match).
+func TestAccountSwitchNameUniqueAcrossProviders(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	projectRoot := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(filepath.Join(projectRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git) error = %v", err)
+	}
+	// "solo" exists only under codex, not under claude.
+	testCreateAccount(t, paths, domain.ProviderCodex, "solo")
+
+	out := runManage(t, paths, []string{
+		"account", "switch", "solo",
+		"--skip-login",
+		"--project", projectRoot,
+	})
+	for _, want := range []string{"Project binding updated", "provider=codex", "account=solo"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("unique-match switch: output %q missing %q", out, want)
+		}
+	}
+}
+
+// TestAccountSwitchNameMultiMatchErrors verifies that when the same account
+// name exists in multiple providers, switch returns a user-facing error
+// listing the matches and instructing use of --provider.
+func TestAccountSwitchNameMultiMatchErrors(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	// Create "shared" under both providers.
+	testCreateAccount(t, paths, domain.ProviderCodex, "shared")
+	testCreateAccount(t, paths, domain.ProviderClaude, "shared")
+
+	errMsg := runManageExpectError(t, paths, []string{
+		"account", "switch", "shared", "--skip-login",
+	})
+	for _, want := range []string{"shared", "codex", "claude", "--provider"} {
+		if !strings.Contains(errMsg, want) {
+			t.Fatalf("multi-match error %q missing substring %q", errMsg, want)
+		}
+	}
+}
+
+// TestAccountSwitchNameNotFoundErrors verifies that a name not found in any
+// provider returns a clear not-found error.
+func TestAccountSwitchNameNotFoundErrors(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	errMsg := runManageExpectError(t, paths, []string{
+		"account", "switch", "does-not-exist", "--skip-login",
+	})
+	if !strings.Contains(errMsg, "does-not-exist") {
+		t.Fatalf("not-found error %q missing account name", errMsg)
+	}
+}
+
+// TestManageAccountListNoArgsShowsCrossProvider verifies that
+// "valv manage account list" (no args) displays accounts grouped by provider
+// using writeAccountsByProvider. This pins the existing cross-provider
+// behavior — no functional change needed, just a regression guard.
+func TestManageAccountListNoArgsShowsCrossProvider(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	testCreateAccount(t, paths, domain.ProviderCodex, "dev-codex")
+	testCreateAccount(t, paths, domain.ProviderClaude, "dev-claude")
+
+	out := runManage(t, paths, []string{"account", "list"})
+	for _, want := range []string{"codex accounts", "dev-codex", "claude accounts", "dev-claude"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("cross-provider list: output %q missing %q", out, want)
+		}
+	}
+}
+
 func testJWT(t *testing.T, claims map[string]string) string {
 	t.Helper()
 	header, err := json.Marshal(map[string]string{"alg": "RS256", "typ": "JWT"})

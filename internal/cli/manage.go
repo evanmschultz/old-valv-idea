@@ -333,6 +333,7 @@ valv manage account cleanup codex
 func newManageAccountSwitchCommand(paths config.Paths, opts *rootOptions) *cobra.Command {
 	var projectPath string
 	var skipLogin bool
+	var providerFlag string
 	cmd := &cobra.Command{
 		Use:   "switch [provider] [account]",
 		Short: "Switch the current project's bound account",
@@ -340,19 +341,24 @@ func newManageAccountSwitchCommand(paths config.Paths, opts *rootOptions) *cobra
 Switch the current project's provider account without leaving the management surface.
 
 When no provider is given, Valv uses the currently bound provider for the project. When no account is given, Valv opens a picker in TTY mode.
+
+Use --provider to switch to an account from a specific provider, which is required when the same account name exists in multiple providers.
 `),
 		Example: strings.TrimSpace(`
 valv manage account switch
 valv manage account switch work
 valv manage account switch codex work
+valv manage account switch work --provider codex
+valv manage account switch --provider claude
 `),
 		Args: cobra.MaximumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runManageAccountSwitch(cmd, paths, opts, args, projectPath, skipLogin)
+			return runManageAccountSwitch(cmd, paths, opts, args, projectPath, skipLogin, providerFlag)
 		},
 	}
 	cmd.Flags().StringVar(&projectPath, "project", "", "explicit project path to switch instead of the current working directory")
 	cmd.Flags().BoolVar(&skipLogin, "skip-login", false, "skip host-side account login for advanced automation")
+	cmd.Flags().StringVar(&providerFlag, "provider", "", "provider to use for account resolution (required when account name exists in multiple providers)")
 	return cmd
 }
 
@@ -567,7 +573,7 @@ func runManageBind(cmd *cobra.Command, paths config.Paths, opts *rootOptions, pr
 	})
 }
 
-func runManageAccountSwitch(cmd *cobra.Command, paths config.Paths, opts *rootOptions, args []string, projectPath string, skipLogin bool) error {
+func runManageAccountSwitch(cmd *cobra.Command, paths config.Paths, opts *rootOptions, args []string, projectPath string, skipLogin bool, providerFlag string) error {
 	service, closeStore, err := openManageService(cmd, paths)
 	if err != nil {
 		return fmt.Errorf("manage account switch: %w", err)
@@ -582,21 +588,35 @@ func runManageAccountSwitch(cmd *cobra.Command, paths config.Paths, opts *rootOp
 		}
 	}
 
-	provider, profileName, err := resolveProfileSwitchTarget(cmd, service, startPath, args)
+	provider, profileName, err := resolveAccountSwitchTarget(cmd, service, startPath, args, providerFlag)
 	if err != nil {
 		return fmt.Errorf("manage account switch: %w", err)
 	}
 	if profileName == "" {
-		profiles, err := service.ListProfiles(cmd.Context(), provider)
-		if err != nil {
-			return fmt.Errorf("manage account switch: list accounts: %w", err)
-		}
-		profileName, err = pickProfile(cmd, provider, profiles.Profiles)
-		if err != nil {
-			if errors.Is(err, errSelectionCanceled) {
-				return writeNoOpRecord(cmd, opts, "No account switch made", "no account selected")
+		// Cross-provider picker: provider=="" means no provider was resolved yet;
+		// collect all accounts across supported providers and open one picker.
+		if provider == "" {
+			allProfiles, pickedProvider, pickerErr := pickProfileCrossProvider(cmd, service)
+			if pickerErr != nil {
+				if errors.Is(pickerErr, errSelectionCanceled) {
+					return writeNoOpRecord(cmd, opts, "No account switch made", "no account selected")
+				}
+				return fmt.Errorf("manage account switch: %w", pickerErr)
 			}
-			return fmt.Errorf("manage account switch: %w", err)
+			provider = pickedProvider
+			profileName = allProfiles
+		} else {
+			profiles, listErr := service.ListProfiles(cmd.Context(), provider)
+			if listErr != nil {
+				return fmt.Errorf("manage account switch: list accounts: %w", listErr)
+			}
+			profileName, err = pickProfile(cmd, provider, profiles.Profiles)
+			if err != nil {
+				if errors.Is(err, errSelectionCanceled) {
+					return writeNoOpRecord(cmd, opts, "No account switch made", "no account selected")
+				}
+				return fmt.Errorf("manage account switch: %w", err)
+			}
 		}
 	}
 	account, err := service.ProfileByName(cmd.Context(), provider, profileName)
@@ -853,6 +873,148 @@ func resolveProfileSwitchTarget(cmd *cobra.Command, service interface {
 		return provider, args[1], nil
 	default:
 		return "", "", fmt.Errorf("unsupported arg count %d", len(args))
+	}
+}
+
+// resolveAccountSwitchTarget is the cross-provider resolution function for
+// "account switch". It implements the four-step resolution order from the
+// Unit 8.2 AC:
+//
+//  1. --provider flag present → parse it; positional arg (if any) is the
+//     account name. Returns (provider, name, nil) where name may be "".
+//  2. No flag, one positional arg that parses as a provider → that is the
+//     provider; name is "" (picker will open for that provider).
+//  3. No flag, one positional arg that is NOT a provider → cross-provider
+//     name search: exactly-one-match resolves; multi-match returns an error
+//     listing all (provider, account) pairs; no-match returns not-found.
+//  4. No flag, no positional arg → returns ("", "", nil), signalling the
+//     caller to open a cross-provider picker.
+//
+// Two positional args with no flag follow the legacy "provider account" form
+// (step 2 extended): first arg must parse as a provider, second is the name.
+type accountSwitchResolver interface {
+	ProfileByName(context.Context, domain.Provider, string) (domain.Profile, error)
+}
+
+func resolveAccountSwitchTarget(
+	cmd *cobra.Command,
+	service accountSwitchResolver,
+	_ string,
+	args []string,
+	providerFlag string,
+) (domain.Provider, string, error) {
+	// Step 1: explicit --provider flag overrides everything.
+	if providerFlag != "" {
+		p, err := domain.ParseProvider(providerFlag)
+		if err != nil {
+			return "", "", err
+		}
+		name := ""
+		if len(args) == 1 {
+			name = args[0]
+		} else if len(args) > 1 {
+			return "", "", fmt.Errorf("expected at most one account name with --provider, got %d args", len(args))
+		}
+		return p, name, nil
+	}
+
+	// Step 2 / legacy two-arg: "codex work".
+	if len(args) == 2 {
+		p, err := domain.ParseProvider(args[0])
+		if err != nil {
+			return "", "", err
+		}
+		return p, args[1], nil
+	}
+
+	// Step 4: no flag, no positional → signal caller to open cross-provider picker.
+	if len(args) == 0 {
+		return "", "", nil
+	}
+
+	// Step 2 (one arg): if the positional arg parses as a provider, that is
+	// the provider; the caller will open a per-provider picker.
+	if p, err := domain.ParseProvider(args[0]); err == nil {
+		return p, "", nil
+	}
+
+	// Step 3: positional arg is an account name — search across all providers.
+	accountName := args[0]
+	type match struct {
+		provider domain.Provider
+	}
+	var matches []match
+	for _, p := range supportedProviders() {
+		_, lookupErr := service.ProfileByName(cmd.Context(), p, accountName)
+		if lookupErr == nil {
+			matches = append(matches, match{provider: p})
+			continue
+		}
+		if errors.Is(lookupErr, domain.ErrNotFound) {
+			continue
+		}
+		// Unexpected error — surface it.
+		return "", "", fmt.Errorf("look up account %q for provider %q: %w", accountName, p, lookupErr)
+	}
+	switch len(matches) {
+	case 0:
+		return "", "", fmt.Errorf("account %q not found in any provider; run `valv manage account add codex %s` or `valv manage account list` to see all available accounts", accountName, accountName)
+	case 1:
+		return matches[0].provider, accountName, nil
+	default:
+		// Multi-match: build an error listing all (provider, account) pairs.
+		pairs := make([]string, 0, len(matches))
+		for _, m := range matches {
+			pairs = append(pairs, fmt.Sprintf("(%s, %s)", m.provider, accountName))
+		}
+		return "", "", fmt.Errorf("account %q found in multiple providers: %s; use --provider to specify which one", accountName, strings.Join(pairs, ", "))
+	}
+}
+
+// pickProfileCrossProvider collects all profiles from every supported
+// provider and presents them in a single picker. It returns the selected
+// profile name and the provider it belongs to. Because the picker returns
+// only a name, and names may not be unique across providers, it performs a
+// post-pick re-resolution using the same step-3 logic as
+// resolveAccountSwitchTarget.
+type crossProviderLister interface {
+	ListProfiles(context.Context, domain.Provider) (manageservice.ProfileListResult, error)
+	ProfileByName(context.Context, domain.Provider, string) (domain.Profile, error)
+}
+
+func pickProfileCrossProvider(cmd *cobra.Command, service crossProviderLister) (string, domain.Provider, error) {
+	var allProfiles []domain.Profile
+	for _, p := range supportedProviders() {
+		result, err := service.ListProfiles(cmd.Context(), p)
+		if err != nil {
+			return "", "", fmt.Errorf("list %s accounts: %w", p, err)
+		}
+		allProfiles = append(allProfiles, result.Profiles...)
+	}
+	// Use the generic provider label for the cross-provider picker.
+	selected, err := pickProfile(cmd, domain.Provider("all"), allProfiles)
+	if err != nil {
+		return "", "", err
+	}
+	// Resolve which provider owns the selected name.
+	var matches []domain.Provider
+	for _, p := range supportedProviders() {
+		if _, lookupErr := service.ProfileByName(cmd.Context(), p, selected); lookupErr == nil {
+			matches = append(matches, p)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return "", "", fmt.Errorf("selected account %q disappeared from all providers", selected)
+	case 1:
+		return selected, matches[0], nil
+	default:
+		// Name exists in multiple providers — cannot auto-resolve; ask user.
+		pairs := make([]string, 0, len(matches))
+		for _, p := range matches {
+			pairs = append(pairs, fmt.Sprintf("(%s, %s)", p, selected))
+		}
+		return "", "", fmt.Errorf("account %q found in multiple providers: %s; use --provider to specify which one", selected, strings.Join(pairs, ", "))
 	}
 }
 

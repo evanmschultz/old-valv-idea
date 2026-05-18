@@ -83,16 +83,24 @@ func New(options Options) (Service, error) {
 }
 
 func (s Service) Switch(ctx context.Context, provider domain.Provider, profileName string) (Result, error) {
-	if provider != domain.ProviderCodex {
+	var targetDotDir, processName string
+	switch provider {
+	case domain.ProviderClaude:
+		targetDotDir = ".claude"
+		processName = "claude"
+	case domain.ProviderCodex:
+		targetDotDir = ".codex"
+		processName = "codex"
+	default:
 		return Result{}, fmt.Errorf("switch global profile %q: unsupported provider", provider)
 	}
 	if s.requiresHostProcessGuard() {
-		running, err := s.isRunning(ctx, "codex")
+		running, err := s.isRunning(ctx, processName)
 		if err != nil {
 			return Result{}, fmt.Errorf("switch global profile %q/%q: check running processes: %w", provider, profileName, err)
 		}
 		if running {
-			return Result{}, fmt.Errorf("switch global profile %q/%q: host codex is currently running; exit Codex before switching", provider, profileName)
+			return Result{}, fmt.Errorf("switch global profile %q/%q: host %s is currently running; exit before switching", provider, profileName, processName)
 		}
 	}
 	profile, err := s.store.ProfileByName(ctx, provider, strings.TrimSpace(profileName))
@@ -103,12 +111,12 @@ func (s Service) Switch(ctx context.Context, provider domain.Provider, profileNa
 		Provider:    provider,
 		ProfileName: profile.Name,
 		ProfileHome: profile.HomePath,
-		TargetPath:  filepath.Join(s.homeDir, ".codex"),
+		TargetPath:  filepath.Join(s.homeDir, targetDotDir),
 	}
 	if err := os.MkdirAll(filepath.Dir(result.TargetPath), 0o755); err != nil {
 		return Result{}, fmt.Errorf("switch global profile %q/%q: ensure target parent: %w", provider, profileName, err)
 	}
-	backupPath, err := s.prepareTarget(result.TargetPath)
+	backupPath, err := s.prepareTarget(result.TargetPath, provider)
 	if err != nil {
 		return Result{}, fmt.Errorf("switch global profile %q/%q: prepare target: %w", provider, profileName, err)
 	}
@@ -123,7 +131,7 @@ func (s Service) Switch(ctx context.Context, provider domain.Provider, profileNa
 	return result, nil
 }
 
-func (s Service) prepareTarget(target string) (string, error) {
+func (s Service) prepareTarget(target string, provider domain.Provider) (string, error) {
 	info, err := os.Lstat(target)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -134,7 +142,7 @@ func (s Service) prepareTarget(target string) (string, error) {
 	if info.Mode()&os.ModeSymlink != 0 {
 		return "", os.Remove(target)
 	}
-	backupRoot := filepath.Join(s.stateDir, "global-switch", "codex", "backups")
+	backupRoot := filepath.Join(s.stateDir, "global-switch", string(provider), "backups")
 	if err := os.MkdirAll(backupRoot, 0o755); err != nil {
 		return "", err
 	}
