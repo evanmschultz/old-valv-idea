@@ -36,9 +36,10 @@ Closes the remainder of focus-plan §6.6 + the dogfood binding-UX gap (dev hit "
 
 **Acceptance:**
 - `service.Switch(ctx, domain.ProviderClaude, profileName)` succeeds and creates a symlink at `~/.claude` (relative to the configured `HomeDir`) pointing to the selected profile's `HomePath`.
-- The backup path for a pre-existing real `~/.claude` directory goes under `global-switch/claude/backups/<timestamp>`, not the existing `codex` subdirectory.
+- `prepareTarget` returns `result.TargetPath = filepath.Join(s.homeDir, ".claude")` when `provider == domain.ProviderClaude`, and `".codex"` when `domain.ProviderCodex`. The existing hardcoded `filepath.Join(s.homeDir, ".codex")` at `service.go:106` is replaced by a provider-switch. A new test `TestSwitchClaudeTargetPath` asserts that calling `service.Switch(ctx, ProviderClaude, profileName)` lands a symlink at `~/.claude` (not `~/.codex`), AND the existing Codex test continues to pass.
+- The backup path for a pre-existing real `~/.claude` directory goes under `global-switch/claude/backups/<timestamp>`, not the existing `codex` subdirectory. The hardcoded `"codex"` in `prepareTarget`'s `backupRoot` (line 137 of service.go) is replaced by `string(provider)` so each provider's backups land in their own subdir.
 - A pre-existing `~/.claude` symlink is replaced without backup (mirrors the existing Codex behaviour).
-- The host-process guard for Claude checks for a running `"claude"` process (not `"codex"`).
+- The host-process guard for Claude checks for a running `"claude"` process (not `"codex"`). Builder runs `pgrep -l claude` or equivalent on a host with the Claude CLI installed and documents the actual process name in BUILDER_WORKLOG.md. The host-process guard uses that verified string. If the name differs from `"claude"` (the planner's assumption), update the constant.
 - `service.Switch(ctx, domain.ProviderCodex, profileName)` still passes all existing Codex tests unchanged.
 - `TestSwitchRejectsUnsupportedProvider` is updated: it must no longer expect an error for Claude, and must verify that a truly unsupported provider (e.g. `domain.Provider("unknown")`) returns an error.
 - `mage testPkg github.com/evanmschultz/valv/internal/services/globalswitch` passes with `-race`.
@@ -57,10 +58,13 @@ Closes the remainder of focus-plan §6.6 + the dogfood binding-UX gap (dev hit "
 **Packages:** `github.com/evanmschultz/valv/internal/cli`
 
 **Acceptance:**
-- `newManageAccountSwitchCommand` gains a `--provider <provider>` flag. When supplied, it overrides provider resolution entirely.
-- `resolveProfileSwitchTarget` (or its replacement): when 1 arg (an account name, not a provider) is given and no `--provider` flag, and the name exists in exactly one provider, resolve to that provider. When the name exists in multiple providers, return a user-facing error that includes both provider names and instructs the user to use `--provider`.
-- When 0 args and no `--provider`, the picker opens showing all providers' accounts (or the provider defaults to the current binding's provider when the project is bound).
-- Existing `valv account switch codex work` (two-arg form) continues to work as before.
+- `newManageAccountSwitchCommand` gains a `--provider <provider>` flag. When supplied it overrides provider resolution entirely (call `domain.ParseProvider(flagValue)`; error if invalid).
+- Provider+account resolution follows this explicit order (replaces `resolveProfileSwitchTarget`):
+  1. `--provider <p>` flag present → use `domain.ParseProvider(p)`, ignore positional arg for provider. Error if invalid.
+  2. No flag, positional arg parses as a provider via `domain.ParseProvider` → treat it as the provider (0 or 1 remaining positional = account name or picker).
+  3. No flag, positional arg is an account name (does not parse as provider) → call `service.ProfileByName` across `supportedProviders()`: if exactly one provider has the name, resolve to that provider; if multiple providers have the name, return a user-facing error listing all `(provider, account)` matches and instructing the user to use `--provider`; if no provider has the name, return a not-found error.
+  4. No flag, no positional arg → picker opens cross-provider showing all accounts.
+- Existing `valv account switch codex work` (two-arg form where `codex` parses as a provider) continues to work via step 1 or step 2.
 - `valv account list` (no args) already shows cross-provider output via `writeAccountsByProvider`. Verify this in the test suite — no functional change needed if it is already correct; add a test assertion if the test coverage is absent.
 - `mage testPkg github.com/evanmschultz/valv/internal/cli` passes with `-race`.
 
@@ -85,6 +89,7 @@ Closes the remainder of focus-plan §6.6 + the dogfood binding-UX gap (dev hit "
 - `runCodexCommand` calls `stripAccountFlag` before `codexArgsSkipProjectBinding`. The extracted `accountName` is threaded through to `ensureCodexBindingReady` (updated in Unit 8.5).
 - When `accountName` is non-empty, the binding-ready calls use that account directly (resolving it from the store) instead of the DB-persisted binding. They do NOT write a new binding row.
 - `account_flag_test.go` covers: no flag present, `--account work`, `--account=work`, `--account` as the last token (malformed — returns empty), `--account` in the middle of other args, and the case where `--account` appears multiple times (first match wins).
+- `--` escape hatch: cobra's `DisableFlagParsing: true` does NOT process `--`. `stripAccountFlag` treats `--` as a literal scan terminator — if `--` appears before `--account`, scanning stops and no account name is extracted. Test case: `["--", "--account", "work"]` → returns `("", ["--", "--account", "work"])`.
 - Note: `valv claude` and `valv codex` both have `DisableFlagParsing: true` on their cobra commands. This flag MUST remain `true` so that Claude and Codex subcommand args pass through unmolested. The `stripAccountFlag` function operates on the raw `args []string` before any cobra parsing, which is the correct interception point.
 - `mage testPkg github.com/evanmschultz/valv/internal/cli` passes with `-race`.
 
@@ -99,23 +104,30 @@ Closes the remainder of focus-plan §6.6 + the dogfood binding-UX gap (dev hit "
 - `internal/cli/claude_setup.go` (new file)
 - `internal/cli/claude_setup_test.go` (new file)
 - `internal/cli/claude.go`
+- `internal/services/manage/service.go` (add `StatusForProvider` method)
+- `internal/services/claude/service.go` (add override-profile support)
 
-**Packages:** `github.com/evanmschultz/valv/internal/cli`
+**Packages:**
+- `github.com/evanmschultz/valv/internal/cli`
+- `github.com/evanmschultz/valv/internal/services/manage`
+- `github.com/evanmschultz/valv/internal/services/claude`
 
 **Acceptance:**
-- `ensureClaudeBindingReady(cmd *cobra.Command, paths config.Paths, workingDir string, accountOverride string) error` is a new function in `internal/cli/claude_setup.go`.
-- When `accountOverride != ""`: the function resolves the named Claude account from the store (`service.ProfileByName`). It does NOT write a binding row. It returns the resolved profile to the caller so `runClaudeCommand` can use it as the launch account. If the account is not found, return a user-facing error.
+- `ensureClaudeBindingReady(cmd *cobra.Command, paths config.Paths, workingDir string, accountOverride string) (domain.Profile, error)` is a new function in `internal/cli/claude_setup.go`. It returns the resolved `domain.Profile` (override OR auto-bound OR existing binding's profile) so `runClaudeCommand` can thread it into the runtime.
+- When `accountOverride != ""`: resolves the named Claude account via `service.ProfileByName(ctx, domain.ProviderClaude, accountOverride)`. Does NOT write a binding row. Returns the resolved profile. If not found, return a user-facing error.
 - When `accountOverride == ""`:
-  - If the project is already Claude-bound (`service` resolves a Claude binding for the project), return nil (proceed normally through the existing `service.ValidateBinding` path).
+  - Check Claude binding via `service.StatusForProvider(ctx, workingDir, domain.ProviderClaude)` — a new method added to `manage.Service` that calls `store.BindingByProjectID(ctx, projectRecord.ID, provider)` for the given provider (NOT hardcoded to Codex). This is the correct fix for the `manage/service.go:245` Codex-hardcoding. Do NOT use `service.Status()` here — it internally calls `store.BindingByProjectID(ctx, projectRecord.ID, domain.ProviderCodex)` and would always return `ErrUnboundProject` for Claude-bound projects.
+  - If Claude-bound (StatusForProvider returns without error): return the resolved profile, nil — caller uses this profile directly, skipping `service.ValidateBinding`.
   - If not bound, call `service.ListProfiles(ctx, domain.ProviderClaude)`:
-    - 0 accounts → return a user-facing error: `"project is not bound; no Claude accounts found — run \`valv manage account add claude\` to create one"`.
-    - 1 account → auto-bind silently: call `service.BindProject(ctx, domain.ProviderClaude, profile.Name, workingDir)`, emit a `laslig.NoticeInfoLevel` notice to `cmd.ErrOrStderr()` confirming the binding, return nil.
-    - 2+ accounts → if TTY available, launch picker via `pickProfile(cmd, domain.ProviderClaude, profiles)` then bind; if not TTY, return error asking user to run `valv manage bind claude <name>`.
-- `runClaudeCommand` calls `ensureClaudeBindingReady` immediately after resolving `workingDir`, before `service.ValidateBinding`. When `accountOverride` is non-empty, skip `service.ValidateBinding` (the override profile is used directly).
-- Note: Claude auth is in-container (device-code runs inside Docker). `ensureClaudeBindingReady` does NOT call any host-side auth check — no `ensureManagedAccountReady` call here.
-- Note: `manage/service.Status()` is hardcoded to `ProviderCodex` for binding lookup. `ensureClaudeBindingReady` must NOT use `service.Status()` for Claude. It checks Claude binding directly via `service.ListProfiles` + store binding lookup. Use `service.ListProfiles(ctx, domain.ProviderClaude)` to get accounts; check binding via `store.BindingByProjectID` if needed, or simply attempt `service.Status` path and fall through on `ErrUnboundProject` to the 0/1/2+ branching.
-- Tests in `claude_setup_test.go` cover: already-bound project (no-op), 0 accounts (error), 1 account (auto-bind + notice), 2+ accounts no-TTY (error), and `accountOverride` path (profile resolved, no bind written).
+    - 0 accounts → return zero Profile and error: `"project is not bound; no Claude accounts found — run \`valv manage account add claude\` to create one"`.
+    - 1 account → auto-bind silently: call `service.BindProject(ctx, domain.ProviderClaude, profile.Name, workingDir)`, emit a `laslig.NoticeInfoLevel` notice to `cmd.ErrOrStderr()` confirming the binding, return the bound profile.
+    - 2+ accounts → if TTY available, launch picker via `pickProfile(cmd, domain.ProviderClaude, profiles)` then call `service.BindProject` and return the bound profile; if not TTY, return zero Profile and error asking user to run `valv manage bind claude <name>`.
+- Override-profile threading into the runtime: when `ensureClaudeBindingReady` returns a non-zero profile, `runClaudeCommand` skips `service.ValidateBinding` and passes the resolved profile into `claudeservice`. Builder evaluates two approaches and documents the choice in BUILDER_WORKLOG.md: (a) add `OverrideProfile *domain.Profile` to `claudeservice.Options` and re-construct the service when non-nil; (b) add a profile parameter to `service.Run`. Either is acceptable; builder picks the cleaner one.
+- Note: Claude auth is in-container. `ensureClaudeBindingReady` does NOT call any host-side auth check — no `ensureManagedAccountReady`.
+- Tests in `claude_setup_test.go` cover: already-bound project (returns existing profile, no-op bind), 0 accounts (error), 1 account (auto-bind + notice + returns profile), 2+ accounts no-TTY (error), and `accountOverride` path (profile resolved, no bind written, correct profile returned). Tests assert the returned profile is correct in each branch.
 - `mage testPkg github.com/evanmschultz/valv/internal/cli` passes with `-race`.
+- `mage testPkg github.com/evanmschultz/valv/internal/services/manage` passes with `-race`.
+- `mage testPkg github.com/evanmschultz/valv/internal/services/claude` passes with `-race`.
 
 **Blocked by:** 8.3
 
@@ -127,16 +139,21 @@ Closes the remainder of focus-plan §6.6 + the dogfood binding-UX gap (dev hit "
 **Paths:**
 - `internal/cli/codex_setup.go`
 - `internal/cli/codex_setup_test.go`
+- `internal/cli/codex.go`
 
 **Packages:** `github.com/evanmschultz/valv/internal/cli`
 
 **Acceptance:**
-- `ensureCodexBindingReady` is updated to implement the spec-mandated 0/1/2+ logic:
-  - 0 Codex accounts and no TTY → return a user-facing error: `"project is not bound; no Codex accounts found — run \`valv manage account add codex\` to create one"`.
-  - 1 Codex account → auto-bind the single account silently (call `service.CreateDefaultHostProfile` or `service.ProfileByName` + `service.BindProject`), emit a `laslig.NoticeInfoLevel` notice, return nil. This avoids the full interactive menu for the single-account case.
-  - 2+ Codex accounts → existing interactive menu flow (`runCodexFirstRunSetup`) continues unchanged.
-- The `accountOverride` from Unit 8.3 is accepted as a parameter to `ensureCodexBindingReady`. When non-empty, it resolves the named Codex account directly (no binding write, same semantics as Unit 8.4 Claude).
-- Existing tests in `codex_setup_test.go` that verify the multi-account interactive flow must still pass. Tests for the 0-account and 1-account shortcuts are added.
+- `ensureCodexBindingReady(cmd *cobra.Command, paths config.Paths, workingDir string, accountOverride string) (domain.Profile, error)` — signature updated to match Unit 8.4's Claude pattern. Returns the resolved `domain.Profile` to the caller.
+- When `accountOverride != ""`: resolves the named Codex account via `service.ProfileByName(ctx, domain.ProviderCodex, accountOverride)`. Does NOT write a binding row. Returns the resolved profile.
+- When `accountOverride == ""`:
+  - Check if already Codex-bound via `service.Status(ctx, workingDir)` (this call is correct for Codex because `manage/service.go:245` hardcodes `ProviderCodex`). If bound, return the existing profile.
+  - If not bound, call `service.ListProfiles(ctx, domain.ProviderCodex)`:
+    - 0 accounts → return zero Profile and error: `"project is not bound; no Codex accounts found — run \`valv manage account add codex\` to create one"`. This replaces the 4-option menu for the 0-account case.
+    - 1 account → auto-bind silently (call `service.BindProject(ctx, domain.ProviderCodex, profile.Name, workingDir)`), emit a `laslig.NoticeInfoLevel` notice, return the bound profile. The 4-option interactive menu (`runCodexFirstRunSetup`) is REMOVED for the 1-account case. Users wanting to create a new account or choose differently run `valv manage account add codex <name>` directly.
+    - 2+ accounts → launch the existing `pickProfile(cmd, domain.ProviderCodex, profiles)` picker, then call `service.BindProject` and return the bound profile. The 4-option menu is REMOVED; the TUI profile picker replaces it for the multi-account case. If not TTY, return zero Profile and error asking user to run `valv manage bind codex <name>`.
+- `runCodexCommand` is updated: call `ensureCodexBindingReady` with the `accountOverride` from Unit 8.3. When a non-zero profile is returned, skip `service.ValidateBinding` and use the resolved profile (matching Unit 8.4's override-threading approach for symmetry).
+- Existing tests in `codex_setup_test.go` that verify the multi-account picker flow must still pass. Tests for the 0-account and 1-account shortcuts are added. Test for `accountOverride` path (profile resolved, no bind written) is added.
 - `mage testPkg github.com/evanmschultz/valv/internal/cli` passes with `-race`.
 
 **Blocked by:** 8.4
@@ -156,10 +173,33 @@ Closes the remainder of focus-plan §6.6 + the dogfood binding-UX gap (dev hit "
 - `TestProfilePickerGoldenClaude` is added to `golden_test.go`. It calls `NewProfilePicker(domain.ProviderClaude, []domain.Profile{{Name: "alpha-profile", HomePath: "/tmp/alpha-profile"}, {Name: "beta-profile", HomePath: "/tmp/beta-profile"}})`, runs the model through `teatest`, and calls `teatest.RequireEqualOutput` on `final.View().Content`.
 - The new golden file `testdata/TestProfilePickerGoldenClaude.golden` is generated via `mage goldenUpdate` and committed.
 - `TestManageHomeGolden` and `TestProfilePickerGolden` (existing Codex variant) continue to pass unchanged.
+- Golden-diff bounding: the Claude golden file format mirrors the Codex golden file format exactly, modulo provider-specific identity fields (e.g., account names, provider label). The test fails if the format diverges beyond those identity-field substitutions.
 - `mage golden` passes (all three golden tests green).
 - `mage testPkg github.com/evanmschultz/valv/internal/tui/manage` passes with `-race`.
 
 **Blocked by:** —
+
+---
+
+### Unit 8.7 — Wire globalswitch dispatch for Claude
+
+**State:** todo
+**Paths:**
+- `internal/cli/operator_helpers.go`
+- `internal/cli/operator_helpers_test.go` (or existing test file for this path)
+
+**Packages:** `github.com/evanmschultz/valv/internal/cli`
+
+**Acceptance:**
+- The `ActionGlobalSwitch` case in `runManageHome` (`operator_helpers.go:151`) is changed from `runGlobalSwitch(cmd, paths, opts, domain.ProviderCodex, "")` to a provider-aware dispatch: detect the current project's bound provider via `openManageService` + `service.Status(ctx, workingDir)`. If bound, use `status.Binding.Provider` as the provider for `runGlobalSwitch`. If `service.Status` returns `ErrUnboundProject` or any error, fall back to `domain.ProviderCodex` for backwards compatibility.
+- `valv global switch claude <account>` (the CLI path, already correct in `global.go`) is NOT modified — it already parses the provider from args correctly. This unit is narrowly scoped to the TUI dispatch in `runManageHome`.
+- `valv global switch codex <account>` continues to work unchanged end-to-end.
+- A test asserts the provider-aware dispatch logic: bound-to-claude project → `runGlobalSwitch` receives `ProviderClaude`; unbound project → `runGlobalSwitch` receives `ProviderCodex` fallback.
+- `mage testPkg github.com/evanmschultz/valv/internal/cli` passes with `-race`.
+
+**Blocked by:** 8.1, 8.5
+
+---
 
 ## Notes
 
@@ -169,3 +209,10 @@ Closes the remainder of focus-plan §6.6 + the dogfood binding-UX gap (dev hit "
 - **Bubble Tea picker.** Existing `internal/tui/manage/picker.go` is the prior art. New picker for unbound-project bind selection may reuse, refactor, or be a sibling — planner's choice.
 - **No re-introduction of auto-open.** Per `feedback_manual_workflow_is_the_decision.md`, the Claude OAuth flow stays manual (press `c` for clean copy + Ctrl-C × 2 to exit). DROP_8 does not touch that surface.
 - **DROP_9 fold-in concerns.** Two non-blocking concerns from DROP_7 R3 close land in DROP_9, not DROP_8: (A) static `ContainerRunRequest` field assertions for auth tests; (B) harden `RunInContainer` against future non-zero exit on Ctrl-C × 2. DROP_8 stays focused on globalswitch + TUI parity + binding UX.
+- **Codex 1-account menu removal (R2 decision).** Dev decided: the existing 4-option Codex menu (`runCodexFirstRunSetup`) is REMOVED for both 0-account and 1-account cases and replaced with the auto-bind shortcut (matching Claude UX). The 4-option menu remains only as the 2+ accounts fallback, where it is replaced by the TUI `pickProfile` picker. Users wanting to create a new isolated account run `valv manage account add codex <name>` directly. Builder must not keep the 4-option menu for 0/1 account cases.
+- **Shared 0-account error helper.** Units 8.4 and 8.5 use structurally identical "no accounts found" errors. Add a single helper function `unboundProjectNoAccountsError(provider domain.Provider) error` in `internal/cli/claude_setup.go` (or a shared `internal/cli/bind_errors.go`) so DROP_9's command-tree rename has one touchpoint to update error copy.
+- **Test injection pattern.** Units 8.4 and 8.5 need injectable seams for testing the auto-bind and picker paths without live Docker or real SQLite. Use package-level `var` overrides (matching the `hostClaudeAccountAuth` pattern from DROP_7) for `openManageService`, `pickProfile`, and `ensureManagedAccountReady`. This keeps the injection pattern consistent with existing CLI tests.
+- **`account_flag.go` file isolation (DROP_9 touchpoint).** Unit 8.3's `stripAccountFlag` lives in `internal/cli/account_flag.go` (its own file) so DROP_9's command-tree rename has a single touchpoint. Do not inline the function into `claude.go` or `codex.go`.
+- **`BindProject` upsert idempotency.** Concurrent `valv claude` or `valv codex` invocations in the same project may both attempt `BindProject` on first run. `service.BindProject` uses `store.UpsertProjectBinding` (confirmed in `manage/service.go:223`) which is already idempotent. Builder verifies this covers the concurrent-call case and adds a note in BUILDER_WORKLOG.md.
+- **`StatusForProvider` method (Unit 8.4).** The new `manage.Service.StatusForProvider(ctx, startPath, provider)` method mirrors `Status` exactly but passes `provider` to `store.BindingByProjectID` instead of hardcoding `domain.ProviderCodex`. This is a minimal surgical extension — do not refactor `Status` itself, as DROP_9 may restructure the status surface.
+- **Unit 8.7 `blocked_by` rationale.** Unit 8.7 touches `internal/cli` (same package as 8.3, 8.4, 8.5) and depends on `globalswitch.Service.Switch` accepting Claude (Unit 8.1). It is blocked by both 8.1 (Claude branch must exist) and 8.5 (last unit that writes to `internal/cli`). Running 8.7 concurrently with any `internal/cli` unit would break package compilation isolation.
