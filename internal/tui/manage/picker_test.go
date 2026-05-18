@@ -8,14 +8,21 @@ import (
 )
 
 func TestProfilePickerSelectsProfile(t *testing.T) {
-	model := NewProfilePicker(domain.ProviderCodex, []domain.Profile{{Name: "dev", HomePath: "/tmp/dev"}, {Name: "work", HomePath: "/tmp/work"}})
+	profiles := []domain.Profile{
+		{Name: "dev", HomePath: "/tmp/dev", Provider: domain.ProviderCodex},
+		{Name: "work", HomePath: "/tmp/work", Provider: domain.ProviderCodex},
+	}
+	model := NewProfilePicker(domain.ProviderCodex, profiles)
 	next, _ := model.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
 	picked, ok := next.(ProfilePickerModel)
 	if !ok {
 		t.Fatalf("Update() returned %T, want ProfilePickerModel", next)
 	}
 	selected, ok := picked.Selected()
-	if !ok || selected != "dev" {
-		t.Fatalf("Selected() = %q, %t; want dev, true", selected, ok)
+	if !ok || selected.Name != "dev" {
+		t.Fatalf("Selected() = %q, %t; want dev, true", selected.Name, ok)
+	}
+	if selected.Provider != domain.ProviderCodex {
+		t.Fatalf("Selected().Provider = %q, want codex", selected.Provider)
 	}
 }

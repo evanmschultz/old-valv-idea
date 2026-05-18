@@ -455,14 +455,14 @@ func runManageBindInteractive(cmd *cobra.Command, paths config.Paths, opts *root
 	if err != nil {
 		return fmt.Errorf("manage bind: list accounts: %w", err)
 	}
-	selected, err := pickProfile(cmd, domain.ProviderCodex, profiles.Profiles)
+	selectedProfile, err := pickProfile(cmd, domain.ProviderCodex, profiles.Profiles)
 	if err != nil {
 		if errors.Is(err, errSelectionCanceled) {
 			return nil
 		}
 		return fmt.Errorf("manage bind: %w", err)
 	}
-	return runManageBind(cmd, paths, opts, domain.ProviderCodex, selected, "")
+	return runManageBind(cmd, paths, opts, domain.ProviderCodex, selectedProfile.Name, "")
 }
 
 func runManageAccountAdd(cmd *cobra.Command, paths config.Paths, opts *rootOptions, provider domain.Provider, name string, homePath string, bind bool, skipLogin bool, projectPath string) error {
@@ -610,13 +610,14 @@ func runManageAccountSwitch(cmd *cobra.Command, paths config.Paths, opts *rootOp
 			if listErr != nil {
 				return fmt.Errorf("manage account switch: list accounts: %w", listErr)
 			}
-			profileName, err = pickProfile(cmd, provider, profiles.Profiles)
-			if err != nil {
-				if errors.Is(err, errSelectionCanceled) {
+			pickedProfile, pickErr := pickProfile(cmd, provider, profiles.Profiles)
+			if pickErr != nil {
+				if errors.Is(pickErr, errSelectionCanceled) {
 					return writeNoOpRecord(cmd, opts, "No account switch made", "no account selected")
 				}
-				return fmt.Errorf("manage account switch: %w", err)
+				return fmt.Errorf("manage account switch: %w", pickErr)
 			}
+			profileName = pickedProfile.Name
 		}
 	}
 	account, err := service.ProfileByName(cmd.Context(), provider, profileName)
@@ -973,13 +974,11 @@ func resolveAccountSwitchTarget(
 
 // pickProfileCrossProvider collects all profiles from every supported
 // provider and presents them in a single picker. It returns the selected
-// profile name and the provider it belongs to. Because the picker returns
-// only a name, and names may not be unique across providers, it performs a
-// post-pick re-resolution using the same step-3 logic as
-// resolveAccountSwitchTarget.
+// profile name and the provider it belongs to. Because Selected() now
+// returns the full domain.Profile (including Provider), no post-pick
+// re-resolution is needed — the picker result is authoritative.
 type crossProviderLister interface {
 	ListProfiles(context.Context, domain.Provider) (manageservice.ProfileListResult, error)
-	ProfileByName(context.Context, domain.Provider, string) (domain.Profile, error)
 }
 
 func pickProfileCrossProvider(cmd *cobra.Command, service crossProviderLister) (string, domain.Provider, error) {
@@ -991,31 +990,19 @@ func pickProfileCrossProvider(cmd *cobra.Command, service crossProviderLister) (
 		}
 		allProfiles = append(allProfiles, result.Profiles...)
 	}
+	// FIX 2: guard before calling the picker so the "all" sentinel never
+	// leaks into user-facing error text.
+	if len(allProfiles) == 0 {
+		return "", "", fmt.Errorf("no accounts found across any provider; run `valv manage account add codex <name>` or `valv manage account add claude <name>` to create one")
+	}
 	// Use the generic provider label for the cross-provider picker.
+	// Selected() returns a full domain.Profile with Provider set, so the
+	// result is unambiguous even when the same name exists in multiple providers.
 	selected, err := pickProfile(cmd, domain.Provider("all"), allProfiles)
 	if err != nil {
 		return "", "", err
 	}
-	// Resolve which provider owns the selected name.
-	var matches []domain.Provider
-	for _, p := range supportedProviders() {
-		if _, lookupErr := service.ProfileByName(cmd.Context(), p, selected); lookupErr == nil {
-			matches = append(matches, p)
-		}
-	}
-	switch len(matches) {
-	case 0:
-		return "", "", fmt.Errorf("selected account %q disappeared from all providers", selected)
-	case 1:
-		return selected, matches[0], nil
-	default:
-		// Name exists in multiple providers — cannot auto-resolve; ask user.
-		pairs := make([]string, 0, len(matches))
-		for _, p := range matches {
-			pairs = append(pairs, fmt.Sprintf("(%s, %s)", p, selected))
-		}
-		return "", "", fmt.Errorf("account %q found in multiple providers: %s; use --provider to specify which one", selected, strings.Join(pairs, ", "))
-	}
+	return selected.Name, selected.Provider, nil
 }
 
 func resolveManagedAccount(cmd *cobra.Command, service interface {

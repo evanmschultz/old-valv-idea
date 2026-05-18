@@ -17,6 +17,7 @@ import (
 	"github.com/evanmschultz/valv/internal/config"
 	"github.com/evanmschultz/valv/internal/domain"
 	"github.com/evanmschultz/valv/internal/pathutil"
+	manageservice "github.com/evanmschultz/valv/internal/services/manage"
 )
 
 func TestManageAccountAddCreatesIsolatedNamedAccountAndBindsProject(t *testing.T) {
@@ -317,7 +318,6 @@ func TestRunManageUpdateClaudeBuildsImage(t *testing.T) {
 
 func TestRunManageUpdateCodexRegression(t *testing.T) {
 	for _, args := range [][]string{{"update"}, {"update", "codex"}} {
-		args := args
 		t.Run(strings.Join(args, "_"), func(t *testing.T) {
 			paths := testCodexPaths(t)
 			logPath := installFakeDocker(t)
@@ -629,6 +629,84 @@ func TestManageAccountListNoArgsShowsCrossProvider(t *testing.T) {
 			t.Fatalf("cross-provider list: output %q missing %q", out, want)
 		}
 	}
+}
+
+// TestAccountSwitchNoArgsZeroAccountsErrors verifies that when both providers
+// have zero accounts, the cross-provider 0-accounts guard fires and the error
+// mentions both provider names — not the "all" sentinel.
+// Non-parallel: exercises the cross-provider no-args path which hits
+// pickProfileCrossProvider's 0-accounts guard before any TTY check.
+func TestAccountSwitchNoArgsZeroAccountsErrors(t *testing.T) {
+	paths := testCodexPaths(t)
+	// No accounts created — both providers are empty.
+	errMsg := runManageExpectError(t, paths, []string{"account", "switch"})
+	for _, want := range []string{"codex", "claude"} {
+		if !strings.Contains(errMsg, want) {
+			t.Fatalf("zero-accounts error %q missing %q", errMsg, want)
+		}
+	}
+	if strings.Contains(errMsg, " all ") || strings.Contains(errMsg, `add all`) {
+		t.Fatalf("zero-accounts error %q must not contain the 'all' sentinel", errMsg)
+	}
+}
+
+// TestPickProfileCrossProviderHandlesDuplicateNames is a direct unit test of
+// pickProfileCrossProvider: when the same account name ("work") exists in both
+// Codex and Claude, and the picker returns the Claude profile struct, the
+// function must return ("work", ProviderClaude, nil) — not a multi-match error.
+//
+// Non-parallel: stubs the package-level pickProfileFn; must not run
+// concurrently with other tests that call pickProfile.
+func TestPickProfileCrossProviderHandlesDuplicateNames(t *testing.T) {
+	// Set up in-memory profiles for both providers.
+	codexWork := domain.Profile{Name: "work", Provider: domain.ProviderCodex, HomePath: "/codex/work"}
+	claudeWork := domain.Profile{Name: "work", Provider: domain.ProviderClaude, HomePath: "/claude/work"}
+
+	fakeLister := &fakeCrossProviderLister{
+		results: map[domain.Provider][]domain.Profile{
+			domain.ProviderCodex:  {codexWork},
+			domain.ProviderClaude: {claudeWork},
+		},
+	}
+
+	// Stub the picker to return the Claude "work" profile (simulating the user
+	// selecting the Claude row from the cross-provider picker).
+	orig := pickProfileFn
+	pickProfileFn = func(_ *cobra.Command, _ domain.Provider, profiles []domain.Profile) (domain.Profile, error) {
+		for _, p := range profiles {
+			if p.Provider == domain.ProviderClaude && p.Name == "work" {
+				return p, nil
+			}
+		}
+		t.Fatalf("stubbed picker: Claude work profile not in list %v", profiles)
+		return domain.Profile{}, nil
+	}
+	defer func() { pickProfileFn = orig }()
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	cmd.SetIn(strings.NewReader(""))
+	cmd.SetOut(&strings.Builder{})
+
+	name, provider, err := pickProfileCrossProvider(cmd, fakeLister)
+	if err != nil {
+		t.Fatalf("pickProfileCrossProvider() error = %v; want nil", err)
+	}
+	if provider != domain.ProviderClaude {
+		t.Fatalf("provider = %q; want claude", provider)
+	}
+	if name != "work" {
+		t.Fatalf("name = %q; want work", name)
+	}
+}
+
+// fakeCrossProviderLister is a test double for crossProviderLister.
+type fakeCrossProviderLister struct {
+	results map[domain.Provider][]domain.Profile
+}
+
+func (f *fakeCrossProviderLister) ListProfiles(_ context.Context, p domain.Provider) (manageservice.ProfileListResult, error) {
+	return manageservice.ProfileListResult{Profiles: f.results[p]}, nil
 }
 
 func testJWT(t *testing.T, claims map[string]string) string {

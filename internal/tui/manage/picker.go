@@ -19,11 +19,12 @@ func (i profileItem) Title() string       { return i.name }
 func (i profileItem) Description() string { return i.home }
 
 type ProfilePickerModel struct {
-	list      list.Model
-	provider  domain.Provider
-	styles    Styles
-	selected  string
-	confirmed bool
+	list            list.Model
+	provider        domain.Provider
+	styles          Styles
+	profiles        []domain.Profile
+	selectedProfile domain.Profile
+	confirmed       bool
 }
 
 func NewProfilePicker(provider domain.Provider, profiles []domain.Profile) ProfilePickerModel {
@@ -52,7 +53,7 @@ func NewProfilePicker(provider domain.Provider, profiles []domain.Profile) Profi
 	menu.SetShowHelp(true)
 	menu.SetStatusBarItemName("account", "accounts")
 
-	return ProfilePickerModel{list: menu, provider: provider, styles: styles}
+	return ProfilePickerModel{list: menu, provider: provider, styles: styles, profiles: profiles}
 }
 
 func (m ProfilePickerModel) Init() tea.Cmd { return nil }
@@ -68,7 +69,12 @@ func (m ProfilePickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		if msg.String() == "enter" && !m.list.SettingFilter() {
 			if item, ok := m.list.SelectedItem().(profileItem); ok {
-				m.selected = item.name
+				for _, p := range m.profiles {
+					if p.Name == item.name && p.HomePath == item.home {
+						m.selectedProfile = p
+						break
+					}
+				}
 				m.confirmed = true
 				return m, tea.Quit
 			}
@@ -92,9 +98,9 @@ func (m ProfilePickerModel) View() tea.View {
 	return view
 }
 
-func (m ProfilePickerModel) Selected() (string, bool) {
+func (m ProfilePickerModel) Selected() (domain.Profile, bool) {
 	if !m.confirmed {
-		return "", false
+		return domain.Profile{}, false
 	}
-	return m.selected, true
+	return m.selectedProfile, true
 }

@@ -51,7 +51,7 @@ Closes the remainder of focus-plan §6.6 + the dogfood binding-UX gap (dev hit "
 
 ### Unit 8.2 — `valv account switch` cross-provider with `--provider` flag
 
-**State:** done
+**State:** done (R2)
 **Paths:**
 - `internal/cli/manage.go`
 - `internal/cli/manage_test.go`

@@ -86,13 +86,14 @@ func runGlobalSwitch(cmd *cobra.Command, paths config.Paths, opts *rootOptions, 
 		if err != nil {
 			return fmt.Errorf("global switch: list accounts: %w", err)
 		}
-		selected, err = pickProfile(cmd, provider, profiles.Profiles)
-		if err != nil {
-			if errors.Is(err, errSelectionCanceled) {
+		pickedProfile, pickErr := pickProfile(cmd, provider, profiles.Profiles)
+		if pickErr != nil {
+			if errors.Is(pickErr, errSelectionCanceled) {
 				return writeNoOpRecord(cmd, opts, "No global switch made", "no account selected")
 			}
-			return fmt.Errorf("global switch: %w", err)
+			return fmt.Errorf("global switch: %w", pickErr)
 		}
+		selected = pickedProfile.Name
 	}
 	result, err := switchService.Switch(cmd.Context(), provider, selected)
 	if err != nil {

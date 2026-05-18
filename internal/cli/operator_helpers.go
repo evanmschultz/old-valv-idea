@@ -154,27 +154,35 @@ func runManageHome(cmd *cobra.Command, paths config.Paths, opts *rootOptions) er
 	}
 }
 
-func pickProfile(cmd *cobra.Command, provider domain.Provider, profiles []domain.Profile) (string, error) {
+// pickProfileFn is the injectable implementation of the profile picker used
+// in tests. Production code uses the real Bubble Tea picker.
+var pickProfileFn = realPickProfile
+
+func pickProfile(cmd *cobra.Command, provider domain.Provider, profiles []domain.Profile) (domain.Profile, error) {
+	return pickProfileFn(cmd, provider, profiles)
+}
+
+func realPickProfile(cmd *cobra.Command, provider domain.Provider, profiles []domain.Profile) (domain.Profile, error) {
 	if len(profiles) == 0 {
-		return "", fmt.Errorf("no %s accounts found; run `valv manage account add %s` for the default host-backed account or `valv manage account add %s account-name` for an isolated account first", provider, provider, provider)
+		return domain.Profile{}, fmt.Errorf("no %s accounts found; run `valv manage account add %s` for the default host-backed account or `valv manage account add %s account-name` for an isolated account first", provider, provider, provider)
 	}
 	if !commandHasTTY(cmd.InOrStdin()) || !commandHasTTY(cmd.OutOrStdout()) {
-		return "", fmt.Errorf("account is required when not running in a TTY")
+		return domain.Profile{}, fmt.Errorf("account is required when not running in a TTY")
 	}
 	sorted := append([]domain.Profile(nil), profiles...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
 	program := tea.NewProgram(managetui.NewProfilePicker(provider, sorted), tea.WithInput(cmd.InOrStdin()), tea.WithOutput(cmd.OutOrStdout()))
 	finalModel, err := program.Run()
 	if err != nil {
-		return "", fmt.Errorf("run account picker: %w", err)
+		return domain.Profile{}, fmt.Errorf("run account picker: %w", err)
 	}
 	model, ok := finalModel.(managetui.ProfilePickerModel)
 	if !ok {
-		return "", fmt.Errorf("run account picker: unexpected final model %T", finalModel)
+		return domain.Profile{}, fmt.Errorf("run account picker: unexpected final model %T", finalModel)
 	}
 	selected, ok := model.Selected()
 	if !ok {
-		return "", errSelectionCanceled
+		return domain.Profile{}, errSelectionCanceled
 	}
 	return selected, nil
 }

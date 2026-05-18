@@ -98,7 +98,47 @@ Confirmed at manage.go:1001: Codex first, Claude second. Deterministic order use
 
 Already correct via `writeAccountsByProvider` (manage.go:931). `TestManageAccountListNoArgsShowsCrossProvider` added to pin this behavior.
 
-## Hylla Feedback (Unit 8.2)
+## Unit 8.2 — Round 2
+
+- **Builder:** go-builder-agent
+- **Started:** 2026-05-18
+- **Files touched:**
+  - `internal/tui/manage/picker.go` — FIX 1: `Selected()` now returns `(domain.Profile, bool)`; model stores `profiles []domain.Profile` + `selectedProfile domain.Profile`; `Update()` matches selected item back to full profile by name+home.
+  - `internal/tui/manage/picker_test.go` — FIX 1: updated `TestProfilePickerSelectsProfile` to assert `selected.Name == "dev"` and `selected.Provider == ProviderCodex`.
+  - `internal/cli/operator_helpers.go` — FIX 1: `pickProfile` returns `(domain.Profile, error)`; added `var pickProfileFn = realPickProfile` injection seam (same pattern as `hostClaudeAccountAuth` in DROP_7); `realPickProfile` is the production implementation.
+  - `internal/cli/manage.go` — FIX 1+2: `pickProfileCrossProvider` simplified (no post-resolution loop; uses `selected.Provider` directly); 0-accounts guard added before picker call; removed `ProfileByName` from `crossProviderLister` interface (no longer needed); updated all `pickProfile` callsites in `runManageBindInteractive` and the per-provider picker branch of `runManageAccountSwitch`.
+  - `internal/cli/global.go` — FIX 1: `pickProfile` callsite updated; `pickedProfile.Name` extracted for `switchService.Switch`.
+  - `internal/cli/codex_setup.go` — FIX 1: `pickProfile` callsite updated; `selectedProfile` passed directly to `loginBindAndReportCodexSetup` (removed now-unnecessary `ProfileByName` re-lookup).
+  - `internal/cli/manage_test.go` — FIX 3: removed `args := args` shadow at line 320 (was line 320 before removal, Go 1.22+ loop-variable capture makes it unnecessary); added `TestAccountSwitchNoArgsZeroAccountsErrors` (FIX 2); added `TestPickProfileCrossProviderHandlesDuplicateNames` (FIX 1, direct unit test of `pickProfileCrossProvider`); added `fakeCrossProviderLister` test double; added `manageservice` import.
+
+- **Mage targets run:**
+  - `mage testPkg github.com/evanmschultz/valv/internal/tui/manage` — PASS (8/8, 91.5% coverage, -race)
+  - `mage testPkg github.com/evanmschultz/valv/internal/cli` — PASS (167/167, 73.1% coverage, -race)
+  - `mage golden` — PASS (24 tests + external transcript)
+
+### Design notes
+
+**`Selected()` return type change — profile matching strategy**
+
+`ProfilePickerModel` converts `[]domain.Profile` to `[]list.Item` (as `profileItem{name, home}`), losing `Provider` and `ID`. Storing `profiles []domain.Profile` in the model and matching by `name+home` on enter recovers the full struct. The `home` field is unique per profile (each profile has a unique `HomePath`), so `name+home` is an unambiguous key even when the same name exists in multiple providers.
+
+**`pickProfileFn` seam — parallelism safety**
+
+The `var pickProfileFn` injection seam is a package-level variable. Tests that mutate it MUST NOT call `t.Parallel()` to avoid data races with other parallel tests that call `pickProfile`. Both new tests (`TestAccountSwitchNoArgsZeroAccountsErrors` and `TestPickProfileCrossProviderHandlesDuplicateNames`) are non-parallel. The seam will be reused by Units 8.4/8.5 per PLAN.md Notes on injection pattern.
+
+**`crossProviderLister` interface simplified**
+
+Removing `ProfileByName` from `crossProviderLister` is correct: the post-resolution name lookup was the source of the BLOCKER. Now that `Selected()` returns a full `domain.Profile` with `Provider` set, no re-resolution is needed. `runManageAccountSwitch` still calls `service.ProfileByName` after `pickProfileCrossProvider` returns — that lookup is correct because it fetches the fully-stored record (with DB `ID` needed for binding). The difference is the provider is now known from the picker, not guessed via multi-provider search.
+
+**FIX 3 — `args := args` removal**
+
+Loop variable capture was fixed in Go 1.22 (per-iteration binding). The shadow `args := args` at the old line 320 is dead code in Go 1.26. Removed. No semantic change.
+
+**Codex setup simplification**
+
+`pickProfile` now returns the full `domain.Profile`, so the subsequent `service.ProfileByName(ctx, ProviderCodex, selected)` call in `codex_setup.go` was a redundant round-trip. Removed.
+
+## Hylla Feedback (Unit 8.2 R1)
 
 N/A — Hylla unreachable this session (per spawn prompt paradigm override). All code understanding came from direct `Read` of source files. Primary fallbacks:
 
@@ -106,3 +146,7 @@ N/A — Hylla unreachable this session (per spawn prompt paradigm override). All
 - `Read internal/services/manage/service.go` — `ProfileByName` signature, `UpsertProjectBinding` idempotency.
 - `Read internal/adapters/sqlite/store.go` — `ProfileByName` returns `domain.ErrNotFound` via `%w`.
 - `Read internal/domain/types.go` — `ParseProvider` signature.
+
+## Hylla Feedback (Unit 8.2 R2)
+
+N/A — Hylla unreachable this session (per spawn prompt paradigm override). All evidence gathered via direct `Read` + `git grep` fallback. Primary sources: `internal/tui/manage/picker.go`, `internal/cli/operator_helpers.go`, `internal/cli/manage.go`, `internal/cli/global.go`, `internal/cli/codex_setup.go`, `internal/cli/extended_test.go`, `internal/cli/manage_test.go`.

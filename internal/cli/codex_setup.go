@@ -70,7 +70,7 @@ func runCodexFirstRunSetup(cmd *cobra.Command, service manageservice.Service, pr
 			if err != nil {
 				return fmt.Errorf("list existing accounts: %w", err)
 			}
-			selected, err := pickProfile(cmd, domain.ProviderCodex, profiles.Profiles)
+			selectedProfile, err := pickProfile(cmd, domain.ProviderCodex, profiles.Profiles)
 			if err != nil {
 				if errors.Is(err, errSelectionCanceled) {
 					return errCodexSetupCanceled
@@ -86,11 +86,7 @@ func runCodexFirstRunSetup(cmd *cobra.Command, service manageservice.Service, pr
 				}
 				return fmt.Errorf("select existing account: %w", err)
 			}
-			account, err := service.ProfileByName(cmd.Context(), domain.ProviderCodex, selected)
-			if err != nil {
-				return fmt.Errorf("resolve existing account %q: %w", selected, err)
-			}
-			return loginBindAndReportCodexSetup(cmd, service, projectRoot, account)
+			return loginBindAndReportCodexSetup(cmd, service, projectRoot, selectedProfile)
 		case "3":
 			name, err := readPrompt(reader, cmd.ErrOrStderr(), "New isolated account name: ")
 			if err != nil {
