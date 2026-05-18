@@ -1,6 +1,6 @@
 # DROP_8 — GLOBALSWITCH AND TUI PARITY (PLUS BINDING UX)
 
-**State:** planning
+**State:** building
 **Blocked by:** DROP_7 (done)
 **Paths (expected):** `internal/services/globalswitch/`, `internal/cli/manage.go` (or post-DROP_9 successor), `internal/cli/claude.go`, `internal/cli/codex.go`, `internal/tui/manage/picker.go` (and new picker for unbound-project bind selection), tests + golden fixtures. Planner refines.
 **Packages (expected):** `internal/services/globalswitch`, `internal/cli`, `internal/tui/manage` (or new `internal/tui/bind/`). Planner confirms.
