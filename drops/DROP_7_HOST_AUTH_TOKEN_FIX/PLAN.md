@@ -1,6 +1,6 @@
 # DROP_7 — HOST AUTH TOKEN FIX → ROUND 5 PIVOT: PATH B (IN-CONTAINER AUTH) + ALWAYS-LATEST
 
-**State:** building
+**State:** done
 **Blocked by:** DROP_6 (done)
 **Pivot (2026-05-15):** Rounds 1–4 (Path A, host-subprocess `claude setup-token`/`auth login` + macOS keychain extract + write to `<managed-home>/.credentials.json`) **failed end-to-end**: even verbatim keychain blob write does NOT authenticate container-side `claude`. Path A is rejected. **Round 5 = Path B + Always-Latest**, bundled per dev directive 2026-05-15.
 **Round 5 paths (expected):** `internal/cli/claude_auth.go` (rewrite — delete host-extract, restore in-container plain `claude` auto-prompt), `internal/cli/claude_auth_test.go` (rewrite — in-container flow with fake docker executor), `internal/services/images/service.go` (edit — add `NewClaudeVersionResolver` mirroring `NewCodexVersionResolver` shape), `internal/services/images/service_test.go` (edit), launch path wiring for both providers (TBD by planner).
@@ -9,7 +9,7 @@
 **Workflow:** main/drops/WORKFLOW.md
 **Started:** 2026-05-15
 **Round 5 started:** 2026-05-15
-**Closed:** —
+**Closed:** 2026-05-17 (Path B + always-latest + Unit 7.11 R3 strip — manual `c`-key copy + Ctrl-C × 2 exit is the canonical Claude OAuth UX)
 
 ## Round 5 Scope (current — Path B + Always-Latest)
 
