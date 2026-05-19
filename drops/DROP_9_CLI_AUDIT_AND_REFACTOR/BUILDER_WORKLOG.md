@@ -412,3 +412,93 @@ All 5 checks return zero hits. R1's three AC invariants hold post-R2.
 ## Hylla Feedback (Unit 9.4.5 Round 2)
 
 N/A — task touched only non-Go files (CONTRIBUTING.md, CLAUDE.md) and a string literal in dead-code Go. No Go symbol search was needed. Hylla is Go-code only; direct `Read` was the correct evidence tool for all three substitutions.
+
+---
+
+## Units 9.5 + 9.6 — Round 1
+
+- **Builder:** go-builder-agent
+- **Started:** 2026-05-19
+- **Note:** Units 9.5 and 9.6 were collapsed into a single builder pass per orchestrator decision (both share identical paths + the resolveAccountByName helper is the implementation vehicle for all 6 verbs).
+
+### Files touched
+
+- `internal/cli/manage.go` — symbols added + modified (see below)
+- `internal/cli/manage_test.go` — 5 new tests added (see below)
+- `drops/DROP_9_CLI_AUDIT_AND_REFACTOR/PLAN.md` — state: todo → in_progress → done for both 9.5 and 9.6
+
+### Symbols added (manage.go)
+
+| Symbol | Kind | Purpose |
+|--------|------|---------|
+| `resolveAccountByName` | function | Cross-provider collision helper; returns `(domain.Provider, domain.Profile, error)`. When `providerFlag != ""`: explicit provider lookup. When `""`: search all providers, 0-match = not-found, 1-match = resolve, 2+-match = collision error. |
+| `resolveProfileFromSwitchTarget` | function | Thin wrapper around `resolveProfileSwitchTarget + ProfileByName/Status` — returns a `domain.Profile`. Used by `runManageAccountInspect` as the existing-path fallback. |
+| `resolveAccountForVerb` | function | Shared resolution for login/logout: cross-provider name check when 1-arg-is-not-a-provider, or existing `resolveManagedAccount` otherwise. |
+
+### Symbols modified (manage.go)
+
+| Constructor | Change |
+|-------------|--------|
+| `newManageAccountInspectCommand` | Removed `Aliases: []string{"whoami"}`. Added `--provider` string flag. Updated Example block (removed `valv account whoami` line). Updated RunE to pass `providerFlag`. |
+| `newManageAccountLoginCommand` | Added `--provider` flag. Updated RunE to call `runManageAccountLogin(..., providerFlag)`. |
+| `newManageAccountLogoutCommand` | Added `--provider` flag. Updated RunE to call `runManageAccountLogout(..., providerFlag)`. |
+| `newManageAccountRenameCommand` | Added `--provider` flag. Updated RunE to call `runManageAccountRename(..., providerFlag)`. |
+| `newManageAccountDeleteCommand` | Added `--provider` flag. Updated RunE to call `runManageAccountDelete(..., providerFlag)`. |
+| `newManageAccountBindCommand` | RunE: 1-arg + no-flag path now calls `resolveAccountByName` (opening a service for the cross-provider collision check); previously defaulted to Codex silently. |
+
+| Run function | Change |
+|-------------|--------|
+| `runManageAccountLogin` | Added `providerFlag string` param. Calls `resolveAccountForVerb` (cross-provider on 1-arg-is-name). |
+| `runManageAccountLogout` | Same as login. |
+| `runManageAccountInspect` | Added `providerFlag string` param. 3-branch dispatch: (a) 1-arg that is not a provider → `resolveAccountByName`; (b) `--provider` flag → `resolveAccountByName`; (c) other forms → `resolveProfileFromSwitchTarget`. |
+| `runManageAccountRename` | Added `providerFlag string` param. 3-branch switch: 3-arg legacy; 2-arg+flag; 2-arg-no-flag (cross-provider). |
+| `runManageAccountDelete` | Added `providerFlag string` param. 2-arg form = explicit positional provider (unchanged). 1-arg form = `resolveAccountByName(name, providerFlag)`. |
+
+### `whoami` alias removal
+
+`newManageAccountInspectCommand` previously had `Aliases: []string{"whoami"}`. This line was removed. The Example block line `valv account whoami` was also removed. `TestAccountInspectWhoamiAliasRemoved` confirms the alias is gone (expects `unknown command` error).
+
+### Test additions (manage_test.go)
+
+| Test | Purpose |
+|------|---------|
+| `TestResolveAccountByNameTableDriven` | Table-driven, 3 cases: (a) single-provider resolves without flag; (b) multi-provider collision returns error with `--provider` in message; (c) explicit `--provider` resolves shared name. Directly exercises `resolveAccountByName`. |
+| `TestAccountDeleteCollisionRequiresProviderFlag` | 1-arg `account delete duplex` where `duplex` in both Codex+Claude → collision error listing both providers and `--provider`. |
+| `TestAccountDeleteWithProviderFlagResolvesSingleAccount` | 1-arg `account delete delme --provider codex` where `delme` in both → resolves to Codex only. |
+| `TestAccountBindCollisionRequiresProviderFlag` | 1-arg `account bind bindme` where `bindme` in both → collision error. Covers Unit 9.6 bind enforcement. |
+| `TestAccountInspectWhoamiAliasRemoved` | `account whoami` returns `unknown command` error confirming alias removal. |
+
+### TDD red-green trace
+
+1. Added 5 new tests to `manage_test.go` before any production code. Ran `mage testPkg` → compile error (RED: `resolveAccountByName` undefined).
+2. Implemented `resolveAccountByName`, `resolveProfileFromSwitchTarget`, `resolveAccountForVerb`, plus all constructor and run function changes in `manage.go`. Ran `mage testPkg` → 214 tests GREEN.
+3. Ran `mage integration` → 217/217 PASS.
+4. Ran `mage build` → `./valv` built cleanly.
+
+### Mage gate results
+
+| Gate | Result | Detail |
+|------|--------|--------|
+| `mage testPkg github.com/evanmschultz/valv/internal/cli` | PASS | 214 tests, 67.5% coverage (threshold 60%), -race, 0 failures |
+| `mage integration` | PASS | 217/217 PASS, 0 skipped, 0 failed |
+| `mage build` | PASS | `./valv` built cleanly |
+
+### Design decisions
+
+**`resolveAccountByName` uses `accountSwitchResolver` interface**: Reuses the existing interface (single method `ProfileByName`) so the same concrete `manageservice.Service` and `*sqliteadapter.Store` values can be passed without a new interface type.
+
+**Bind collision detection opens service twice**: The `newManageAccountBindCommand` RunE opens a service for the collision check (when 1-arg + no-flag), then `runManageBind` opens a second service instance. This is a minor overhead (2 SQLite opens) accepted as the simplest surgical path — avoids refactoring `runManageBind` or adding a new bind entry point.
+
+**Rename 2-arg cross-provider check**: `rename personal hylla` (2 args, first not a provider) now calls `resolveAccountByName("personal", "")` which requires the account to exist. Previous behavior: `resolveRenameArgs` defaulted to Codex without checking existence. The new behavior is strictly safer — fails fast if the account isn't found in any provider, avoiding a service error with an unhelpful `profile not found` message.
+
+**Inspect 3-branch dispatch**: The existing `runManageAccountInspect` had a more complex path (through `resolveProfileSwitchTarget` then `service.Status` for 0-arg). This is preserved as the fallback. The new cross-provider path fires only on the 1-arg-is-not-a-provider case (the ambiguity-prone case).
+
+**`resolveAccountForVerb` not used by rename/delete**: Rename and delete have unique arg shapes (2-3 args vs 0-2) that required custom dispatch logic. Login/logout share the same `[provider] [account]` MaximumNArgs(2) shape and thus share `resolveAccountForVerb`.
+
+### Dead-code note
+
+`runManageHome` in `operator_helpers.go` and `internal/tui/manage` remain dead code. Not touched — DROP_11 handles removal.
+
+## Hylla Feedback (Units 9.5 + 9.6 Round 1)
+
+None — Hylla's last ingest predates all DROP_9 changes (snapshot = DROP_8 baseline). All Go symbol evidence gathered via direct `Read` of source files and `git diff` context from prior worklog rounds. No Hylla queries were applicable given the stale baseline. Non-Go files (markdown, worklog) are outside Hylla's Go-only scope.

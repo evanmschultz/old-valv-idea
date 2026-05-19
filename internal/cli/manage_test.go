@@ -942,6 +942,171 @@ func TestImageCleanupAllImagesFlagConflict(t *testing.T) {
 	}
 }
 
+// ----------------------------------------------------------------------------
+// Units 9.5 + 9.6 — --provider flag normalization + collision enforcement
+// (collapsed into a single builder pass per orchestrator decision)
+// ----------------------------------------------------------------------------
+
+// TestResolveAccountByNameTableDriven is a table-driven unit test for the
+// resolveAccountByName helper covering three cases:
+//
+//	(a) single-provider match — resolves without --provider flag
+//	(b) multi-provider collision — returns error listing (provider, account) pairs
+//	(c) explicit --provider flag — resolves to the specified provider
+//
+// Non-parallel: tests share a single paths/store and the table mutates data.
+func TestResolveAccountByNameTableDriven(t *testing.T) {
+	paths := testCodexPaths(t)
+
+	// Create "solo" only in Codex.
+	testCreateAccount(t, paths, domain.ProviderCodex, "solo")
+	// Create "shared" in both providers.
+	testCreateAccount(t, paths, domain.ProviderCodex, "shared")
+	testCreateAccount(t, paths, domain.ProviderClaude, "shared")
+
+	store, err := sqliteadapter.NewStore(paths.DatabasePath)
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&strings.Builder{})
+	cmd.SetErr(&strings.Builder{})
+
+	cases := []struct {
+		name          string
+		accountName   string
+		providerFlag  string
+		wantProvider  domain.Provider
+		wantErrSubstr string // empty means success expected
+	}{
+		{
+			name:         "single-provider resolves without flag",
+			accountName:  "solo",
+			providerFlag: "",
+			wantProvider: domain.ProviderCodex,
+		},
+		{
+			name:          "multi-provider collision errors without flag",
+			accountName:   "shared",
+			providerFlag:  "",
+			wantErrSubstr: "--provider",
+		},
+		{
+			name:         "explicit provider flag resolves shared name",
+			accountName:  "shared",
+			providerFlag: "codex",
+			wantProvider: domain.ProviderCodex,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			provider, profile, err := resolveAccountByName(cmd.Context(), store, tc.accountName, tc.providerFlag)
+			if tc.wantErrSubstr != "" {
+				if err == nil {
+					t.Fatalf("resolveAccountByName(%q, %q) error = nil, want error containing %q", tc.accountName, tc.providerFlag, tc.wantErrSubstr)
+				}
+				if !strings.Contains(err.Error(), tc.wantErrSubstr) {
+					t.Fatalf("resolveAccountByName(%q, %q) error = %q, want substring %q", tc.accountName, tc.providerFlag, err.Error(), tc.wantErrSubstr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveAccountByName(%q, %q) error = %v, want nil", tc.accountName, tc.providerFlag, err)
+			}
+			if provider != tc.wantProvider {
+				t.Fatalf("resolveAccountByName(%q, %q) provider = %q, want %q", tc.accountName, tc.providerFlag, provider, tc.wantProvider)
+			}
+			if profile.Name != tc.accountName {
+				t.Fatalf("resolveAccountByName(%q, %q) profile.Name = %q, want %q", tc.accountName, tc.providerFlag, profile.Name, tc.accountName)
+			}
+		})
+	}
+}
+
+// TestAccountDeleteCollisionRequiresProviderFlag verifies that when an account
+// name exists in multiple providers, `account delete <name>` returns a
+// collision error listing the (provider, account) pairs and instructing the
+// user to add --provider.
+func TestAccountDeleteCollisionRequiresProviderFlag(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	// Create "duplex" in both Codex and Claude.
+	testCreateAccount(t, paths, domain.ProviderCodex, "duplex")
+	testCreateAccount(t, paths, domain.ProviderClaude, "duplex")
+
+	errMsg := runManageExpectError(t, paths, []string{"account", "delete", "duplex"})
+	for _, want := range []string{"duplex", "codex", "claude", "--provider"} {
+		if !strings.Contains(errMsg, want) {
+			t.Fatalf("delete collision error %q missing substring %q", errMsg, want)
+		}
+	}
+}
+
+// TestAccountDeleteWithProviderFlagResolvesSingleAccount verifies that when
+// --provider is given, an ambiguous name resolves to the specified provider.
+func TestAccountDeleteWithProviderFlagResolvesSingleAccount(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	testCreateAccount(t, paths, domain.ProviderCodex, "delme")
+	testCreateAccount(t, paths, domain.ProviderClaude, "delme")
+
+	out := runManage(t, paths, []string{"account", "delete", "delme", "--provider", "codex"})
+	for _, want := range []string{"Account deleted", "provider=codex", "account=delme"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("delete --provider output %q missing %q", out, want)
+		}
+	}
+}
+
+// TestAccountBindCollisionRequiresProviderFlag verifies that when an account
+// name exists in multiple providers and no positional provider or --provider
+// flag is given, `account bind <name>` returns a collision error.
+func TestAccountBindCollisionRequiresProviderFlag(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	projectRoot := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(filepath.Join(projectRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git) error = %v", err)
+	}
+	// Create "bindme" in both Codex and Claude.
+	testCreateAccount(t, paths, domain.ProviderCodex, "bindme")
+	testCreateAccount(t, paths, domain.ProviderClaude, "bindme")
+
+	errMsg := runManageExpectError(t, paths, []string{"account", "bind", "bindme", "--project", projectRoot})
+	for _, want := range []string{"bindme", "codex", "claude", "--provider"} {
+		if !strings.Contains(errMsg, want) {
+			t.Fatalf("bind collision error %q missing substring %q", errMsg, want)
+		}
+	}
+}
+
+// TestAccountInspectWhoamiAliasRemoved verifies that `account whoami` no
+// longer works after the alias was removed from newManageAccountInspectCommand.
+func TestAccountInspectWhoamiAliasRemoved(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd := newManageAccountCommand(paths, &rootOptions{})
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"whoami"})
+
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "unknown command") {
+		t.Fatalf("account whoami: Execute() error = %v, want unknown command error", err)
+	}
+}
+
 func testJWT(t *testing.T, claims map[string]string) string {
 	t.Helper()
 	header, err := json.Marshal(map[string]string{"alg": "RS256", "typ": "JWT"})

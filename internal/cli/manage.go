@@ -65,75 +65,82 @@ valv account delete hylla
 
 func newManageAccountInspectCommand(paths config.Paths, opts *rootOptions) *cobra.Command {
 	var projectPath string
+	var providerFlag string
 	cmd := &cobra.Command{
-		Use:     "inspect [provider] [account]",
-		Aliases: []string{"whoami"},
-		Short:   "Show one account's resolved identity and home",
+		Use:   "inspect [provider] [account]",
+		Short: "Show one account's resolved identity and home",
 		Long: strings.TrimSpace(`
 Show one provider account's resolved auth identity, mounted home, and how many projects are currently bound to it.
 
-With no args, Valv inspects the account currently bound to the detected project. With one arg, Valv treats it as an account name under the current provider unless it parses as a provider.
+With no args, Valv inspects the account currently bound to the detected project. With one arg, Valv treats it as an account name and searches all providers; use --provider to disambiguate when the name exists in multiple providers.
 `),
 		Example: strings.TrimSpace(`
 valv account inspect
 valv account inspect personal
 valv account inspect codex personal
-valv account whoami
+valv account inspect personal --provider codex
 `),
 		Args: cobra.MaximumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runManageAccountInspect(cmd, paths, opts, args, projectPath)
+			return runManageAccountInspect(cmd, paths, opts, args, projectPath, providerFlag)
 		},
 	}
 	cmd.Flags().StringVar(&projectPath, "project", "", "explicit project path to inspect instead of the current working directory")
+	cmd.Flags().StringVar(&providerFlag, "provider", "", "explicit provider override (required when account name is ambiguous across providers)")
 	return cmd
 }
 
 func newManageAccountLoginCommand(paths config.Paths, opts *rootOptions) *cobra.Command {
 	var projectPath string
+	var providerFlag string
 	cmd := &cobra.Command{
 		Use:   "login [provider] [account]",
 		Short: "Log in one existing provider account on the host",
 		Long: strings.TrimSpace(`
 Log in one existing provider account on the host without changing the current project binding.
 
-With no args, Valv uses the account currently bound to the detected project.
+With no args, Valv uses the account currently bound to the detected project. With one arg, Valv searches all providers; use --provider to disambiguate when the name exists in multiple providers.
 `),
 		Example: strings.TrimSpace(`
 valv account login
 valv account login hylla
 valv account login codex hylla
+valv account login hylla --provider codex
 `),
 		Args: cobra.MaximumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runManageAccountLogin(cmd, paths, opts, args, projectPath)
+			return runManageAccountLogin(cmd, paths, opts, args, projectPath, providerFlag)
 		},
 	}
 	cmd.Flags().StringVar(&projectPath, "project", "", "explicit project path to inspect instead of the current working directory")
+	cmd.Flags().StringVar(&providerFlag, "provider", "", "explicit provider override (required when account name is ambiguous across providers)")
 	return cmd
 }
 
 func newManageAccountLogoutCommand(paths config.Paths, opts *rootOptions) *cobra.Command {
 	var projectPath string
+	var providerFlag string
 	cmd := &cobra.Command{
 		Use:   "logout [provider] [account]",
 		Short: "Log out one existing provider account on the host",
 		Long: strings.TrimSpace(`
 Log out one existing provider account on the host without deleting the Valv account record or changing project bindings.
 
-With no args, Valv uses the account currently bound to the detected project.
+With no args, Valv uses the account currently bound to the detected project. With one arg, Valv searches all providers; use --provider to disambiguate when the name exists in multiple providers.
 `),
 		Example: strings.TrimSpace(`
 valv account logout
 valv account logout hylla
 valv account logout codex hylla
+valv account logout hylla --provider codex
 `),
 		Args: cobra.MaximumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runManageAccountLogout(cmd, paths, opts, args, projectPath)
+			return runManageAccountLogout(cmd, paths, opts, args, projectPath, providerFlag)
 		},
 	}
 	cmd.Flags().StringVar(&projectPath, "project", "", "explicit project path to inspect instead of the current working directory")
+	cmd.Flags().StringVar(&providerFlag, "provider", "", "explicit provider override (required when account name is ambiguous across providers)")
 	return cmd
 }
 
@@ -233,44 +240,50 @@ valv account list codex --format json
 }
 
 func newManageAccountRenameCommand(paths config.Paths, opts *rootOptions) *cobra.Command {
+	var providerFlag string
 	cmd := &cobra.Command{
 		Use:   "rename [provider] <account> <new-name>",
 		Short: "Rename one provider account without changing its home",
 		Long: strings.TrimSpace(`
 Rename one provider account while keeping the same provider home, auth state, session history, and MCP config.
 
-With no explicit provider, Valv uses the current project's bound provider or the default supported provider.
+With no explicit provider, Valv searches all providers; use --provider to disambiguate when the account name exists in multiple providers.
 `),
 		Example: strings.TrimSpace(`
 valv account rename personal hylla
 valv account rename codex personal hylla
+valv account rename personal hylla --provider codex
 `),
 		Args: cobra.RangeArgs(2, 3),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runManageAccountRename(cmd, paths, opts, args)
+			return runManageAccountRename(cmd, paths, opts, args, providerFlag)
 		},
 	}
+	cmd.Flags().StringVar(&providerFlag, "provider", "", "explicit provider override (required when account name is ambiguous across providers)")
 	return cmd
 }
 
 func newManageAccountDeleteCommand(paths config.Paths, opts *rootOptions) *cobra.Command {
+	var providerFlag string
 	cmd := &cobra.Command{
 		Use:   "delete [provider] <account>",
 		Short: "Delete one Valv account record",
 		Long: strings.TrimSpace(`
 Delete one Valv account record without deleting the underlying home directory on disk.
 
-Valv refuses to delete accounts that are still bound to one or more projects.
+Valv refuses to delete accounts that are still bound to one or more projects. When no provider is given, Valv searches all providers; use --provider to disambiguate when the name exists in multiple providers.
 `),
 		Example: strings.TrimSpace(`
 valv account delete hylla
 valv account delete codex hylla
+valv account delete hylla --provider codex
 `),
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runManageAccountDelete(cmd, paths, opts, args)
+			return runManageAccountDelete(cmd, paths, opts, args, providerFlag)
 		},
 	}
+	cmd.Flags().StringVar(&providerFlag, "provider", "", "explicit provider override (required when account name is ambiguous across providers)")
 	return cmd
 }
 
@@ -359,6 +372,7 @@ valv account bind profile-name --project /absolute/path/to/repo
 			var provider domain.Provider
 			var profileName string
 			if len(args) == 2 {
+				// Explicit positional provider: "account bind codex profile-name".
 				p, err := domain.ParseProvider(args[0])
 				if err != nil {
 					return err
@@ -368,13 +382,24 @@ valv account bind profile-name --project /absolute/path/to/repo
 			} else {
 				profileName = args[0]
 				if providerFlag != "" {
+					// Explicit --provider flag: no collision check needed.
 					p, err := domain.ParseProvider(providerFlag)
 					if err != nil {
 						return err
 					}
 					provider = p
 				} else {
-					provider = domain.ProviderCodex
+					// No explicit provider: cross-provider collision check.
+					service, closeStore, err := openManageService(cmd, paths)
+					if err != nil {
+						return fmt.Errorf("account bind: %w", err)
+					}
+					resolvedProvider, _, resolveErr := resolveAccountByName(cmd.Context(), service, profileName, "")
+					closeStore()
+					if resolveErr != nil {
+						return fmt.Errorf("account bind: %w", resolveErr)
+					}
+					provider = resolvedProvider
 				}
 			}
 			return runManageBind(cmd, paths, opts, provider, profileName, projectPath)
@@ -680,7 +705,7 @@ func runManageAccountSwitch(cmd *cobra.Command, paths config.Paths, opts *rootOp
 	return runManageBind(cmd, paths, opts, provider, profileName, projectPath)
 }
 
-func runManageAccountLogin(cmd *cobra.Command, paths config.Paths, opts *rootOptions, args []string, projectPath string) error {
+func runManageAccountLogin(cmd *cobra.Command, paths config.Paths, opts *rootOptions, args []string, projectPath, providerFlag string) error {
 	mode, err := commandOutputMode(cmd, opts)
 	if err != nil {
 		return fmt.Errorf("resolve output policy: %w", err)
@@ -690,7 +715,7 @@ func runManageAccountLogin(cmd *cobra.Command, paths config.Paths, opts *rootOpt
 		return fmt.Errorf("manage account login: %w", err)
 	}
 	defer closeStore()
-	profile, err := resolveManagedAccount(cmd, service, args, projectPath)
+	profile, err := resolveAccountForVerb(cmd, service, args, projectPath, providerFlag)
 	if err != nil {
 		return fmt.Errorf("manage account login: %w", err)
 	}
@@ -707,7 +732,7 @@ func runManageAccountLogin(cmd *cobra.Command, paths config.Paths, opts *rootOpt
 	})
 }
 
-func runManageAccountLogout(cmd *cobra.Command, paths config.Paths, opts *rootOptions, args []string, projectPath string) error {
+func runManageAccountLogout(cmd *cobra.Command, paths config.Paths, opts *rootOptions, args []string, projectPath, providerFlag string) error {
 	mode, err := commandOutputMode(cmd, opts)
 	if err != nil {
 		return fmt.Errorf("resolve output policy: %w", err)
@@ -717,7 +742,7 @@ func runManageAccountLogout(cmd *cobra.Command, paths config.Paths, opts *rootOp
 		return fmt.Errorf("manage account logout: %w", err)
 	}
 	defer closeStore()
-	profile, err := resolveManagedAccount(cmd, service, args, projectPath)
+	profile, err := resolveAccountForVerb(cmd, service, args, projectPath, providerFlag)
 	if err != nil {
 		return fmt.Errorf("manage account logout: %w", err)
 	}
@@ -734,7 +759,7 @@ func runManageAccountLogout(cmd *cobra.Command, paths config.Paths, opts *rootOp
 	})
 }
 
-func runManageAccountInspect(cmd *cobra.Command, paths config.Paths, opts *rootOptions, args []string, projectPath string) error {
+func runManageAccountInspect(cmd *cobra.Command, paths config.Paths, opts *rootOptions, args []string, projectPath, providerFlag string) error {
 	mode, err := commandOutputMode(cmd, opts)
 	if err != nil {
 		return fmt.Errorf("resolve output policy: %w", err)
@@ -753,21 +778,38 @@ func runManageAccountInspect(cmd *cobra.Command, paths config.Paths, opts *rootO
 		}
 	}
 
-	provider, profileName, err := resolveProfileSwitchTarget(cmd, service, startPath, args)
-	if err != nil {
-		return fmt.Errorf("manage account inspect: %w", err)
-	}
 	var profile domain.Profile
-	if profileName == "" {
-		status, err := service.Status(cmd.Context(), startPath)
+	if len(args) == 1 && providerFlag == "" {
+		if _, parseErr := domain.ParseProvider(args[0]); parseErr != nil {
+			// 1-arg form that is not a provider: cross-provider name lookup.
+			_, resolvedProfile, resolveErr := resolveAccountByName(cmd.Context(), service, args[0], "")
+			if resolveErr != nil {
+				return fmt.Errorf("manage account inspect: %w", resolveErr)
+			}
+			profile = resolvedProfile
+		} else {
+			// 1-arg form that IS a provider: use existing path.
+			profile, err = resolveProfileFromSwitchTarget(cmd, service, startPath, args)
+			if err != nil {
+				return fmt.Errorf("manage account inspect: %w", err)
+			}
+		}
+	} else if (len(args) == 1 || len(args) == 2) && providerFlag != "" {
+		// --provider flag explicit: use it directly.
+		accountName := args[0]
+		if len(args) == 2 {
+			accountName = args[1]
+		}
+		_, resolvedProfile, resolveErr := resolveAccountByName(cmd.Context(), service, accountName, providerFlag)
+		if resolveErr != nil {
+			return fmt.Errorf("manage account inspect: %w", resolveErr)
+		}
+		profile = resolvedProfile
+	} else {
+		// 0-arg or 2-arg (explicit positional provider + name): existing path.
+		profile, err = resolveProfileFromSwitchTarget(cmd, service, startPath, args)
 		if err != nil {
 			return fmt.Errorf("manage account inspect: %w", err)
-		}
-		profile = status.Profile
-	} else {
-		profile, err = service.ProfileByName(cmd.Context(), provider, profileName)
-		if err != nil {
-			return fmt.Errorf("manage account inspect: resolve account %q: %w", profileName, err)
 		}
 	}
 	bindings, err := service.ListBindings(cmd.Context(), profile.Provider)
@@ -791,7 +833,7 @@ func runManageAccountInspect(cmd *cobra.Command, paths config.Paths, opts *rootO
 	})
 }
 
-func runManageAccountRename(cmd *cobra.Command, paths config.Paths, opts *rootOptions, args []string) error {
+func runManageAccountRename(cmd *cobra.Command, paths config.Paths, opts *rootOptions, args []string, providerFlag string) error {
 	mode, err := commandOutputMode(cmd, opts)
 	if err != nil {
 		return fmt.Errorf("resolve output policy: %w", err)
@@ -802,13 +844,42 @@ func runManageAccountRename(cmd *cobra.Command, paths config.Paths, opts *rootOp
 	}
 	defer closeStore()
 
-	provider, currentName, newName, err := resolveRenameArgs(args)
-	if err != nil {
-		return fmt.Errorf("manage account rename: %w", err)
+	var provider domain.Provider
+	var currentName, newName string
+
+	switch {
+	case len(args) == 3:
+		// Three-arg legacy positional form: "rename [provider] currentName newName".
+		var parseErr error
+		provider, currentName, newName, parseErr = resolveRenameArgs(args)
+		if parseErr != nil {
+			return fmt.Errorf("manage account rename: %w", parseErr)
+		}
+		if provider == "" {
+			provider = domain.ProviderCodex
+		}
+	case len(args) == 2 && providerFlag != "":
+		// Two args + explicit --provider flag: flag is the provider.
+		p, parseErr := domain.ParseProvider(providerFlag)
+		if parseErr != nil {
+			return fmt.Errorf("manage account rename: %w", parseErr)
+		}
+		provider = p
+		currentName = args[0]
+		newName = args[1]
+	case len(args) == 2:
+		// Two args, no flag, no positional provider: cross-provider collision check on currentName.
+		resolvedProvider, _, resolveErr := resolveAccountByName(cmd.Context(), service, args[0], "")
+		if resolveErr != nil {
+			return fmt.Errorf("manage account rename: %w", resolveErr)
+		}
+		provider = resolvedProvider
+		currentName = args[0]
+		newName = args[1]
+	default:
+		return fmt.Errorf("manage account rename: unexpected arg count %d", len(args))
 	}
-	if provider == "" {
-		provider = domain.ProviderCodex
-	}
+
 	profile, err := service.RenameProfile(cmd.Context(), provider, currentName, newName)
 	if err != nil {
 		return fmt.Errorf("manage account rename: %w", err)
@@ -849,7 +920,7 @@ func runManageAccountCleanup(cmd *cobra.Command, paths config.Paths, opts *rootO
 	})
 }
 
-func runManageAccountDelete(cmd *cobra.Command, paths config.Paths, opts *rootOptions, args []string) error {
+func runManageAccountDelete(cmd *cobra.Command, paths config.Paths, opts *rootOptions, args []string, providerFlag string) error {
 	mode, err := commandOutputMode(cmd, opts)
 	if err != nil {
 		return fmt.Errorf("resolve output policy: %w", err)
@@ -860,13 +931,26 @@ func runManageAccountDelete(cmd *cobra.Command, paths config.Paths, opts *rootOp
 	}
 	defer closeStore()
 
-	provider, profileName, err := resolveDeleteArgs(args)
-	if err != nil {
-		return fmt.Errorf("manage account delete: %w", err)
+	var provider domain.Provider
+	var profileName string
+
+	if len(args) == 2 {
+		// Explicit positional provider: "account delete codex hylla".
+		var parseErr error
+		provider, profileName, parseErr = resolveDeleteArgs(args)
+		if parseErr != nil {
+			return fmt.Errorf("manage account delete: %w", parseErr)
+		}
+	} else {
+		// 1-arg form: cross-provider collision check (or explicit --provider flag).
+		profileName = args[0]
+		resolvedProvider, _, resolveErr := resolveAccountByName(cmd.Context(), service, profileName, providerFlag)
+		if resolveErr != nil {
+			return fmt.Errorf("manage account delete: %w", resolveErr)
+		}
+		provider = resolvedProvider
 	}
-	if provider == "" {
-		provider = domain.ProviderCodex
-	}
+
 	profile, err := service.DeleteProfile(cmd.Context(), provider, profileName)
 	if err != nil {
 		return fmt.Errorf("manage account delete: %w", err)
@@ -1011,6 +1095,66 @@ func resolveAccountSwitchTarget(
 	}
 }
 
+// resolveAccountByName performs a cross-provider lookup for accountName.
+//
+// When providerFlag is non-empty it is parsed as the explicit provider and the
+// account is looked up under that provider only — no collision check is needed.
+//
+// When providerFlag is empty the function searches every supported provider:
+//   - zero matches → not-found error
+//   - exactly one match → returns that provider and profile
+//   - two or more matches → returns a collision error listing all
+//     (provider, account) pairs and instructing the user to add --provider
+//
+// The interface constraint reuses accountSwitchResolver so the same concrete
+// service / store value can be passed without an additional interface type.
+func resolveAccountByName(
+	ctx context.Context,
+	service accountSwitchResolver,
+	accountName, providerFlag string,
+) (domain.Provider, domain.Profile, error) {
+	if providerFlag != "" {
+		p, err := domain.ParseProvider(providerFlag)
+		if err != nil {
+			return "", domain.Profile{}, err
+		}
+		profile, err := service.ProfileByName(ctx, p, accountName)
+		if err != nil {
+			return "", domain.Profile{}, fmt.Errorf("account %q not found for provider %q: %w", accountName, p, err)
+		}
+		return p, profile, nil
+	}
+
+	type match struct {
+		provider domain.Provider
+		profile  domain.Profile
+	}
+	var matches []match
+	for _, p := range supportedProviders() {
+		profile, lookupErr := service.ProfileByName(ctx, p, accountName)
+		if lookupErr == nil {
+			matches = append(matches, match{provider: p, profile: profile})
+			continue
+		}
+		if errors.Is(lookupErr, domain.ErrNotFound) {
+			continue
+		}
+		return "", domain.Profile{}, fmt.Errorf("look up account %q for provider %q: %w", accountName, p, lookupErr)
+	}
+	switch len(matches) {
+	case 0:
+		return "", domain.Profile{}, fmt.Errorf("account %q not found in any provider; run `valv account add codex %s` or `valv account list` to see all available accounts", accountName, accountName)
+	case 1:
+		return matches[0].provider, matches[0].profile, nil
+	default:
+		pairs := make([]string, 0, len(matches))
+		for _, m := range matches {
+			pairs = append(pairs, fmt.Sprintf("(%s, %s)", m.provider, accountName))
+		}
+		return "", domain.Profile{}, fmt.Errorf("account %q found in multiple providers: %s; use --provider to specify which one", accountName, strings.Join(pairs, ", "))
+	}
+}
+
 // pickProfileCrossProvider collects all profiles from every supported
 // provider and presents them in a single picker. It returns the selected
 // profile name and the provider it belongs to. Because Selected() now
@@ -1073,6 +1217,69 @@ func resolveManagedAccount(cmd *cobra.Command, service interface {
 		return domain.Profile{}, fmt.Errorf("resolve account %q: %w", profileName, err)
 	}
 	return profile, nil
+}
+
+// resolveProfileFromSwitchTarget is a thin wrapper around
+// resolveProfileSwitchTarget + ProfileByName / Status that returns a full
+// domain.Profile. It is the existing-path fallback used by inspect when the
+// arg IS a provider name or when there are 0 or 2 positional args.
+func resolveProfileFromSwitchTarget(cmd *cobra.Command, service interface {
+	Status(context.Context, string) (manageservice.StatusResult, error)
+	ProfileByName(context.Context, domain.Provider, string) (domain.Profile, error)
+}, startPath string, args []string,
+) (domain.Profile, error) {
+	provider, profileName, err := resolveProfileSwitchTarget(cmd, service, startPath, args)
+	if err != nil {
+		return domain.Profile{}, err
+	}
+	if profileName == "" {
+		status, statusErr := service.Status(cmd.Context(), startPath)
+		if statusErr != nil {
+			return domain.Profile{}, statusErr
+		}
+		return status.Profile, nil
+	}
+	profile, err := service.ProfileByName(cmd.Context(), provider, profileName)
+	if err != nil {
+		return domain.Profile{}, fmt.Errorf("resolve account %q: %w", profileName, err)
+	}
+	return profile, nil
+}
+
+// resolveAccountForVerb resolves the target account for verbs like login,
+// logout that accept [provider] [account] positionals plus an optional
+// --provider flag.
+//
+// Resolution order:
+//  1. 1 arg + no providerFlag + arg does NOT parse as a provider:
+//     cross-provider collision check via resolveAccountByName.
+//  2. providerFlag set: parse it and use ProfileByName directly.
+//  3. All other cases (0 args, 1 provider-arg, 2 args): existing
+//     resolveManagedAccount behaviour.
+func resolveAccountForVerb(cmd *cobra.Command, service interface {
+	Status(context.Context, string) (manageservice.StatusResult, error)
+	ProfileByName(context.Context, domain.Provider, string) (domain.Profile, error)
+}, args []string, projectPath, providerFlag string,
+) (domain.Profile, error) {
+	if len(args) == 1 && providerFlag == "" {
+		if _, parseErr := domain.ParseProvider(args[0]); parseErr != nil {
+			// Account name, not a provider token — use cross-provider resolution.
+			_, profile, resolveErr := resolveAccountByName(cmd.Context(), service, args[0], "")
+			return profile, resolveErr
+		}
+	}
+	if providerFlag != "" && len(args) == 1 {
+		p, parseErr := domain.ParseProvider(providerFlag)
+		if parseErr != nil {
+			return domain.Profile{}, parseErr
+		}
+		profile, lookupErr := service.ProfileByName(cmd.Context(), p, args[0])
+		if lookupErr != nil {
+			return domain.Profile{}, fmt.Errorf("resolve account %q for provider %q: %w", args[0], p, lookupErr)
+		}
+		return profile, nil
+	}
+	return resolveManagedAccount(cmd, service, args, projectPath)
 }
 
 func resolveRenameArgs(args []string) (domain.Provider, string, string, error) {
