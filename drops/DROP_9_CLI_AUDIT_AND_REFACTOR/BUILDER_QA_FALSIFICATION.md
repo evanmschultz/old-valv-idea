@@ -495,3 +495,76 @@ These are surface-level drift items R2 did not introduce and that the unit's AC 
 ## Hylla Feedback (Unit 9.4.5 Round 2)
 
 N/A — task touched only non-Go files (CLAUDE.md, CONTRIBUTING.md) and a 4-line string substitution inside a cobra `Example:` field literal. No Go symbol search was needed; direct `Read` + `git diff` + `git grep` were the correct evidence tools. Per `main/CLAUDE.md` Hylla policy, this is exactly the "non-Go content + uncommitted/changed since last ingest" combination that routes through git tooling.
+
+---
+
+## Units 9.5 + 9.6 — Round 1
+
+- **Reviewer:** go-qa-falsification-agent
+- **Commit under review:** `702b7c9 feat(cli): units 9.5+9.6 normalize --provider flag and collision check`
+- **Mage targets exercised by reviewer:**
+  - `mage testPkg ./internal/cli` — PASS (214 tests, 67.5% coverage, 0 failures)
+  - `mage integration` — PASS (217/217, 0 skipped, 0 failed)
+  - `mage build` — PASS
+- **Verdict:** PASS with one MINOR finding (vector 4, help-text drift on `bind --provider`). No CONFIRMED counterexamples that block the unit; the help-text drift is recommend-fix-now but does not require a builder respawn before 9.5+9.6 is `done`. Orchestrator may either accept the finding as a follow-up nit or have the builder patch the one line.
+
+### Summary
+
+Wide-surface refactor: 6 verb constructors gained `--provider` flag, 4 run functions threaded the flag, and three new helpers (`resolveAccountByName`, `resolveAccountForVerb`, `resolveProfileFromSwitchTarget`) were added. All three mage gates re-verified GREEN by the reviewer with the exact numbers the builder reported. The 11 enumerated attack vectors were each attempted; only vector 4 (`bind` `--provider` help-text drift) produced a finding, and that finding is cosmetic UX rather than a behaviour break.
+
+### Attack vector outcomes
+
+| # | Attack | Outcome | Notes |
+|---|--------|---------|-------|
+| 1 | `bind` 1-arg path: account exists only for Codex resolves correctly | REFUTED | `resolveAccountByName(name, "")` iterates `supportedProviders()` and returns the single Codex match via `ProfileByName`. `manageservice.Service.ProfileByName` wraps `domain.ErrNotFound` with `%w`, so `errors.Is(err, domain.ErrNotFound)` still matches and the Claude lookup is skipped — single-provider name still resolves cleanly. |
+| 2 | `rename` 2-arg semantic: `rename nonexistent newname` returns a meaningful error | REFUTED | `resolveAccountByName("nonexistent", "")` returns the `"account %q not found in any provider; run \`valv account add codex %s\` or \`valv account list\` ..."` error from `manage.go:1086`. Meaningful guidance, not the previous unhelpful `RenameProfile` "profile not found" message. The builder's Unknowns claim is over-cautious — the change is strictly safer. |
+| 3 | `whoami` documentation drift | REFUTED | `rtk git grep -in "whoami" -- README.md AGENTS.md CONTRIBUTING.md CLAUDE.md` returns zero matches. The only surviving references are inside DROP_9 dir (builder worklog + plan) and in test code that asserts the alias is gone. Clean. |
+| 4 | `--provider` flag help-text consistency across all 6 verbs | **CONFIRMED (minor, cosmetic)** | The 5 verbs `inspect`, `login`, `logout`, `rename`, `delete` all use the string `"explicit provider override (required when account name is ambiguous across providers)"` (manage.go lines 89/116/143/262/286 — consistent). The 6th verb `bind` (manage.go line 409) uses `"provider to use for binding (codex or claude; defaults to codex)"` — a stale wording inherited from the pre-9.5 silent-default-to-Codex behaviour. After this commit, `valv account bind <name>` with no `--provider` does NOT default to Codex; it runs the collision check, which can resolve to Claude (if `<name>` is Claude-only) or error (collision). A user reading `bind --help` will believe the wrong contract. Cosmetic UX bug, not a behaviour break; fix is one line: change line 409 to the same `"explicit provider override (required when account name is ambiguous across providers)"` wording as the other five verbs. Unbind (line 436) is unchanged territory (`NoArgs`, no collision detection) and its "defaults to codex" wording remains accurate. |
+| 5 | Coverage decline 69.5% → 67.5% — which paths went unexercised | REFUTED (gate passes; partial coverage acknowledged) | Coverage gate threshold is 60% (`magefile.go`), so 67.5% passes. New helper `resolveAccountByName` is covered by `TestResolveAccountByNameTableDriven` (all 3 branches: single, collision, explicit-flag). Live coverage gaps: `resolveAccountForVerb` 1-arg-not-a-provider branch (login + logout); `runManageAccountInspect` 1-arg-not-a-provider and `--provider`-flag branches; `runManageAccountRename` 2-arg cross-provider COLLISION branch (the single-provider-resolves branch IS hit by pre-existing `TestManageAccountRenameKeepsBindingByProfileID`). These uncovered branches all delegate to the well-tested `resolveAccountByName` and the dispatch arithmetic is straightforward; not a counterexample but a follow-up "tighten coverage" note. |
+| 6 | Bind 1-arg+no-flag path opens service twice → leak | REFUTED | First service opened at manage.go:393, closed inline via `closeStore()` at line 398 (executed before the error check at 399). Second service opened inside `runManageBind` at line 613 with `defer closeStore()` at line 617. Both opens have a paired close; no leak. Worth ~2 SQLite opens of perf cost on that one path, acknowledged by the builder as the surgical trade-off. |
+| 7 | `accountSwitchResolver` interface completeness for `resolveAccountByName` | REFUTED | The interface is `ProfileByName(ctx, provider, name) (Profile, error)`. `resolveAccountByName` only calls `service.ProfileByName(ctx, p, accountName)` (manage.go:1126 and 1135). No other methods required; interface is minimal and sufficient. Reuse of an existing one-method interface is good Go discipline (no premature interface bloat). |
+| 8 | Test isolation — `t.Parallel` + global state | REFUTED | 4 of 5 new tests are `t.Parallel()`. Each uses `testCodexPaths(t)` which returns a fresh `t.TempDir()`-rooted paths struct; no global state crossover. `TestResolveAccountByNameTableDriven` is non-parallel by design (builder note explicit); even if it were parallel the table's sub-tests share read-only setup. No race detected (mage testPkg runs `-race` and PASSes). |
+| 9 | Positional `[provider]` fallback preserved (AC 9.5 #4) | REFUTED | `valv account delete codex hylla` (2 args) routes to the `if len(args) == 2` branch at manage.go:937 → calls `resolveDeleteArgs` (existing path) and ignores `--provider` flag — backward ergonomic preserved. `valv account inspect codex hylla` (2 args, no flag) hits the trailing `else` at manage.go:808 → `resolveProfileFromSwitchTarget` (existing path). Switch verb (the most complex multi-arg case) is untouched — vector 11 (below) confirms. |
+| 10 | Hidden integration-tag breakage; +8 test delta accounting | REFUTED | 209 (post-9.4.5) → 217 (post-9.5+9.6) = +8. Delta accounting: 5 new test functions, one of which (`TestResolveAccountByNameTableDriven`) is table-driven with 3 sub-tests via `t.Run`. Go counts each `t.Run` as a separate test = 1 parent + 3 subs = 4 tests for that function. 4 single tests + 4 from table = 8 added. Reproducible: `mage integration` reports 217 tests; the 5 new test names appear in the per-package output. No hidden integration test was added or modified. |
+| 11 | `resolveAccountSwitchTarget` callers still type-check | REFUTED | `rtk git grep -n "resolveAccountSwitchTarget" -- internal/cli/` shows exactly one call site at manage.go:655 (`runManageAccountSwitch`). The function's signature is unchanged. AC 9.6 #2 ("`valv account switch` already implements this — no change needed") holds. |
+
+### Additional adversarial attempts (not in vector list)
+
+- **`bind --provider claude` against non-existent name.** When the user provides `--provider claude` and the account doesn't exist under Claude, the bind path at manage.go:384 only parses the provider and calls `runManageBind` without verifying existence. `service.BindProject` will fail with "lookup profile" → wrapped error. Acceptable behaviour (error surfaces from the service); not a counterexample. Could be tightened by pre-checking existence via `resolveAccountByName(name, providerFlag)` in the bind RunE — pattern matches what `delete` does — but is a UX polish, not a correctness break.
+- **Error swallowing in `resolveAccountByName` per-provider loop.** When `ProfileByName` returns a non-`ErrNotFound` error (e.g. transient SQLite error), the function returns immediately wrapping with `"look up account %q for provider %q: %w"` (manage.go:1087). Correct; no swallow. The `errors.Is(err, domain.ErrNotFound)` gate at line 1083 is the only "skip" path and it's the correct shape. REFUTED.
+- **Nil-cmd / nil-context paths.** `resolveAccountByName` takes a raw `context.Context`, not a cmd; no nil-cmd risk. Callers all pass `cmd.Context()` which Cobra guarantees non-nil. REFUTED.
+- **Concurrent test mutation of shared paths.** Each new collision test creates its own `t.TempDir()` paths via `testCodexPaths(t)`. No cross-test contamination possible even with `-race`. REFUTED.
+- **Goroutine leaks.** No goroutines spawned in any new helper. REFUTED.
+- **`runManageBind` reopens service after closing in RunE — does the cobra context survive?** `cmd.Context()` is set once by Cobra and lives for the whole RunE call. Closing the store object doesn't touch the context. The second `openManageService` call gets a fresh `*sqliteadapter.Store` value but reuses the same `cmd.Context()`. REFUTED.
+
+### Counterexamples
+
+#### Vector 4 — `bind` `--provider` flag help-text drift (CONFIRMED, MINOR)
+
+- **File:line:** `internal/cli/manage.go:409`
+- **Current text:** `"provider to use for binding (codex or claude; defaults to codex)"`
+- **Behaviour:** Post-9.5+9.6, `valv account bind <name>` with no `--provider` flag and 1 positional arg does NOT default to Codex. It runs the cross-provider collision check via `resolveAccountByName(name, "")`. Possible outcomes: (a) name exists only in Codex → Codex; (b) name exists only in Claude → Claude; (c) name in both → collision error. The "defaults to codex" half of the help text is therefore false.
+- **Repro:** `mage build && ./valv account bind --help | grep -A1 provider` shows the misleading "defaults to codex" wording.
+- **Fix:** Replace line 409 with `cmd.Flags().StringVar(&providerFlag, "provider", "", "explicit provider override (required when account name is ambiguous across providers)")` — matches the wording on the 5 sibling verbs.
+- **Severity:** Cosmetic / documentation. Does NOT break behaviour, tests, or CI. Falsification verdict is PASS-with-finding — orchestrator decides whether to fold the one-line fix into a 9.5+9.6 fix-up round or queue as a follow-up nit.
+
+### Verification by reviewer
+
+| Gate | Result | Detail |
+|------|--------|--------|
+| `mage testPkg ./internal/cli` | PASS | 214 tests, 67.5% coverage (gate 60%), 0 failures, `-race` enabled |
+| `mage integration` | PASS | 217/217, 0 skipped, 0 failed |
+| `mage build` | PASS | `./valv` built cleanly |
+
+All three numbers match the builder's worklog claim exactly.
+
+### Self-review / orchestrator hand-off discipline
+
+- Did NOT edit Go code. HEAD commit `702b7c9` inspected via `git diff HEAD~1..HEAD`, `Read`, `rtk git grep`. Not modified.
+- Did NOT edit `PLAN.md`, `BUILDER_WORKLOG.md`, `BUILDER_QA_PROOF.md`. Only appended `## Units 9.5 + 9.6 — Round 1` to this falsification file.
+- Mage-only test invocations (`mage testPkg`, `mage integration`, `mage build`). No raw `go test` / `go build` / `go vet`.
+- Hylla NOT queried — HEAD commit is post-DROP_8 baseline (Hylla last ingest = `56ea569`). All changed code is post-ingest and would not appear in Hylla's index. Evidence flow: `git diff HEAD~1` + `Read` + `rtk git grep`.
+
+## Hylla Feedback (Units 9.5 + 9.6 Round 1)
+
+None — Hylla's last ingest at `56ea569` predates the entire DROP_9 work tree, so every symbol under review is post-ingest by definition. All Go evidence gathered via `git diff HEAD~1`, direct `Read`, and `rtk git grep`. No Hylla query was applicable to this commit. Non-Go grep checks (README/AGENTS/CONTRIBUTING/CLAUDE) used `git grep` directly per the Hylla-is-Go-only rule. No ergonomic gripes — Hylla was correctly bypassed for this entire review.
