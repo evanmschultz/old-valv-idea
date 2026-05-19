@@ -1,6 +1,6 @@
 # DROP_9 — CLI_AUDIT_AND_REFACTOR
 
-**State:** building
+**State:** done
 **Blocked by:** DROP_8 (done)
 **Paths (expected):**
 - `internal/cli/root.go`
@@ -34,7 +34,7 @@
 **PLAN.md ref:** main/PLAN.md → DROP_9 row
 **Workflow:** main/drops/WORKFLOW.md
 **Started:** 2026-05-18
-**Closed:** —
+**Closed:** 2026-05-19
 
 ## Scope
 
