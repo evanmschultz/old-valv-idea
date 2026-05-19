@@ -192,7 +192,7 @@ Closes the remainder of focus-plan §6.6 + the dogfood binding-UX gap (dev hit "
 
 ### Unit 8.7 — Wire globalswitch dispatch for Claude
 
-**State:** todo
+**State:** done
 **Paths:**
 - `internal/cli/operator_helpers.go`
 - `internal/cli/operator_helpers_test.go` (or existing test file for this path)

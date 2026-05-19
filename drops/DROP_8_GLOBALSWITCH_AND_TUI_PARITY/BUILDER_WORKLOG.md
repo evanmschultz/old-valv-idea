@@ -372,3 +372,63 @@ N/A — Hylla unreachable this session (per spawn prompt paradigm override). All
 - `internal/cli/operator_helpers.go` — `pickProfile`, `openManageService`, `errSelectionCanceled`.
 - `internal/cli/codex_test.go` — `testCodexPaths`, `runManage` helpers.
 - `internal/services/claude/service_test.go` — `fakeStore`, `fakeExecutor`, `boundClaudeStore`, `detectAlways` helpers.
+
+## Unit 8.7 — Round 1
+
+- **Builder:** go-builder-agent
+- **Started:** 2026-05-18
+- **Files touched:**
+  - `internal/cli/operator_helpers.go` (added `detectGlobalSwitchProviderFn` seam + `realDetectGlobalSwitchProvider`; rewired `ActionGlobalSwitch` case in `runManageHome`)
+  - `internal/cli/operator_helpers_test.go` (added 7 new tests: 4 stub-seam unit tests + 3 real-store integration tests)
+- **Mage targets run:**
+  - `mage testPkg github.com/evanmschultz/valv/internal/cli` — PASS (202/202, 73.1% coverage, -race)
+  - `mage build` — PASS
+
+### Design notes
+
+**`detectGlobalSwitchProviderFn` injection seam**
+
+Follows the `pickProfileFn` pattern established in Unit 8.2 R2: a package-level `var` pointing at the real implementation (`realDetectGlobalSwitchProvider`). Tests that mutate the var are non-parallel (same discipline as `TestPickProfileCrossProviderHandlesDuplicateNames`). The seam keeps the four unit-level dispatch tests free of SQLite setup, while three integration tests use the real store via `testCodexPaths` + `runManage`.
+
+**Two-probe policy in `realDetectGlobalSwitchProvider`**
+
+Step 1 probes Claude. Step 2 probes Codex. When both bindings exist, Claude wins because step 1 runs first and returns immediately on nil. The "both bound → Claude wins" policy is encoded solely in the probe order — no explicit "both bound" check needed. A comment in the godoc explains this intent so future readers don't reorder steps without understanding the policy implication.
+
+**Unbound fallback to Codex**
+
+When step 2 also returns `ErrUnboundProject`, the function returns `ProviderCodex`. This preserves the behavior of the old hardcoded `domain.ProviderCodex` path (pre-8.7). The fallback applies to projects with no binding row at all — calling `runGlobalSwitch` with Codex will then invoke the profile picker, which shows only Codex accounts. Correct behavior: if neither provider is bound, default to Codex for backward compatibility.
+
+**`os.Getwd()` for workingDir**
+
+The `ActionGlobalSwitch` TUI dispatch path calls `os.Getwd()` for the starting path — the same pattern used by `runManageStatus` (manage.go:1202-1208). The TUI is launched from the user's current directory, so this is correct. A `os.Getwd()` failure is treated as fatal (wrapped error returned), matching the behavior in `runManageStatus`.
+
+**`errors.Is` alone — no `strings.Contains` belt-and-suspenders**
+
+Per the 8.5 decision log: `StatusForProvider` wraps `ErrUnboundProject` with `%w`, so `errors.Is` unwraps the chain correctly. The `strings.Contains` fallback that existed in early 8.4 draft is not carried here.
+
+**`global.go` unchanged**
+
+The CLI path (`valv global switch <provider> <account>`) already parses the provider from args correctly. Unit 8.7 only changes the TUI dispatch in `runManageHome`.
+
+### Test coverage
+
+7 new tests added:
+- `TestDetectGlobalSwitchProviderClaudeBound` — stub: seam returns Claude.
+- `TestDetectGlobalSwitchProviderCodexBound` — stub: seam returns Codex.
+- `TestDetectGlobalSwitchProviderUnbound` — stub: seam returns Codex fallback.
+- `TestDetectGlobalSwitchProviderNonUnboundErrorPropagate` — stub: seam returns wrapped DB error; verifies `errors.Is` chain.
+- `TestRealDetectGlobalSwitchProviderClaudeBound` — real store: Claude binding → returns ProviderClaude.
+- `TestRealDetectGlobalSwitchProviderCodexBound` — real store: Codex binding → returns ProviderCodex.
+- `TestRealDetectGlobalSwitchProviderUnboundFallsBackToCodex` — real store: no binding → returns ProviderCodex.
+
+## Hylla Feedback (Unit 8.7 R1)
+
+N/A — Hylla unreachable this session (per spawn prompt paradigm override). All evidence gathered via direct `Read` of source files. Primary sources:
+- `internal/cli/operator_helpers.go` — `runManageHome`, `pickProfileFn` seam shape, existing imports.
+- `internal/cli/operator_helpers_test.go` — existing test structure.
+- `internal/cli/manage.go:1202-1208` — `os.Getwd()` pattern for workingDir.
+- `internal/cli/claude_setup.go:57-66` — `ErrUnboundProject` detection shape.
+- `internal/cli/global.go` — `runGlobalSwitch` signature.
+- `internal/services/manage/service.go:264-299` — `StatusForProvider` method.
+- `internal/cli/manage_test.go` — `pickProfileFn` seam mutation pattern (non-parallel discipline).
+- `internal/cli/codex_test.go` — `testCodexPaths` helper.

@@ -148,10 +148,65 @@ func runManageHome(cmd *cobra.Command, paths config.Paths, opts *rootOptions) er
 	case managetui.ActionCleanup:
 		return runManageCleanup(cmd, paths, opts, "all")
 	case managetui.ActionGlobalSwitch:
-		return runGlobalSwitch(cmd, paths, opts, domain.ProviderCodex, "")
+		workingDir, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("run manage tui: resolve working directory: %w", err)
+		}
+		provider, err := detectGlobalSwitchProviderFn(cmd, paths, workingDir)
+		if err != nil {
+			return fmt.Errorf("run manage tui: %w", err)
+		}
+		return runGlobalSwitch(cmd, paths, opts, provider, "")
 	default:
 		return fmt.Errorf("run manage tui: unsupported action %q", action)
 	}
+}
+
+// detectGlobalSwitchProviderFn is the injectable implementation of the
+// provider-detection step used by the ActionGlobalSwitch TUI dispatch path.
+// Tests stub this to control dispatch without a real SQLite store.
+//
+// Non-parallel: tests mutating this var must NOT call t.Parallel().
+var detectGlobalSwitchProviderFn = realDetectGlobalSwitchProvider
+
+// realDetectGlobalSwitchProvider detects which provider is bound for the given
+// working directory, applying the two-probe policy:
+//
+//  1. Try Claude first. nil error → return ProviderClaude (Claude wins when
+//     both bindings exist — step-1-first order encodes this policy).
+//     ErrUnboundProject → fall through to step 2.
+//     Any other error → wrap with "detect globalswitch provider: %w" and return.
+//
+//  2. Try Codex. nil error → return ProviderCodex.
+//     ErrUnboundProject → return ProviderCodex (backward-compatible fallback for
+//     projects with no binding at all).
+//     Any other error → wrap and return.
+func realDetectGlobalSwitchProvider(cmd *cobra.Command, paths config.Paths, workingDir string) (domain.Provider, error) {
+	service, closeStore, err := openManageService(cmd, paths)
+	if err != nil {
+		return "", fmt.Errorf("detect globalswitch provider: %w", err)
+	}
+	defer closeStore()
+
+	// Step 1: probe Claude.
+	_, err = service.StatusForProvider(cmd.Context(), workingDir, domain.ProviderClaude)
+	if err == nil {
+		return domain.ProviderClaude, nil
+	}
+	if !errors.Is(err, domain.ErrUnboundProject) {
+		return "", fmt.Errorf("detect globalswitch provider: %w", err)
+	}
+
+	// Step 2: probe Codex.
+	_, err = service.StatusForProvider(cmd.Context(), workingDir, domain.ProviderCodex)
+	if err == nil {
+		return domain.ProviderCodex, nil
+	}
+	if errors.Is(err, domain.ErrUnboundProject) {
+		// Neither provider is bound — fall back to Codex for backward compatibility.
+		return domain.ProviderCodex, nil
+	}
+	return "", fmt.Errorf("detect globalswitch provider: %w", err)
 }
 
 // pickProfileFn is the injectable implementation of the profile picker used

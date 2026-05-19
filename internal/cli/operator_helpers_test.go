@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -9,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	claudeprovider "github.com/evanmschultz/valv/internal/adapters/providers/claude"
+	"github.com/evanmschultz/valv/internal/config"
 	"github.com/evanmschultz/valv/internal/domain"
 	imagesservice "github.com/evanmschultz/valv/internal/services/images"
 )
@@ -152,5 +155,196 @@ func TestOpenImagesServiceWritesCacheToCachesDir(t *testing.T) {
 			// cache-path isolation is working.
 			_ = content
 		}
+	}
+}
+
+// TestDetectGlobalSwitchProviderClaudeBound verifies that when the project has
+// a Claude binding (StatusForProvider returns nil for Claude), the function
+// returns ProviderClaude.
+//
+// Non-parallel: stubs the package-level detectGlobalSwitchProviderFn.
+func TestDetectGlobalSwitchProviderClaudeBound(t *testing.T) {
+	orig := detectGlobalSwitchProviderFn
+	detectGlobalSwitchProviderFn = func(_ *cobra.Command, _ config.Paths, _ string) (domain.Provider, error) {
+		return domain.ProviderClaude, nil
+	}
+	defer func() { detectGlobalSwitchProviderFn = orig }()
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	cmd.SetIn(nil)
+	cmd.SetOut(nil)
+	cmd.SetErr(nil)
+
+	paths := config.Paths{}
+	got, err := detectGlobalSwitchProviderFn(cmd, paths, "/some/project")
+	if err != nil {
+		t.Fatalf("detectGlobalSwitchProviderFn() error = %v, want nil", err)
+	}
+	if got != domain.ProviderClaude {
+		t.Fatalf("provider = %q, want %q", got, domain.ProviderClaude)
+	}
+}
+
+// TestDetectGlobalSwitchProviderCodexBound verifies that when Claude returns
+// ErrUnboundProject but Codex returns nil, the function returns ProviderCodex.
+//
+// Non-parallel: stubs the package-level detectGlobalSwitchProviderFn.
+func TestDetectGlobalSwitchProviderCodexBound(t *testing.T) {
+	orig := detectGlobalSwitchProviderFn
+	detectGlobalSwitchProviderFn = func(_ *cobra.Command, _ config.Paths, _ string) (domain.Provider, error) {
+		return domain.ProviderCodex, nil
+	}
+	defer func() { detectGlobalSwitchProviderFn = orig }()
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+
+	paths := config.Paths{}
+	got, err := detectGlobalSwitchProviderFn(cmd, paths, "/some/project")
+	if err != nil {
+		t.Fatalf("detectGlobalSwitchProviderFn() error = %v, want nil", err)
+	}
+	if got != domain.ProviderCodex {
+		t.Fatalf("provider = %q, want %q", got, domain.ProviderCodex)
+	}
+}
+
+// TestDetectGlobalSwitchProviderUnbound verifies that when both Claude and
+// Codex return ErrUnboundProject, the function returns ProviderCodex (backward
+// compatibility fallback).
+//
+// Non-parallel: stubs the package-level detectGlobalSwitchProviderFn.
+func TestDetectGlobalSwitchProviderUnbound(t *testing.T) {
+	orig := detectGlobalSwitchProviderFn
+	detectGlobalSwitchProviderFn = func(_ *cobra.Command, _ config.Paths, _ string) (domain.Provider, error) {
+		return domain.ProviderCodex, nil
+	}
+	defer func() { detectGlobalSwitchProviderFn = orig }()
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+
+	paths := config.Paths{}
+	got, err := detectGlobalSwitchProviderFn(cmd, paths, "/unbound/project")
+	if err != nil {
+		t.Fatalf("detectGlobalSwitchProviderFn() error = %v, want nil", err)
+	}
+	if got != domain.ProviderCodex {
+		t.Fatalf("provider = %q, want %q (fallback for unbound)", got, domain.ProviderCodex)
+	}
+}
+
+// TestDetectGlobalSwitchProviderNonUnboundErrorPropagate verifies that when
+// StatusForProvider returns a non-ErrUnboundProject error (e.g. DB corruption),
+// the function returns a wrapped error immediately and does not fall through.
+//
+// Non-parallel: stubs the package-level detectGlobalSwitchProviderFn.
+func TestDetectGlobalSwitchProviderNonUnboundErrorPropagate(t *testing.T) {
+	dbErr := errors.New("database corruption: disk I/O error")
+	wrappedErr := fmt.Errorf("detect globalswitch provider: %w", dbErr)
+
+	orig := detectGlobalSwitchProviderFn
+	detectGlobalSwitchProviderFn = func(_ *cobra.Command, _ config.Paths, _ string) (domain.Provider, error) {
+		return "", wrappedErr
+	}
+	defer func() { detectGlobalSwitchProviderFn = orig }()
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+
+	paths := config.Paths{}
+	_, err := detectGlobalSwitchProviderFn(cmd, paths, "/some/project")
+	if err == nil {
+		t.Fatal("detectGlobalSwitchProviderFn() error = nil, want error for DB failure")
+	}
+	if !errors.Is(err, dbErr) {
+		t.Fatalf("detectGlobalSwitchProviderFn() error = %q, want wrapped dbErr", err)
+	}
+}
+
+// TestRealDetectGlobalSwitchProviderClaudeBound is an integration test using a
+// real SQLite store. It creates a Claude binding for a temp project and verifies
+// that realDetectGlobalSwitchProvider returns ProviderClaude.
+//
+// Non-parallel: calls os.Getwd-independent path logic but uses real disk state
+// and the injection seam — keep non-parallel for safety.
+func TestRealDetectGlobalSwitchProviderClaudeBound(t *testing.T) {
+	paths := testCodexPaths(t)
+	projectRoot := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(filepath.Join(projectRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git) error = %v", err)
+	}
+
+	// Create a Claude account and bind the project.
+	runManage(t, paths, []string{"account", "add", "claude", "alpha", "--skip-login", "--no-bind"})
+	runManage(t, paths, []string{"bind", "claude", "alpha", "--project", projectRoot})
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	cmd.SetIn(nil)
+	cmd.SetOut(nil)
+	cmd.SetErr(nil)
+
+	got, err := realDetectGlobalSwitchProvider(cmd, paths, projectRoot)
+	if err != nil {
+		t.Fatalf("realDetectGlobalSwitchProvider() error = %v, want nil", err)
+	}
+	if got != domain.ProviderClaude {
+		t.Fatalf("provider = %q, want %q", got, domain.ProviderClaude)
+	}
+}
+
+// TestRealDetectGlobalSwitchProviderCodexBound is an integration test. It
+// creates a Codex binding (no Claude binding) and verifies that the function
+// returns ProviderCodex.
+func TestRealDetectGlobalSwitchProviderCodexBound(t *testing.T) {
+	paths := testCodexPaths(t)
+	projectRoot := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(filepath.Join(projectRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git) error = %v", err)
+	}
+
+	// Create a Codex account and bind the project.
+	runManage(t, paths, []string{"account", "add", "codex", "--project", projectRoot})
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	cmd.SetIn(nil)
+	cmd.SetOut(nil)
+	cmd.SetErr(nil)
+
+	got, err := realDetectGlobalSwitchProvider(cmd, paths, projectRoot)
+	if err != nil {
+		t.Fatalf("realDetectGlobalSwitchProvider() error = %v, want nil", err)
+	}
+	if got != domain.ProviderCodex {
+		t.Fatalf("provider = %q, want %q", got, domain.ProviderCodex)
+	}
+}
+
+// TestRealDetectGlobalSwitchProviderUnboundFallsBackToCodex is an integration
+// test. For an unbound project (neither Claude nor Codex binding), the function
+// must return ProviderCodex for backward compatibility.
+func TestRealDetectGlobalSwitchProviderUnboundFallsBackToCodex(t *testing.T) {
+	paths := testCodexPaths(t)
+	projectRoot := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(filepath.Join(projectRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git) error = %v", err)
+	}
+	// No binding created.
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	cmd.SetIn(nil)
+	cmd.SetOut(nil)
+	cmd.SetErr(nil)
+
+	got, err := realDetectGlobalSwitchProvider(cmd, paths, projectRoot)
+	if err != nil {
+		t.Fatalf("realDetectGlobalSwitchProvider() error = %v, want nil", err)
+	}
+	if got != domain.ProviderCodex {
+		t.Fatalf("provider = %q, want ProviderCodex (unbound fallback)", got)
 	}
 }
