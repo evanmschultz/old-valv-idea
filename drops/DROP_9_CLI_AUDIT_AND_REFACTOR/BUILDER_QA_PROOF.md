@@ -244,3 +244,44 @@ Hylla's last ingest is at commit `56ea569` (DROP_8 close). All DROP_9 work (4 co
 All 7 acceptance criteria PASS. Three-gate mage verification GREEN (cli 206/206@69.5%, integration 209/209/0skip, build SUCCESS). The unit cleanly flattens `valv status` to the top level under the inspect group, adds `--all` as the canonical replacement for the deleted `manage project list`, and the 3 stale symbols (`newManageProjectCommand`, `newManageProjectListCommand`, `runManageProjectList`) are fully removed. The `extended_test.go` retarget is justified scope expansion per the planner's AC5 wording. No new dead code introduced.
 
 **Verdict: PASS**
+
+---
+
+## Unit 9.4.5 — Round 1
+
+- **QA agent:** go-qa-proof-agent
+- **Reviewed commit:** `2cd6c14 refactor(cli): unit 9.4.5 sweep stale valv manage strings`
+- **Verdict:** PASS
+
+### Verification matrix
+
+| AC | Claim | Evidence | Result |
+|---|---|---|---|
+| #1a | Zero `valv manage` hits in cli helper files (excluding manage.go) | `git grep "valv manage" -- internal/cli/{claude,codex,claude_setup,codex_setup,operator_helpers,claude_setup_test,codex_setup_test,codex_test,operator_helpers_test}.go` → **zero output**. Verbatim PLAN.md AC#1a command, re-run at HEAD. | PASS |
+| #1b | Zero `valv manage` hits in manage.go (Example/Long blocks swept) | `git grep "valv manage" -- internal/cli/manage.go` → **zero output**. Diff confirms 47 line-pair substitutions across 12 cobra constructor Example/Long blocks (Account container, account inspect/login/logout/add/list/rename/delete/cleanup/switch, bind, update, cleanup). | PASS |
+| #1c | Zero bare-`manage <word>` quoted hits in magefile.go + README.md | `git grep -E '"manage [a-z]+\|manage [a-z]+"' -- magefile.go README.md` → **zero output**. Verbatim PLAN.md AC#1c command. | PASS |
+| #2 | Substitutions match the AC#2 mapping | `git diff HEAD~1 HEAD`:<br>• `valv manage update` → `valv image update` at `codex.go:217`, `manage.go:1277`<br>• `valv manage update claude` → `valv image update claude` at `claude.go:215`, `manage.go:1279`<br>• `valv manage account add codex/claude` → `valv account add codex/claude` at `claude_setup.go:15,97`, `codex_setup.go:91`, `operator_helpers.go:219` (×2 in one string), `manage.go` Example blocks (×8)<br>• `valv manage bind claude <name>` → `valv account bind <name> --provider claude` at `claude_setup.go:100`<br>• `valv manage bind codex <name>` → `valv account bind <name> --provider codex` at `codex_setup.go:93`<br>• `valv manage status` → `valv status` (README.md only — no source occurrences)<br>• `valv manage bind codex work` → `valv account bind codex work` at `manage.go:471,472`<br>• `valv manage cleanup *` → `valv cleanup *` at `manage.go:1389-1392` | PASS |
+| #3 | Test assertions updated to match new error strings | `git diff HEAD~1 HEAD`:<br>• `claude_setup_test.go:119` `"valv account add claude"`; `:195-196` `"valv account bind"` **AND** `"--provider claude"` (paired `strings.Contains` short-circuit); `:276` `"valv account add claude"`<br>• `codex_setup_test.go:121` `"valv account add codex"`; `:200-201` `"valv account bind"` **AND** `"--provider codex"` paired check<br>• `codex_test.go:251` `"valv image update"` substring assert<br>• `extended_test.go:401` `"run \`valv account add codex\` for the default host-backed account"` substring assert. All assertions still pass per Gate #1 (206/206). | PASS |
+| #4 | `magefile.go printDevHomeMessage` bootstrap label updated | `git diff` shows `magefile.go:682`: `mage dev:run "manage update"` → `mage dev:run "image update"`. | PASS |
+| #5 | `README.md` mage run examples updated | `git diff` shows `README.md:36` `mage run "manage status"` → `mage run "status"`; `:44` `mage dev:run "manage update"` → `mage dev:run "image update"`; `:45` `mage dev:run "manage status"` → `mage dev:run "status"`. | PASS |
+| #6 | `mage testPkg ./internal/cli` passes with updated assertions | Re-run: 206 tests, 206 passed, 0 failed, 0 skipped, 69.5% coverage (threshold 60.0%), -race, 5.76s. | PASS |
+
+### Mage gate re-run
+
+| Gate | Command | Result | Notes |
+|------|---------|--------|-------|
+| 1 | `mage testPkg github.com/evanmschultz/valv/internal/cli` | PASS | 206/206, 0 fail, 0 skip, **69.5%** cov (≥ 60%) |
+| 2 | `mage integration` | PASS | 209/209, 0 fail, 0 skip, 38.63s |
+| 3 | `mage build` | PASS | `./valv` built, 25.3M |
+
+Builder-claimed counts reproduced exactly: testPkg 206@69.5%, integration 209/0skip/0fail, build SUCCESS.
+
+### Hylla Feedback
+
+N/A — Unit 9.4.5 is a pure user-facing string-substitution sweep across already-committed-but-post-ingest code (Hylla's last ingest at `56ea569`, 5 commits behind HEAD). All evidence flows from `git show HEAD`, `git diff HEAD~1 HEAD`, `git grep`, direct `Read`, and live mage gate re-runs. No Hylla queries were applicable: the relevant content is non-symbol (struct literal field values, Long/Example string literals, test assertion strings, magefile.go Value literal, README.md prose) and would not be addressable through `hylla_search` / `hylla_node_full` even with a fresh ingest. Per `main/CLAUDE.md` Hylla policy, this is exactly the "changed since last ingest + non-Go code" combination that routes through git tooling.
+
+### Conclusion
+
+All 6 acceptance criteria PASS with citation-grade evidence. The 3 AC#1 grep checks return zero output, exactly as the unit demanded. Substitution count matches the worklog's per-pattern table. Test assertion updates correctly pair `valv account bind` with `--provider <claude|codex>` substring checks where the old assertion was `valv manage bind <provider>`. All 3 mage gates re-run GREEN with the same counts the builder reported. No unmitigated falsification counterexample.
+
+**Verdict: PASS**

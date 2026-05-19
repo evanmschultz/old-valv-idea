@@ -321,3 +321,132 @@ One useful Hylla query, one expected stale-snapshot fallback:
 
 - **Query:** `hylla_search_keyword` for `"ListBindings"` then `hylla_node_full` on `Service.ListBindings`. **Worked:** returned the function body and a complete caller graph including `runManageProjectList` (showing it as a pre-9.4 caller). Combined with the post-9.4 `git show` diff, this proved the deletion is clean (the listed callers are exactly the deleted symbol plus the surviving `runManageAccountInspect` plus two service-internal methods, plus the new `runStatusAll` that will appear in the next ingest).
 - **Stale-snapshot fallback (expected):** `runStatusAll` / `--all` flag / deleted constructors are post-snapshot. Used `git show HEAD` + direct `Read` for all of those. No Hylla "miss" — the staleness is structural, not a Hylla gap.
+
+---
+
+## Unit 9.4.5 — Round 1
+
+- **Reviewer:** go-qa-falsification-agent
+- **Commit under review:** `2cd6c14 refactor(cli): unit 9.4.5 sweep stale valv manage strings`
+- **Mage targets exercised by reviewer:**
+  - `mage testPkg github.com/evanmschultz/valv/internal/cli` — PASS (206 tests, 69.5% coverage > 60% threshold)
+  - `mage integration` — PASS (209 tests, 0 skipped, 0 failed)
+  - `mage build` — PASS
+- **AC greps re-run:**
+  - AC #1a (cli helpers, excluding manage.go) — **zero hits**.
+  - AC #1b (`internal/cli/manage.go`) — **zero hits**.
+  - AC #1c (`magefile.go README.md` bare-`manage` form) — **zero hits**.
+- **Verdict:** FAIL — **one CONFIRMED counterexample (vector 1)**: the cobra `Example:` block at `manage.go:1389-1392` now reads `valv cleanup state/images/docker/all` after the substitution, but `valv cleanup` is **not a registered top-level command**. The block documents user-invocable syntax that does not exist; the post-rename functional equivalent is `valv image cleanup --state/--images/etc.`
+
+### Summary
+
+The string-sweep is mechanically clean across all 11 declared Paths. AC #1a / #1b / #1c return zero hits, all three mage gates are GREEN, no other-direction substitution errors landed in the live constructors, and the test-assertion drift across `claude_setup_test.go` / `codex_setup_test.go` / `codex_test.go` / `extended_test.go` / `operator_helpers_test.go` lines up with the runtime error-string updates one-to-one. Test counts unchanged from 9.4 (206 unit / 209 integration).
+
+The single failure is semantic, not mechanical. PLAN.md AC #2's listed substitution `valv manage cleanup *` → `valv cleanup *` was applied literally inside the cobra `Example:` field of `newManageCleanupCommand` (manage.go:1375-1404). But that constructor is **dead code from a user-CLI perspective** — `root.go:137` registers only `pathsCmd, versionCmd, statusCmd, codexCmd, claudeCmd, accountCmd, globalCmd, imageCmd`; there is no `cleanupCmd`. The constructor survives only because two unit tests (`extended_test.go:532`, `:588`) and the `newTestManageContainerCommand` helper (`manage_test.go:394`) instantiate it directly, and because the inner helper `runManageCleanup` is still called from the TUI dispatch at `operator_helpers.go:149` (`managetui.ActionCleanup`). The literal substitution produced an Example block that names a non-existent top-level command — copy-pasted by any human reader who sees `valv cleanup state` and tries to invoke it would yield `Error: unknown command "cleanup" for "valv"`.
+
+The functional replacement for that scope-list is the live `newImageCleanupCommand` registered under `valv image cleanup` (manage.go:1508), which uses flags (`--state`, `--images`, `--containers`, `--build-cache`, `--all`) instead of positional scope arguments. The semantically correct substitution would have been:
+
+```
+valv image cleanup --state
+valv image cleanup --images
+valv image cleanup --containers --images   (closest mapping for the old "docker" scope)
+valv image cleanup --all
+```
+
+…or, since the constructor is dead user-facing code anyway, deletion of the constructor and its Example block (DROP_11 cleanup).
+
+Two secondary stale strings outside the unit's declared Paths were also identified (`CONTRIBUTING.md:46` `mage dev:run "manage update"`, `CLAUDE.md:122` parenthetical `valv manage …`). These are scope-gap of PLAN.md's `Paths` declaration rather than builder error — the builder cannot edit files outside declared Paths under cascade discipline. Routed to the orchestrator for plan-side resolution (extend a future unit's Paths or accept as known-stale).
+
+### Per-vector findings
+
+| # | Vector | Verdict | Notes |
+|---|---|---|---|
+| 1 | `valv cleanup *` strings in `newManageCleanupCommand` Example (manage.go:1389-1392) | **CONFIRMED** | See counterexample section below. PLAN.md AC #2 listed the substitution literally without checking that `valv cleanup` is not a registered top-level command. The constructor is dead user-facing code (not in `root.go:137` AddCommand list); its Example block now documents a syntax that does not exist. |
+| 2 | Other `valv manage` slip-throughs in declared Paths (case-insensitive, mixed-case, backtick variants) | REFUTED | `git grep -in "valv manage" -- '*.go' '*.md'` returns only references inside drop history (drops/), `AGENTS.md:14` (the noun "Valv management flows" — not the CLI string), `CLAUDE.md:122` (out of scope), `VALV_ACCOUNT_SWITCH_PLAN.md` (frozen historical plan), and `manage_test.go:788` (test-comment reference to the historical user-facing string, not invoked). All declared Paths are clean. |
+| 3 | Substitution direction errors on `account bind` (`--provider claude` vs positional) | REFUTED | The runtime error strings now say `valv account bind <name> --provider claude` (claude_setup.go:100) / `valv account bind <name> --provider codex` (codex_setup.go:93). The live registered `newManageAccountBindCommand` (manage.go:330, registered via manage.go:53) has `Args: cobra.RangeArgs(1, 2)` AND `cmd.Flags().StringVar(&providerFlag, "provider", "", ...)` at line 384. The RunE handles the single-positional + `--provider` flag combination at lines 368-378. The suggested syntax is supported. (Note: the dead-code `newManageBindCommand` at manage.go:452 with `cobra.ExactArgs(2)` and no `--provider` flag is not the registered command — same dead-code shape as vector 1, but its Example block `valv account bind codex work` happens to also be valid syntax on the live command, so no user-facing harm.) |
+| 4 | Test-assertion drift not matching runtime error strings | REFUTED | All 5 modified test files have lock-step updates:<br>• `claude_setup_test.go:117,196,276` — assertions `"valv account add claude"`, `"valv account bind"` + `"--provider claude"`, `"valv account add claude"` match runtime strings at `claude_setup.go:15,100`.<br>• `codex_setup_test.go:119,202` — assertions `"valv account add codex"`, `"valv account bind"` + `"--provider codex"` match runtime strings at `codex_setup.go:91,93`.<br>• `codex_test.go:254` — assertion `"valv image update"` matches runtime string at `codex.go:217`.<br>• `extended_test.go:401` — assertion `"run \`valv account add codex\`"` matches the corresponding fragment in `operator_helpers.go:219`.<br>• `operator_helpers_test.go:152` — assertion is inside a comment, not a runtime string check; no behavior verification required. |
+| 5 | `magefile.go printDevHomeMessage` bootstrap label | REFUTED | `magefile.go:682` now reads `Value: \`mage dev:run "image update"\``. The `mage dev:run` wrapper is preserved (not accidentally stripped); the inner argv `"image update"` matches the new namespace. Verified by Read. |
+| 6 | `README.md` mage examples (lines 36/44/45) | REFUTED | Diff shows:<br>• Line 36: `mage run "manage status"` → `mage run "status"` ✓<br>• Line 44: `mage dev:run "manage update"` → `mage dev:run "image update"` ✓<br>• Line 45: `mage dev:run "manage status"` → `mage dev:run "status"` ✓<br>All three correctly target the new top-level namespace. `mage` wrapper preserved. |
+| 7 | `runManage*` function names vs argv strings collateral damage | REFUTED | Diff stats: 11 files, +69/-69 (pure 1:1). `git diff HEAD~1` shows NO `^[+-].*func (run\|new)` lines — no function signatures renamed. Internal Go identifier `runManageStatus`, `runManageUpdate`, `runManageCleanup`, `runManageBind` etc. all preserved. Only CLI argv string literals and human-facing prose were touched. The builder correctly distinguished Go-symbol fragments from argv tokens. |
+| 8 | `internal/cli/extended_test.go` integration-helper drift | REFUTED | Single-line change at line 401 swaps the runtime-error-substring assertion. No test name renames (the function `TestRunManageBindInteractiveShowsGuidanceWhenNoAccountsExist` survives intact). The other "manage" references inside extended_test.go (e.g., the `// "manage project list" is deleted` comment at line 299, the `runManageHome`-related lines) are inside `//` comments not argv strings — untouched correctly. |
+| 9 | Coverage line-shift regression hidden by passing tests | REFUTED | `mage testPkg` reports identical 69.5% as 9.4. The diff is a pure +69/-69 string substitution with zero new code paths and zero deleted code paths. Go coverage instrumentation does not count Example-block content; only `if/else/return` etc. lines count. Substitution inside `strings.TrimSpace(\`...\`)` argument has zero coverage impact. Reproduced. |
+| 10 | `mage integration` count drift (209 → ?) | REFUTED | `mage integration` reports 209 tests (matches 9.4 baseline). Zero integration tests renamed or deleted. The +2 tests added in 9.4 (`TestStatusViaRootCommandShowsCurrentProjectBinding`, `TestStatusAllViaRootCommandShowsAllBindings`) are inherited unchanged. |
+
+### Counterexample (vector 1)
+
+**Repro:**
+
+```bash
+# After the 2cd6c14 commit, look at the surviving newManageCleanupCommand:
+git grep -nA 6 "Use:   \"cleanup \[state\|images\|docker\|all\]\"" -- internal/cli/manage.go
+
+# manage.go:1377: Use: "cleanup [state|images|docker|all]"
+# manage.go:1388-1392: Example: strings.TrimSpace(`
+#   valv cleanup state
+#   valv cleanup images
+#   valv cleanup docker
+#   valv cleanup all
+# `),
+
+# Now check whether `cleanup` is a registered top-level command on root.go:
+git grep -n "cmd.AddCommand(" -- internal/cli/root.go
+# internal/cli/root.go:137: cmd.AddCommand(pathsCmd, versionCmd, statusCmd, codexCmd, claudeCmd, accountCmd, globalCmd, imageCmd)
+# (No cleanupCmd.)
+
+# And confirm newManageCleanupCommand is only test-instantiated:
+git grep -n "newManageCleanupCommand" -- internal/cli/
+# internal/cli/extended_test.go:532: cmd := newManageCleanupCommand(paths, &rootOptions{})
+# internal/cli/extended_test.go:588: cmd := newManageCleanupCommand(paths, &rootOptions{})
+# internal/cli/manage.go:1375: func newManageCleanupCommand(paths config.Paths, opts *rootOptions) *cobra.Command {
+# internal/cli/manage_test.go:394: container.AddCommand(newManageCleanupCommand(paths, opts))
+```
+
+**Trace through user perspective:**
+
+1. A future maintainer reads `manage.go` for `valv` cleanup syntax, sees the Example block.
+2. They run `./valv cleanup state` in a terminal.
+3. cobra responds: `Error: unknown command "cleanup" for "valv"`.
+4. The Example block, post-9.4.5, is now strictly misleading.
+
+**Pre-9.4.5 baseline:** The Example block said `valv manage cleanup state` / etc., which was also stale (after 9.1 deleted `valv manage`), but the staleness was symptomatic of unfinished work — readers would correctly conclude "this is a vestige of pre-rename code." Post-9.4.5, the Example block has the surface appearance of correctness (matches the new namespace style) while documenting a command that does not exist. The new state is **worse than the pre-9.4.5 state** from a user-trust perspective: it confidently directs to a non-existent command instead of self-flagging as stale.
+
+**Root cause:** PLAN.md AC #2 listed the literal substitution `valv manage cleanup *` → `valv cleanup *` without an audit of whether `valv cleanup` exists as a registered command. The DROP_9 cascade (units 9.1 + 9.3) consolidated the cleanup functionality under `valv image cleanup` (flag-driven), but unit 9.4.5 was authored before that consolidation landed and the AC #2 mapping was not refreshed against the post-9.3 reality. The builder strictly followed AC #2; the failure is in the AC, not the builder's execution.
+
+**Remediation options (orchestrator chooses):**
+
+- **(a) Re-substitute** the four lines at `manage.go:1389-1392` to point at the live command:
+  ```
+  valv image cleanup --state
+  valv image cleanup --images
+  valv image cleanup --containers --images
+  valv image cleanup --all
+  ```
+  Minimal-diff fix; the Example block then documents real syntax. Note: this is approximate — the old "docker" scope is closest to `--containers --images` but not 1:1 (the old `runManageCleanup` "docker" scope cleaned Valv-managed containers plus provider images; new `--containers --images` is the same with explicit per-target flags).
+- **(b) Delete the dead constructor entirely** (defer to DROP_11 cleanup): drop `newManageCleanupCommand` from `manage.go` and from the two `extended_test.go` instantiations + the `manage_test.go` helper. The inner helper `runManageCleanup` survives because `operator_helpers.go:149` still calls it from the TUI `ActionCleanup` dispatch. Out of unit 9.4.5 declared Paths/scope; explicit follow-up unit.
+- **(c) Accept the gap** if PLAN.md scope holds that AC #2 is the contract and the constructor's user-unreachability makes it cosmetic. Recommendation against this: a future grep for `valv cleanup` will surface this string and a future agent will copy-adapt it under the assumption it's a valid template.
+
+### Non-finding notes (for the orchestrator)
+
+- **Stale strings outside declared Paths.** `CONTRIBUTING.md:46` still has `mage dev:run "manage update"`. `CLAUDE.md:122` still has `(\`valv codex\`, \`valv manage …\`)` in the package-map prose. Both are user-facing but not in unit 9.4.5's declared Paths or AC greps. AC #1c narrowly scopes to `magefile.go README.md`. This is a plan-side scope gap (unit description says "Refresh user-facing strings post-namespace-rename" but Paths omits two user-facing docs); the builder is correctly disciplined for not writing outside declared Paths. Recommend either (a) extend a future unit's Paths to include `CONTRIBUTING.md` and `CLAUDE.md`, or (b) record these as known-stale in DROP_11 cleanup backlog.
+- **Dead-code constructors with surviving Example blocks.** Three constructors (`newManageBindCommand` manage.go:452, `newManageUpdateCommand` manage.go:1264, `newManageCleanupCommand` manage.go:1375) are not registered on root.go but survive because tests instantiate them directly. Their Example blocks all received the substitution in this unit. Two of the three (`bind`, `update`) happen to document syntax that the LIVE registered commands accept; the third (`cleanup`) is the counterexample above. Recommend DROP_11 cleanup unit deletes all three dead constructors and their test-helper instantiations.
+- **`valv manage` references in drop-history files.** `drops/DROP_*/PLAN.md` and `drops/DROP_*/BUILDER_QA_*.md` retain many `valv manage` mentions — these are historical records (frozen artifacts of the pre-rename cascade) and are explicitly out of scope. The `manage_test.go:788` comment-line reference to `"valv manage account list"` is a docstring describing the test's intent; not user-facing.
+- **`magefile.go` printDevHomeMessage** is correctly updated. The dev-home onboarding flow now points at `image update` consistent with the new namespace.
+
+### Targeted code reads
+
+- **`internal/cli/manage.go:1375-1404`** — `newManageCleanupCommand` (dead user-facing constructor, registered only in tests; counterexample target).
+- **`internal/cli/manage.go:1567-1647`** — `newImageCleanupCommand` (live flag-driven replacement under `valv image cleanup`).
+- **`internal/cli/root.go:108-137`** — `cmd.AddCommand` registration list (confirms no `cleanupCmd`).
+- **`internal/cli/operator_helpers.go:141-162`** — TUI dispatch confirming `runManageCleanup` is still called from `managetui.ActionCleanup`, so the inner helper is alive even though the cobra constructor is dead.
+- **`internal/cli/claude_setup.go:15,100`**, **`codex_setup.go:91,93`** — runtime error strings (post-substitution) referenced by test assertions.
+
+### Self-review / orchestrator hand-off discipline
+
+- Did NOT edit Go code. HEAD commit `2cd6c14` was inspected via `git diff HEAD~1`, `Read`, and `git grep`. Not modified.
+- Did NOT edit `PLAN.md`, `BUILDER_WORKLOG.md`, `BUILDER_QA_PROOF.md`, or any other phase-non-owned file. Only appended `## Unit 9.4.5 — Round 1` to this falsification file.
+- Mage-only test invocations (`mage testPkg`, `mage integration`, `mage build`). No raw `go test` / `go build` / `go vet`.
+- Hylla NOT queried for primary signal — review surface is post-DROP_8-ingest (`56ea569`); all 9.4.5 substitutions are post-ingest. `git show` + `git diff` + direct `Read` were the correct primary sources.
+
+## Hylla Feedback (Unit 9.4.5 Round 1)
+
+N/A — review touched only HEAD-relative diffs (post-DROP_8 ingest snapshot `56ea569`). The 9.4.5 changes are pure string substitutions inside cobra `Example` field literals and runtime error format strings — non-symbol content that `hylla_search` / `hylla_node_full` does not index addressably. The substitution-content audit is a `git grep` + `Read` job; Hylla has no role here. Per `main/CLAUDE.md` Hylla policy, this is exactly the "changed since last ingest + non-symbol content" combination that routes through git tooling.
