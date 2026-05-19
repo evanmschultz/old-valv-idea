@@ -1,6 +1,6 @@
 # DROP_9 — CLI_AUDIT_AND_REFACTOR
 
-**State:** planning
+**State:** building
 **Blocked by:** DROP_8 (done)
 **Paths (expected):**
 - `internal/cli/root.go`
