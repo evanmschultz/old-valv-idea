@@ -660,3 +660,45 @@ Both tests use the existing `stubClaudeAccountAuthRunner` + `writeCredsToDir` he
 - `stubClaudeAccountAuthRunner.stubRunFunc` field — **found** in the test file read directly (Hylla is Go-only, not indexed for test files). N/A miss category — non-production file.
 
 None — Hylla answered everything needed for production symbol lookup.
+
+---
+
+## Drop-end fix-up — fakeStore DeleteBinding stubs
+
+- **Builder:** go-builder-agent
+- **Started:** 2026-05-19
+- **Files touched:**
+  - `internal/services/claude/service_test.go`
+  - `internal/services/codex/service_test.go`
+
+### Root-cause analysis
+
+Unit 9.2 added `DeleteBinding(ctx context.Context, projectID string, provider Provider) error` to the `domain.BindingRepository` interface (`internal/domain/repository.go`). The `fakeStore` mock types in `internal/services/claude/service_test.go` and `internal/services/codex/service_test.go` do not implement `DeleteBinding`, so they no longer satisfy the interface. This surfaced as a compile error at drop-end `mage test` (full project) but was invisible to 9.2's build-QA gates (`mage testPkg ./internal/cli` and `mage testPkg ./internal/services/manage`) because both of those packages use `sqlite.Store` directly, not these test-file `fakeStore` mocks.
+
+### Stubs added
+
+Both files received identical method insertions adjacent to `BindingByProjectID` (keeping binding-related methods grouped):
+
+```go
+func (f fakeStore) DeleteBinding(context.Context, string, domain.Provider) error {
+    panic("unexpected call")
+}
+```
+
+Pattern matches all other unused stubs in both files (`CreateProject`, `ListProjects`, `CreateProfile`, `ProfileByName`, `ListProfilesByProvider`, `UpdateProfileName`, `DeleteProfile`, `UpsertProjectBinding`, `ListBindings`), all of which panic with `"unexpected call"`. No test in either package calls `DeleteBinding`, so a panic stub is the correct implementation.
+
+### Mage gate results
+
+| Gate | Result | Detail |
+|------|--------|--------|
+| `mage testPkg github.com/evanmschultz/valv/internal/services/claude` | PASS | 19 tests, 79.7% coverage, -race, 0 failures |
+| `mage testPkg github.com/evanmschultz/valv/internal/services/codex` | PASS | 13 tests, 74.6% coverage, -race, 0 failures |
+| `mage test` (full project) | PASS | 505 tests, 20 packages, 0 failures — drop-end verify breakage resolved |
+
+### Closes
+
+This fix-up resolves the drop-end compile break introduced by the Unit 9.2 interface expansion. All 20 packages now compile and pass tests. DROP_9 drop-end verify is clear.
+
+## Hylla Feedback (Drop-end fix-up)
+
+N/A — task touched only test files with a trivial 4-line stub addition per file. No Go symbol queries were needed; the interface signature was already known from the task description and confirmed via direct `Read` of both test files before editing.

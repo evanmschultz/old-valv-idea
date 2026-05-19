@@ -72,6 +72,10 @@ func (f fakeStore) BindingByProjectID(context.Context, string, domain.Provider) 
 	return f.binding, f.bindingErr
 }
 
+func (f fakeStore) DeleteBinding(context.Context, string, domain.Provider) error {
+	panic("unexpected call")
+}
+
 func (f fakeStore) ListBindings(context.Context) ([]domain.ProjectBinding, error) {
 	panic("unexpected call")
 }
