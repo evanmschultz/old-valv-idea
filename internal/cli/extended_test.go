@@ -398,7 +398,7 @@ func TestRunManageBindInteractiveShowsGuidanceWhenNoAccountsExist(t *testing.T) 
 	cmd.SetErr(&bytes.Buffer{})
 
 	err := runManageBindInteractive(cmd, paths, &rootOptions{})
-	if err == nil || !strings.Contains(err.Error(), "run `valv manage account add codex` for the default host-backed account") {
+	if err == nil || !strings.Contains(err.Error(), "run `valv account add codex` for the default host-backed account") {
 		t.Fatalf("runManageBindInteractive() error = %v, want account guidance", err)
 	}
 }

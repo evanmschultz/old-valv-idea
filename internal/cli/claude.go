@@ -215,7 +215,7 @@ func ensureClaudeImageAvailable(ctx context.Context, runner interface {
 	}
 	if err := runner.Run(ctx, []string{"image", "inspect", image.String()}); err != nil {
 		if dockerImageMissingError(err) {
-			return fmt.Errorf("claude image %q is not built locally; run `valv manage update claude` first", image.String())
+			return fmt.Errorf("claude image %q is not built locally; run `valv image update claude` first", image.String())
 		}
 		return fmt.Errorf("inspect claude image %q: %w", image.String(), err)
 	}

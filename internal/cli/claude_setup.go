@@ -15,7 +15,7 @@ import (
 // project is unbound and no accounts exist for the given provider.
 func unboundProjectNoAccountsError(provider domain.Provider) error {
 	return fmt.Errorf(
-		"project is not bound; no %s accounts found — run `valv manage account add %s` to create one",
+		"project is not bound; no %s accounts found — run `valv account add %s` to create one",
 		provider, provider,
 	)
 }
@@ -97,7 +97,7 @@ func ensureClaudeBindingReady(cmd *cobra.Command, paths config.Paths, workingDir
 		// 2+ accounts: use picker when TTY available.
 		if !commandHasTTY(cmd.InOrStdin()) || !commandHasTTY(cmd.OutOrStdout()) {
 			return domain.Profile{}, fmt.Errorf(
-				"project is not bound to a Claude account; run `valv manage bind claude <name>` to bind one",
+				"project is not bound to a Claude account; run `valv account bind <name> --provider claude` to bind one",
 			)
 		}
 		selected, err := pickProfile(cmd, domain.ProviderClaude, profiles)

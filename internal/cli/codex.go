@@ -217,7 +217,7 @@ func ensureCodexImageAvailable(ctx context.Context, runner interface {
 	}
 	if err := runner.Run(ctx, []string{"image", "inspect", image.String()}); err != nil {
 		if dockerImageMissingError(err) {
-			return fmt.Errorf("codex image %q is not built locally; run `valv manage update` first", image.String())
+			return fmt.Errorf("codex image %q is not built locally; run `valv image update` first", image.String())
 		}
 		return fmt.Errorf("inspect codex image %q: %w", image.String(), err)
 	}

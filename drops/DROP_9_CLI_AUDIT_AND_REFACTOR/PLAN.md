@@ -177,7 +177,7 @@ For `image cleanup` flag-driven dispatch: the current `runManageCleanup` uses a 
 
 ### Unit 9.4.5 — Refresh user-facing strings post-namespace-rename
 
-- **State:** todo
+- **State:** done (R1 — all 3 mage gates GREEN, all 3 AC greps zero hits)
 - **Paths:**
   - `internal/cli/claude.go`
   - `internal/cli/codex.go`

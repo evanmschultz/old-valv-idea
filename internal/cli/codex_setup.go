@@ -91,7 +91,7 @@ func ensureCodexAccountReadyForLaunch(cmd *cobra.Command, paths config.Paths, wo
 				// 2+ accounts: use picker when TTY available.
 				if !commandHasTTY(cmd.InOrStdin()) || !commandHasTTY(cmd.OutOrStdout()) {
 					return domain.Profile{}, fmt.Errorf(
-						"project is not bound to a Codex account; run `valv manage bind codex <name>` to bind one",
+						"project is not bound to a Codex account; run `valv account bind <name> --provider codex` to bind one",
 					)
 				}
 				selected, err := pickProfile(cmd, domain.ProviderCodex, profiles)

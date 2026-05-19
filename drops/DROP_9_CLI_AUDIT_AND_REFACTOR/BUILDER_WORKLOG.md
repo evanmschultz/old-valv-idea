@@ -288,3 +288,67 @@ None — Hylla answered everything needed. All Go symbol evidence gathered via d
 None — Hylla's last ingest predates all DROP_9 changes (snapshot 2 = DROP_8 baseline). All Go symbol evidence gathered via direct `Read` of source files. One Hylla query was attempted:
 
 - **Query:** `hylla_search_keyword` with `"listItemsForBindings listItemsForAccounts"`, node_type=block. **Missed because:** zero results — stale ingest, target functions are in `operator_helpers.go` which has content added post-snapshot. **Worked via:** `Read` on `operator_helpers.go` directly. **Suggestion:** Per-file stale detection hint in query response would help callers know when to skip directly to Read.
+
+---
+
+## Unit 9.4.5 — Round 1
+
+- **Builder:** go-builder-agent
+- **Started:** 2026-05-19
+
+### Files touched
+
+- `internal/cli/claude.go` — 1 substitution
+- `internal/cli/codex.go` — 1 substitution
+- `internal/cli/claude_setup.go` — 2 substitutions
+- `internal/cli/codex_setup.go` — 1 substitution
+- `internal/cli/operator_helpers.go` — 1 substitution (2 occurrences in one string literal)
+- `internal/cli/manage.go` — 47 occurrences across 12 Example/Long blocks
+- `internal/cli/claude_setup_test.go` — 4 items (1 comment, 3 assertions)
+- `internal/cli/codex_setup_test.go` — 3 items (1 comment, 2 assertions)
+- `internal/cli/codex_test.go` — 1 assertion
+- `internal/cli/extended_test.go` — 1 assertion
+- `internal/cli/operator_helpers_test.go` — 1 comment
+- `magefile.go` — 1 substitution (bootstrap label in `printDevHomeMessage`)
+- `README.md` — 3 substitutions
+
+### AC grep results (AFTER sweep)
+
+| AC | Pattern | BEFORE | AFTER |
+|----|---------|--------|-------|
+| #1a | `git grep "valv manage"` — cli helper files (excl. manage.go) | 18 | **0** |
+| #1b | `git grep "valv manage"` — manage.go | 47 | **0** |
+| #1c | `git grep -E '"manage [a-z]+\|manage [a-z]+"'` — magefile.go + README.md | 4 | **0** |
+
+### Substitution counts per pattern
+
+- `valv manage update` → `valv image update` — 2 (codex.go, manage.go × 1)
+- `valv manage update claude` → `valv image update claude` — 2 (claude.go, manage.go × 1)
+- `valv manage account add <provider>` → `valv account add <provider>` — 8 (claude_setup.go, codex_setup.go, operator_helpers.go × 2, manage.go Long + Example × 4)
+- `valv manage bind claude <name>` → `valv account bind <name> --provider claude` — 1 (claude_setup.go)
+- `valv manage bind codex <name>` → `valv account bind <name> --provider codex` — 1 (codex_setup.go)
+- `valv manage account *` → `valv account *` — 31 (manage.go Example blocks for inspect, login, logout, list, rename, delete, cleanup, switch)
+- `valv manage bind codex work` → `valv account bind codex work` — 2 (newManageBindCommand Example)
+- `valv manage cleanup *` → `valv cleanup *` — 4 (manage.go cleanup Example)
+- `mage dev:run "manage update"` → `mage dev:run "image update"` — 2 (magefile.go + README.md)
+- `mage run "manage status"` → `mage run "status"` — 1 (README.md)
+- `mage dev:run "manage status"` → `mage dev:run "status"` — 1 (README.md)
+
+### Mage gate results
+
+| Gate | Result | Coverage |
+|------|--------|---------|
+| `mage testPkg github.com/evanmschultz/valv/internal/cli` | PASS | 69.5% (threshold 60%) |
+| `mage integration` | PASS | 209 tests passed |
+| `mage build` | PASS | `./valv` built cleanly |
+
+### Test assertion updates
+
+- `claude_setup_test.go`: `TestEnsureClaudeBindingReadyZeroAccounts` + `TestUnboundProjectNoAccountsError` — updated 2 assertions checking `"valv manage account add claude"` → `"valv account add claude"`. `TestEnsureClaudeBindingReadyMultipleAccountsNonTTY` — updated assertion to check `"valv account bind"` AND `"--provider claude"` (was `"valv manage bind claude"`).
+- `codex_setup_test.go`: `TestEnsureCodexAccountReadyForLaunchZeroAccounts` — updated `"valv manage account add codex"` → `"valv account add codex"`. `TestEnsureCodexAccountReadyForLaunchMultipleAccountsNonTTY` — updated to check `"valv account bind"` AND `"--provider codex"`.
+- `codex_test.go`: `TestEnsureCodexImageAvailableReturnsActionableMessageWhenMissing` — updated `"valv manage update"` → `"valv image update"`.
+- `extended_test.go`: `TestRunManageBindInteractiveShowsGuidanceWhenNoAccountsExist` — updated `"valv manage account add codex"` → `"valv account add codex"`.
+
+## Hylla Feedback (Unit 9.4.5 Round 1)
+
+N/A — task was a pure string-substitution sweep. No Go symbol search via Hylla was needed; all evidence came from direct `Read` of source files and `git grep` counts. Hylla is Go-code only and is not applicable to grep-and-substitute work.

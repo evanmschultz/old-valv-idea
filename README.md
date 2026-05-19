@@ -33,7 +33,7 @@ mage integration
 Build and run the CLI directly:
 
 ```bash
-mage run "manage status"
+mage run "status"
 mage run "codex --help"
 ```
 
@@ -41,8 +41,8 @@ Use the disposable dev-home workflow:
 
 ```bash
 mage dev:home
-mage dev:run "manage update"
-mage dev:run "manage status"
+mage dev:run "image update"
+mage dev:run "status"
 mage dev:clean
 ```
 

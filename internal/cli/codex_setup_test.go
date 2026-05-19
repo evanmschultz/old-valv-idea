@@ -98,7 +98,7 @@ func TestEnsureCodexAccountReadyForLaunchOverrideBoundProject(t *testing.T) {
 
 // TestEnsureCodexAccountReadyForLaunchZeroAccounts verifies that when no Codex
 // accounts exist and the project is unbound, the error message directs the user
-// to `valv manage account add codex`.
+// to `valv account add codex`.
 func TestEnsureCodexAccountReadyForLaunchZeroAccounts(t *testing.T) {
 	t.Parallel()
 
@@ -118,7 +118,7 @@ func TestEnsureCodexAccountReadyForLaunchZeroAccounts(t *testing.T) {
 	if err == nil {
 		t.Fatal("ensureCodexAccountReadyForLaunch(0-accounts) error = nil, want error")
 	}
-	for _, want := range []string{"project is not bound", "valv manage account add codex"} {
+	for _, want := range []string{"project is not bound", "valv account add codex"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error = %q, want substring %q", err.Error(), want)
 		}
@@ -200,8 +200,8 @@ func TestEnsureCodexAccountReadyForLaunchMultipleAccountsNonTTY(t *testing.T) {
 	if err == nil {
 		t.Fatal("ensureCodexAccountReadyForLaunch(2+ accounts, non-TTY) error = nil, want error")
 	}
-	if !strings.Contains(err.Error(), "valv manage bind codex") {
-		t.Fatalf("error = %q, want reference to `valv manage bind codex`", err.Error())
+	if !strings.Contains(err.Error(), "valv account bind") || !strings.Contains(err.Error(), "--provider codex") {
+		t.Fatalf("error = %q, want reference to `valv account bind <name> --provider codex`", err.Error())
 	}
 }
 

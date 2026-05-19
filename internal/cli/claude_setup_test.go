@@ -96,7 +96,7 @@ func TestEnsureClaudeBindingReadyOverrideBoundProject(t *testing.T) {
 
 // TestEnsureClaudeBindingReadyZeroAccounts verifies that when no Claude
 // accounts exist and the project is unbound, the error message directs the
-// user to `valv manage account add claude`.
+// user to `valv account add claude`.
 func TestEnsureClaudeBindingReadyZeroAccounts(t *testing.T) {
 	t.Parallel()
 
@@ -116,7 +116,7 @@ func TestEnsureClaudeBindingReadyZeroAccounts(t *testing.T) {
 	if err == nil {
 		t.Fatal("ensureClaudeBindingReady(0-accounts) error = nil, want error")
 	}
-	for _, want := range []string{"project is not bound", "valv manage account add claude"} {
+	for _, want := range []string{"project is not bound", "valv account add claude"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error = %q, want substring %q", err.Error(), want)
 		}
@@ -195,8 +195,8 @@ func TestEnsureClaudeBindingReadyMultipleAccountsNonTTY(t *testing.T) {
 	if err == nil {
 		t.Fatal("ensureClaudeBindingReady(2+ accounts, non-TTY) error = nil, want error")
 	}
-	if !strings.Contains(err.Error(), "valv manage bind claude") {
-		t.Fatalf("error = %q, want reference to `valv manage bind claude`", err.Error())
+	if !strings.Contains(err.Error(), "valv account bind") || !strings.Contains(err.Error(), "--provider claude") {
+		t.Fatalf("error = %q, want reference to `valv account bind <name> --provider claude`", err.Error())
 	}
 }
 
@@ -273,7 +273,7 @@ func TestUnboundProjectNoAccountsError(t *testing.T) {
 	if err == nil {
 		t.Fatal("unboundProjectNoAccountsError() = nil")
 	}
-	for _, want := range []string{"project is not bound", "claude", "valv manage account add claude"} {
+	for _, want := range []string{"project is not bound", "claude", "valv account add claude"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error = %q, want substring %q", err.Error(), want)
 		}

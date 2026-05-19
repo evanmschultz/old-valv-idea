@@ -31,18 +31,18 @@ Accounts are the user-facing way to manage provider homes, auth, session history
 For Codex, that home path becomes ` + "`CODEX_HOME`" + ` inside the container.
 `),
 		Example: strings.TrimSpace(`
-valv manage account add codex
-valv manage account add codex work
-valv manage account switch
-valv manage account switch work
-valv manage account list
-valv manage account list codex
-valv manage account inspect
-valv manage account login
-valv manage account logout
-valv manage account rename personal hylla
-valv manage account cleanup
-valv manage account delete hylla
+valv account add codex
+valv account add codex work
+valv account switch
+valv account switch work
+valv account list
+valv account list codex
+valv account inspect
+valv account login
+valv account logout
+valv account rename personal hylla
+valv account cleanup
+valv account delete hylla
 `),
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -75,10 +75,10 @@ Show one provider account's resolved auth identity, mounted home, and how many p
 With no args, Valv inspects the account currently bound to the detected project. With one arg, Valv treats it as an account name under the current provider unless it parses as a provider.
 `),
 		Example: strings.TrimSpace(`
-valv manage account inspect
-valv manage account inspect personal
-valv manage account inspect codex personal
-valv manage account whoami
+valv account inspect
+valv account inspect personal
+valv account inspect codex personal
+valv account whoami
 `),
 		Args: cobra.MaximumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -100,9 +100,9 @@ Log in one existing provider account on the host without changing the current pr
 With no args, Valv uses the account currently bound to the detected project.
 `),
 		Example: strings.TrimSpace(`
-valv manage account login
-valv manage account login hylla
-valv manage account login codex hylla
+valv account login
+valv account login hylla
+valv account login codex hylla
 `),
 		Args: cobra.MaximumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -124,9 +124,9 @@ Log out one existing provider account on the host without deleting the Valv acco
 With no args, Valv uses the account currently bound to the detected project.
 `),
 		Example: strings.TrimSpace(`
-valv manage account logout
-valv manage account logout hylla
-valv manage account logout codex hylla
+valv account logout
+valv account logout hylla
+valv account logout codex hylla
 `),
 		Args: cobra.MaximumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -149,8 +149,8 @@ func newManageAccountAddCommand(paths config.Paths, opts *rootOptions) *cobra.Co
 Create one provider account, ensure it is logged in on the host, and, by default, bind the current project to it.
 
 Semantics:
-- ` + "`valv manage account add codex`" + ` creates or reuses the inferred host-backed default account for Codex
-- ` + "`valv manage account add codex work`" + ` creates or reuses an isolated named account under Valv's provider root
+- ` + "`valv account add codex`" + ` creates or reuses the inferred host-backed default account for Codex
+- ` + "`valv account add codex work`" + ` creates or reuses an isolated named account under Valv's provider root
 - isolated named accounts seed their initial ` + "`config.toml`" + ` from the default host Codex home when available so MCP/tool config carries across without sharing auth state
 - ` + "`--no-bind`" + ` keeps the account ready without changing the current project's binding
 - ` + "`--skip-login`" + ` skips the host-side Codex login step for advanced automation
@@ -165,10 +165,10 @@ Output fields:
 - home: host path mounted into provider runtimes as that account's home
 `),
 		Example: strings.TrimSpace(`
-valv manage account add codex
-valv manage account add codex work
-valv manage account add codex work --no-bind
-valv manage account add codex work --home /absolute/path/to/custom-home --skip-login --no-bind
+valv account add codex
+valv account add codex work
+valv account add codex work --no-bind
+valv account add codex work --home /absolute/path/to/custom-home --skip-login --no-bind
 `),
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -200,9 +200,9 @@ List the accounts Valv knows for one provider or, if no provider is given, group
 Human output shows the account name, auth mode, email identity when available, and mounted home path. JSON output uses one stable command-owned top-level key.
 `),
 		Example: strings.TrimSpace(`
-valv manage account list
-valv manage account list codex
-valv manage account list codex --format json
+valv account list
+valv account list codex
+valv account list codex --format json
 `),
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -242,8 +242,8 @@ Rename one provider account while keeping the same provider home, auth state, se
 With no explicit provider, Valv uses the current project's bound provider or the default supported provider.
 `),
 		Example: strings.TrimSpace(`
-valv manage account rename personal hylla
-valv manage account rename codex personal hylla
+valv account rename personal hylla
+valv account rename codex personal hylla
 `),
 		Args: cobra.RangeArgs(2, 3),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -263,8 +263,8 @@ Delete one Valv account record without deleting the underlying home directory on
 Valv refuses to delete accounts that are still bound to one or more projects.
 `),
 		Example: strings.TrimSpace(`
-valv manage account delete hylla
-valv manage account delete codex hylla
+valv account delete hylla
+valv account delete codex hylla
 `),
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -284,8 +284,8 @@ Remove stale unbound same-home account aliases while preserving the canonical ac
 This is intended to clean up historical duplicate host-home aliases such as ` + "`host`" + ` or ` + "`host-codex`" + ` after renames.
 `),
 		Example: strings.TrimSpace(`
-valv manage account cleanup
-valv manage account cleanup codex
+valv account cleanup
+valv account cleanup codex
 `),
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -310,11 +310,11 @@ When no provider is given, Valv uses the currently bound provider for the projec
 Use --provider to switch to an account from a specific provider, which is required when the same account name exists in multiple providers.
 `),
 		Example: strings.TrimSpace(`
-valv manage account switch
-valv manage account switch work
-valv manage account switch codex work
-valv manage account switch work --provider codex
-valv manage account switch --provider claude
+valv account switch
+valv account switch work
+valv account switch codex work
+valv account switch work --provider codex
+valv account switch --provider claude
 `),
 		Args: cobra.MaximumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -468,8 +468,8 @@ Output fields:
 - home: host path mounted into provider runtimes as that account's home
 `),
 		Example: strings.TrimSpace(`
-valv manage bind codex work
-valv manage bind codex work --project /absolute/path/to/repo
+valv account bind codex work
+valv account bind codex work --project /absolute/path/to/repo
 `),
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -1277,9 +1277,9 @@ Output fields:
 - context: generated Docker build context under the Valv cache root
 `),
 		Example: strings.TrimSpace(`
-valv manage update
-valv manage update codex
-valv manage update claude
+valv image update
+valv image update codex
+valv image update claude
 `),
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -1386,10 +1386,10 @@ Scopes:
 - all: local state plus Valv-managed runtime containers plus provider images
 `),
 		Example: strings.TrimSpace(`
-valv manage cleanup state
-valv manage cleanup images
-valv manage cleanup docker
-valv manage cleanup all
+valv cleanup state
+valv cleanup images
+valv cleanup docker
+valv cleanup all
 `),
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {

@@ -219,7 +219,7 @@ func pickProfile(cmd *cobra.Command, provider domain.Provider, profiles []domain
 
 func realPickProfile(cmd *cobra.Command, provider domain.Provider, profiles []domain.Profile) (domain.Profile, error) {
 	if len(profiles) == 0 {
-		return domain.Profile{}, fmt.Errorf("no %s accounts found; run `valv manage account add %s` for the default host-backed account or `valv manage account add %s account-name` for an isolated account first", provider, provider, provider)
+		return domain.Profile{}, fmt.Errorf("no %s accounts found; run `valv account add %s` for the default host-backed account or `valv account add %s account-name` for an isolated account first", provider, provider, provider)
 	}
 	if !commandHasTTY(cmd.InOrStdin()) || !commandHasTTY(cmd.OutOrStdout()) {
 		return domain.Profile{}, fmt.Errorf("account is required when not running in a TTY")

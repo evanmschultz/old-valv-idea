@@ -251,7 +251,7 @@ func TestEnsureCodexImageAvailableReturnsActionableMessageWhenMissing(t *testing
 	if err == nil {
 		t.Fatal("ensureCodexImageAvailable() error = nil, want missing image failure")
 	}
-	for _, want := range []string{"valv-codex-dev:dev", "valv manage update"} {
+	for _, want := range []string{"valv-codex-dev:dev", "valv image update"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("ensureCodexImageAvailable() error = %q, want substring %q", err.Error(), want)
 		}

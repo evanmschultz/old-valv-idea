@@ -149,7 +149,7 @@ func TestOpenImagesServiceWritesCacheToCachesDir(t *testing.T) {
 		content := string(data)
 		if len(content) > 0 {
 			// Intentionally not t.Fatal here — the real cache may legitimately
-			// contain "2.2.0" if the dev ran `valv manage update claude` and
+			// contain "2.2.0" if the dev ran `valv image update claude` and
 			// the actual latest version happens to be 2.2.0. We only fail if
 			// the wantCachePath did not get created (above), which proves the
 			// cache-path isolation is working.

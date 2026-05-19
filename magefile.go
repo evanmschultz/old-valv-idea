@@ -679,7 +679,7 @@ func printDevHomeMessage(title, home string) error {
 			{Label: "home", Value: home, Identifier: true},
 			{Label: "use", Value: `mage dev:run "..."`, Identifier: true},
 			{Label: "cleanup", Value: "mage dev:reset or mage dev:clean", Muted: true},
-			{Label: "bootstrap", Value: `mage dev:run "manage update"`, Identifier: true},
+			{Label: "bootstrap", Value: `mage dev:run "image update"`, Identifier: true},
 		},
 	})
 }
