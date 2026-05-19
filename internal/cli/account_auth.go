@@ -39,7 +39,7 @@ func ensureManagedAccountReady(cmd *cobra.Command, provider domain.Provider, acc
 	case domain.ProviderCodex:
 		return ensureCodexAccountReady(cmd, account, options)
 	case domain.ProviderClaude:
-		return ensureClaudeAccountReady(cmd, account, options)
+		return ensureClaudeAccountReady(cmd, account, options, "")
 	default:
 		return nil
 	}

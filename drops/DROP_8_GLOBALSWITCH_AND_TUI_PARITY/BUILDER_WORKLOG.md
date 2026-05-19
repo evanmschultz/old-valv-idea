@@ -150,3 +150,89 @@ N/A — Hylla unreachable this session (per spawn prompt paradigm override). All
 ## Hylla Feedback (Unit 8.2 R2)
 
 N/A — Hylla unreachable this session (per spawn prompt paradigm override). All evidence gathered via direct `Read` + `git grep` fallback. Primary sources: `internal/tui/manage/picker.go`, `internal/cli/operator_helpers.go`, `internal/cli/manage.go`, `internal/cli/global.go`, `internal/cli/codex_setup.go`, `internal/cli/extended_test.go`, `internal/cli/manage_test.go`.
+
+## Unit 8.3 — Round 1
+
+- **Builder:** go-builder-agent
+- **Started:** 2026-05-18
+- **Files touched:**
+  - `internal/cli/account_flag.go` (new)
+  - `internal/cli/account_flag_test.go` (new)
+  - `internal/cli/claude.go` (added `stripAccountFlag` call + `ensureClaudeAccountReady` stub + `skipValidate` gate)
+  - `internal/cli/codex.go` (added `stripAccountFlag` call; updated `ensureCodexBindingReady` and `ensureBoundCodexAccountReady` call-sites to pass `accountOverride`; added `skipValidate` gate on `service.ValidateBinding`)
+  - `internal/cli/codex_setup.go` (`ensureCodexBindingReady` gains `accountOverride string` param + override short-circuit)
+  - `internal/cli/codex_test.go` (two existing `ensureBoundCodexAccountReady` calls updated to pass `""` as fifth arg)
+- **Mage targets run:** BLOCKED — Bash tool denied for this session. Mage verification not yet run. See note below.
+
+### Design notes
+
+**Threading approach chosen: (a) — add `accountOverride string` parameter NOW**
+
+As specified, approach (a) was chosen: add `accountOverride string` to `ensureCodexBindingReady` and `ensureBoundCodexAccountReady` immediately so Unit 8.5 only needs to consume the parameter rather than add it during a rename/merge. For `ensureClaudeAccountReady`, a stub is added in `claude.go` (same file as `runClaudeCommand`) — Unit 8.4 rewrites it into `ensureClaudeBindingReady` in `claude_setup.go`.
+
+**`stripAccountFlag` placement**
+
+Lives in its own `internal/cli/account_flag.go` as specified. The `--` terminator stops the scan (returns `("", args)` unchanged). First-match-wins for multiple `--account` occurrences. Malformed cases (`--account` as last token, `--account=` with empty value) return `("", args)`.
+
+**`stripAccountFlag` call position**
+
+Both `runClaudeCommand` and `runCodexCommand` call `stripAccountFlag` BEFORE the skip-binding check. This ensures the flag is consumed even when the args contain `--help` or `--version` (though in that case the extracted `accountName` goes nowhere — fine, it's a no-op for skip paths). The shadow assignment `accountName, args := stripAccountFlag(args)` replaces the outer `args` parameter with the stripped slice for all downstream consumers.
+
+**`skipValidate` pattern**
+
+When `accountName != ""`, both `runClaudeCommand` and `runCodexCommand` skip their respective `service.ValidateBinding` calls. The binding store is bypassed at every point. Unit 8.4 (Claude) and Unit 8.5 (Codex) will thread the resolved profile into the launch service to replace the internal binding lookup.
+
+**`ensureCodexBindingReady` override short-circuit**
+
+When `accountOverride != ""`, the function calls `service.ProfileByName(ctx, ProviderCodex, accountOverride)` to validate the account exists, then returns nil. The standard `service.Status` binding check and the `runCodexFirstRunSetup` flow are both skipped. No binding row is written.
+
+**`ensureBoundCodexAccountReady` override path**
+
+When `accountOverride != ""`, the function calls `service.ProfileByName(ctx, ProviderCodex, accountOverride)` and passes the resolved profile directly to `ensureManagedAccountReady`. The `service.Status()` lookup is skipped. This mirrors the existing bound-account-ready logic exactly, just using the override profile instead of the binding-derived profile.
+
+**`ensureClaudeAccountReady` stub**
+
+Placed in `claude.go` temporarily. When `accountOverride != ""`, calls `service.ProfileByName(ctx, ProviderClaude, accountOverride)`. When empty, no-op (returns nil). The `workingDir` parameter is included in the signature now so Unit 8.4's rewrite to `ensureClaudeBindingReady` (which needs `workingDir` for `StatusForProvider`) can inherit it without a signature change at the call-site.
+
+**`BindProject` upsert idempotency**
+
+Confirmed at `manage/service.go:223`: `BindProject` calls `store.UpsertProjectBinding` which is idempotent. Concurrent `valv claude` / `valv codex` first-run invocations are safe. Note recorded per PLAN.md requirement.
+
+**Existing test updates**
+
+Two `codex_test.go` tests that call `ensureBoundCodexAccountReady` directly updated to pass `""` as the new fifth `accountOverride` argument. No semantic change — they test the no-override path.
+
+### Mage verification — BLOCKED
+
+Bash tool access was denied for this session. `mage testPkg github.com/evanmschultz/valv/internal/cli` could not be run. The orchestrator must run this target before advancing Unit 8.3 to `done` and before gating Unit 8.4.
+
+Code-correctness analysis (static):
+- `account_flag.go`: pure slice manipulation, no external deps. Correct by inspection.
+- `account_flag_test.go`: 17 table-driven cases + 1 mutation test. Covers all ACs.
+- `claude.go`: `ensureClaudeAccountReady` is package-internal (same package), all imports present.
+- `codex_setup.go`: `domain` import already present for `domain.ProviderCodex`. `openManageService` is in `operator_helpers.go` (same package).
+- `codex.go`: `domain` import already present. `accountName` variable is used in 3 places after extraction — no unused-variable risk.
+- `codex_test.go`: two call-site updates only, no logic change.
+
+### Fix-up
+
+**Root cause:** `claude.go` R1 declared `func ensureClaudeAccountReady(cmd *cobra.Command, paths config.Paths, workingDir string, accountOverride string)` — a different signature from the existing `func ensureClaudeAccountReady(cmd *cobra.Command, account domain.Profile, options accountAuthOptions)` in `claude_auth.go`. Go disallows two declarations of the same name in one package regardless of signatures → compile error. Additionally, the `account_auth.go:42` caller and three `claude_auth_test.go` call-sites used the old 3-arg signature. The test build also had `codex_setup_test.go:137` calling `ensureCodexBindingReady` with 3 args (R1 added a 4th `accountOverride` param).
+
+**4-step fix applied:**
+
+1. **Deleted** the R1 stub `ensureClaudeAccountReady` from `internal/cli/claude.go` (lines 183–205 in R1 output).
+2. **Modified** `internal/cli/claude_auth.go:123`: added `accountOverride string` as 4th parameter. Added override short-circuit at top of body: when `accountOverride != ""`, opens service via `openManageService(cmd, options.Paths)`, calls `service.ProfileByName(ctx, domain.ProviderClaude, accountOverride)`, and reassigns `account = resolved` before falling through to the credential-check + auth flow. All callers passing `""` see identical behavior to before.
+3. **Updated** `internal/cli/account_auth.go:42`: `ensureClaudeAccountReady(cmd, account, options)` → `ensureClaudeAccountReady(cmd, account, options, "")`.
+4. **Updated** call in `runClaudeCommand` (`internal/cli/claude.go`): guarded behind `if accountName != ""` (avoids zero `domain.Profile{}` flowing into the credential-check when no override is active), passes `accountAuthOptions{Paths: paths}` so the override path can open the store.
+5. **Updated** `internal/cli/claude_auth_test.go`: three `ensureClaudeAccountReady(...)` calls updated to 4-arg form with `""`.
+6. **Updated** `internal/cli/codex_setup_test.go:137`: `ensureCodexBindingReady(cmd, paths, projectRoot)` → `ensureCodexBindingReady(cmd, paths, projectRoot, "")` (missed in R1).
+
+**Mage results:**
+- `mage build` — PASS (compiled clean, no duplicate-declaration error)
+- `mage testPkg github.com/evanmschultz/valv/internal/cli` — PASS (184/184 tests, 72.6% coverage, -race)
+
+Unit 8.3 flipped to `done`.
+
+## Hylla Feedback (Unit 8.3 R1)
+
+N/A — Hylla unreachable this session (per spawn prompt paradigm override). All evidence gathered via direct `Read` of source files. Primary sources: `internal/cli/claude.go`, `internal/cli/codex.go`, `internal/cli/codex_setup.go`, `internal/cli/codex_test.go`, `internal/services/manage/service.go`, `internal/services/claude/service.go`, `internal/cli/operator_helpers.go`.

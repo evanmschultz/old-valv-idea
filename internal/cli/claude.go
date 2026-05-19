@@ -55,6 +55,10 @@ func runClaudeCommand(cmd *cobra.Command, paths config.Paths, args []string) err
 		logger.Debug("run claude command arguments", "args", args)
 	}
 
+	// Extract --account override before any skip-binding check so the flag is
+	// consumed even when the caller passes a help/version arg combination.
+	accountName, args := stripAccountFlag(args)
+
 	if claudeArgsSkipProjectBinding(args) {
 		return runClaudeImageOnlyCommand(cmd, paths, args)
 	}
@@ -63,6 +67,20 @@ func runClaudeCommand(cmd *cobra.Command, paths config.Paths, args []string) err
 	if err != nil {
 		return fmt.Errorf("run claude command: resolve working directory: %w", err)
 	}
+
+	// When --account is supplied, resolve and auth the override profile before
+	// the image check. When accountName is empty, auth runs container-side at
+	// first launch so no host-side check is needed here.
+	if accountName != "" {
+		if err := ensureClaudeAccountReady(cmd, domain.Profile{}, accountAuthOptions{Paths: paths}, accountName); err != nil {
+			return fmt.Errorf("run claude command: %w", err)
+		}
+	}
+
+	// When an account override is active, skip ValidateBinding (which would fail
+	// for unbound projects). The resolved profile is threaded into the launch
+	// service by Unit 8.4 via OverrideProfile on claudeservice.Options.
+	skipValidate := accountName != ""
 
 	// No ensureClaudeBindingReady: unbound projects surface as ErrUnboundProject
 	// from service.ValidateBinding. Claude device-code auth runs inside the
@@ -106,9 +124,13 @@ func runClaudeCommand(cmd *cobra.Command, paths config.Paths, args []string) err
 		return fmt.Errorf("run claude command: initialize launcher: %w", err)
 	}
 	// Validate binding before the image check so unbound-project errors surface
-	// quickly without triggering a docker build.
-	if err := service.ValidateBinding(cmd.Context(), workingDir); err != nil {
-		return fmt.Errorf("run claude command: validate binding: %w", err)
+	// quickly without triggering a docker build. Skip when --account override is
+	// active: the override bypasses the binding store entirely. Unit 8.4 threads
+	// the resolved profile into claudeservice.Options so the launch proceeds.
+	if !skipValidate {
+		if err := service.ValidateBinding(cmd.Context(), workingDir); err != nil {
+			return fmt.Errorf("run claude command: validate binding: %w", err)
+		}
 	}
 	if err := ensureClaudeImageCurrent(cmd, paths); err != nil {
 		return fmt.Errorf("run claude command: %w", err)

@@ -109,18 +109,32 @@ func claudeAuthRunnerFromContext(ctx context.Context) claudeAuthRunner {
 }
 
 // ensureClaudeAccountReady is the Claude-specific auth flow called from
-// ensureManagedAccountReady. It runs the managed Claude container with the
-// account's home directory bind-mounted so the Claude CLI auto-prompts for
-// device-code OAuth and writes .credentials.json natively.
+// ensureManagedAccountReady and (when --account is supplied) from
+// runClaudeCommand. When accountOverride is non-empty, the named profile is
+// resolved via ProfileByName and the resolved profile replaces account for the
+// auth flow below. When accountOverride is empty, account is used as-is.
 //
 // Step order:
-//  1. SkipLogin → return nil immediately.
-//  2. .credentials.json exists and non-empty → already authed, return nil.
-//  3. Non-TTY guard → return error mentioning "TTY".
-//  4. writeCLINotice to announce login.
-//  5. RunInContainer → if error → return.
-//  6. ReadAccountIdentity → if not LoggedIn → return error.
-func ensureClaudeAccountReady(cmd *cobra.Command, account domain.Profile, options accountAuthOptions) error {
+//  1. accountOverride non-empty → resolve profile by name; replace account.
+//  2. SkipLogin → return nil immediately.
+//  3. .credentials.json exists and non-empty → already authed, return nil.
+//  4. Non-TTY guard → return error mentioning "TTY".
+//  5. writeCLINotice to announce login.
+//  6. RunInContainer → if error → return.
+//  7. ReadAccountIdentity → if not LoggedIn → return error.
+func ensureClaudeAccountReady(cmd *cobra.Command, account domain.Profile, options accountAuthOptions, accountOverride string) error {
+	if accountOverride != "" {
+		service, closeStore, err := openManageService(cmd, options.Paths)
+		if err != nil {
+			return fmt.Errorf("initialize manage service for account override: %w", err)
+		}
+		defer closeStore()
+		resolved, err := service.ProfileByName(cmd.Context(), domain.ProviderClaude, accountOverride)
+		if err != nil {
+			return fmt.Errorf("resolve override account %q: %w", accountOverride, err)
+		}
+		account = resolved
+	}
 	if options.SkipLogin {
 		return nil
 	}

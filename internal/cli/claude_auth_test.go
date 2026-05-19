@@ -95,7 +95,7 @@ func TestEnsureClaudeAccountReadyRejectsNonTTY(t *testing.T) {
 	installStubClaudeAuth(t, cmd, stub)
 
 	account := domain.Profile{Name: "personal", HomePath: t.TempDir()}
-	err := ensureClaudeAccountReady(cmd, account, accountAuthOptions{})
+	err := ensureClaudeAccountReady(cmd, account, accountAuthOptions{}, "")
 	if err == nil {
 		t.Fatal("ensureClaudeAccountReady() error = nil, want non-tty error")
 	}
@@ -123,7 +123,7 @@ func TestEnsureClaudeAccountReadyRespectsSkipLogin(t *testing.T) {
 	installStubClaudeAuth(t, cmd, stub)
 
 	account := domain.Profile{Name: "personal", HomePath: dir}
-	err := ensureClaudeAccountReady(cmd, account, accountAuthOptions{SkipLogin: true})
+	err := ensureClaudeAccountReady(cmd, account, accountAuthOptions{SkipLogin: true}, "")
 	if err != nil {
 		t.Fatalf("ensureClaudeAccountReady(SkipLogin=true) error = %v, want nil", err)
 	}
@@ -154,7 +154,7 @@ func TestEnsureClaudeAccountReadyAlreadyAuthedReturnsNilEvenNonTTY(t *testing.T)
 	installStubClaudeAuth(t, cmd, stub)
 
 	account := domain.Profile{Name: "personal", HomePath: dir}
-	err := ensureClaudeAccountReady(cmd, account, accountAuthOptions{})
+	err := ensureClaudeAccountReady(cmd, account, accountAuthOptions{}, "")
 	if err != nil {
 		t.Fatalf("ensureClaudeAccountReady() error = %v, want nil (already authed)", err)
 	}

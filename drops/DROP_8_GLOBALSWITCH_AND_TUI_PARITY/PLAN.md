@@ -75,7 +75,7 @@ Closes the remainder of focus-plan §6.6 + the dogfood binding-UX gap (dev hit "
 
 ### Unit 8.3 — `--account` raw-arg interception on `valv claude` + `valv codex`
 
-**State:** todo
+**State:** done
 **Paths:**
 - `internal/cli/account_flag.go` (new file)
 - `internal/cli/account_flag_test.go` (new file)

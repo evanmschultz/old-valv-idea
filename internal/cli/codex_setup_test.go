@@ -134,7 +134,7 @@ func TestEnsureCodexBindingReadyReturnsActionableGuidanceWithoutTTY(t *testing.T
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
 
-	err := ensureCodexBindingReady(cmd, paths, projectRoot)
+	err := ensureCodexBindingReady(cmd, paths, projectRoot, "")
 	if err == nil {
 		t.Fatal("ensureCodexBindingReady() error = nil, want unbound guidance")
 	}

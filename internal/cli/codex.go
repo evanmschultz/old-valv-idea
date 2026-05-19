@@ -61,6 +61,10 @@ func runCodexCommand(cmd *cobra.Command, paths config.Paths, args []string) erro
 		logger.Debug("run codex command arguments", "args", args)
 	}
 
+	// Extract --account override before any skip-binding check so the flag is
+	// consumed even when the caller passes a help/version arg combination.
+	accountName, args := stripAccountFlag(args)
+
 	if codexArgsSkipProjectBinding(args) {
 		return runCodexImageOnlyCommand(cmd, paths, args)
 	}
@@ -69,13 +73,13 @@ func runCodexCommand(cmd *cobra.Command, paths config.Paths, args []string) erro
 	if err != nil {
 		return fmt.Errorf("run codex command: resolve working directory: %w", err)
 	}
-	if err := ensureCodexBindingReady(cmd, paths, workingDir); err != nil {
+	if err := ensureCodexBindingReady(cmd, paths, workingDir, accountName); err != nil {
 		if errors.Is(err, errCodexSetupCanceled) {
 			return nil
 		}
 		return fmt.Errorf("run codex command: %w", err)
 	}
-	if err := ensureBoundCodexAccountReady(cmd, paths, workingDir, args); err != nil {
+	if err := ensureBoundCodexAccountReady(cmd, paths, workingDir, args, accountName); err != nil {
 		return fmt.Errorf("run codex command: %w", err)
 	}
 
@@ -119,8 +123,13 @@ func runCodexCommand(cmd *cobra.Command, paths config.Paths, args []string) erro
 	if err := ensureCodexImageCurrent(cmd, paths); err != nil {
 		return fmt.Errorf("run codex command: %w", err)
 	}
-	if err := service.ValidateBinding(cmd.Context(), workingDir); err != nil {
-		return fmt.Errorf("run codex command: validate binding: %w", err)
+	// Skip ValidateBinding when an explicit account override is active: the
+	// override bypasses the binding store entirely. Unit 8.5 threads the resolved
+	// profile into the launch service so the container run proceeds.
+	if accountName == "" {
+		if err := service.ValidateBinding(cmd.Context(), workingDir); err != nil {
+			return fmt.Errorf("run codex command: validate binding: %w", err)
+		}
 	}
 
 	if err := service.Run(cmd.Context(), workingDir, args); err != nil {
@@ -201,7 +210,11 @@ func codexArgsSkipAccountReady(args []string) bool {
 	}
 }
 
-func ensureBoundCodexAccountReady(cmd *cobra.Command, paths config.Paths, workingDir string, args []string) error {
+// ensureBoundCodexAccountReady checks host authentication for the bound (or
+// override) Codex account. When accountOverride is non-empty, the named profile
+// is resolved directly via ProfileByName — the binding store is not consulted.
+// Unit 8.5 will merge this function into ensureCodexAccountReadyForLaunch.
+func ensureBoundCodexAccountReady(cmd *cobra.Command, paths config.Paths, workingDir string, args []string, accountOverride string) error {
 	if codexArgsSkipAccountReady(args) {
 		return nil
 	}
@@ -210,6 +223,20 @@ func ensureBoundCodexAccountReady(cmd *cobra.Command, paths config.Paths, workin
 		return fmt.Errorf("initialize account service: %w", err)
 	}
 	defer closeStore()
+
+	// When an explicit account override is supplied, resolve the named profile
+	// directly. Binding store is not consulted and no row is written.
+	if accountOverride != "" {
+		profile, err := service.ProfileByName(cmd.Context(), domain.ProviderCodex, accountOverride)
+		if err != nil {
+			return fmt.Errorf("resolve override account %q: %w", accountOverride, err)
+		}
+		if err := ensureManagedAccountReady(cmd, profile.Provider, profile, accountAuthOptions{}); err != nil {
+			return fmt.Errorf("ensure override account %q is ready: %w", profile.Name, err)
+		}
+		return nil
+	}
+
 	status, err := service.Status(cmd.Context(), workingDir)
 	if err != nil {
 		return fmt.Errorf("resolve bound account: %w", err)

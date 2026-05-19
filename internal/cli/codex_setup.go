@@ -19,12 +19,26 @@ import (
 
 var errCodexSetupCanceled = errors.New("codex setup canceled")
 
-func ensureCodexBindingReady(cmd *cobra.Command, paths config.Paths, workingDir string) error {
+// ensureCodexBindingReady checks whether the current project is bound to a
+// Codex account. When accountOverride is non-empty, the named account is
+// resolved directly via ProfileByName and the binding-store lookup is skipped
+// entirely — no binding row is written. Unit 8.5 will merge this function into
+// ensureCodexAccountReadyForLaunch and inherit the accountOverride parameter.
+func ensureCodexBindingReady(cmd *cobra.Command, paths config.Paths, workingDir string, accountOverride string) error {
 	service, closeStore, err := openManageService(cmd, paths)
 	if err != nil {
 		return fmt.Errorf("initialize manage service: %w", err)
 	}
 	defer closeStore()
+
+	// When an explicit account override is supplied, resolve the named profile
+	// directly. Binding store is not consulted and no row is written.
+	if accountOverride != "" {
+		if _, err := service.ProfileByName(cmd.Context(), domain.ProviderCodex, accountOverride); err != nil {
+			return fmt.Errorf("resolve override account %q: %w", accountOverride, err)
+		}
+		return nil
+	}
 
 	if _, err := service.Status(cmd.Context(), workingDir); err == nil {
 		return nil

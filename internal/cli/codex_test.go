@@ -191,7 +191,7 @@ func TestEnsureBoundCodexAccountReadyUsesBoundAccount(t *testing.T) {
 	cmd.SetErr(&bytes.Buffer{})
 	stub := installStubCodexAccountAuth(t, cmd, true)
 
-	if err := ensureBoundCodexAccountReady(cmd, paths, projectRoot, []string{"resume", "--last"}); err != nil {
+	if err := ensureBoundCodexAccountReady(cmd, paths, projectRoot, []string{"resume", "--last"}, ""); err != nil {
 		t.Fatalf("ensureBoundCodexAccountReady() error = %v", err)
 	}
 	if stub.statusHits == 0 {
@@ -220,7 +220,7 @@ func TestEnsureBoundCodexAccountReadySkipsAccountCheckForLoginCommand(t *testing
 	cmd.SetErr(&bytes.Buffer{})
 	stub := installStubCodexAccountAuth(t, cmd, true)
 
-	if err := ensureBoundCodexAccountReady(cmd, paths, projectRoot, []string{"login"}); err != nil {
+	if err := ensureBoundCodexAccountReady(cmd, paths, projectRoot, []string{"login"}, ""); err != nil {
 		t.Fatalf("ensureBoundCodexAccountReady() error = %v", err)
 	}
 	if stub.statusHits != 0 {
