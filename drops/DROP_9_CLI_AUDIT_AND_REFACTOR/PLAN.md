@@ -5,12 +5,31 @@
 **Paths (expected):**
 - `internal/cli/root.go`
 - `internal/cli/manage.go`
+- `internal/cli/claude.go`
+- `internal/cli/codex.go`
+- `internal/cli/claude_setup.go`
+- `internal/cli/codex_setup.go`
+- `internal/cli/operator_helpers.go`
 - `internal/cli/claude_auth.go`
 - `internal/cli/claude_auth_test.go`
 - `internal/cli/manage_test.go`
 - `internal/cli/root_test.go`
 - `internal/cli/extended_test.go`
-**Packages (expected):** `github.com/evanmschultz/valv/internal/cli`
+- `internal/cli/claude_setup_test.go`
+- `internal/cli/codex_setup_test.go`
+- `internal/cli/codex_test.go`
+- `internal/domain/repository.go`
+- `internal/adapters/sqlite/store.go`
+- `internal/adapters/sqlite/store_test.go`
+- `internal/services/manage/service.go`
+- `internal/services/manage/service_test.go`
+- `magefile.go`
+- `README.md`
+**Packages (expected):**
+- `github.com/evanmschultz/valv/internal/cli`
+- `github.com/evanmschultz/valv/internal/domain`
+- `github.com/evanmschultz/valv/internal/adapters/sqlite`
+- `github.com/evanmschultz/valv/internal/services/manage`
 **PLAN.md ref:** main/PLAN.md → DROP_9 row
 **Workflow:** main/drops/WORKFLOW.md
 **Started:** 2026-05-18
@@ -34,8 +53,8 @@ Normalize the Valv CLI surface to a clean tree: delete the `valv manage` namespa
 - **Packages:** `github.com/evanmschultz/valv/internal/cli`
 - **Acceptance:**
   1. `newManageCommand` function and its `RunE` (the `runManageHome` TUI call) are deleted from `manage.go`.
-  2. `root.go` no longer registers `newManageCommand`; the `manage` group and the `manageCmd` local variable are removed.
-  3. `root.go` still registers `accountCmd` pointing to `newManageAccountCommand` (unchanged — account namespace is already a top-level command; the duplicate registration under `manage` is the thing being removed).
+  2. `root.go` no longer registers `newManageCommand`; the `manageCmd` local variable and its `AddCommand` call are removed.
+  3. `root.go` `cmd.AddGroup(...)` call: the `&cobra.Group{ID: "manage", Title: "Management Commands"}` entry is removed or renamed. The builder renames the group ID to `"account"` (since `manage` is gone) and updates `accountCmd.GroupID` and `globalCmd.GroupID` to match the new group ID. `globalCmd.GroupID = "manage"` MUST be re-homed — after `manageCmd` is deleted, any command still carrying `GroupID = "manage"` references a non-existent group. Builder scans `root.go` for ALL lines assigning `GroupID = "manage"` (currently: `root.go:130` for `accountCmd`, `root.go:134` for `globalCmd`) and updates each one.
   4. `root.go` examples block is updated to remove all `valv manage ...` examples.
   5. `manage_test.go` tests that previously routed via `newManageCommand(...)` `.Execute()` with `account ...` subargs are rewritten to use `newManageAccountCommand` directly.
   6. `mage testPkg ./internal/cli` passes (no compilation errors, all tests green).
@@ -47,12 +66,12 @@ The `account` namespace is already top-level (registered at `root.go:129` via `n
 - Remove `newManageCommand` from `manage.go` (lines 22-57 approximately — the constructor and its `RunE` body that calls `runManageHome`).
 - Remove `runManageHome` from `manage.go` (the TUI dispatch function).
 - Remove the `manageCmd` local var + its `AddCommand` call from `root.go` `newRootCommandWithPaths`.
-- Remove the `"manage"` group registration from `root.go` `cmd.AddGroup(...)` call (the `GroupID: "manage"` group and the `manageCmd.GroupID = "manage"` line). Keep `accountCmd.GroupID = "manage"` or rename the group to `"account"` — the GroupID label is a cosmetic concern; builder should rename to `"account"` since `manage` is gone.
+- In `root.go` `cmd.AddGroup(...)`: replace `&cobra.Group{ID: "manage", Title: "Management Commands"}` with `&cobra.Group{ID: "account", Title: "Account Commands"}` (or equivalent). Update both `accountCmd.GroupID = "manage"` (line 130) and `globalCmd.GroupID = "manage"` (line 134) to the new group ID. Both lines are in scope for this unit.
 - Keep ALL children of `newManageCommand` (the constructors `newManageAccountCommand`, `newManageBindCommand`, `newManageProjectCommand`, `newManageStatusCommand`, `newManageUpdateCommand`, `newManageCleanupCommand`) in `manage.go` — they will be wired to the new `account` and `image` top-level commands in units 9.2–9.4.
 - `runManageHome` (the TUI dispatch for the manage home screen) is the only function that goes away permanently. The `internal/tui/manage` package itself is independent and survives — it may be used by `valv image` or removed in a later cleanup drop.
 - Test fixes: tests that call `newManageCommand(paths, &rootOptions{})` and then `.SetArgs([]string{"account", ...})` must be rewritten to call `newManageAccountCommand(paths, &rootOptions{})` and set args to the subcommand name directly (e.g., `[]string{"add", "codex", "profile-name", "--project", workDir}`). Same pattern for bind, status, update, cleanup tests.
 
-**Risk note:** This unit touches three large test files (`manage_test.go` 26K, `extended_test.go` 31.8K, `root_test.go` 9.4K). The acceptance criterion `mage testPkg ./internal/cli` catches all breakage. Builder must scan all three for `newManageCommand` and `valv manage` routing before declaring done.
+**Risk note:** This unit touches three large test files (`manage_test.go` 26K, `extended_test.go` 31.8K, `root_test.go` 9.4K). The acceptance criterion `mage testPkg ./internal/cli` catches all breakage. Builder must scan all three for `newManageCommand` and `valv manage` routing before declaring done. Concrete stale-string count from `git grep "valv manage"`: 91 total hits; the majority are in `manage.go`'s own example blocks (updated in-situ by units 9.1-9.4 as each constructor is modified) and in separate files handled by unit 9.4.5. Builder for 9.1 is responsible for removing/updating `valv manage ...` examples in `root.go`'s example block only. GroupID assignments confirmed at `root.go:130` (`accountCmd`) and `root.go:134` (`globalCmd`) — both must be re-homed in this unit.
 
 ---
 
@@ -62,13 +81,27 @@ The `account` namespace is already top-level (registered at `root.go:129` via `n
 - **Paths:**
   - `internal/cli/manage.go`
   - `internal/cli/manage_test.go`
-- **Packages:** `github.com/evanmschultz/valv/internal/cli`
+  - `internal/domain/repository.go`
+  - `internal/adapters/sqlite/store.go`
+  - `internal/adapters/sqlite/store_test.go`
+  - `internal/services/manage/service.go`
+  - `internal/services/manage/service_test.go`
+- **Packages:**
+  - `github.com/evanmschultz/valv/internal/cli`
+  - `github.com/evanmschultz/valv/internal/domain`
+  - `github.com/evanmschultz/valv/internal/adapters/sqlite`
+  - `github.com/evanmschultz/valv/internal/services/manage`
 - **Acceptance:**
-  1. `valv account bind <name> [--provider <p>]` binds the current project to the named account. When `--provider` is absent, provider is inferred from the existing binding or defaults to Codex. Calls `runManageBind` (the existing run function, already present in `manage.go`).
-  2. `valv account unbind [--provider <p>]` unbinds the current project from its bound account. Implementation: call `service.UnbindProject(ctx, provider, projectPath)`. If the manage service does not expose `UnbindProject` yet, the builder may stub as `not yet implemented` and note the gap — but the preferred path is to implement it against `service.DeleteBinding` or equivalent (builder verifies service surface).
-  3. `newManageAccountCommand` in `manage.go` adds both new subcommands via `cmd.AddCommand(newManageAccountBindCommand(...), newManageAccountUnbindCommand(...))`.
-  4. At least two new tests in `manage_test.go` cover (a) bind succeeds and records the project-profile row; (b) unbind succeeds and removes the row. Table-driven is fine.
-  5. `mage testPkg ./internal/cli` passes.
+  1. `domain.BindingRepository` interface in `internal/domain/repository.go` gains `DeleteBinding(ctx context.Context, projectID string, provider Provider) error`. This is a new method (not yet in tree). Signature matches the composite PK on `project_bindings(project_id, provider)`.
+  2. `sqlite.Store` in `internal/adapters/sqlite/store.go` implements `DeleteBinding` via `DELETE FROM project_bindings WHERE project_id = ? AND provider = ?`. Returns `domain.ErrNotFound` (wrapped) when zero rows are affected. Pattern mirrors existing `DeleteProfile` implementation.
+  3. `manage.Service` in `internal/services/manage/service.go` gains `UnbindProject(ctx context.Context, provider domain.Provider, startPath string) error` (new, not yet in tree). Implementation: detect project from startPath → look up project record → call `store.DeleteBinding(ctx, project.ID, provider)`. Returns descriptive wrapped error if project not found or binding not found.
+  4. `valv account bind <name> [--provider <p>]` binds the current project to the named account. When `--provider` is absent, provider defaults to Codex. Calls `runManageBind` (the existing run function, already present in `manage.go`).
+  5. `valv account unbind [--provider <p>]` unbinds the current project from its bound account. Calls `service.UnbindProject`. Provider defaults to Codex when `--provider` is absent.
+  6. `newManageAccountCommand` in `manage.go` adds both new subcommands via `cmd.AddCommand(newManageAccountBindCommand(...), newManageAccountUnbindCommand(...))`.
+  7. Tests in `manage_test.go`: at least two covering (a) bind succeeds and records the project-profile row; (b) unbind succeeds and removes the row. Table-driven is fine.
+  8. Tests in `internal/adapters/sqlite/store_test.go`: `DeleteBinding` — bound row removed (success); non-existent row returns `domain.ErrNotFound`-wrapped error.
+  9. Tests in `internal/services/manage/service_test.go`: `UnbindProject` — bound project unbound successfully; unbound project returns clean wrapped error; provider defaults correctly.
+  10. `mage testPkg ./internal/cli` passes. `mage testPkg ./internal/adapters/sqlite` passes. `mage testPkg ./internal/services/manage` passes. All with `-race` and ≥70% coverage per package.
 - **Blocked by:** 9.1
 
 **Design notes for builder:**
@@ -79,7 +112,7 @@ The `account` namespace is already top-level (registered at `root.go:129` via `n
 
 Option (b) is preferred (surgical, avoids touching the existing manage bind run path during a transition period).
 
-For `unbind`: check whether `internal/services/manage.Service` already has a method that removes a project binding row. Hylla search on `UnbindProject` or `DeleteBinding` before implementing. If absent, add it to the service (new, not yet in tree).
+For `unbind`: `manage.Service` currently has no `UnbindProject` method (confirmed by source read). `BindingRepository` has no `DeleteBinding` (confirmed by source read). Both must be added as new. The pattern for store-level delete is at `store.go` line 387 (`DeleteProfile`) — follow the same rows-affected-zero → ErrNotFound pattern. The `store.Store` interface in `manage.Service`'s `Store` interface (line 21-25 of service.go) embeds `domain.BindingRepository` — adding `DeleteBinding` to the interface means `sqlite.Store` must implement it before the manage service test will compile.
 
 ---
 
@@ -93,12 +126,17 @@ For `unbind`: check whether `internal/services/manage.Service` already has a met
 - **Packages:** `github.com/evanmschultz/valv/internal/cli`
 - **Acceptance:**
   1. `valv image update [provider]` rebuilds the provider image. Calls `runManageUpdate` (existing run function, unchanged). Provider defaults to Codex when omitted.
-  2. `valv image cleanup` prunes Valv-managed Docker artifacts. Uses flag-driven interface: `--images` (provider images), `--containers` (leaked Valv containers), `--state` (local logs/caches), `--build-cache` (Docker builder cache), `--all` (everything). No-arg default: dry-run preview (list what would be cleaned, print count, do not delete). Calls `runManageCleanup` logic internally, adapted for flag dispatch.
+  2. `valv image cleanup` prunes Valv-managed Docker artifacts. Uses flag-driven interface: `--images` (provider images), `--containers` (leaked Valv containers), `--state` (local logs/caches), `--build-cache` (Docker builder cache), `--all` (everything), `--apply` (actually delete; absence means dry-run).
+     - **Flag combination rules (enforced at RunE entry):**
+       - `--all` is mutually exclusive with any individual scope flag (`--images`, `--containers`, `--state`, `--build-cache`). If `--all` is combined with any individual flag, return an error: `"--all is mutually exclusive with --images, --containers, --state, --build-cache"`.
+       - Individual scope flags are additive: `--images --containers` cleans both scopes.
+       - Default behavior when NO scope flag is provided: equivalent to `--all` (clean everything).
+       - Default is DRY-RUN: print a count and list of what would be cleaned, do not delete. `--apply` (or `--yes`) actually executes the deletion.
+     - Only Valv-managed artifacts are touched. The `providerCleanupImageFilters()` filter (`io.valv.managed=true` label) is already sufficient — the images service sets this label via `docker build --label` args in `Build()`. No new label instructions needed.
   3. `valv image inspect [provider]` shows the current provider image version, last-checked-at timestamp, and installed state. Provider defaults to Codex. Implementation reads from the images service state (builder may use `service.EnsureLatest` with `AllowExistingOnCheckFail: true` and no-rebuild semantics, OR call a new `service.InspectImage(ctx)` method if one exists — builder decides the cheapest approach after checking the service surface).
-  4. `newImageCommand` is a new function in `manage.go` (new, not yet in tree) that constructs the `image` namespace cobra command with the three subcommands above. Registered in `root.go` under the `manage` group (or a renamed group).
-  5. `providerCleanupImageFilters()` filter (`io.valv.managed=true`) is already sufficient — no new Dockerfile label instructions are needed because the images service sets this label via `docker build --label` args in `Build()`.
-  6. At least one test in `manage_test.go` covers `valv image update` routing.
-  7. `mage testPkg ./internal/cli` passes.
+  4. `newImageCommand` is a new function in `manage.go` (new, not yet in tree) that constructs the `image` namespace cobra command with the three subcommands above. Registered in `root.go` under the renamed group from unit 9.1.
+  5. At least two tests in `manage_test.go`: (a) `valv image update` routing succeeds; (b) `valv image cleanup --all --images` returns a flag-conflict error.
+  6. `mage testPkg ./internal/cli` passes.
 - **Blocked by:** 9.1
 
 **Design notes for builder:**
@@ -120,16 +158,56 @@ For `image cleanup` flag-driven dispatch: the current `runManageCleanup` uses a 
 - **Packages:** `github.com/evanmschultz/valv/internal/cli`
 - **Acceptance:**
   1. `valv status` (no `manage` prefix) shows the current project's binding status. Same output as the current `manage status`.
-  2. `newManageStatusCommand` is registered directly in `root.go` under the inspect group (or a new `status` group).
+  2. `newManageStatusCommand` is registered directly in `root.go` under the inspect group (or equivalent).
   3. `valv status --project /path` still works.
   4. The old `manage status` path no longer exists (because unit 9.1 deleted `manage`).
-  5. At least one test covers `valv status` via the root command.
-  6. `mage testPkg ./internal/cli` passes.
+  5. `valv status --all` (new flag, not yet in tree) shows all project bindings across all providers. Implementation calls `runManageProjectList` logic (the existing logic behind `newManageProjectCommand`). `manage project list` is DELETED (no replacement command — users get the same data via `valv status --all`).
+  6. At least two tests: (a) `valv status` via the root command shows current project binding; (b) `valv status --all` shows all bindings.
+  7. `mage testPkg ./internal/cli` passes.
 - **Blocked by:** 9.1
 
 **Design notes for builder:**
 
-`newManageStatusCommand` already exists in `manage.go`. Unit 9.4 just registers it in `root.go` as `statusCmd`. The `runManageStatus` run function needs no changes. The `manage project list` content (list of all project bindings) is separate — it becomes accessible via `valv status --all-projects` or remains a standalone path. Per the spec, `manage project list` content is folded into `valv status`; the simplest interpretation is: `valv status` shows the current project binding, and a new `--all` or `--projects` flag shows all bindings. Builder decides the minimal path; can keep it as a separate `valv account projects` command or fold as a flag. Spec's §5 shows `valv status` replacing both `manage status` + `manage project list` — builder adds a `--list` or `--all` flag that calls `runManageProjectList` logic.
+`newManageStatusCommand` already exists in `manage.go`. Unit 9.4 registers it in `root.go` as `statusCmd`. The `runManageStatus` run function needs no changes for single-project output. For `--all`: add a `BoolVar` flag to `newManageStatusCommand`; when set, call the listing logic currently in `runManageProjectList` (or inline a call to `service.ListBindings`). `newManageProjectCommand` and `runManageProjectList` are deleted (or left as dead code for cleanup in DROP_11 — builder decides based on effort; deleting is preferred). The `--all` flag is the canonical replacement. No other command replaces `manage project list`.
+
+---
+
+### Unit 9.4.5 — Refresh user-facing strings post-namespace-rename
+
+- **State:** todo
+- **Paths:**
+  - `internal/cli/claude.go`
+  - `internal/cli/codex.go`
+  - `internal/cli/claude_setup.go`
+  - `internal/cli/codex_setup.go`
+  - `internal/cli/operator_helpers.go`
+  - `internal/cli/claude_setup_test.go`
+  - `internal/cli/codex_setup_test.go`
+  - `internal/cli/codex_test.go`
+  - `internal/cli/extended_test.go`
+  - `magefile.go`
+  - `README.md`
+- **Packages:** `github.com/evanmschultz/valv/internal/cli`
+- **Acceptance:**
+  1. `git grep "valv manage" -- internal/cli/claude.go internal/cli/codex.go internal/cli/claude_setup.go internal/cli/codex_setup.go internal/cli/operator_helpers.go internal/cli/claude_setup_test.go internal/cli/codex_setup_test.go internal/cli/codex_test.go internal/cli/extended_test.go magefile.go README.md` returns zero hits.
+  2. All updated error/help text references the new normalized command tree. Concrete substitutions (builder applies across all files in scope):
+     - `valv manage update` → `valv image update`
+     - `valv manage update claude` → `valv image update claude`
+     - `valv manage account add codex` → `valv account add codex`
+     - `valv manage account add claude` → `valv account add claude`
+     - `valv manage bind codex <name>` → `valv account bind <name>` (or `valv account bind <name> --provider codex`)
+     - `valv manage bind claude <name>` → `valv account bind <name> --provider claude`
+     - `valv manage status` → `valv status`
+  3. Test assertions in `claude_setup_test.go`, `codex_setup_test.go`, `codex_test.go`, `extended_test.go` that check for specific error message substrings are updated to match the new command names. All assertions must still pass.
+  4. `magefile.go` bootstrap label in `printDevHomeMessage` (line 682 approximately: `"manage update"`) is updated to `"image update"`.
+  5. `README.md` mage run examples (lines 36, 44, 45 approximately: `mage run "manage status"`, `mage dev:run "manage update"`, `mage dev:run "manage status"`) are updated to reference the new subcommands (`image update`, `status`).
+  6. `manage.go`'s own example blocks (cobra `Example:` string literals) are OUT OF SCOPE for this unit — they are updated in-situ by units 9.1–9.4 as each constructor is modified or deleted.
+  7. `mage testPkg ./internal/cli` passes with all updated test assertions.
+- **Blocked by:** 9.1, 9.2, 9.3, 9.4 (all units finalizing the new command tree must land first so strings reference the correct final shape)
+
+**Design notes for builder:**
+
+This is a mechanical string-substitution unit. No logic changes. Every hit found by the acceptance criterion's `git grep` command is a required fix. Builder runs the grep, addresses each hit, reruns the grep to confirm zero, then runs `mage testPkg ./internal/cli` to confirm all test assertions still hold. For test files, updated assertions must match the new error strings exactly — if the underlying error is now `"run \`valv image update\`"`, the test must assert that substring. Builder may also find hits in `manage.go`'s own example blocks that survived 9.1–9.4 edits and should fix those too if present (belt-and-suspenders).
 
 ---
 
@@ -271,6 +349,14 @@ If the builder finds that `--provider` flag normalization + uniform collision en
 
 ### Dependency chain
 ```
-9.1 (manage deletion) → 9.2 (account bind/unbind) → 9.3 (image namespace) → 9.4 (status flatten) → 9.5 (flag normalization) → 9.6 (collision enforcement) → 9.7 (CONCERN A tests) → 9.8 (CONCERN B hardening)
+9.1 (manage deletion)
+  → 9.2 (account bind/unbind — cli + domain + store + service)
+  → 9.3 (image namespace — cli)
+  → 9.4 (status flatten + --all flag — cli)
+  → 9.4.5 (stale string refresh — cli + magefile + README)
+  → 9.5 (flag normalization — cli)
+  → 9.6 (collision enforcement — cli)
+  → 9.7 (CONCERN A tests — cli)
+  → 9.8 (CONCERN B hardening — cli)
 ```
-All units in one package (`internal/cli`). No parallelism possible within this drop due to the package lock. All units are serial.
+Units 9.2–9.4.5 touch multiple packages (`internal/cli`, `internal/domain`, `internal/adapters/sqlite`, `internal/services/manage`). Units 9.5–9.8 touch `internal/cli` only. All units are serial due to the shared `internal/cli` package — no parallelism possible within this drop.
