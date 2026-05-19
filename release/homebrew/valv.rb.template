@@ -1,0 +1,66 @@
+# frozen_string_literal: true
+
+# Homebrew formula TEMPLATE for valv.
+#
+# This is a template — not a live formula. Lives here for version-controlled
+# reference. The live formula lives at evanmschultz/homebrew-tap (separate
+# repo) and is updated per release.
+#
+# Replace at release time:
+#   {{VERSION}}        → e.g. "0.1.0"  (no leading "v")
+#   {{SHA256_AMD64}}   → sha256 of valv-darwin-amd64 from the GitHub Release
+#   {{SHA256_ARM64}}   → sha256 of valv-darwin-arm64 from the GitHub Release
+#
+# The checksums are emitted by the release.yml workflow into
+# `release-assets/checksums.txt` and attached to the GitHub Release.
+#
+# Usage at tag time (manual, post-release):
+#   1. Wait for `release` workflow to publish the GitHub Release with assets.
+#   2. Download `checksums.txt` from the release assets page.
+#   3. Substitute {{VERSION}} / {{SHA256_AMD64}} / {{SHA256_ARM64}}.
+#   4. Push the resulting `valv.rb` to evanmschultz/homebrew-tap.
+#   5. Users install with: `brew install evanmschultz/tap/valv`.
+
+class Valv < Formula
+  desc "Multi-account Claude Code + Codex CLI launcher with Docker isolation"
+  homepage "https://github.com/evanmschultz/valv"
+  version "{{VERSION}}"
+  license "MIT"
+
+  on_macos do
+    on_arm do
+      url "https://github.com/evanmschultz/valv/releases/download/v#{version}/valv-darwin-arm64"
+      sha256 "{{SHA256_ARM64}}"
+    end
+    on_intel do
+      url "https://github.com/evanmschultz/valv/releases/download/v#{version}/valv-darwin-amd64"
+      sha256 "{{SHA256_AMD64}}"
+    end
+  end
+
+  # Docker is a runtime requirement (valv shells out to the docker CLI), but
+  # Homebrew recommends not installing it as a formula dep since most users
+  # install Docker Desktop separately. Surface the requirement via caveats.
+  def caveats
+    <<~EOS
+      valv requires Docker (Desktop or another local daemon) at runtime.
+      Install Docker Desktop from https://www.docker.com/products/docker-desktop
+      or via cask: `brew install --cask docker`
+    EOS
+  end
+
+  def install
+    arch_suffix = Hardware::CPU.arm? ? "arm64" : "amd64"
+    bin.install "valv-darwin-#{arch_suffix}" => "valv"
+  end
+
+  test do
+    # `valv version` is a foundational subcommand and is not renamed by
+    # DROP_9's CLI normalization. Safe smoke check that the binary runs.
+    assert_match(/^Valv version/, shell_output("#{bin}/valv version"))
+
+    # `valv help` is cobra's built-in help command — also safe across
+    # command-tree changes.
+    assert_match(/Valv manages/, shell_output("#{bin}/valv help"))
+  end
+end

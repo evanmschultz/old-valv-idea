@@ -247,25 +247,6 @@ Keep the public API unified, but keep provider runtimes separate.
 
 ---
 
-> Superseded by VALV_CLAUDE_CODE_FOCUS_PLAN.md — the `valv api` wrapper was removed in DROP_1. This section remains as an architecture note and will be fully scrubbed in a later doc sweep per focus plan §2.12.
-
-## Public API shape
-
-Expose a unified front door, for example:
-
-- `/v1/chat/completions`
-- `/anthropic/v1/messages`
-
-Internally route based on:
-
-- provider
-- profile
-- project
-- model
-- mode (`fresh`, `resume`, `ephemeral`)
-
----
-
 ## README notes
 
 The README should clearly state:
