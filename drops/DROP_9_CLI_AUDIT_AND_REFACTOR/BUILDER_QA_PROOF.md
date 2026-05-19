@@ -79,3 +79,54 @@ None — Hylla was not required for this proof review. Verification is structura
 R1 falsification finding fully resolved. All 5 sub-criteria for the R2/R3 combined fix-up have evidence. mage 3-gate GREEN reproduced (`testPkg` 200/200 at 72.9%, `integration` 202+1skip+0fail, `build` SUCCESS). No new gaps introduced. The single test skip is correctly scoped, correctly named, and explicitly references Unit 9.2 as the re-enable trigger.
 
 **Verdict: PASS**
+
+## Unit 9.2 — Round 1
+
+- **QA agent:** go-qa-proof-agent
+- **Reviewed commit:** `828d575` `feat(cli): unit 9.2 add valv account bind and unbind`
+- **Verdict:** PASS
+
+### Verification matrix
+
+| AC | Claim | Evidence | Result |
+|---|---|---|---|
+| #1 | `BindingRepository.DeleteBinding` added | `git diff HEAD~1 -- internal/domain/repository.go` → `+DeleteBinding(ctx context.Context, projectID string, provider Provider) error` at line 22. Signature matches composite PK `(project_id, provider)`. | PASS |
+| #2 | `sqlite.Store.DeleteBinding` impl | `store.go:494-514` (read post-edit): `DELETE FROM project_bindings WHERE project_id = ? AND provider = ?`, `RowsAffected()` check, `affected == 0` → wraps `domain.ErrNotFound`. Pattern matches `DeleteProfile`. Error wrapping via `%w`. | PASS |
+| #3 | `manage.Service.UnbindProject` impl | `service.go:228-249` (read post-edit): detects project via `s.detect(startPath)` → `s.store.ProjectByRoot(ctx, projectResult.Root)` → `s.store.DeleteBinding(ctx, projectRecord.ID, provider)`. Errors wrapped descriptively at each boundary. `ErrNotFound` preserved through `errors.Is` chain. | PASS |
+| #4 | `valv account bind <name> [--provider]` | `manage.go:330-386` (`newManageAccountBindCommand`). Use: `"bind [provider] <account>"`, `Args: cobra.RangeArgs(1, 2)`. Two-positional form (matches integration test pattern); one-positional + `--provider` flag form; provider defaults to Codex when both absent. Calls `runManageBind`. | PASS |
+| #5 | `valv account unbind [--provider]` | `manage.go:388-413` (`newManageAccountUnbindCommand`) + `manage.go:415-450` (`runManageAccountUnbind`). `Args: cobra.NoArgs`, `--provider` defaults to Codex, calls `service.UnbindProject`. Error paths wrapped via `fmt.Errorf("account unbind: %w", err)`. Output via `output.WriteRecord` with provider + project fields. | PASS |
+| #6 | Wired into `newManageAccountCommand` | `manage.go:51-52` (read): `cmd.AddCommand(newManageAccountBindCommand(paths, opts))` + `cmd.AddCommand(newManageAccountUnbindCommand(paths, opts))` registered before existing inspect/login/etc. subcommands. | PASS |
+| #7 | CLI tests cover bind+unbind happy paths | `manage_test.go:184-225` (`TestManageAccountBindWithTwoPositionalsBindsProject`): real `.git` marker dir + `runManage(account add … --no-bind)` + `runManage(account bind codex profile-name --project workDir)` → asserts output contains `account=profile-name` + `provider=codex`, then verifies `BindingByProjectID` returns a binding via real sqlite store. `manage_test.go:227-260` (`TestManageAccountUnbindRemovesBinding`): same pattern, then unbinds, asserts `BindingByProjectID` returns error post-unbind. Both `t.Parallel()`. | PASS |
+| #8 | sqlite tests for DeleteBinding | `store_test.go:381-409` (`TestStoreDeleteBindingRemovesBoundRow`): creates project + profile + binding via real store, calls `DeleteBinding`, asserts `BindingByProjectID` → `errors.Is(err, domain.ErrNotFound)`. `store_test.go:411-419` (`TestStoreDeleteBindingReturnsErrNotFoundWhenAbsent`): calls `DeleteBinding` against non-existent project, asserts `errors.Is(err, domain.ErrNotFound)`. Both `t.Parallel()`. | PASS |
+| #9 | manage service tests for UnbindProject | `service_test.go:751-835` adds three tests: `TestUnbindProjectRemovesBoundProjectBinding` (happy path; verifies via `Status() → ErrUnboundProject`), `TestUnbindProjectReturnsErrNotFoundWhenProjectHasNoBinding` (project record exists, binding absent), `TestUnbindProjectReturnsErrWhenProjectNotKnown` (project entirely unknown). All three `t.Parallel()`, real sqlite store, `errors.Is` against `domain.ErrNotFound`. Provider default verified implicitly via direct `ProviderCodex` calls. | PASS |
+| #10 | 70% coverage floor on all 3 packages | `mage testPkg ./internal/cli` → 202/202 PASS @ 72.6%. `mage testPkg ./internal/adapters/sqlite` → 21/21 PASS @ 78.4%. `mage testPkg ./internal/services/manage` → 28/28 PASS @ 75.8%. All `-race` on, all ≥70%. | PASS |
+| #11 | `t.Skip` removed + integration GREEN | `codex_integration_test.go` line 113 (post-edit): `t.Skip(...)` line deleted (`git diff HEAD~1 -- internal/cli/codex_integration_test.go` shows `-` on that line, no replacement). Line 146 invokes `runValvBinaryCommand(t, …, "account", "bind", "codex", "profile-name")` — exercises the newly-wired bind command path end-to-end via the built `./valv` binary inside a real Docker container. `mage integration` → 205/205 PASS, 0 skipped, 0 failed (38.07s). | PASS |
+| Build sanity | `mage build` GREEN | `mage build` → `[SUCCESS] Built valv (./valv)`. | PASS |
+
+### Section 0 — Semi-Formal Reasoning (orchestrator-facing summary)
+
+**Premises:**
+- `domain.BindingRepository.DeleteBinding` is a NEW method (was not in tree pre-9.2).
+- `sqlite.Store` must implement it (interface contract).
+- `manage.Service.UnbindProject` is NEW; must thread project detection → store.DeleteBinding.
+- AC #11 requires the previously-skipped integration test to (a) be unskipped and (b) actually exercise the new bind path.
+
+**Evidence:** `git diff HEAD~1` deltas (10 files, +416/-2); `Read` over post-edit source at the cited line ranges; 5 mage gates reproduced GREEN locally.
+
+**Trace:**
+- Domain interface adds method → sqlite adapter implements it (delete SQL + rows-affected check + ErrNotFound wrap) → manage service wires detection→lookup→delete → CLI thin wrappers `newManageAccountBindCommand` (Option b — preferred per design notes) + `newManageAccountUnbindCommand` → registered in `newManageAccountCommand` → exercised by unit tests (3 packages) + end-to-end integration test against real Docker fixture image.
+- Integration test at line 146 calls `valv account bind codex profile-name` against the built binary; the test reaches container-run (asserts stdin/stdout TTY + CODEX_HOME) which is unreachable without a successful prior bind. ⇒ AC #11 sub-clause "actually runs the command path" is proven by the test's downstream Docker assertions.
+
+**Conclusion:** All 11 ACs have direct evidence. Coverage floors met. Mage gates green. The wrapping/error-handling pattern is idiomatic Go (`%w`, `errors.Is`). Provider default-to-Codex semantics consistent across bind and unbind. No dead code introduced.
+
+**Unknowns:** none.
+
+### Hylla Feedback
+
+None — Hylla was not required for this proof review. All verification is structural (`git diff HEAD~1` + `Read` post-edit + `mage` reproduction) over committed code at HEAD. The newly-introduced symbols (`DeleteBinding`, `UnbindProject`, `newManageAccountBindCommand`, `newManageAccountUnbindCommand`) are not yet ingested; relying on Hylla for them would have been a miss by construction.
+
+### Conclusion
+
+R1 lands clean. All 11 ACs proven. All 5 mage gates green (testPkg cli 202/202@72.6%, testPkg sqlite 21/21@78.4%, testPkg manage 28/28@75.8%, integration 205/205, build SUCCESS). The drop's AC #11 — re-enabling the previously-skipped `TestCodexCommandRunsFixtureImageWithTTYEndToEnd` — is the load-bearing end-to-end proof: it exercises `valv account bind codex profile-name` against a real Docker fixture and downstream TTY/CODEX_HOME assertions confirm the bind path landed. Builder selected Option (b) thin-wrapper approach as the design notes preferred.
+
+**Verdict: PASS**

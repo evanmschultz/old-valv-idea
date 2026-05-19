@@ -135,3 +135,58 @@ None. R2 + R3 cleanly close R1's `CONFIRMED` counterexample (vector 4 of R1: `ne
 ## Hylla Feedback (Round 2)
 
 N/A — review touched only test-file deltas in `internal/cli/codex_integration_test.go` which is `//go:build integration`-gated and on a stale snapshot relative to HEAD. `git diff` + `git grep` + direct `Read` were the right primary sources; Hylla would not have helped at this depth on this surface.
+
+## Unit 9.2 — Round 1
+
+- **Reviewer:** go-qa-falsification-agent
+- **Commit under review:** `828d575 feat(cli): unit 9.2 add valv account bind and unbind`
+- **Mage targets exercised by reviewer:**
+  - `mage testPkg ./internal/cli` — PASS (202 tests, 72.6% coverage)
+  - `mage testPkg ./internal/adapters/sqlite` — PASS (21 tests, 78.4% coverage)
+  - `mage testPkg ./internal/services/manage` — PASS (28 tests, 75.8% coverage)
+  - `mage integration` — PASS (205 tests, 0 skipped)
+- **Verdict:** PASS — no CONFIRMED counterexamples after running all 10 attack vectors.
+
+### Per-vector findings
+
+| # | Attack vector | Verdict | Evidence |
+|---|---|---|---|
+| 1 | `DeleteBinding` SQL composite PK leakage across providers | REFUTED | SQL = `DELETE FROM project_bindings WHERE project_id = ? AND provider = ?` at `store.go:500`. Table PK is `(project_id, provider)` (`store.go:63`, `:149`). Deleting one provider's row leaves the other intact — same row identity model `UpsertProjectBinding` uses on insert (`ON CONFLICT(project_id, provider)`). |
+| 2 | `UnbindProject` default-provider when only Claude bound | REFUTED (UX concern only) | `runManageAccountUnbind` in `manage.go:412–445` defaults `provider = ProviderCodex` when `--provider` is absent. If a project has only a Claude binding, `service.UnbindProject(ctx, ProviderCodex, …)` → `DeleteBinding(projID, ProviderCodex)` → wrapped `ErrNotFound`. **No panic, no Claude-binding corruption.** Returned error chain: `account unbind: unbind project: delete binding "<id>"/"codex": not found`. The `--provider` flag's help text (`manage.go:411`) explicitly documents "defaults to codex". UX nit: a project with only a Claude binding requires the user to pass `--provider claude` explicitly; the help text is the contract. |
+| 3 | Stale `newManageBindCommand` causes duplicate registration | REFUTED | `git grep newManageBindCommand` returns exactly two hits: `manage.go:452` (definition, unchanged from DROP_9.1) and `manage_test.go:319` (test-only helper `newTestManageContainerCommand`). NOT registered into the production root command in `root.go:128` — only `newManageAccountCommand` is mounted at the top level. Zero conflict in the production CLI; the legacy constructor survives solely so existing test-suite invocations `["bind", ...]` keep working under the test-only container helper. |
+| 4 | `t.Skip` removal + test ordering coupling | REFUTED | `mage integration` reports **205 passed, 0 skipped** under `-count=1` (cache disabled). `-count=1` forces fresh execution; if `TestCodexCommandRunsFixtureImageWithTTYEndToEnd` relied on another test having seeded global state, it would fail in `-parallel` mode (Go's default ≥ GOMAXPROCS). It does not. Test uses `t.TempDir()` + ephemeral `t.Setenv` + per-test `testCodexPaths`, so its setup is hermetic. |
+| 5 | `DeleteBinding` error-wrap inconsistency vs `DeleteProfile` | REFUTED | Byte-for-byte symmetric: both wrap exec error as `fmt.Errorf("delete <kind> %q/%q: %w", …, err)`, both wrap `RowsAffected()` err the same way, both wrap zero-rows as `fmt.Errorf("delete <kind> %q/%q: %w", …, domain.ErrNotFound)`. Compare `store.go:387–405` (DeleteProfile) vs `:494–513` (DeleteBinding). |
+| 6 | `unbind` on unbound project panics | REFUTED | Three explicit tests cover the unbind-without-binding shapes: `TestUnbindProjectReturnsErrNotFoundWhenProjectHasNoBinding` (project row exists, no binding), `TestUnbindProjectReturnsErrWhenProjectNotKnown` (project record never created), `TestStoreDeleteBindingReturnsErrNotFoundWhenAbsent` (store-layer). All three assert `errors.Is(err, domain.ErrNotFound)`. No panic possible: `DeleteBinding` does `result.RowsAffected()` after a successful `ExecContext`; SQL `DELETE` of zero rows is a normal result, not an error. |
+| 7 | CLI argv shape coverage / docs | REFUTED | `account bind` declares `Args: cobra.RangeArgs(1, 2)`. The `RunE` body in `manage.go:355–380` distinguishes: (a) `len(args)==2` → `args[0]=provider, args[1]=account`; (b) `len(args)==1` + `--provider` flag set → use flag; (c) `len(args)==1` + no flag → ProviderCodex default. All three forms are listed in the `Example` block (`manage.go:347–353`). The `Use` string `"bind [provider] <account>"` is mildly ambiguous (cobra `Use` doesn't enforce the bracket syntax) but the help-text `Example` block resolves the ambiguity. |
+| 8 | Coverage delta -0.3% with +2 tests | REFUTED | Pre-9.2: 200 tests @ 72.9% across `internal/cli`. Post-9.2: 202 tests @ 72.6%. Drop comes from new handler code (`newManageAccountBindCommand` body's `RangeArgs(1,2)` provider-parse branches + `runManageAccountUnbind`'s `os.Getwd()` error path, `commandOutputMode` error path) being added to the denominator, while the two new tests exercise only the happy path. Per-package coverage floor (60%) and the project's 70% floor (AGENTS.md § 11) both clear. No new unbranded untested feature surfaces — the uncovered lines are defensive error paths consistent with existing patterns in `runManageBind`. |
+| 9 | `mage integration` test count rise to 205 is unexplained | REFUTED | Resolution: `mage integration` reports **205 passed**. Composition: 202 non-integration tests in `internal/cli` (the same set seen via `mage testPkg ./internal/cli`) + 3 integration-tagged tests in `codex_integration_test.go` (`TestCodexCommandRunsFixtureImageEndToEnd`, `TestCodexCommandRunsFixtureImageWithTTYEndToEnd` — now un-skipped, `TestCodexInteractiveMCPGolden`). Spawn prompt's "pre-9.2: 202+1skip=203" was an arithmetic artifact (200 cli + 3 integration where 1 was skipped = 203 passed + 1 skip earlier; post-9.2 = 202 cli + 3 integration where all 3 pass = 205 passed + 0 skip). Math reconciles. |
+| 10 | Cobra insertion order leaks into help rendering | REFUTED | Cobra sorts subcommands alphabetically in `Help` output by default (`cobra.Command.SuggestionsMinimumDistance` / `Commands()` returns sorted slice unless `DisableSuggestions` or custom sort). The wire order `add → bind → unbind → inspect → login → logout → list → rename → cleanup → delete → switch` (`manage.go:52–62`) is irrelevant to help rendering; users see alphabetical order. No regression risk. |
+
+### Targeted code reads
+
+- `internal/adapters/sqlite/store.go:494–513` — `DeleteBinding` body. Composite-PK SQL + symmetric wrap.
+- `internal/adapters/sqlite/store.go:387–405` — `DeleteProfile` reference body for wrap comparison.
+- `internal/cli/manage.go:52–63` — `newManageAccountCommand` subcommand registration (bind/unbind wired).
+- `internal/cli/manage.go:330–386` — `newManageAccountBindCommand` (RangeArgs(1,2), positional + `--provider` flag handling).
+- `internal/cli/manage.go:388–447` — `newManageAccountUnbindCommand` + `runManageAccountUnbind` (default Codex, `os.Getwd` fallback, wrapped error flow).
+- `internal/cli/manage.go:452–485` — legacy `newManageBindCommand` (test-only survivor; not in `root.go`).
+- `internal/services/manage/service.go:230–252` — `UnbindProject` service flow.
+- `internal/cli/root.go:128–133` — production root command registration (only `newManageAccountCommand` is mounted; legacy `newManageBindCommand` is unreachable).
+
+### Non-finding notes (for the orchestrator)
+
+These came up during attack but did not produce counterexamples:
+
+- **`Use: "bind [provider] <account>"` doc nit.** The cobra `Use` string is mildly ambiguous about how `[provider]` plus `<account>` compose with `--provider` flag interplay. The `Example` block resolves it, and `RangeArgs(1, 2)` + the `RunE` branch logic enforces the semantics. Worth tightening to `"bind <account> | bind <provider> <account>"` in a future docs polish drop, NOT a blocking finding.
+- **Codex-as-default unbind UX.** If multi-provider becomes the norm post-DROP_8, the default-provider behavior for `unbind` could surprise users with only-Claude bindings. The flag help (`"defaults to codex"`) is the contract today. The eventual fix is the same fix the binding-UX spec calls for (`project_valv_binding_ux_spec`): 1-provider auto-detect, 2-provider picker, `--provider` one-shot override.
+
+### Self-review / orchestrator hand-off discipline
+
+- Did NOT edit Go code. HEAD commit `828d575` was inspected via `git diff` / `git grep` / `Read`, not modified.
+- Did NOT edit `PLAN.md`, sibling QA files, or BUILDER_WORKLOG.md. Only appended `## Unit 9.2 — Round 1` to this falsification file (phase-owned).
+- Mage-only test invocations (`mage testPkg`, `mage integration`). No raw `go test` / `go build`.
+- Hylla NOT queried — review surface is HEAD-only diff against a stale snapshot (Unit 9.2 commit is post-DROP_8 ingest). `git diff` + `git grep` + direct `Read` were the right primary sources.
+
+## Hylla Feedback (Unit 9.2 Round 1)
+
+N/A — review touched only HEAD-relative diffs (post-DROP_8 ingest snapshot). Hylla would have returned stale node data for the new `DeleteBinding` / `UnbindProject` / `newManageAccountBindCommand` / `newManageAccountUnbindCommand` symbols. `git diff HEAD~1` + `git grep` + direct `Read` were the right primary sources.
