@@ -450,3 +450,48 @@ git grep -n "newManageCleanupCommand" -- internal/cli/
 ## Hylla Feedback (Unit 9.4.5 Round 1)
 
 N/A — review touched only HEAD-relative diffs (post-DROP_8 ingest snapshot `56ea569`). The 9.4.5 changes are pure string substitutions inside cobra `Example` field literals and runtime error format strings — non-symbol content that `hylla_search` / `hylla_node_full` does not index addressably. The substitution-content audit is a `git grep` + `Read` job; Hylla has no role here. Per `main/CLAUDE.md` Hylla policy, this is exactly the "changed since last ingest + non-symbol content" combination that routes through git tooling.
+
+---
+
+## Unit 9.4.5 — Round 2
+
+- **Reviewer:** go-qa-falsification-agent
+- **Commit under review:** `faa0635 fix(cli): unit 9.4.5 r2 fix dead-code example + sweep stragglers`
+- **R1 finding being remediated:** R1 vector 1 (CONFIRMED) — Example block in dead-code `newManageCleanupCommand` (manage.go:1388-1392) pointed at non-existent `valv cleanup ...` commands.
+- **Mage targets exercised by reviewer:**
+  - `mage testPkg github.com/evanmschultz/valv/internal/cli` — PASS (206 tests, 69.5% coverage)
+  - `mage integration` — PASS (209 tests, 0 failed, 0 skipped)
+  - `mage build` — PASS
+- **Verdict:** PASS — no unmitigated counterexample. R2 mapping is semantically equivalent for `state`/`images`/`docker` scopes and a safe superset for `--all`. CLAUDE.md and CONTRIBUTING.md substitutions preserve original intent. All R1 invariants survive.
+
+### Per-vector findings
+
+| # | Vector | Verdict | Notes |
+|---|---|---|---|
+| 1 | Flag mapping `valv cleanup docker` → `valv image cleanup --containers --images` | REFUTED | Old `runManageCleanup` `case "docker"` (manage.go:1449-1454) calls `service.CleanDocker(ctx, dockerRequest)` where `dockerRequest = {ContainerLabels: io.valv.managed=true, ImageFilters: providerCleanupImageFilters(), Force: true}` — containers + images, NO build-cache. New `--containers --images` in `runImageCleanup` (manage.go:1620-1670) sets `dockerRequest.ImageFilters` and `dockerRequest.ContainerLabels` but leaves `PruneBuilder` false. Semantically EQUIVALENT (no build-cache in either form). |
+| 2 | `--state` vs old `state` scope | REFUTED | Old `case "state"` (manage.go:1437-1442) = `service.CleanLocal(ctx, local)` only. New `--state` (manage.go:1622, 1679-1685) = `doState=true` → `service.CleanLocal(ctx, local)`. EQUIVALENT. |
+| 3 | `--all` covers all 4 scope booleans | REFUTED | `runImageCleanup` lines 1611-1623: `effectiveAll := flags.all \|\| noScopeSet` then `doImages := effectiveAll \|\| flags.images`, `doContainers := effectiveAll \|\| ...`, `doState := effectiveAll \|\| ...`, `doBuildCache := effectiveAll \|\| ...`. All 4 booleans flip true under `--all`. NOTE: this is a *superset* of old `case "all"` (manage.go:1455-1460), which did state+containers+images but NOT build-cache. The drift is a superset — users running the live `--all` get more cleanup than the old `valv manage cleanup all` did. Acceptable in a dead-code Example block context pointing users to a live command. |
+| 4 | CLAUDE.md:122 substitution | REFUTED | Original line 122: `cobra command implementations (` valv codex `, ` valv manage … `)`. New: `cobra command implementations (` valv codex `, ` valv account … `, ` valv image … `)`. Both forms are illustrative-shorthand for the cli/ package contents; neither enumerates exhaustively (both omit `paths`, `version`, `status`, `claude`, `global`). The substitution preserves intent (give a flavor of the namespace surface) and updates the named commands to the post-9.4 normalized tree. |
+| 5 | CONTRIBUTING.md:46 substitution | REFUTED | `mage dev:run "image update"` resolves to `(Dev) Run(args string)` at `magefile.go:241-259`, which calls `Build()` then `runValv([]string{...envs}, args)`. The args string `"image update"` is forwarded to the built binary as argv, yielding `valv image update`. `valv image update` is the live subcommand registered at `root.go:134-137` via `newImageCommand` → `newImageUpdateCommand`. Valid invocation. |
+| 6 | Cascade discipline (3 declared files only) | REFUTED | `git diff HEAD~1..HEAD --stat` shows 5 paths touched: 3 declared (`CLAUDE.md`, `CONTRIBUTING.md`, `internal/cli/manage.go`) + 2 expected workflow files (`drops/DROP_9_.../PLAN.md`, `drops/DROP_9_.../BUILDER_WORKLOG.md`). No stray edits to other source/markdown. |
+| 7 | R1 AC invariants preserved post-R2 | REFUTED | Independently re-ran R1's three AC greps: AC #1a (cli helper files excluding manage.go, explicit file list from PLAN.md:201-211) = 0 hits; AC #1b (`internal/cli/manage.go`) = 0 hits; AC #1c (`magefile.go README.md` bare `manage` form) = 0 hits. All three return zero. R1 invariants HOLD. |
+| 8 | Live-flag wiring on `newImageCleanupCommand` | REFUTED | All 5 flags registered at `manage.go:1599-1603`: `--images`, `--containers`, `--state`, `--build-cache`, `--all`. All wired through `runImageCleanup` to the cleanup service via `dockerRequest`/`local`. Every command in R2's Example block (`--state`, `--images`, `--containers --images`, `--all`) maps to a real, wired flag combination. |
+
+### Observations (not counterexamples)
+
+These are surface-level drift items R2 did not introduce and that the unit's AC did not require it to address. Recording for orchestrator awareness; **none invalidate the R2 verdict**.
+
+1. **manage_test.go:788 stray hit.** `git grep "valv manage" -- internal/cli/` finds one survivor: `internal/cli/manage_test.go:788` — a Go comment line `// "valv manage account list" (no args) displays accounts grouped by provider`. The comment names a command that no longer exists. AC #1a's explicit file list (`PLAN.md` lines 201-211) does NOT include `manage_test.go`; the file is therefore not in scope. Recommend a follow-up unit (or backlog item) to either update the comment or extend AC#1a's file list in any future audit.
+2. **Dead-code Long-description drift.** `newManageCleanupCommand`'s Long block at `manage.go:1382-1386` still documents old scopes `state / images / docker / all` as positional args (e.g. `- docker: Valv-managed runtime containers plus provider images`). R2 only updated the Example block. The Long is now internally inconsistent with the Example. Since the constructor is unreachable from `valv` (root.go does not register it), this is dead-code drift, not user-visible misleading text. R1 vector 1 (dead-code Example pointing at non-existent commands) was the targeted regression; the Long inconsistency is the residual cousin. Recommend folding into the same future cleanup unit.
+3. **`--all` superset drift.** New `--all` adds build-cache pruning that old `all` did not. Documented above as Acceptable (users get more cleanup, not less). Worth surfacing in any UX-facing doc that compares old↔new behavior.
+
+### Self-review / orchestrator hand-off discipline
+
+- Did NOT edit Go code. HEAD commit `faa0635` inspected via `git diff HEAD~1..HEAD`, `Read`, `git grep`. Not modified.
+- Did NOT edit `PLAN.md`, `BUILDER_WORKLOG.md`, `BUILDER_QA_PROOF.md`. Only appended `## Unit 9.4.5 — Round 2` to this falsification file.
+- Mage-only test invocations (`mage testPkg`, `mage integration`, `mage build`). No raw `go test` / `go build` / `go vet`.
+- Hylla NOT queried — R2 touches non-Go files (CLAUDE.md, CONTRIBUTING.md) plus a 4-line string substitution inside dead-code Go. No symbol lookups needed.
+
+## Hylla Feedback (Unit 9.4.5 Round 2)
+
+N/A — task touched only non-Go files (CLAUDE.md, CONTRIBUTING.md) and a 4-line string substitution inside a cobra `Example:` field literal. No Go symbol search was needed; direct `Read` + `git diff` + `git grep` were the correct evidence tools. Per `main/CLAUDE.md` Hylla policy, this is exactly the "non-Go content + uncommitted/changed since last ingest" combination that routes through git tooling.

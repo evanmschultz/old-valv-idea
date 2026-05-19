@@ -285,3 +285,78 @@ N/A — Unit 9.4.5 is a pure user-facing string-substitution sweep across alread
 All 6 acceptance criteria PASS with citation-grade evidence. The 3 AC#1 grep checks return zero output, exactly as the unit demanded. Substitution count matches the worklog's per-pattern table. Test assertion updates correctly pair `valv account bind` with `--provider <claude|codex>` substring checks where the old assertion was `valv manage bind <provider>`. All 3 mage gates re-run GREEN with the same counts the builder reported. No unmitigated falsification counterexample.
 
 **Verdict: PASS**
+
+---
+
+## Unit 9.4.5 — Round 2
+
+- **Reviewer:** go-qa-proof-agent
+- **Commit under review:** `faa0635 fix(cli): unit 9.4.5 r2 fix dead-code example + sweep stragglers` (HEAD; prior commit `26a1841` is the R1 QA pair findings, prior to that `2cd6c14` is the original R1 build commit).
+- **Round scope:** R2 fix-up for the R1 falsification CONFIRMED counterexample (`manage.go:1389-1392` Example block documenting non-existent `valv cleanup *` commands) + dev-approved sweep of two out-of-scope stragglers (`CONTRIBUTING.md:46`, `CLAUDE.md:122`).
+- **Mage targets exercised by reviewer:**
+  - `mage testPkg github.com/evanmschultz/valv/internal/cli` — PASS (206 tests, 69.5% coverage > 60% threshold, `-race`)
+  - `mage integration` — PASS (209 tests, 0 skipped, 0 failed)
+  - `mage build` — PASS (`./valv` built cleanly)
+- **R1 grep invariants re-run:**
+  - AC #1a (precise planner-defined file list — `claude.go codex.go claude_setup.go codex_setup.go operator_helpers.go claude_setup_test.go codex_setup_test.go codex_test.go operator_helpers_test.go`): **zero hits**.
+  - AC #1b (`internal/cli/manage.go`): **zero hits**.
+  - AC #1c (`magefile.go README.md` bare-`manage` form): **zero hits**.
+- **R2 sanity greps re-run:**
+  - `git grep "valv cleanup " -- internal/cli/manage.go`: **zero hits**.
+  - `git grep "valv manage" -- CONTRIBUTING.md CLAUDE.md`: **zero hits**.
+- **Verdict:** PASS — the R1 counterexample is correctly resolved via remediation option (a) from the falsification author's three options ("re-substitute the four lines at `manage.go:1389-1392` to point at the live command"). The 2 out-of-scope stragglers identified in R1's non-finding notes are swept under explicit dev approval recorded in the orchestrator's R2 spawn appendix. All 3 R1 AC invariants hold, both R2 sanity greps return zero, and all 3 mage gates are GREEN with the exact counts the builder reported (206 / 69.5%, 209/0/0, build SUCCESS).
+
+### Per-claim evidence
+
+| # | Builder claim | Evidence | Verdict |
+|---|---|---|---|
+| 1 | `internal/cli/manage.go:1389-1392` now reads the four `valv image cleanup` lines (R1 dead-code Example block fixed). | `Read manage.go:1380-1404` post-R2 shows the Example block reads `valv image cleanup --state` / `valv image cleanup --images` / `valv image cleanup --containers --images` / `valv image cleanup --all`. `git diff HEAD~1 HEAD -- internal/cli/manage.go` shows the +4/-4 substitution at lines 1389-1392 only — no collateral edits inside the surviving constructor body or its `Long:` field. | PASS |
+| 2 | The `valv image cleanup` Example syntax is semantically correct against the live `newImageCleanupCommand` flag schema (`imageCleanupFlags` at `manage.go:1549-1556` and `cmd.Flags().BoolVar` registrations at `manage.go:1599-1605`). | All four lines reference flags that exist on the live command: `--state` (line 1601), `--images` (line 1599), `--containers` (line 1600), `--all` (line 1603). The mapping `manage cleanup docker` → `valv image cleanup --containers --images` is semantically defensible: `runManageCleanup` "docker" scope at `manage.go:1449-1454` calls `service.CleanDocker(dockerRequest)` where `dockerRequest` (lines 1416-1422) has both `ContainerLabels` and `ImageFilters` set — i.e., containers + images, which is exactly what `--containers --images` selects on the new flag-driven command. (Subtle behavioral nuance: the new `image cleanup` is dry-run by default; the old "docker" scope was always-apply. The Example block is documentation only, not a behavior contract, so the copy-template mapping is acceptable.) | PASS |
+| 3 | `CONTRIBUTING.md:46` reads `mage dev:run "image update"` (was `mage dev:run "manage update"`). | `Read CONTRIBUTING.md:40-50` shows the disposable-dev-home flow now reads `mage dev:home` / `mage dev:run "image update"` / `mage dev:run "codex --help"` / `mage dev:reset` / `mage dev:clean`. `git diff HEAD~1 HEAD -- CONTRIBUTING.md` confirms the single +1/-1 swap at line 46. | PASS |
+| 4 | `CLAUDE.md:122` reads `(\`valv codex\`, \`valv account …\`, \`valv image …\`)` in the `internal/cli/` package-map prose (was `(\`valv codex\`, \`valv manage …\`)`). | `Read CLAUDE.md:115-129` shows the package-map line for `internal/cli/` now reads "cobra command implementations (`valv codex`, `valv account …`, `valv image …`) plus pass-through launcher …". `git diff HEAD~1 HEAD -- CLAUDE.md` confirms the single +1/-1 swap at line 122. | PASS |
+| 5 | All 3 R1 AC #1 invariants still hold post-R2 (the fix did not regress the previously cleared sweep surface). | All three precise greps re-run by reviewer; all return zero hits. AC #1a uses the planner-defined explicit file list at `PLAN.md:202-210` (which excludes `manage.go` and `manage_test.go` — the latter survives a benign `// "valv manage account list"` comment-line docstring at line 788, REFUTED in R1 falsification vector 2). | PASS |
+| 6 | R2 sanity invariants hold (`valv cleanup ` absent from manage.go; `valv manage` absent from `CONTRIBUTING.md` + `CLAUDE.md`). | Both greps re-run zero. | PASS |
+| 7 | Mage gates GREEN with the reported counts. | `mage testPkg github.com/evanmschultz/valv/internal/cli` → 206/206 pass, 69.5% coverage. `mage integration` → 209/209 pass, 0 skipped, 0 failed. `mage build` → SUCCESS, `./valv` produced. All counts match the builder's reported numbers exactly. | PASS |
+
+### Targeted code reads (R2 surface)
+
+- **`internal/cli/manage.go:1375-1404`** — `newManageCleanupCommand` (dead user-facing constructor, registered only in test helpers per R1 evidence: `extended_test.go:532`, `:588`, `manage_test.go:394`). Its `Long:` field at lines 1379-1387 still references the old positional scopes (`state` / `images` / `docker` / `all`) — but the Example block at 1388-1393 now uses the new flag-driven syntax. This is mildly inconsistent (`Long` describes positional args while `Example` shows flag-driven commands), but the constructor is user-unreachable so the divergence is cosmetic. The R1 falsification author explicitly framed option (a) as "re-substitute the four lines at `manage.go:1389-1392`" and called out option (b) "delete the dead constructor entirely (defer to DROP_11 cleanup)" as the alternative — the orchestrator chose (a), which is what landed. Not a finding; advisory only.
+- **`internal/cli/manage.go:1549-1556`** — `imageCleanupFlags` struct: `images`, `containers`, `state`, `buildCache`, `all`, `apply`. Confirms the four flags referenced in the new Example block (`--state`, `--images`, `--containers`, `--all`) are real fields.
+- **`internal/cli/manage.go:1599-1605`** — `cmd.Flags().BoolVar` registrations. All four flags from the Example block resolve to live cobra flag bindings.
+- **`internal/cli/manage.go:1406-1469`** — `runManageCleanup` (inner helper still alive via TUI dispatch at `operator_helpers.go:149` per R1 falsification line 425). "docker" scope at 1449-1454 confirms containers+images semantics — supports the `--containers --images` mapping choice for the old "docker" scope.
+- **`CONTRIBUTING.md:40-50`** — disposable dev-home flow block; clean substitution.
+- **`CLAUDE.md:115-129`** — package-map bullet list; clean substitution.
+
+### Section-0-style proof certificate
+
+- **Premises:**
+  1. R1 falsification CONFIRMED counterexample was `manage.go:1389-1392` Example block referencing non-existent `valv cleanup *` commands.
+  2. Dev approved scope expansion to sweep `CONTRIBUTING.md:46` + `CLAUDE.md:122`.
+  3. R1 AC #1a/#1b/#1c grep invariants must still return zero.
+  4. R2 sanity greps must return zero.
+  5. Mage gates must be GREEN with the reported counts (206 unit + 209 integration + build SUCCESS).
+- **Evidence:** `Read` of `manage.go:1380-1404` + `1540-1620` + `1406-1469`; `Read` of `CONTRIBUTING.md:40-50`; `Read` of `CLAUDE.md:115-129`; `git diff HEAD~1 HEAD` (4 source-file edits: `internal/cli/manage.go` +4/-4, `CONTRIBUTING.md` +1/-1, `CLAUDE.md` +1/-1, plus PLAN.md + BUILDER_WORKLOG.md doc edits); five live grep runs (three R1 ACs + two R2 sanity); three live mage gate runs.
+- **Trace or cases:**
+  - (a) User reads `manage.go:1389-1392` post-R2 → sees `valv image cleanup --state`/etc. → invokes `./valv image cleanup --state` → cobra routes to live `newImageCleanupCommand` at `manage.go:1567` → `runImageCleanup` at `manage.go:1609` → success path. The post-R2 Example block now documents a real command tree; this is exactly the failure mode R1 falsification ruled out.
+  - (b) User reads `CONTRIBUTING.md:46` post-R2 → sees `mage dev:run "image update"` → invokes that → `mage dev:run` wrapper calls `./valv image update` → cobra routes to live `newImageUpdateCommand` at `manage.go:1516`. Real command tree.
+  - (c) User reads `CLAUDE.md:122` post-R2 → sees `(\`valv codex\`, \`valv account …\`, \`valv image …\`)` — matches the actual root command tree per `root.go:137` (`pathsCmd, versionCmd, statusCmd, codexCmd, claudeCmd, accountCmd, globalCmd, imageCmd`).
+- **Conclusion:** All 7 builder claims (Example-block fix + 2 straggler substitutions + 5 grep invariants + 3 mage gates) are supported by independent evidence. The R1 counterexample is mechanically resolved via the falsification author's recommended remediation option (a). No new counterexamples introduced.
+- **Unknowns:** None blocking the PASS. Two advisory items routed to the orchestrator (not findings):
+  1. `newManageCleanupCommand` `Long:` field at `manage.go:1379-1387` still describes the old positional scopes — minor cosmetic drift from the new flag-driven Example block. The constructor is user-unreachable, so the drift is invisible to end users. Candidate for DROP_11 dead-code cleanup (option (b) from R1's remediation menu).
+  2. R1 falsification's "Dead-code constructors with surviving Example blocks" non-finding flagged three such constructors (`newManageBindCommand` manage.go:452, `newManageUpdateCommand` manage.go:1264, `newManageCleanupCommand` manage.go:1375). Two of three document syntax that the LIVE commands accept; the third is the one just fixed. Recommend a DROP_11 unit deletes all three dead constructors + their test-helper instantiations. Not a blocker for 9.4.5 closure.
+
+### Self-review / orchestrator hand-off discipline
+
+- Did NOT edit Go code, `magefile.go`, `PLAN.md`, `BUILDER_WORKLOG.md`, or `BUILDER_QA_FALSIFICATION.md`. Only appended `## Unit 9.4.5 — Round 2` to this proof file (phase-owned).
+- Mage-only test invocations (`mage testPkg`, `mage integration`, `mage build`). No raw `go test` / `go build` / `go vet`.
+- Hylla NOT queried: review surface is post-DROP_8-ingest (`56ea569`); all R2 changes are post-ingest. `git show` + `git diff` + direct `Read` were the correct primary sources, plus live mage gate runs against the working tree.
+
+## Hylla Feedback (Unit 9.4.5 Round 2)
+
+N/A — Unit 9.4.5 R2 is a 3-edit fix-up (one Example-block substitution in dead-code Go + two markdown one-liner swaps) entirely post-ingest. All evidence flows from `git diff HEAD~1 HEAD`, direct `Read`, five `git grep` runs, and three live mage gate re-runs. The relevant content is either non-symbol (string-literal field values inside an unreferenced constructor; markdown prose) or post-snapshot, so no Hylla query mode applies. Per `main/CLAUDE.md` Hylla policy this is exactly the "changed since last ingest + non-Go code" combination that routes through git tooling.
+
+### Conclusion
+
+R2 fix-up correctly addresses the R1 falsification CONFIRMED counterexample via the remediation option (a) the falsification author recommended. All 5 grep invariants (3 R1 ACs + 2 R2 sanity) return zero. All 3 mage gates GREEN with builder-reported counts. The 2 out-of-scope stragglers were swept under explicit dev approval. Semantic mapping of the new `valv image cleanup` Example syntax against the live `newImageCleanupCommand` flag schema is verified (every flag in the Example resolves to a real `cmd.Flags().BoolVar` registration; the `manage cleanup docker` → `--containers --images` mapping matches the old "docker" scope's containers+images semantics in `runManageCleanup` at lines 1449-1454).
+
+**Verdict: PASS**
