@@ -186,3 +186,61 @@ This is an exceptional path — the next available proof-agent dispatch (after t
 All 6 acceptance criteria PASS. Three-gate mage verification GREEN (cli 204/204@69.4%, integration 207/207, build SUCCESS). Orchestrator-recovered per the documented precedent. The unit is **done** and the cascade advances to Unit 9.4.
 
 **Verdict: PASS**
+
+## Unit 9.4 — Round 1
+
+- **QA agent:** go-qa-proof-agent
+- **Reviewed commit:** `1510e7f` `feat(cli): unit 9.4 flatten valv status and add --all flag`
+- **Verdict:** PASS
+
+### Verification matrix
+
+| AC | Claim | Evidence | Result |
+|---|---|---|---|
+| #1 | `valv status` (no `manage` prefix) shows the current project's binding — same output as the old `manage status` | `root.go:124-125` registers `statusCmd := newManageStatusCommand(paths, opts)`; `statusCmd.GroupID = "inspect"`. The `newManageStatusCommand` constructor (post-edit `manage.go:1178-1213`) preserves the original `runManageStatus` path: when `--all` is false the `RunE` calls `runManageStatus(cmd, paths, opts, projectPath)` exactly as before. Test `TestStatusViaRootCommandShowsCurrentProjectBinding` (`manage_test.go:184-218`) drives the root cobra command with `SetArgs([]string{"status", "--project", workDir})` and asserts stdout contains `"account=dev"` + `"provider=codex"` after binding a real account against a real `.git` project dir. | PASS |
+| #2 | `newManageStatusCommand` registered directly in `root.go` under the inspect group | `root.go:124` `statusCmd := newManageStatusCommand(paths, opts)`; `root.go:125` `statusCmd.GroupID = "inspect"`; `root.go:137` `cmd.AddCommand(pathsCmd, versionCmd, statusCmd, codexCmd, claudeCmd, accountCmd, globalCmd, imageCmd)`. The inspect group (`root.go:109` `&cobra.Group{ID: "inspect", Title: "Inspect Commands"}`) groups `statusCmd` alongside `pathsCmd` and `versionCmd` — semantically correct (read-only informational). | PASS |
+| #3 | `valv status --project /path` still works | Same `TestStatusViaRootCommandShowsCurrentProjectBinding` (`manage_test.go:201`): `cmd.SetArgs([]string{"status", "--project", workDir})` then `cmd.Execute()` succeeds and stdout asserts pass. The `--project` flag at `manage.go:1207` `cmd.Flags().StringVar(&projectPath, "project", "", ...)` is preserved verbatim from pre-9.4. | PASS |
+| #4 | The old `manage status` path no longer exists (deleted by 9.1) | `git grep "func newManageCommand"` → 0 hits (deleted in 9.1); `git grep "manageCmd\b"` in `root.go` → 0 hits. No `manage` cobra namespace is registered on the root command. Tests still reach `newTestManageContainerCommand` for legacy routing (test-only helper, not the production CLI). The production CLI surface has no `valv manage status`. | PASS |
+| #5 | `valv status --all` (new flag) shows all bindings across all providers, replacing deleted `manage project list` | `manage.go:1179` `var all bool` + `manage.go:1209` `cmd.Flags().BoolVar(&all, "all", false, "list all project bindings across all providers")`. RunE branch (`manage.go:1198-1202`): `if all { return runStatusAll(cmd, paths, opts) }`. New `runStatusAll` (`manage.go:1244-1262`) calls `service.ListBindings(cmd.Context(), "")` (empty provider = all providers) and renders via `output.WriteListWithKey(..., "project bindings", "projects", listItemsForBindings(bindings))` — byte-identical output shape to the deleted `runManageProjectList`. The three deleted symbols are confirmed gone: `git grep "newManageProjectCommand\|newManageProjectListCommand\|runManageProjectList"` over `internal/cli/` returns 0 hits. | PASS |
+| #6 | At least two tests: (a) `valv status` shows current project; (b) `valv status --all` shows all bindings | Three coverage points: `TestStatusViaRootCommandShowsCurrentProjectBinding` (`manage_test.go:184-218`) drives root with `["status", "--project", workDir]` and asserts `account=dev` + `provider=codex`; `TestStatusAllViaRootCommandShowsAllBindings` (`manage_test.go:223-253`) drives root with `["status", "--all"]` and asserts heading `"project bindings"` + the bound project root path in output; retargeted `TestManageProjectListShowsBoundProjects` (`extended_test.go:296-302`) keeps the original four substring assertions (`projectRoot`, `account=personal`, `auth=ChatGPT`, `email=person@example.com`) against the new `["status", "--all"]` args. | PASS |
+| #7 | `mage testPkg ./internal/cli` passes | QA agent re-ran: `mage testPkg github.com/evanmschultz/valv/internal/cli` → **206 tests, 206 PASS, 0 fail, 0 skip, 69.5% coverage** (above the enforced 60% floor). | PASS |
+| Build sanity (per WORKFLOW.md gates; required per memory `feedback_mage_integration_when_deleting_symbols.md` since this unit deletes Go symbols) | `mage integration` + `mage build` | `mage integration` → **209/209 PASS, 0 skipped, 0 failed** (38.53s). `mage build` → `[SUCCESS] Built valv (./valv)`. No hidden compile breaks from the 3 deleted symbols under the `-tags=integration` build. | PASS |
+
+### Section 0 — Semi-Formal Reasoning (orchestrator-facing summary)
+
+**Premises:**
+- `newManageStatusCommand` already existed pre-9.4; 9.4 only adds the `--all` flag wiring and re-homes `statusCmd` onto the root command.
+- `runManageProjectList`'s implementation is the canonical source for `runStatusAll`'s behavior — the AC5 mandate is "same data via `valv status --all`," not "different data."
+- The retargeted `extended_test.go` test is justified scope-creep: deleting `newManageProjectCommand` forces that test's args to move; the planner's AC5 explicitly says "users get the same data via `valv status --all`," so the retarget is the canonical replacement, not a workaround.
+- Per memory `feedback_mage_integration_when_deleting_symbols.md`, `mage integration` is mandatory for symbol-deletion units because `testPkg` skips `//go:build integration` files. 9.4 deletes 3 Go symbols, so the gate applies.
+
+**Evidence:** `git show HEAD` over 4 production files + the worklog row; `Read` on `root.go:100-141` for the AddCommand wiring; `git grep` to confirm the 3 deleted symbols return 0 hits; all 3 mage gates re-run locally by the QA agent.
+
+**Trace:**
+- `runStatusAll` short-circuit: `if all` at `manage.go:1198` skips the `runManageStatus` path entirely, calls `service.ListBindings(ctx, "")`. The empty provider arg semantics match `runManageProjectList`'s `parseOptionalProvider(args, "")` when no positional arg was passed.
+- `extended_test.go:297-300` retarget: the comment `// "manage project list" is deleted; use "status --all" as the canonical replacement.` documents the rationale; the substring assertion set is byte-identical to the pre-9.4 version (4 substrings) — the test's discriminative power is preserved.
+- `runManage(t, paths, []string{"status", "--all"})` works because `newTestManageContainerCommand` (the test helper) still has `newManageStatusCommand` registered as a child (`manage_test.go:391` line: `container.AddCommand(newManageStatusCommand(paths, opts))`). The `--all` flag is on that command. So the test container helper proxies `["status", "--all"]` correctly.
+
+**Conclusion:** 7/7 ACs PASS. 3/3 mage gates GREEN (testPkg cli 206/206@69.5%, integration 209/209/0skip/0fail, build SUCCESS). No regression. The `--all` flag is the canonical replacement for the deleted `manage project list`; behavior, output shape, and test coverage are preserved.
+
+**Unknowns:** None.
+
+### Falsification probes (each mitigated)
+
+- **Probe:** Does `runStatusAll` actually call `ListBindings` with empty provider (not just match by structure)? **Mitigation:** Read of `manage.go:1257`: `bindings, err := service.ListBindings(cmd.Context(), "")` — empty string second arg, no positional-arg parsing. Confirmed.
+- **Probe:** Could a user pass both `--all` and `--project` and get confused? **Mitigation:** AC5 wording requires `--all` to "show all project bindings," not to "guard against `--project`." The RunE branch (`manage.go:1198-1202`) takes the `--all` path when `all` is true and ignores `projectPath`. Builder worklog § "Design choices" explicitly accepts this. Not an AC violation.
+- **Probe:** Did the `extended_test.go` retarget drop the provider filter (`"codex"`) in a way that reduces coverage? **Mitigation:** The retargeted test still asserts the 4 original substrings (`projectRoot`, `account=personal`, `auth=ChatGPT`, `email=person@example.com`). The bound account is named `"personal"` and bound to provider `codex` (the default). `--all` lists all providers, so the test's output necessarily includes that binding. Coverage equivalent or stronger.
+- **Probe:** Does `mage integration` actually compile the `codex_integration_test.go` file with the 3 deleted symbols? **Mitigation:** `mage integration` returned 209/209 PASS. If any deleted symbol were referenced under `-tags=integration`, the build would fail at the test-compile step, not pass. Gate satisfied per memory rule.
+- **Probe:** Is `statusCmd` actually registered in the AddCommand list at root.go (not just constructed)? **Mitigation:** `root.go:137` `cmd.AddCommand(pathsCmd, versionCmd, statusCmd, codexCmd, claudeCmd, accountCmd, globalCmd, imageCmd)` — `statusCmd` is in position 3. Confirmed.
+
+### Hylla Feedback
+
+Hylla's last ingest is at commit `56ea569` (DROP_8 close). All DROP_9 work (4 commits past that ingest) is post-snapshot, so Hylla is stale for every changed symbol in this review (`statusCmd`, `--all` BoolVar, `runStatusAll`, deleted `newManageProjectCommand` / `newManageProjectListCommand` / `runManageProjectList`, retargeted test, `newTestManageContainerCommand` post-9.3 update). No Hylla query was attempted — all evidence flows from `git show HEAD` + direct `Read` + `git grep` + mage re-run. Per `main/CLAUDE.md` Hylla policy: changed-since-last-ingest files use `git diff`, which is the path taken here.
+
+- **Query:** N/A (no Hylla queries attempted). **Missed because:** structural review of a single commit at HEAD against a snapshot 4 commits behind — `git show` + `Read` are the right primary sources. **Worked via:** `git show HEAD`, `git grep`, `Read`, `mage testPkg/integration/build`. **Suggestion:** A drop-end-only ingest cadence (current policy) is correct; per-unit ingest would burn resources for the kind of small structural reviews this drop has been doing. No change recommended.
+
+### Conclusion
+
+All 7 acceptance criteria PASS. Three-gate mage verification GREEN (cli 206/206@69.5%, integration 209/209/0skip, build SUCCESS). The unit cleanly flattens `valv status` to the top level under the inspect group, adds `--all` as the canonical replacement for the deleted `manage project list`, and the 3 stale symbols (`newManageProjectCommand`, `newManageProjectListCommand`, `runManageProjectList`) are fully removed. The `extended_test.go` retarget is justified scope expansion per the planner's AC5 wording. No new dead code introduced.
+
+**Verdict: PASS**

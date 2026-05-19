@@ -257,3 +257,67 @@ This is an exceptional path — the next available falsification-agent dispatch 
 ## Hylla Feedback (Unit 9.3 Round 1)
 
 N/A — review touched only HEAD-relative diffs (post-DROP_8 ingest snapshot 56ea569). Hylla's index is stale for `newImageCommand` / `newImageUpdateCommand` / `newImageCleanupCommand` / `runImageCleanup` / `newImageInspectCommand` / `runImageInspect` / `imageCleanupFlags` — all introduced in 9.3. `git show` + direct `Read` were the right primary sources.
+
+---
+
+## Unit 9.4 — Round 1
+
+- **Reviewer:** go-qa-falsification-agent
+- **Commit under review:** `1510e7f feat(cli): unit 9.4 flatten valv status and add --all flag`
+- **Mage targets exercised by reviewer:**
+  - `mage testPkg github.com/evanmschultz/valv/internal/cli` — PASS (206 tests, 69.5% coverage > 60% threshold)
+  - `mage integration` — PASS (209 tests, 0 skipped, 0 failed)
+  - `mage build` — PASS
+- **Verdict:** PASS — zero CONFIRMED counterexamples after 13 attack vectors.
+
+### Summary
+
+The 9.4 commit flattens `valv status` to top-level (registered in the `inspect` group alongside `paths` and `version`), adds an `--all` flag that calls a new `runStatusAll` (provider-agnostic listing), and deletes `newManageProjectCommand` / `newManageProjectListCommand` / `runManageProjectList` cleanly. Two new root-routed tests pin AC1-AC6. The integration suite delta (207 → 209) matches the two new unit tests (which `mage integration` also runs without the build tag). All three mage gates reproduce locally. The single landed UX advisory (`--all` silently drops `--project`) is not an AC violation; PLAN.md AC5 does not require a flag-conflict guard.
+
+### Per-vector findings
+
+| # | Vector | Verdict | Notes |
+|---|---|---|---|
+| 1 | `--all` + `--project` interaction (no mutex) | REFUTED (advisory) | `RunE` at `manage.go:1206-1210` branches `if all { runStatusAll } else { runManageStatus(projectPath) }`. `--project` is silently dropped when `--all` is set. PLAN.md AC5 does not require a conflict guard; `--project` and `--all` are conceptually orthogonal (single-project vs all-projects). Builder disclosed this explicitly in the worklog. Not an AC violation; noted as advisory UX gap for future refinement (e.g. `cmd.MarkFlagsMutuallyExclusive("project", "all")`). |
+| 2 | `runStatusAll` provider semantics — does it iterate Codex + Claude? | REFUTED | Hylla `Service.ListBindings` content shows `if provider != "" && binding.Provider != provider { continue }` — empty provider skips the filter, returns ALL providers. `runStatusAll` calls `service.ListBindings(ctx, "")` (manage.go:1257). Smoke verified via `mage run "status --all"` — output lists BOTH the dev's `hylla/claude` binding AND `work/codex` binding. Matches previous `manage project list` no-arg semantics. |
+| 3 | `extended_test.go` retarget — does `TestManageProjectListShowsBoundProjects` still verify the same behavior? | REFUTED | Pre-change argv `["project", "list", "codex"]` filtered by provider; post-change `["status", "--all"]` does not filter. The test only seeds ONE Codex `personal` binding in an isolated `t.TempDir()`-rooted paths store — no Claude binding exists in this test environment — so the assertion set (`projectRoot`, `account=personal`, `auth=ChatGPT`, `email=person@example.com`) remains exhaustively satisfied. The test is semantically weaker (no provider filter) but not broken; the identity fields are sufficient. |
+| 4 | Inspect group placement (AC2) | REFUTED | `root.go:124-125` registers `statusCmd.GroupID = "inspect"`. `root.go:108-112` declares the three groups: `inspect`, `runtime`, `account`. `valv --help` rendering (via `mage run`) confirms `status` appears under "INSPECT COMMANDS" alongside `paths` and `version`. AC2 ("inspect group or equivalent") satisfied. |
+| 5 | Help text drift — `valv status --help` and `--all` flag help | REFUTED | `valv status --help` (via `mage run "status --help"`) prints the full updated Long (mentions `--all`), three examples (`valv status`, `valv status --project ...`, `valv status --all`), and the `--all` flag's help line "List all project bindings across all providers". Help is comprehensive across both modes. |
+| 6 | `runManageStatus` re-entrancy — does the single-project path still work? | REFUTED | `runManageStatus` body is unchanged (no diff lines inside the function). The new `RunE` branches `if all { runStatusAll } else { runManageStatus(projectPath) }`. `TestStatusViaRootCommandShowsCurrentProjectBinding` exercises the `--project` branch via root command and asserts `account=dev`, `provider=codex`. PASS. No behavioral drift. |
+| 7 | Integration argv pattern — does `codex_integration_test.go` still reference deleted argv? | REFUTED | `rtk grep -rnE 'runManage.*"project"|"project", "list"|"project", "ls"'` returns zero matches in any test file. The +2 integration delta (207 → 209) is accounted for by `mage integration` re-running the +2 new unit-tagged tests in `manage_test.go` (`TestStatusViaRootCommandShowsCurrentProjectBinding`, `TestStatusAllViaRootCommandShowsAllBindings`) under the `integration` build tag (those tests are NOT `//go:build integration` gated, so both gates run them). Integration-only test count unchanged at 3. |
+| 8 | `newTestManageContainerCommand` drop of `newManageProjectCommand` — orphan callers? | REFUTED | Helper at `manage_test.go:382-398` registers all surviving ex-`manage` children minus `newManageProjectCommand`. `rtk grep -rnE 'newManageProjectCommand|newManageProjectListCommand|runManageProjectList'` returns zero in `internal/`, `cmd/`, `magefile.go`. Zero orphans. |
+| 9 | `runManageProjectList` deletion side-effects — service or CLI callers outside deleted constructors? | REFUTED | Hylla `callers` for `Service.ListBindings` lists `runManageAccountInspect`, `runManageProjectList` (deleted), `Service.CleanupDuplicateAliases`, `Service.DeleteProfile`, and one test. Post-deletion the surviving CLI caller is `runManageAccountInspect` plus the new `runStatusAll`. Plus the two service-internal methods. No other consumers. |
+| 10 | Coverage delta scrutiny (69.4% → 69.5%) | REFUTED | Builder removed `newManageProjectCommand` (RunE returned `cmd.Help()`, untested), `newManageProjectListCommand` (constructor only), and `runManageProjectList` (~20 lines, partially covered via the original `TestManageProjectListShowsBoundProjects`). Builder added `runStatusAll` (~14 lines, fully covered by `TestStatusAllViaRootCommandShowsAllBindings` AND the retargeted extended test) + a `RunE` branch covered by both new tests. The net +0.1% is plausible: removed mixed-coverage code and added fully-covered code. Smoke-verified via the reproduced `mage testPkg` result. |
+| 11 | README staleness (`mage run "manage status"`) | REFUTED (out of scope) | `README.md:36` and `README.md:45` still reference `mage run "manage status"` / `mage dev:run "manage status"`. PLAN.md explicitly scopes README cleanup to Unit 9.4.5 (the "Refresh user-facing strings post-namespace-rename" unit which lists `README.md` in its Paths). Not a 9.4 finding. |
+| 12 | `"manage status:"` / `"manage project list:"` error-wrapper prefixes | REFUTED (out of scope) | `manage.go:1225,1232` keep `"manage status: ..."` wrapping (unchanged from pre-9.4); `service.go:256-318` has 12 sites with `"manage status:"`. User now invokes `valv status`, so error messages read `Error: manage status: ...`. PLAN.md AC #1a-c for Unit 9.4.5 explicitly mandates "Zero stale `valv manage` strings remain" — the string sweep is 9.4.5's scope. New `runStatusAll` uses `"status --all:"` wrapping (manage.go:1254,1259), so the new code does not introduce additional drift. |
+| 13 | Cobra `TraverseChildren=true` + persistent flag / local flag conflicts | REFUTED | Root persistent flags: `--config`, `--format`, `--style`, `--no-style`, `--debug`. `statusCmd` local flags: `--project`, `--all`. Zero name overlap. `TraverseChildren` allows flag inheritance without re-declaration; no shadowing risk. |
+
+### Targeted code reads
+
+- **`internal/cli/root.go:108-141`** — group declarations + `statusCmd.GroupID = "inspect"` + `cmd.AddCommand(pathsCmd, versionCmd, statusCmd, codexCmd, claudeCmd, accountCmd, globalCmd, imageCmd)`. Clean.
+- **`internal/cli/manage.go:1179-1216`** — `newManageStatusCommand` with both flags; `RunE` branches cleanly on `all`. Help / Example / Short / Long all updated to drop the `manage` prefix in examples.
+- **`internal/cli/manage.go:1247-1262`** — `runStatusAll`. Mirror of deleted `runManageProjectList` minus the optional provider arg. Error wraps use `"status --all:"` prefix consistently.
+- **`internal/cli/manage_test.go:186-258`** — both new tests use `NewRootCommandWithPaths` (not the manage-container helper), so they actually exercise the root-level registration claim, not just the `runStatusAll` logic. AC2 + AC6 coverage is real, not delegated.
+- **`internal/cli/manage_test.go:382-398`** — `newTestManageContainerCommand` minus `newManageProjectCommand` line. Comment at 381 explicitly notes the removal and points to the replacement argv.
+- **`internal/cli/extended_test.go:287-306`** — retargeted test. Comment at 299 documents the swap. Asserts are unchanged.
+- **Hylla `Service.ListBindings` content** — confirms empty provider returns ALL providers.
+
+### Non-findings (worth noting but not counterexamples)
+
+- **Paths field in PLAN.md (`internal/cli/root.go`, `internal/cli/manage_test.go`) is narrower than the actual diff** (`internal/cli/manage.go`, `internal/cli/extended_test.go` also modified). The 9.4 design notes explicitly authorize deleting `newManageProjectCommand` / `runManageProjectList` in `manage.go` and retargeting `extended_test.go`, so this is a planner-side `Paths:` undercount rather than a builder out-of-scope edit. Advisory only.
+- **`--all` ignores `--project` silently.** Documented above (vector 1). Future polish opportunity: `cmd.MarkFlagsMutuallyExclusive("project", "all")` or explicit error. Not blocking.
+- **`runManageHome` dead code in `operator_helpers.go`** remains; carried over from 9.3 round 1, still routed to DROP_11 per builder's note. Not introduced by 9.4.
+
+### Self-review / orchestrator hand-off discipline
+
+- Did NOT edit Go code. HEAD commit `1510e7f` was inspected via `git show` / `Read` / Hylla node-full, not modified.
+- Did NOT edit `PLAN.md`, sibling QA file (`BUILDER_QA_PROOF.md`), or `BUILDER_WORKLOG.md`. Only appended `## Unit 9.4 — Round 1` to this falsification file (phase-owned).
+- Mage-only test invocations (`mage testPkg`, `mage integration`, `mage build`, plus three `mage run "..."` smoke probes for help-text and `--all` output). No raw `go test` / `go build`.
+- Hylla queried for `ListBindings` (snapshot 2 = `56ea569`, baseline DROP_8). One useful hit (`Service.ListBindings` content + caller graph), confirming `provider == ""` returns all providers.
+
+## Hylla Feedback (Unit 9.4 Round 1)
+
+One useful Hylla query, one expected stale-snapshot fallback:
+
+- **Query:** `hylla_search_keyword` for `"ListBindings"` then `hylla_node_full` on `Service.ListBindings`. **Worked:** returned the function body and a complete caller graph including `runManageProjectList` (showing it as a pre-9.4 caller). Combined with the post-9.4 `git show` diff, this proved the deletion is clean (the listed callers are exactly the deleted symbol plus the surviving `runManageAccountInspect` plus two service-internal methods, plus the new `runStatusAll` that will appear in the next ingest).
+- **Stale-snapshot fallback (expected):** `runStatusAll` / `--all` flag / deleted constructors are post-snapshot. Used `git show HEAD` + direct `Read` for all of those. No Hylla "miss" — the staleness is structural, not a Hylla gap.
