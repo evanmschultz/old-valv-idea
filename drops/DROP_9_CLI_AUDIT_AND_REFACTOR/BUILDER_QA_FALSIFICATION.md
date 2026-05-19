@@ -568,3 +568,54 @@ All three numbers match the builder's worklog claim exactly.
 ## Hylla Feedback (Units 9.5 + 9.6 Round 1)
 
 None — Hylla's last ingest at `56ea569` predates the entire DROP_9 work tree, so every symbol under review is post-ingest by definition. All Go evidence gathered via `git diff HEAD~1`, direct `Read`, and `rtk git grep`. No Hylla query was applicable to this commit. Non-Go grep checks (README/AGENTS/CONTRIBUTING/CLAUDE) used `git grep` directly per the Hylla-is-Go-only rule. No ergonomic gripes — Hylla was correctly bypassed for this entire review.
+
+## Units 9.5 + 9.6 — Round 2
+
+- **Reviewer:** go-qa-falsification-agent
+- **Commit under review:** `f128c8b fix(cli): units 9.5+9.6 r2 align bind --provider help text`
+- **R1 finding being closed:** Round 1 Vector 4 — `bind --provider` help-text drift at `manage.go:409`.
+- **Mage targets exercised by reviewer:**
+  - `mage testPkg github.com/evanmschultz/valv/internal/cli` — PASS (214 tests, 67.5% coverage, 0 failures, `-race` enabled)
+  - `mage build` — PASS (`./valv` built cleanly)
+- **Verdict:** PASS. R1 finding fully mitigated; no new counterexamples introduced.
+
+### Attack vector outcomes (R2 targeted, narrow surface)
+
+| # | Attack | Outcome | Notes |
+|---|--------|---------|-------|
+| 1 | Substitution string mismatch vs R1 prescription | REFUTED | R1 prescribed: `"explicit provider override (required when account name is ambiguous across providers)"`. `git diff HEAD~1 HEAD -- internal/cli/manage.go` shows `+ cmd.Flags().StringVar(&providerFlag, "provider", "", "explicit provider override (required when account name is ambiguous across providers)")` at line 409 — character-perfect match. `rg -n 'explicit provider override \(required when account name is ambiguous across providers\)' internal/cli/manage.go` returns **6 matches** on lines 89, 116, 143, 262, 286, **409** — sibling parity confirmed across `inspect`, `login`, `logout`, `rename`, `delete`, `bind`. |
+| 2 | R2 commit accidentally touched other code lines | REFUTED | `git diff HEAD~1 HEAD -- internal/cli/manage.go` shows exactly 1 deletion + 1 insertion (`1 file changed, 1 insertion(+), 1 deletion(-)`). `git diff HEAD~1 HEAD --stat` shows the full commit only touches `BUILDER_WORKLOG.md` (+42), `PLAN.md` (+2/-2), and `internal/cli/manage.go` (+1/-1). No spurious Go code change. |
+| 3 | Other stale "defaults to codex" wording missed by R2 | REFUTED (scope-correct) | `rg -n "provider to use for binding\|defaults to codex" internal/ cmd/` returns one surviving hit at `manage.go:436` (the `unbind` constructor). R1 vector 4 explicitly carved this out: *"Unbind (line 436) is unchanged territory (`NoArgs`, no collision detection) and its 'defaults to codex' wording remains accurate."* The R2 appendix scoped the fix to bind only; leaving line 436 alone is on-spec. (Aside: line 339 `switch` has its own divergent wording `"provider to use for account resolution (required when account name exists in multiple providers)"` — R1 did not flag it because the semantics are accurate; not in R2 scope.) |
+| 4 | Test asserting old help-text substring broke | REFUTED | No `*_test.go` file was modified in the commit (per `git diff --stat`). R1 verification noted no test asserts help-text content (the `--help` rendering is Cobra-owned, not test-asserted), so the substitution cannot have shifted any assertion. `mage testPkg cli` reports identical numbers to R1 (214/0/67.5%) — zero delta in test count, coverage, or pass/fail. |
+| 5 | R1 invariants regressed (test count, coverage, build) | REFUTED | R1 baseline: 214 tests / 67.5% / PASS / `mage build` SUCCESS. R2 measurement: 214 tests / 67.5% / PASS / `mage build` SUCCESS. All invariants preserved bit-for-bit. |
+
+### Additional adversarial attempts
+
+- **Whitespace / Unicode invisible-character drift.** R2 fix could have introduced a non-breaking space or zero-width character that renders identical in text editors but diverges in byte content. `rg` with the exact escaped string against `manage.go` matches lines 89, 116, 143, 262, 286, **and 409** — all six bind/sibling lines hit the identical ASCII byte sequence. No invisible-character substitution. REFUTED.
+- **Cobra flag de-duplication.** Two flags with the same name on the same cobra.Command panic at registration. `bind` only declares `--provider` once (line 409), and adding a second `--provider` with sibling wording would have surfaced as a runtime panic on `valv account bind --help`. `mage build` succeeded and the binary's help command would crash on startup if the registration had been duplicated. REFUTED.
+- **Go string literal escape.** The replacement string contains no special characters needing escaping (no backticks, no embedded quotes, no `\n`). Source string is plain ASCII; compiler had no opportunity to mis-tokenize. REFUTED.
+- **Help-text length / wrap regression.** New string (89 chars) is longer than the old string (60 chars). Cobra wraps long flag help in `--help` output. The 5 sibling verbs already render this exact string in `--help`; any wrapping behaviour was already proven acceptable across the binary. No new layout risk introduced. REFUTED.
+
+### Counterexamples
+
+None. The R1 finding is the only outstanding minor item that warranted a fix-up, and R2 closes it cleanly.
+
+### Verification by reviewer
+
+| Gate | Result | Detail |
+|------|--------|--------|
+| `mage testPkg github.com/evanmschultz/valv/internal/cli` | PASS | 214 tests, 67.5% coverage (gate 60%), 0 failures, `-race` enabled — identical to R1 baseline |
+| `mage build` | PASS | `./valv` built cleanly |
+
+`mage integration` was optional per the R2 appendix and was not exercised. Justification: the change is a help-text string literal that does not flow into runtime behaviour, error paths, or external-process semantics. The integration suite (`mage integration`) targets Docker-backed and external-CLI golden coverage; neither is exercised by the help-string change.
+
+### Self-review / orchestrator hand-off discipline
+
+- Did NOT edit Go code. HEAD commit `f128c8b` inspected via `git diff HEAD~1 HEAD`, `Read`, and `rg`.
+- Did NOT edit `PLAN.md`, `BUILDER_WORKLOG.md`, `BUILDER_QA_PROOF.md`, or any other drop file. Only appended this `## Units 9.5 + 9.6 — Round 2` section to `BUILDER_QA_FALSIFICATION.md`.
+- Mage-only test invocations (`mage testPkg`, `mage build`). No raw `go test` / `go build` / `go vet`.
+- Hylla NOT queried — HEAD commit is post-DROP_8 baseline (Hylla last ingest = `56ea569`); the changed line did not exist at ingest time.
+
+## Hylla Feedback (Units 9.5 + 9.6 Round 2)
+
+None — Hylla's last ingest at `56ea569` predates the entire DROP_9 work tree, so the R2-modified line is post-ingest by definition. All evidence gathered via `git diff HEAD~1 HEAD`, `Read`, and `rg`. No Hylla query was applicable to this 1-line cosmetic fix. No ergonomic gripes.

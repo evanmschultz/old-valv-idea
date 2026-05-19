@@ -420,3 +420,37 @@ None — Hylla's last ingest is at `56ea569` (DROP_8 close), which predates the 
 All 13 acceptance criteria PASS (8 from 9.5 + 5 from 9.6). The combined unit collapses cleanly because both 9.5 and 9.6 share the `resolveAccountByName` helper as the implementation vehicle and the same paths (`manage.go`, `manage_test.go`). Add and List constructors are demonstrably untouched (zero diff hunks in their line ranges). `resolveAccountSwitchTarget` body is preserved verbatim (the function is the diff context anchor with new helpers added after its closing brace). All three mage gates reproduce GREEN at the builder-reported counts (testPkg 214 / integration 217 / build SUCCESS). Coverage at 67.5% exceeds the 60% threshold. Five new tests cover the resolver helper (3 sub-cases), two delete-path scenarios (collision + flag override), one bind-path collision, and the `whoami` alias removal.
 
 **Verdict: PASS (13/13 ACs)**
+
+## Units 9.5 + 9.6 — Round 2
+
+- **QA agent:** go-qa-proof-agent
+- **Reviewed commit:** f128c8b `fix(cli): units 9.5+9.6 r2 align bind --provider help text`
+- **R1 finding being fixed:** `BUILDER_QA_FALSIFICATION.md` `## Units 9.5 + 9.6 — Round 1` vector 4 — `manage.go:409` `bind --provider` help text stale.
+- **Verdict:** PASS
+
+### Verification matrix
+
+| AC | Claim | Evidence | Result |
+|---|---|---|---|
+| #1 | `manage.go:409` reads sibling-aligned wording | Read `manage.go:409` → `cmd.Flags().StringVar(&providerFlag, "provider", "", "explicit provider override (required when account name is ambiguous across providers)")` — verbatim match to spawn-appendix target. | PASS |
+| #2 | Sibling lines 89, 116, 143, 262, 286 unchanged | Read each; all five carry the identical `"explicit provider override (required when account name is ambiguous across providers)"` string. No regression. | PASS |
+| #3 | Only `manage.go` line 409 changed in HEAD | `git show HEAD -- internal/cli/manage.go` → single hunk `-`/`+` on line 409. `git show HEAD --stat` confirms `internal/cli/manage.go | 2 +-` (1 insertion, 1 deletion); other touched files are `BUILDER_WORKLOG.md` and `PLAN.md` (out-of-scope, expected). | PASS |
+| #4 | `mage testPkg ./internal/cli` GREEN at baseline | `mage testPkg github.com/evanmschultz/valv/internal/cli` → 214/214 PASS, 67.5% coverage, `-race` on, 5.64s. Identical count + coverage to R1 baseline. | PASS |
+| #5 | `mage build` GREEN | `mage build` → SUCCESS, built `./valv` (25.3M). | PASS |
+
+### Falsification attacks attempted (all mitigated)
+
+- **Probe:** Could the R2 commit have touched other Go files? **Mitigation:** `git show HEAD --stat` shows only `internal/cli/manage.go` among code paths. No leakage.
+- **Probe:** Could sibling verb wording have drifted (e.g. accidental edit beyond line 409)? **Mitigation:** Direct Reads of lines 89, 116, 143, 262, 286 confirm identical wording to line 409.
+- **Probe:** Could test count have dropped (a test removed)? **Mitigation:** R1 PASS reported 214 tests @ 67.5%; R2 gate reports 214 tests @ 67.5%. Identical.
+- **Probe:** Could the new wording break gofumpt or vet? **Mitigation:** `mage testPkg` enforces gofumpt + race + vet; GREEN proves all pass.
+
+### Hylla Feedback
+
+None — Hylla's ingest is still at `56ea569` (DROP_8 close), pre-dating the entire DROP_9 sequence. R2 evidence collection used `git show`, direct `Read`, and live `mage` re-runs. Per `main/CLAUDE.md` Hylla policy this is the "changed since last ingest" path and routes correctly through git tooling. N/A miss reporting.
+
+### Conclusion
+
+All 5 R2 acceptance criteria PASS. The R1 falsification vector 4 ("manage.go:409 bind --provider help text stale") is resolved: the previously-stale string is now identical to the five sibling `--provider` flag declarations in the same file. The fix is exactly 1-line, surgically scoped, and preserves all R1-PASS evidence (test count, coverage, build). No regressions detected. R2 closes green.
+
+**Verdict: PASS (5/5 ACs)**
