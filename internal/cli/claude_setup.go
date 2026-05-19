@@ -3,7 +3,6 @@ package cli
 import (
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/evanmschultz/laslig"
 	"github.com/spf13/cobra"
@@ -62,7 +61,7 @@ func ensureClaudeBindingReady(cmd *cobra.Command, paths config.Paths, workingDir
 	}
 	// Only proceed to auto-bind / picker when the error is ErrUnboundProject.
 	// Any other error (store failures, project-detect failures) must propagate.
-	if !errors.Is(err, domain.ErrUnboundProject) && !strings.Contains(err.Error(), domain.ErrUnboundProject.Error()) {
+	if !errors.Is(err, domain.ErrUnboundProject) {
 		return domain.Profile{}, fmt.Errorf("detect claude binding: %w", err)
 	}
 

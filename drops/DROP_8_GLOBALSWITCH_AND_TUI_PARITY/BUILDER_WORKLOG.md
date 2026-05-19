@@ -432,3 +432,39 @@ N/A — Hylla unreachable this session (per spawn prompt paradigm override). All
 - `internal/services/manage/service.go:264-299` — `StatusForProvider` method.
 - `internal/cli/manage_test.go` — `pickProfileFn` seam mutation pattern (non-parallel discipline).
 - `internal/cli/codex_test.go` — `testCodexPaths` helper.
+
+## DROP_8 Polish — Close-out
+
+- **Builder:** go-builder-agent
+- **Started:** 2026-05-18
+- **Files touched:**
+  - `internal/cli/claude_setup.go` — FIX 1: removed `|| strings.Contains(err.Error(), domain.ErrUnboundProject.Error())` clause; removed `strings` import (now unused).
+  - `internal/cli/manage.go` — FIX 1: replaced `strings.Contains(err.Error(), domain.ErrUnboundProject.Error())` with `errors.Is(err, domain.ErrUnboundProject)` in `resolveProfileSwitchTarget`. `strings` import retained (used extensively elsewhere in the file).
+  - `internal/services/claude/service.go` — FIX 2: added provider mismatch guard in `Run` when `overrideProfile != nil`.
+  - `internal/services/claude/service_test.go` — FIX 2: added `TestRunRejectsOverrideProfileWithWrongProvider`.
+  - `internal/services/codex/service.go` — FIX 2: added provider mismatch guard in `Run` when `overrideProfile != nil`.
+  - `internal/services/codex/service_test.go` — FIX 2: added `TestRunRejectsOverrideProfileWithWrongProvider`.
+  - `internal/cli/claude_setup_test.go` — FIX 3: added `TestEnsureClaudeBindingReadyWrapsNonUnboundError`.
+- **Mage targets run:**
+  - `mage testPkg github.com/evanmschultz/valv/internal/services/claude` — PASS (19/19, 79.7% coverage, -race)
+  - `mage testPkg github.com/evanmschultz/valv/internal/services/codex` — PASS (13/13, 74.6% coverage, -race)
+  - `mage testPkg github.com/evanmschultz/valv/internal/cli` — PASS (203/203, 73.1% coverage, -race)
+  - `mage build` — PASS
+
+### Design notes
+
+**FIX 1 — `strings.Contains` removal**
+
+The `|| strings.Contains(err.Error(), domain.ErrUnboundProject.Error())` clause was belt-and-suspenders. Since `StatusForProvider` wraps `ErrUnboundProject` with `%w`, `errors.Is` unwraps the chain correctly — the substring fallback was redundant and a future-correctness risk (any error whose message happens to contain "project is not bound" would have been misclassified as ErrUnboundProject). Both callsites (`claude_setup.go:65` and `manage.go:853`) simplified to `errors.Is` only. `strings` import dropped from `claude_setup.go`; retained in `manage.go` where it is used by `strings.TrimSpace`, `strings.Join`, and several `strings.TrimSpace` call-sites.
+
+**FIX 2 — provider mismatch guard**
+
+Guard is inserted immediately after the `if s.overrideProfile != nil` branch, before any normalization or DB work. Error message contains "provider mismatch" so tests and operators can identify it unambiguously. Symmetric across both services. Tests follow the `TestRunRejectsOverrideProfileWithWrongProvider` naming pattern and use the wrong provider (Claude service test uses `ProviderCodex`; Codex service test uses `ProviderClaude`).
+
+**FIX 3 — non-unbound error path test**
+
+The `TestEnsureClaudeBindingReadyWrapsNonUnboundError` test uses a `workingDir` set to a path inside a regular file (e.g., `/tmp/somefile/subdir`). When `ensureClaudeBindingReady` calls `StatusForProvider`, the underlying `projectdetect.DetectFrom` attempts to stat the path and fails with a filesystem error — not `ErrUnboundProject`. This causes `StatusForProvider` to return `fmt.Errorf("manage status: detect project from %q: %w", ...)`, which does not wrap `ErrUnboundProject`. The function hits the `"detect claude binding: %w"` branch (the line we are testing), returning the wrapped error. The test asserts the error contains `"detect claude binding:"`.
+
+## Hylla Feedback (DROP_8 Polish)
+
+N/A — task touched non-Go metadata file (worklog) plus Go files already covered via direct `Read`. All Go evidence gathered via direct `Read`. No Hylla queries attempted (Hylla unreachable per spawn prompt paradigm override for this session).

@@ -850,7 +850,7 @@ func resolveProfileSwitchTarget(cmd *cobra.Command, service interface {
 		if err == nil {
 			return status.Binding.Provider, nil
 		}
-		if strings.Contains(err.Error(), domain.ErrUnboundProject.Error()) {
+		if errors.Is(err, domain.ErrUnboundProject) {
 			return defaultProvider, nil
 		}
 		return "", err

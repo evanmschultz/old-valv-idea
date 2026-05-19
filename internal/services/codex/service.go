@@ -121,6 +121,9 @@ func New(options Options) (Service, error) {
 func (s Service) Run(ctx context.Context, cwd string, codexArgs []string) error {
 	var resolved resolvedLaunchBinding
 	if s.overrideProfile != nil {
+		if s.overrideProfile.Provider != domain.ProviderCodex {
+			return fmt.Errorf("codex service: override profile provider mismatch: got %q, want codex", s.overrideProfile.Provider)
+		}
 		workingDir, err := pathutil.Normalize(cwd)
 		if err != nil {
 			return fmt.Errorf("run codex launch service: normalize working directory: %w", err)

@@ -524,6 +524,41 @@ func TestContainerNameContainsClaude(t *testing.T) {
 	}
 }
 
+// TestRunRejectsOverrideProfileWithWrongProvider verifies that Run returns an
+// error containing "provider mismatch" when OverrideProfile has a provider
+// that is not ProviderClaude.
+func TestRunRejectsOverrideProfileWithWrongProvider(t *testing.T) {
+	t.Parallel()
+
+	project := domain.Project{ID: "p1", Root: "/tmp/project", Name: "proj"}
+	store := boundClaudeStore(project, t.TempDir())
+	executor := &fakeExecutor{}
+
+	wrongProfile := domain.Profile{
+		ID:       "override-wrong",
+		Provider: domain.ProviderCodex, // wrong provider
+		Name:     "wrong",
+		HomePath: t.TempDir(),
+	}
+
+	service, err := New(Options{
+		Store:           store,
+		Executor:        executor,
+		Detect:          detectAlways(project.Root),
+		Image:           docker.NewImageRef("valv-claude", "dev"),
+		TempRoot:        t.TempDir(),
+		OverrideProfile: &wrongProfile,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	err = service.Run(context.Background(), "/tmp/project", []string{"--prompt", "hello"})
+	if err == nil || !strings.Contains(err.Error(), "provider mismatch") {
+		t.Fatalf("Run() error = %v, want error containing \"provider mismatch\"", err)
+	}
+}
+
 // TestRunBubblesExecutorErrors verifies executor errors are propagated
 // upward with context.
 func TestRunBubblesExecutorErrors(t *testing.T) {

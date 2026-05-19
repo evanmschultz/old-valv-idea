@@ -230,6 +230,40 @@ func TestEnsureClaudeBindingReadyAlreadyBound(t *testing.T) {
 	}
 }
 
+// TestEnsureClaudeBindingReadyWrapsNonUnboundError verifies that when
+// StatusForProvider returns an error that is NOT ErrUnboundProject, the
+// function wraps and returns it immediately via the "detect claude binding"
+// prefix rather than falling through to the accounts-enumeration path.
+func TestEnsureClaudeBindingReadyWrapsNonUnboundError(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+
+	// Create a regular file, then use a path *inside* that file as the
+	// workingDir. projectdetect.DetectFrom will attempt to stat it and fail
+	// with a filesystem error that does NOT wrap ErrUnboundProject, forcing
+	// ensureClaudeBindingReady into the "detect claude binding: %w" branch.
+	regularFile := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(regularFile, []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	notADir := filepath.Join(regularFile, "subdir")
+
+	cmd := newClaudeCommand(paths, nil)
+	cmd.SetContext(context.Background())
+	cmd.SetIn(bytes.NewBuffer(nil))
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+
+	_, err := ensureClaudeBindingReady(cmd, paths, notADir, "")
+	if err == nil {
+		t.Fatal("ensureClaudeBindingReady(non-unbound error) error = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "detect claude binding:") {
+		t.Fatalf("error = %q, want \"detect claude binding:\" prefix", err.Error())
+	}
+}
+
 // TestUnboundProjectNoAccountsError verifies the shared error helper returns
 // the expected message format for each provider.
 func TestUnboundProjectNoAccountsError(t *testing.T) {

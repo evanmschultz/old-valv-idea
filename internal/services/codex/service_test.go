@@ -269,6 +269,44 @@ func TestRunBuildsDockerRequestFromProjectBindingAndProfile(t *testing.T) {
 	}
 }
 
+// TestRunRejectsOverrideProfileWithWrongProvider verifies that Run returns an
+// error containing "provider mismatch" when OverrideProfile has a provider
+// that is not ProviderCodex.
+func TestRunRejectsOverrideProfileWithWrongProvider(t *testing.T) {
+	t.Parallel()
+
+	project := domain.Project{ID: "p1", Root: "/tmp/project", Name: "proj"}
+	executor := &fakeExecutor{}
+
+	wrongProfile := domain.Profile{
+		ID:       "override-wrong",
+		Provider: domain.ProviderClaude, // wrong provider
+		Name:     "wrong",
+		HomePath: t.TempDir(),
+	}
+
+	service, err := New(Options{
+		Store: fakeStore{
+			project: project,
+			binding: domain.ProjectBinding{ProjectID: project.ID, ProfileID: "profile-1", Provider: domain.ProviderCodex},
+			profile: domain.Profile{ID: "profile-1", Provider: domain.ProviderCodex, HomePath: "/tmp/profile"},
+		},
+		Executor:        executor,
+		Detect:          func(start string) (projectdetect.Result, error) { return projectdetect.Result{Root: project.Root}, nil },
+		Image:           docker.NewImageRef("valv-codex", "dev"),
+		TempRoot:        t.TempDir(),
+		OverrideProfile: &wrongProfile,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	err = service.Run(context.Background(), "/tmp/project", []string{"resume", "--last"})
+	if err == nil || !strings.Contains(err.Error(), "provider mismatch") {
+		t.Fatalf("Run() error = %v, want error containing \"provider mismatch\"", err)
+	}
+}
+
 func TestRunBubblesExecutorErrors(t *testing.T) {
 	t.Parallel()
 
