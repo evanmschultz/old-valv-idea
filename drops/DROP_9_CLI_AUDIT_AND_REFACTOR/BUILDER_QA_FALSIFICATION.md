@@ -619,3 +619,74 @@ None. The R1 finding is the only outstanding minor item that warranted a fix-up,
 ## Hylla Feedback (Units 9.5 + 9.6 Round 2)
 
 None — Hylla's last ingest at `56ea569` predates the entire DROP_9 work tree, so the R2-modified line is post-ingest by definition. All evidence gathered via `git diff HEAD~1 HEAD`, `Read`, and `rg`. No Hylla query was applicable to this 1-line cosmetic fix. No ergonomic gripes.
+
+---
+
+## Unit 9.7 — Round 1
+
+- **Reviewer:** go-qa-falsification-agent
+- **Commit under review:** `069f869 test(cli): unit 9.7 add static ContainerRunRequest field assertions`
+- **Mage targets exercised by reviewer:**
+  - `mage testPkg github.com/evanmschultz/valv/internal/cli` — PASS (215 tests, 67.5% coverage, -race, 0 failures)
+  - `mage build` — PASS (`./valv` built cleanly)
+  - `mage integration` — NOT run (appendix marks OPTIONAL; no production code change → risk negligible)
+- **Verdict:** PASS — 0 CONFIRMED counterexamples across 10 attack vectors.
+
+### Summary
+
+Unit 9.7 is a test-only addition: one new test `TestSystemClaudeAccountAuthRunnerBuildsExpectedContainerRequest` with 12 assertions covering all 10 AC #1 field facets of `ContainerRunRequest`. The test uses the pre-existing `stubAuthContainerExecutor` (faithful capture of `ContainerRunRequest`), forces the `TERM` default branch via `t.Setenv("TERM", "")`, and asserts each field against either exact-value (Env keys, Mounts, User) or strict-bool (Init, Remove, len(Args)). The Codex parity gap is documented and structurally accurate — `systemCodexAccountAuthRunner` shells out to host `codex login` via `runCodexHostCommand` and never builds a `ContainerRunRequest`, so a parity test is structurally inapplicable.
+
+### Attack vectors
+
+| # | Vector | Outcome | Evidence |
+|---|--------|---------|---------|
+| 1 | Loose TERM assertion (non-empty only, not specific value) | REFUTED | Test does both `if got == ""` then `else if got != "xterm-256color"` — exact-value check after non-empty check. |
+| 2 | Stub vs production `ContainerRunRequest` divergence | REFUTED | `stubAuthContainerExecutor.Run` (`claude_auth_test.go:80-83`) captures the `req` arg verbatim; no transformation. Same `executor.Run(ctx, request)` call site as production (`claude_auth.go:101`). |
+| 3 | Codex parity claim accuracy | REFUTED | `systemCodexAccountAuthRunner` (`account_auth.go:132-163`) has only `LoginStatus`/`Login`/`Logout` methods, each delegating to `runCodexHostCommand`, which does `exec.LookPath("codex")` (`account_auth.go:165-169`). No `RunInContainer`, no `ContainerRunRequest`. Builder's gap documentation is structurally correct. |
+| 4 | `t.Parallel()` omission justification | REFUTED | Test source line 1 of body: `t.Setenv("TERM", "")`. `t.Setenv` + `t.Parallel` is a runtime panic. AC #3 cannot be jointly satisfied with AC #1 TERM-default coverage on the same test. Pattern matches pre-existing `TestSystemClaudeAccountAuthRunnerUsesClaudeImageRef`. |
+| 5 | TERM default branch genuinely exercised | REFUTED | `t.Setenv("TERM", "")` → `os.Getenv("TERM") == ""` → `strings.TrimSpace == ""` → `termValue = "xterm-256color"` branch fires (`claude_auth.go:66-69`). Test asserts the resulting value exactly. |
+| 6 | AC #1 field coverage completeness (10 fields claimed) | REFUTED | 12 assertions covering CLAUDE_CONFIG_DIR, HOME, LOGNAME, USER, TERM (non-empty + exact), len(Mounts), Mounts[0].Source, Mounts[0].Target, len(Args), Init, Remove, User. All 10 AC fields covered. |
+| 7 | Env leak / race across sequential tests | REFUTED | All test in this file are non-parallel due to `t.Setenv`. `t.Setenv` registers a cleanup that restores prior value on test exit. No leak possible. |
+| 8 | Loose Env map assertions (e.g., just `len(Env)`) | REFUTED | Test asserts specific key→value pairs for each of the 5 Env keys, not map cardinality. |
+| 9 | `currentContainerUser()` environment-portability | REFUTED | `currentContainerUser` returns `fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())` (`operator_helpers.go:378-380`). Test compares `req.User` against `currentContainerUser()` itself — a contract test: same helper on both sides, so if production replaced the call with a hardcoded value, the test would fail when local UID/GID differs from the hardcoded value. Environment-agnostic. |
+| 10 | Coverage delta sanity (67.5% unchanged) | REFUTED | The new test exercises the same `RunInContainer` body that `TestSystemClaudeAccountAuthRunnerPassesThroughTerminalEnv` (`claude_auth_test.go:426`) already exercised. Net new line coverage is near-zero by design; value-add is *assertion density* on existing-but-under-asserted code paths. Coverage staying flat is consistent and expected. |
+
+### Production-code cross-check
+
+`claude_auth.go:64-102` `RunInContainer` builds:
+
+```go
+Env: map[string]string{
+    "CLAUDE_CONFIG_DIR": claudeprovider.ContainerClaudeDir,
+    "HOME":              claudeprovider.ContainerHomeDir,
+    "LOGNAME":           "valv",
+    "TERM":              termValue,            // "xterm-256color" when TERM empty
+    "USER":              "valv",
+},
+Mounts: []dockeradapter.MountSpec{
+    dockeradapter.NewMountSpec(homePath, claudeprovider.ContainerClaudeDir, false),
+},
+Args:        []string{},
+Init:        true,
+Remove:      true,
+User:        currentContainerUser(),
+```
+
+Every literal in this struct is asserted by the test. The test captures `Interactive: stdin != nil` (false, since stdin is nil) and `TTY: commandHasTTY(stdin)` (false) implicitly — not asserted but not in AC #1.
+
+### Codex parity gap — verified structurally
+
+`account_auth.go:165-191` (`runCodexHostCommand`): shells out via `exec.Command(binary, finalArgs...)`. No `dockeradapter.ContainerRunRequest` construction. Codex auth is host-side by design; a parity test against a non-existent code path is not applicable. Builder's documented gap is correct.
+
+### Verdict rationale
+
+10 attack vectors attempted, 10 REFUTED with concrete evidence. The test is tight (exact-value assertions where applicable), the parity decision is structurally accurate, the AC #3 deviation is justified with same-file precedent and pre-existing pattern, and both mandatory gates (`mage testPkg` + `mage build`) PASS. Verdict: PASS.
+
+## Hylla Feedback (Unit 9.7 Round 1)
+
+Hylla's last ingest at `56ea569` predates DROP_9. All evidence for this round came from direct `Read` of post-ingest source files (`claude_auth.go`, `claude_auth_test.go`, `account_auth.go`, `operator_helpers.go`) and `git diff HEAD~1`. Two Hylla query attempts were considered:
+
+- **Query (not run):** `hylla_search_keyword` for `systemCodexAccountAuthRunner` to verify it has no `RunInContainer`. **Skipped because:** the symbol exists in `account_auth.go` whose contents may have been modified post-ingest by units 9.1–9.4.5; Hylla's stale view would be misleading. **Worked via:** `rg -n "systemCodexAccountAuthRunner|codexAuthRunner|RunInContainer"` across the cli package + targeted `Read` of `account_auth.go:130-191`. **Suggestion:** Hylla could surface a "this file modified since last ingest" flag in keyword-search results to help reviewers decide when to fall back.
+- **Query (not run):** `hylla_node_full` on `ContainerRunRequest`. **Skipped because:** the struct is in `internal/adapters/docker/` (pre-DROP_9, stable), but the test under review references it directly and the production builder code reads cleanly. **Worked via:** the production code (`claude_auth.go:75-99`) shows the construction site verbatim, which is what the test must mirror.
+
+No ergonomic gripes — for a test-only Go review with a stale ingest, direct `Read` + `rg` is the appropriate evidence path.

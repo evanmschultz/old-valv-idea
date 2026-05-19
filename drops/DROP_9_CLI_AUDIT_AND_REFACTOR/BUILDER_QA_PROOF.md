@@ -454,3 +454,40 @@ None — Hylla's ingest is still at `56ea569` (DROP_8 close), pre-dating the ent
 All 5 R2 acceptance criteria PASS. The R1 falsification vector 4 ("manage.go:409 bind --provider help text stale") is resolved: the previously-stale string is now identical to the five sibling `--provider` flag declarations in the same file. The fix is exactly 1-line, surgically scoped, and preserves all R1-PASS evidence (test count, coverage, build). No regressions detected. R2 closes green.
 
 **Verdict: PASS (5/5 ACs)**
+
+---
+
+## Unit 9.7 — Round 1
+
+- **QA agent:** go-qa-proof-agent
+- **Reviewed commit:** 069f869 `test(cli): unit 9.7 add static ContainerRunRequest field assertions`
+- **Verdict:** PASS (4/4 ACs)
+
+### Verification matrix
+
+| AC | Claim | Evidence | Result |
+|---|---|---|---|
+| #1 | `TestSystemClaudeAccountAuthRunnerBuildsExpectedContainerRequest` asserts every static field of `ContainerRunRequest` | Test at `claude_auth_test.go:476-549`. 12 distinct assertions: `Env[CLAUDE_CONFIG_DIR]` (lines 504-506) → matches `claude_auth.go:79`; `Env[HOME]` (507-509) → matches prod line 80; `Env[LOGNAME]="valv"` (510-512) → prod 81; `Env[USER]="valv"` (513-515) → prod 83; `Env[TERM]="xterm-256color"` (516-520) → prod 66-69, 82 (default branch exercised via `t.Setenv("TERM","")` at line 482); `len(Mounts)==1` (522-525) → prod 90-92; `Mounts[0].Source==homePath` (526-528) → prod 91; `Mounts[0].Target==claudeprovider.ContainerClaudeDir` (529-531) → prod 91; `len(Args)==0` (533-536) → prod 93; `Init==true` (537-539) → prod 96; `Remove==true` (540-542) → prod 97; `User==currentContainerUser()` (545-548) → prod 98. Test uses injected `stubAuthContainerExecutor` (defined `claude_auth_test.go:75-84`, captures `lastRequest`). | PASS |
+| #2 | Codex-equivalent test added IF analogous runner exists; documented gap otherwise | `git grep "systemCodexAccountAuthRunner"` → only `account_auth.go:132-160` (LoginStatus/Login/Logout) and `account_auth_test.go` host-side tests. `git grep "RunInContainer"` → ZERO codex hits; only `claude_auth.go` and `claude_auth_test.go`. `account_auth.go:149` `systemCodexAccountAuthRunner.Login` shells out via host (no `ContainerRunRequest` constructed). Carve-out condition satisfied: no analogous injectable runner with `RunInContainer` exists in the codex auth path. Gap documented in BUILDER_WORKLOG.md § "Codex parity decision" (lines 580-582). | PASS (carve-out) |
+| #3 | Both tests use `t.Parallel()` | SOFT VIOLATION ACCEPTED. Only the claude test exists (carve-out under AC #2). The claude test omits `t.Parallel()` because `t.Setenv("TERM","")` (line 482) is required to exercise the `"xterm-256color"` default-branch in `claude_auth.go:66-69`, and Go's testing runtime panics if `t.Setenv` is combined with `t.Parallel` (stdlib `testing.T.Setenv` doc: "panics if Parallel was called"). Inline comment at lines 477-479 documents the constraint and cites the established pattern at `TestSystemClaudeAccountAuthRunnerUsesClaudeImageRef` (the file's prior precedent for the same `t.Setenv`/no-parallel pairing). Justification is structurally sound per Go testing semantics. | PASS (soft, justified) |
+| #4 | `mage testPkg ./internal/cli` passes | Re-run: 215/215 PASS, 0 failed, 0 skipped, 67.5% coverage (≥60% threshold), `-race` on, 5.55s. `mage build` → SUCCESS (`./valv` built cleanly). | PASS |
+
+### Critical verification points (per appendix)
+
+1. **AC #1 line-by-line check** — 12 field assertions cited above, each line-mapped to its production counterpart in `claude_auth.go`. The values are not stubs; they reference the actual `claudeprovider.ContainerClaudeDir` / `ContainerHomeDir` package-level constants and the in-package `currentContainerUser()` function. Production code constructs the `ContainerRunRequest` at `claude_auth.go:75-99` with literally the static values asserted (LOGNAME/USER="valv", Init=true, Remove=true, Args=[]string{}, single Mount of homePath→ContainerClaudeDir). Test exercises the executor injection seam: `runner := systemClaudeAccountAuthRunner{executor: stub, image: claudeImageRef()}`, then `RunInContainer(...)` → `stub.Run` captures `lastRequest` (claude_auth_test.go:80-82). The injected executor path is reached because `containerExec := r.executor` (claude_auth.go:65) takes the injected non-nil stub instead of the production `NewExecutor` fallback (line 71-73). PASS.
+
+2. **AC #2 codex parity** — Confirmed via `git grep`: codex auth uses `systemCodexAccountAuthRunner.Login` (`account_auth.go:149`) which shells out to host `codex login`. No `RunInContainer` method exists on codex side. The decision to not add a codex parity test is structurally correct, not a gap-by-oversight.
+
+3. **AC #3 `t.Parallel()` soft violation** — `t.Setenv("TERM","")` is genuinely called at line 482. Go semantics force the omission. The decision preserves the test's ability to exercise the `"xterm-256color"` default branch (production lines 66-69). Established precedent: `TestSystemClaudeAccountAuthRunnerUsesClaudeImageRef` follows the same pattern (per builder worklog line 591 citing line 408 of the same file).
+
+4. **AC #4 mage gates** — Re-run live: 215 tests / 0 fail / 67.5% coverage. `mage build` produces `./valv` cleanly. Matches builder claim exactly.
+
+### Conclusion
+
+All 4 ACs PASS. AC #2 invokes the documented carve-out (no analogous codex runner exists; verified). AC #3 records a soft violation that is structurally justified per Go's `t.Setenv`/`t.Parallel` incompatibility and the file's pre-existing precedent. The 12 assertions in `TestSystemClaudeAccountAuthRunnerBuildsExpectedContainerRequest` provide complete static-field coverage of the `ContainerRunRequest` produced by `systemClaudeAccountAuthRunner.RunInContainer`, including the previously-unprotected default-`TERM` branch. Test depends only on the injected stub seam — no Docker daemon, no host-network access required. No regressions: 215 tests pass (up from 214 at Units 9.5+9.6 R2), coverage unchanged at 67.5%. R1 closes green.
+
+**Verdict: PASS (4/4 ACs)**
+
+## Hylla Feedback
+
+None — Hylla answered everything needed for QA verification. Evidence gathered via direct `Read` of `claude_auth_test.go` and `claude_auth.go` (post-DROP_8 commits are post-ingest; `git diff HEAD~1 HEAD` cited the new test), plus `git grep` for codex parity confirmation. Non-Go files (worklog, PLAN.md) are outside Hylla scope. The committed Hylla ingest is stale relative to DROP_9 commits, so direct Read was the appropriate evidence source for the new test body; the production code (`claude_auth.go`) is pre-DROP_9 and could have been queried via Hylla, but direct Read was equally cheap and avoided a stale-vs-fresh ambiguity.
