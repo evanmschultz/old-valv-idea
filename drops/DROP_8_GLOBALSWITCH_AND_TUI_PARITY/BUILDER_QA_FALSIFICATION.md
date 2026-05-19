@@ -395,3 +395,250 @@ No test in the six new tests covers this path. `TestAccountSwitchNameMultiMatchE
 ## Hylla Feedback (Unit 8.2)
 
 N/A — Hylla unreachable per spawn paradigm override; all evidence gathered via `Read`, `Grep` (`rg`), `git diff`, and `mage testPkg` / `mage test`. No tool-shape gripes to report.
+
+## Unit 8.2 — Round 2
+
+**Verdict:** `pass`
+
+**Builder commit under attack:** `15479ba fix(drop-8): unit 8.2 r2 cross-provider picker fixes`
+
+**Scope reviewed:** R2 diff vs `HEAD~1` covering `internal/cli/codex_setup.go`, `internal/cli/global.go`, `internal/cli/manage.go`, `internal/cli/manage_test.go`, `internal/cli/operator_helpers.go`, `internal/tui/manage/picker.go`, `internal/tui/manage/picker_test.go`. R1 BLOCKER + small leak + nit-2 fixes verified.
+
+`mage testPkg ./internal/cli` GREEN — 167 tests, 73.1% coverage. `mage testPkg ./internal/tui/manage` GREEN — 8 tests, 91.5% coverage. `mage golden` GREEN — 24 tracked + 1 external transcript.
+
+### Attack 1 — BLOCKER (R1 CX1) picker post-resolution dead-end on duplicate `(name, home)` tuple
+
+**Hypothesis (vector 1):** R2 changes `ProfilePickerModel.Selected()` to return `(domain.Profile, bool)` and matches the selected list item back to `m.profiles` via `name+home`. What if two profiles share the same `(name, home)` tuple — does the match-back resolve to the wrong profile?
+
+**Trace:**
+
+1. `picker.go:71-79` (enter handler):
+
+   ```go
+   if item, ok := m.list.SelectedItem().(profileItem); ok {
+       for _, p := range m.profiles {
+           if p.Name == item.name && p.HomePath == item.home {
+               m.selectedProfile = p
+               break
+           }
+       }
+       m.confirmed = true
+       return m, tea.Quit
+   }
+   ```
+
+2. The match-back keys by `(name, home)`. In cross-provider mode (`pickProfileCrossProvider` at `manage.go:984-1006`), `allProfiles` is the concatenation of `service.ListProfiles(ctx, codex)` and `service.ListProfiles(ctx, claude)`. Question: can a Codex profile and a Claude profile have identical `(name, home)`?
+
+3. Profile homes are provider-rooted by design:
+   - Codex default host profile: `<homeDir>/.codex` (`internal/adapters/providers/codex/profile.go:13-23`).
+   - Claude default host profile: `<homeDir>/.valv/providers/claude/profiles/default` (`internal/adapters/providers/claude/profile.go:18-28`).
+   - Isolated named accounts: `<provider-root>/<provider>/profiles/<name>` (per-provider directory tree, see `manage.go:485-491` and the `internal/services/manage` profile creation logic).
+
+   So `HomePath` is always rooted under the provider's namespace. Two profiles with the same `(name, home)` would require an actual filesystem coincidence, which the production code prevents.
+
+4. **Filter input collision?** `profileItem.FilterValue() = name + " " + home` — the filter uses both fields, but the picker has `menu.SetShowFilter(false)` (`picker.go:50`), so the filter pathway is disabled. Not a concern.
+
+**Verdict:** REFUTED — the R1 BLOCKER is fixed. The match-back loop terminates at the first `(name, home)` match, but two profiles with identical `(name, home)` cannot arise in production because Valv-managed profile homes are provider-rooted. The new unit test `TestPickProfileCrossProviderHandlesDuplicateNames` (`manage_test.go:660-701`) directly exercises the SAME-NAME-DIFFERENT-HOME case and confirms Provider round-trips correctly.
+
+**Future fragility (flag, not counterexample):** the match-back relies on `(name, home)` being unique per profile. If a future Valv refactor allowed two profiles to share a home (e.g., aliasing) the picker would silently pick the first match. Defensible to add an explicit panic / sanity-check at picker construction, OR switch the match key to a profile index. Non-blocking; the current invariant is preserved by production code.
+
+### Attack 2 — Small leak (R1 CX2) `Provider("all")` in 0-accounts error + cancel-path leak
+
+**Hypothesis (vector 2):** R2 added a `len(allProfiles) == 0` pre-flight in `pickProfileCrossProvider`. But what about the case where NON-zero profiles exist and the user CANCELS the picker? Does the cancel path leak `"all"` in any user-visible string?
+
+**Trace:**
+
+1. R2 pre-flight (`manage.go:993-997`):
+
+   ```go
+   if len(allProfiles) == 0 {
+       return "", "", fmt.Errorf("no accounts found across any provider; run `valv manage account add codex <name>` or `valv manage account add claude <name>` to create one")
+   }
+   ```
+
+   No "all" in the message. Lists both providers explicitly. New test `TestAccountSwitchNoArgsZeroAccountsErrors` (`manage_test.go:639-651`) asserts both `codex` and `claude` are present AND that no `" all "` / `"add all"` substring leaks.
+
+2. Cancel path (non-zero profiles, user presses esc):
+   - `realPickProfile` (`operator_helpers.go:183-185`) returns `(domain.Profile{}, errSelectionCanceled)` — bare sentinel, no formatted message.
+   - `pickProfileCrossProvider` (`manage.go:1001-1004`) propagates the error verbatim: `return "", "", err`.
+   - Caller (`runManageAccountSwitch` line 599-604) catches `errors.Is(pickerErr, errSelectionCanceled)` and writes the no-op record `"No account switch made"` / `"no account selected"`. **No "all" anywhere in the cancel path.**
+
+3. TTY-missing path (non-zero profiles, no TTY): `realPickProfile` returns `"account is required when not running in a TTY"` (`operator_helpers.go:170`). No provider-name interpolation. Clean.
+
+4. `picker.go:49` still sets `menu.Title = fmt.Sprintf("%s accounts", provider)` → cross-provider picker title is `"all accounts"`. **Per spawn prompt: DEFERRED to DROP_9.** Not an R2 regression — explicitly out of R2 scope.
+
+**Verdict:** REFUTED — small leak fully addressed in the error / cancel / TTY paths. Picker-title leak deferred to DROP_9 per spawn prompt; not flagged here.
+
+### Attack 3 — Nit-2 fix verification
+
+**Hypothesis (vector 3):** R1 nit-2 was the redundant `args := args` capture shim at `manage_test.go:320` (Go 1.22+ creates per-iteration scope, so the copy is dead code).
+
+**Trace:** R2 diff confirms removal:
+
+```
+@@ -317,7 +318,6 @@ func TestRunManageUpdateClaudeBuildsImage(t *testing.T) {
+-		args := args
+ 		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+```
+
+Line gone. `t.Run` and the body capture `args` directly via the per-iteration loop variable (Go 1.22+). Verified `mage testPkg ./internal/cli` still GREEN.
+
+**Verdict:** REFUTED — nit-2 fix lands cleanly.
+
+### Attack 4 — Injection seam race / parallel test interleaving
+
+**Hypothesis (vector 4):** R2 introduces `pickProfileFn = realPickProfile` as a package-level var. Existing parallel tests `TestPickProfileWithoutTTYRequiresExplicitAccount` (`extended_test.go:420 t.Parallel()`) and `TestPickProfileRequiresTTY` (`extended_test.go:741 t.Parallel()`) READ `pickProfileFn`. The new `TestPickProfileCrossProviderHandlesDuplicateNames` (non-parallel) WRITES it. Does `-race` surface a race?
+
+**Trace:**
+
+1. Go's `testing` semantics: non-parallel tests run sequentially before any `t.Parallel()` test resumes. `TestPickProfileCrossProviderHandlesDuplicateNames` is non-parallel — it executes during the sequential phase, mutates `pickProfileFn` via `orig := pickProfileFn; pickProfileFn = stub; defer func() { pickProfileFn = orig }()`. The defer fires when the test function exits.
+
+2. Per Go testing model: ALL non-`t.Parallel()` tests in a package complete before ANY parallel test resumes from its `t.Parallel()` pause. So `pickProfileFn` is restored to `realPickProfile` BEFORE `TestPickProfileWithoutTTYRequiresExplicitAccount` or `TestPickProfileRequiresTTY` actually executes their bodies. No interleaving.
+
+3. **Inside the parallel cohort:** the two parallel tests both READ `pickProfileFn` (no write) → no race. Reads are safe under `-race` even without synchronization, provided no concurrent write exists. Verified by `mage testPkg ./internal/cli` running 167/167 tests GREEN with `-race`.
+
+4. **Sub-attack:** could two non-parallel tests both write `pickProfileFn` and interleave? Non-parallel tests run sequentially in source order (within their file's `init` registration order). They don't interleave with each other. Safe.
+
+5. New test `TestPickProfileCrossProviderHandlesDuplicateNames` correctly does NOT call `t.Parallel()`. Comment block at `manage_test.go:657-659` documents the rationale.
+
+6. New test `TestAccountSwitchNoArgsZeroAccountsErrors` (`manage_test.go:639`) also doesn't call `t.Parallel()`. It doesn't stub `pickProfileFn` directly, but it executes through the cross-provider path which COULD reach `pickProfile` if accounts existed — since the test fixture has zero accounts, the 0-accounts guard short-circuits before `pickProfile` is called. Either way: non-parallel, no race surface introduced.
+
+**Verdict:** REFUTED — no race. `mage testPkg ./internal/cli` runs with `-race` and is GREEN at HEAD.
+
+### Attack 5 — `crossProviderLister` interface narrowing ripple
+
+**Hypothesis (vector 5):** R2 drops `ProfileByName` from the `crossProviderLister` interface. Any callsite that depended on the broader interface would break.
+
+**Trace:** `git grep -n "crossProviderLister" -- '*.go'`:
+
+```
+internal/cli/manage.go:980:type crossProviderLister interface {
+internal/cli/manage.go:984:func pickProfileCrossProvider(cmd *cobra.Command, service crossProviderLister) (string, domain.Provider, error) {
+internal/cli/manage_test.go:703:// fakeCrossProviderLister is a test double for crossProviderLister.
+```
+
+Only ONE consumer: `pickProfileCrossProvider`. Only ONE test double: `fakeCrossProviderLister`. The R2 fake (`manage_test.go:704-710`) implements `ListProfiles` only — no `ProfileByName`. Aligned with the narrowed interface.
+
+The production caller `runManageAccountSwitch` (`manage.go:599`) passes `service` (a `manageservice.Service`), which has BOTH methods — the narrowing only loosens the consumer's expectation. No producer breaks.
+
+**Verdict:** REFUTED — narrowing is clean. No stranded callers.
+
+### Attack 6 — Picker enter-handler robustness against UI text drift
+
+**Hypothesis (vector 6):** Match-back reads `item.name` and `item.home` from the `profileItem` struct. Does it survive a future `profileItem.Title()` / `Description()` format change (e.g., adding a provider prefix to Title)?
+
+**Trace:** `picker.go:17-19`:
+
+```go
+func (i profileItem) FilterValue() string { return i.name + " " + i.home }
+func (i profileItem) Title() string       { return i.name }
+func (i profileItem) Description() string { return i.home }
+```
+
+The match-back keys on the STRUCT FIELDS (`item.name`, `item.home`), not the rendered `Title()` / `Description()` strings. A future change to add `"[codex]"` prefix in `Title()` would NOT break match-back — the underlying `i.name` is unchanged. The struct fields and the rendered text are decoupled. Robust against display-text drift.
+
+**Edge case — zero-value `home`:** if two profiles have `HomePath == ""` AND the same name, the match-back picks the first. This is impossible in production (both `DefaultHostProfile` paths and isolated account paths are non-empty by construction), but unconstrained at the picker level. Same future-fragility note as Attack 1.
+
+**Verdict:** REFUTED — match-back is robust against UI text drift.
+
+### Attack 7 — API ripple completeness (`pickProfile` signature change)
+
+**Hypothesis (vector 7):** `pickProfile` changed from `(string, error)` → `(domain.Profile, error)`. Every callsite must be updated.
+
+**Trace:** `git grep -n "pickProfile(" -- '*.go'`:
+
+```
+internal/cli/codex_setup.go:73    selectedProfile, err := pickProfile(...) → loginBindAndReportCodexSetup(..., selectedProfile)
+internal/cli/extended_test.go:428 _, err := pickProfile(...)              → test assertion only (no profile use)
+internal/cli/extended_test.go:748 _, err := pickProfile(...)              → test assertion only
+internal/cli/global.go:89         pickedProfile, pickErr := pickProfile(...); selected = pickedProfile.Name
+internal/cli/manage.go:458        selectedProfile, err := pickProfile(...) → runManageBind(..., selectedProfile.Name, "")
+internal/cli/manage.go:613        pickedProfile, pickErr := pickProfile(...); profileName = pickedProfile.Name
+internal/cli/manage.go:1001       selected, err := pickProfile(...); return selected.Name, selected.Provider, nil
+internal/cli/operator_helpers.go:161 — definition (returns domain.Profile, error)
+```
+
+7 callsites total (5 production + 2 test). All consume the new `(domain.Profile, error)` signature correctly:
+
+- 2 test callsites discard the profile (`_, err :=`) — they only check error text. Compatible.
+- 5 production callsites either bind the full profile (`selectedProfile`, then pass into another function) or extract `.Name` / `.Provider`. All compile under the new signature.
+
+Verified by `mage testPkg ./internal/cli` GREEN.
+
+**Verdict:** REFUTED — all 7 callsites correctly migrated. No stranded `(string, error)` consumer.
+
+### Attack 8 — Picker test fixture parity
+
+**Hypothesis (vector 8):** Did the API ripple correctly update `picker_test.go`? Are golden tests still consistent?
+
+**Trace:**
+
+1. `picker_test.go:1-29` (renamed `TestProfilePickerSelectsFirst` → `TestProfilePickerSelectsProfile`):
+   - Profiles now include `Provider: domain.ProviderCodex` explicitly.
+   - Assertion changed from `selected != "dev"` → `selected.Name != "dev"` and added `selected.Provider != domain.ProviderCodex`.
+   - Test verifies the Provider round-trips through `Selected()` correctly.
+
+2. `golden_test.go:25-55` (`TestProfilePickerGolden`, `TestProfilePickerGoldenClaude`): these tests do `final.View().Content` rendering — they don't call `Selected()`. The signature change to `Selected()` doesn't touch the View rendering pathway. Goldens unchanged. `mage golden` confirms 24/24 tracked goldens GREEN, including both Codex and Claude picker goldens.
+
+3. `model_test.go:62, 100` calls `updated.Selected()` on the OTHER `Model` type (the action picker, not the profile picker). Different type. Unchanged.
+
+**Verdict:** REFUTED — picker tests updated correctly; goldens unaffected because the View path is independent of `Selected()`.
+
+### Attack 9 — Hardcoded provider names in 0-accounts error (future fragility)
+
+**Hypothesis (vector 9):** R2's 0-accounts error hardcodes `"codex"` and `"claude"`. If a third provider lands, the message becomes incomplete.
+
+**Trace:** `manage.go:996`:
+
+```go
+return "", "", fmt.Errorf("no accounts found across any provider; run `valv manage account add codex <name>` or `valv manage account add claude <name>` to create one")
+```
+
+True — hardcoded two-provider list. Adding `ProviderAnthropicConsole` or any future third provider would require updating this string. Could be rewritten to iterate `supportedProviders()` dynamically.
+
+**Verdict:** REFUTED as R2 regression; flagged as FUTURE FRAGILITY for post-v0.1.0 multi-provider work. Per spawn prompt: "Acceptable for now (pre-v0.1.0 scope) but flag as future fragility." Not a blocker. Suggest a TODO comment routed to DROP_9 (CLI audit) or whichever drop adds the third provider.
+
+### Attack 10 — `pickProfileFn` default-init order
+
+**Hypothesis (vector 10):** Is `pickProfileFn = realPickProfile` guaranteed to initialize before any function references it?
+
+**Trace:** Both `pickProfileFn` (var) and `realPickProfile` (func) live in the SAME file (`operator_helpers.go`). Go function declarations are available at package-initialization time regardless of textual order — functions are first-class values with their addresses resolved at compile time, not at init time. Package-level var initialization with `var x = someFunc` (where `someFunc` is a package-level function declaration) is always safe.
+
+Additionally, even if `realPickProfile` were in another file, Go's spec guarantees that variable initialization expressions referencing package-level function declarations work — functions are bound before var initializers run.
+
+**Verdict:** REFUTED — no init-order hazard. Functions are bound before var init begins.
+
+### Mage verification
+
+- `mage testPkg ./internal/cli` — PASS (167 tests, 73.1% coverage, `-race` on).
+- `mage testPkg ./internal/tui/manage` — PASS (8 tests, 91.5% coverage, `-race` on).
+- `mage golden` — PASS (24 tracked + 1 external transcript).
+
+### Summary
+
+| # | Attack | Verdict |
+|---|---|---|
+| 1 | BLOCKER (R1 CX1) picker dead-end on duplicate `(name, home)` | REFUTED (impossible in production; provider-rooted homes) |
+| 2 | Small leak (R1 CX2) `Provider("all")` in 0-accounts / cancel | REFUTED (clean error + clean cancel; picker-title deferred to DROP_9) |
+| 3 | Nit-2 `args := args` removal | REFUTED (line gone, tests green) |
+| 4 | Injection seam race / parallel test interleaving | REFUTED (non-parallel test serialized by Go testing semantics) |
+| 5 | `crossProviderLister` interface narrowing ripple | REFUTED (one consumer; aligned) |
+| 6 | Picker enter-handler robustness against UI text drift | REFUTED (matches struct fields, not rendered text) |
+| 7 | API ripple completeness | REFUTED (7/7 callsites migrated) |
+| 8 | Picker test fixture parity | REFUTED (picker_test.go updated; goldens unaffected) |
+| 9 | Hardcoded provider names in 0-accounts error | REFUTED as regression (future fragility flagged) |
+| 10 | `pickProfileFn` default-init order | REFUTED (Go spec guarantees) |
+
+**No CONFIRMED counterexamples.** All R1 BLOCKER + small leak + nit-2 fixes land cleanly. R2 introduces no new defects.
+
+**Unknowns:** none.
+
+**Future fragility flags (non-blocking, do NOT block R2 closure):**
+
+1. Picker match-back keys on `(name, home)` tuple — if a future Valv refactor allows two profiles to share that tuple, the picker silently picks the first match. Defensible to add a uniqueness invariant check at picker construction OR switch match key to a profile index. Route to DROP_9 audit if dev wants hardening.
+2. 0-accounts error hardcodes `codex` and `claude`. Iterate `supportedProviders()` when a third provider is added.
+3. Picker title still says `"all accounts"` (DEFERRED to DROP_9 per R1 routing — flagged only for orchestrator visibility, NOT raised as R2 issue).
+
+## Hylla Feedback (Unit 8.2 Round 2)
+
+N/A — Hylla unreachable per spawn paradigm override; all evidence gathered via `Read`, `git grep`, `git diff`, Context7-not-needed (no external library questions), and `mage testPkg` / `mage golden`. No tool-shape gripes.

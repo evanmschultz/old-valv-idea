@@ -205,3 +205,86 @@ N/A — Hylla unreachable per spawn-prompt paradigm override. Evidence gathered 
 ### TL;DR
 
 PASS. All 5 ACs satisfied. `mage testPkg internal/cli` 165/165 GREEN @ 71.4% coverage with `-race`. Four-step resolution order implemented correctly with explicit `domain.ErrNotFound` filtering, deterministic `supportedProviders()` iteration, multi-match error listing `(provider, account)` pairs, and `--provider` flag overriding all positional-as-provider parsing. Pre-existing `TestManageAccountSwitchMissingAccountShowsActionableGuidance` still passes because the new Step 3 zero-match error preserves the `"run \`valv manage account add codex <name>\`"` substring. The LSP `forvar` flag at line 320 is pre-existing legacy code (commit 413db81c, 2026-04-21), not introduced by this build — non-blocking polish only.
+
+## Unit 8.2 — Round 2
+
+**Verdict: PASS.**
+
+R2 builder commit `15479ba2 fix(drop-8): unit 8.2 r2 cross-provider picker fixes` resolves all three R1 findings (1 BLOCKER + 1 CONCERN/leak + 1 nit-2), passes all three mage targets, and ships a measurable test for each fix. No regressions detected. The `pickProfileFn` injection seam (DROP-7 pattern) is the right ergonomic choice for a non-TTY unit test of cross-provider behavior and doesn't compromise production paths.
+
+### Per-fix mapping
+
+**FIX 1 (BLOCKER) — `ProfilePickerModel.Selected()` returns `(domain.Profile, bool)`:**
+
+- `internal/tui/manage/picker.go:101-106` — signature confirmed `func (m ProfilePickerModel) Selected() (domain.Profile, bool)`; returns full profile struct with `Provider` field set.
+- Call sites verified via `git grep "\.Selected()"`:
+  - `internal/cli/operator_helpers.go:183` — `selected, ok := model.Selected()`; uses `selected` directly as `domain.Profile` (no name re-resolution). Returns `selected, nil` at line 187.
+  - `internal/tui/manage/picker_test.go:21-26` — destructures into `selected, ok` and asserts `selected.Provider == domain.ProviderCodex`, exercising the new field-bearing API.
+- The remaining `.Selected()` references at `operator_helpers.go:137` and `model_test.go:62,100` are on the unrelated `Model.Selected() (Action, bool)` method — distinct type, distinct contract; not affected.
+- `pickProfile` wrapper signature is now `func pickProfile(...) (domain.Profile, error)` (operator_helpers.go:161) — single return + error replaces R1's `(domain.Profile, bool)` shape mismatch.
+- `pickProfileCrossProvider` (manage.go:984-1006) reads `selected.Name, selected.Provider` directly from the picker result — post-resolution `ProfileByName` lookup loop is gone, `crossProviderLister` interface (manage.go:980-982) is `ListProfiles`-only as the comment promises.
+
+**FIX 2 (small leak) — 0-accounts cross-provider error:**
+
+- `internal/cli/manage.go:995-997` — explicit zero-accounts guard fires before `pickProfile(..., domain.Provider("all"), ...)` is reached:
+  - Error literal: `"no accounts found across any provider; run \`valv manage account add codex <name>\` or \`valv manage account add claude <name>\` to create one"`.
+  - Contains both `codex` and `claude` keywords.
+  - Does not contain the literal `"all"` (verified by inspection: substring `" all "` and `"add all"` both absent).
+- `TestAccountSwitchNoArgsZeroAccountsErrors` (manage_test.go:638-651) executes `valv manage account switch` with both providers empty, asserts `codex` + `claude` in the error, asserts `" all "` and `"add all"` are absent. PASSES.
+
+**FIX 3 (nit-2) — `args := args` shadow:**
+
+- `internal/cli/manage_test.go:320` — for-range now reads `for _, args := range [][]string{{"update"}, {"update", "codex"}}` with no redundant inner `args := args` shadow. Go 1.22+ semantics auto-fresh-scope `args` per iteration; the LSP `forvar` diagnostic does not fire on this form.
+
+### Mage target reproducibility
+
+| Target | Builder claim | This run | Status |
+|---|---|---|---|
+| `mage testPkg ./internal/tui/manage` | 8/8 @ 91.5%, `-race` | 8/8 @ 91.5%, `-race` (1.37s) | MATCH |
+| `mage testPkg ./internal/cli` | 167/167 @ 73.1%, `-race` | 167/167 @ 73.1%, `-race` (5.45s) | MATCH |
+| `mage golden` | 24 tests + external transcript GREEN | 24 tests + 1 external transcript GREEN (12.77s) | MATCH |
+
+### `pickProfileFn` injection seam safety
+
+- Package-level var: `var pickProfileFn = realPickProfile` (`operator_helpers.go:159`). Production code goes through `pickProfile()` (line 161) which dispatches to `pickProfileFn`. Default is `realPickProfile`; no production caller can observe a different impl.
+- Test mutation discipline: `TestPickProfileCrossProviderHandlesDuplicateNames` (manage_test.go:660-704) is non-parallel (no `t.Parallel()`) per the comment at lines 657-659. Restores with `defer func() { pickProfileFn = orig }()`. Parallel tests that call `pickProfile` (`extended_test.go:420` and `:748`) only exercise the early-return branches of `realPickProfile` (`len(profiles) == 0`, non-TTY guidance) and run after sequential tests complete per Go testing semantics — no race window.
+- `mage testPkg ./internal/cli -race` finished clean (167/167) — empirical confirmation no race triggered.
+
+### Duplicate-name test trace
+
+`TestPickProfileCrossProviderHandlesDuplicateNames` (manage_test.go:660-704):
+
+1. Sets up `codexWork = {work, codex}` and `claudeWork = {work, claude}` in a `fakeCrossProviderLister` keyed by provider.
+2. Stubs `pickProfileFn` to scan the picker input for `p.Provider == ProviderClaude && p.Name == "work"` and return it; `t.Fatalf`s otherwise — this asserts the cross-provider function aggregated BOTH profiles into the picker call.
+3. Calls `pickProfileCrossProvider(cmd, fakeLister)`.
+4. Asserts `provider == domain.ProviderClaude` and `name == "work"`.
+
+This is exactly the failure shape the R1 BLOCKER named: same name, different providers, with no ambiguity in the returned provider. PASSES.
+
+### QA Falsification pass
+
+Attacked the verdict on five vectors:
+
+1. **Unmigrated `.Selected()` caller?** — `git grep "\.Selected()"` returns five lines, all in migrated or unrelated-type files (Model.Selected on the manage Model type). No leakage.
+2. **`pickProfileFn` race with parallel tests?** — sequential mutator runs before parallel readers; defer-restore inside sequential phase. `-race` clean. Mitigated.
+3. **0-accounts error contains `"all"` indirectly?** — full literal inspected: `"no accounts found across any provider; run \`valv manage account add codex <name>\` or \`valv manage account add claude <name>\` to create one"` — no `all`. Mitigated.
+4. **Stripping `ProfileByName` from `crossProviderLister` interface broke a caller?** — interface is local to manage.go (line 980-982), unexported, only consumer is `pickProfileCrossProvider`. The `manageservice.Service` concrete type still has `ProfileByName` for other callers (`runManageAccountSwitch:623`). Mitigated.
+5. **R1 BLOCKER fully resolved or just papered over?** — The R1 finding was that `pickProfileCrossProvider` returned only `Name` and tried to re-resolve provider via name lookup, which failed when the same name existed in both providers. R2 returns `(name, provider)` derived from the picker's authoritative `domain.Profile`. No name-based ambiguity remains. Mitigated.
+
+No unmitigated counterexample.
+
+### Findings
+
+None. R2 is clean across all three fixes plus the added testability seam.
+
+### Missing evidence
+
+None.
+
+### Hylla Feedback
+
+N/A — Hylla unreachable per spawn-prompt paradigm override. Evidence gathered via `git diff HEAD~1`, direct `Read`, `git grep "\.Selected()"`, `git grep pickProfile`, `git grep ProfileByName`, and `mage testPkg` / `mage golden` reproduction.
+
+### TL;DR
+
+PASS. All three R2 fixes verified end-to-end. Selected() returns `(domain.Profile, bool)` with no unmigrated callers; 0-accounts cross-provider error names both providers and contains no `"all"` sentinel; `args := args` shadow gone at manage_test.go:320. Three mage targets reproduce builder's exact pass counts and coverage (`mage testPkg ./internal/tui/manage` 8/8 @ 91.5%, `mage testPkg ./internal/cli` 167/167 @ 73.1%, `mage golden` 24 + 1 external). New `pickProfileFn = realPickProfile` injection seam is the standard DROP-7 pattern and is provably safe (defaults right, non-parallel mutators, `-race` clean). Unit 8.2 ready to close.
