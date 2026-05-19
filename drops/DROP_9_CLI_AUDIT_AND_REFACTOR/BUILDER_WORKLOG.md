@@ -352,3 +352,63 @@ None — Hylla's last ingest predates all DROP_9 changes (snapshot 2 = DROP_8 ba
 ## Hylla Feedback (Unit 9.4.5 Round 1)
 
 N/A — task was a pure string-substitution sweep. No Go symbol search via Hylla was needed; all evidence came from direct `Read` of source files and `git grep` counts. Hylla is Go-code only and is not applicable to grep-and-substitute work.
+
+---
+
+## Unit 9.4.5 — Round 2
+
+- **Builder:** go-builder-agent
+- **Started:** 2026-05-19
+- **Round:** fix-up addressing R1 QA Falsification CONFIRMED counterexample (vector 1)
+
+### R1 finding addressed
+
+QA Falsification vector 1 (`BUILDER_QA_FALSIFICATION.md § Unit 9.4.5 — Round 1`): `newManageCleanupCommand`'s Example block at `internal/cli/manage.go:1389-1392` documented `valv cleanup state / images / docker / all` — commands that do not exist. `valv cleanup` is not a registered top-level command (root.go:137 registers no cleanupCmd); `newManageCleanupCommand` is dead code instantiated only by test helpers. The Example block pointed at non-existent commands.
+
+Additionally, dev approved sweep of two out-of-scope stragglers:
+- `CONTRIBUTING.md:46` — `mage dev:run "manage update"` → `mage dev:run "image update"`
+- `CLAUDE.md:122` — `valv manage …` → `valv account …, valv image …`
+
+### Files touched in R2
+
+- `internal/cli/manage.go` — Example block in `newManageCleanupCommand` (lines 1388-1393) updated
+- `CONTRIBUTING.md` — line 46 substitution
+- `CLAUDE.md` — line 122 substitution
+
+Note: R2 is a scope expansion beyond R1's declared paths. CONTRIBUTING.md and CLAUDE.md are outside the original `paths` list for 9.4.5. Dev approval was recorded in the orchestrator conversation (builder appendix for R2 explicitly authorizes the sweep).
+
+### Substitutions made
+
+1. **`internal/cli/manage.go`** (dead-code `newManageCleanupCommand` Example block):
+   - `valv cleanup state` → `valv image cleanup --state`
+   - `valv cleanup images` → `valv image cleanup --images`
+   - `valv cleanup docker` → `valv image cleanup --containers --images` (closest semantic match: containers + images, per `--containers` and `--images` flags on `newImageCleanupCommand`)
+   - `valv cleanup all` → `valv image cleanup --all`
+
+2. **`CONTRIBUTING.md`**: `mage dev:run "manage update"` → `mage dev:run "image update"`
+
+3. **`CLAUDE.md`**: `cobra command implementations (\`valv codex\`, \`valv manage …\`)` → `cobra command implementations (\`valv codex\`, \`valv account …\`, \`valv image …\`)`
+
+### Mage gate results
+
+| Gate | Result | Detail |
+|------|--------|--------|
+| `mage testPkg github.com/evanmschultz/valv/internal/cli` | PASS | 206 tests, 69.5% coverage (threshold 60%), -race, 0 failures |
+| `mage integration` | PASS | 209 tests passed, 0 failed |
+| `mage build` | PASS | `./valv` built cleanly |
+
+### Post-R2 grep results (5 checks — all must be zero)
+
+| Check | Pattern | Result |
+|-------|---------|--------|
+| AC #1a | `git grep "valv manage"` — cli helper files (excl. manage.go) | **0** |
+| AC #1b | `git grep "valv manage"` — manage.go | **0** |
+| AC #1c | `git grep -E '"manage [a-z]+\|manage [a-z]+"'` — magefile.go + README.md | **0** |
+| R2 sanity 1 | `git grep "valv cleanup "` — internal/cli/manage.go | **0** |
+| R2 sanity 2 | `git grep "valv manage"` — CONTRIBUTING.md CLAUDE.md | **0** |
+
+All 5 checks return zero hits. R1's three AC invariants hold post-R2.
+
+## Hylla Feedback (Unit 9.4.5 Round 2)
+
+N/A — task touched only non-Go files (CONTRIBUTING.md, CLAUDE.md) and a string literal in dead-code Go. No Go symbol search was needed. Hylla is Go-code only; direct `Read` was the correct evidence tool for all three substitutions.

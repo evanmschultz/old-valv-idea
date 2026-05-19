@@ -1386,10 +1386,10 @@ Scopes:
 - all: local state plus Valv-managed runtime containers plus provider images
 `),
 		Example: strings.TrimSpace(`
-valv cleanup state
-valv cleanup images
-valv cleanup docker
-valv cleanup all
+valv image cleanup --state
+valv image cleanup --images
+valv image cleanup --containers --images
+valv image cleanup --all
 `),
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {

@@ -43,7 +43,7 @@ Use the disposable dev-home workflow for local runtime validation that should no
 
 ```bash
 mage dev:home
-mage dev:run "manage update"
+mage dev:run "image update"
 mage dev:run "codex --help"
 mage dev:reset
 mage dev:clean
