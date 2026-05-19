@@ -526,6 +526,68 @@ func TestStatusReturnsUnboundProjectWhenMissing(t *testing.T) {
 	}
 }
 
+func TestStatusForProviderReturnsBoundProjectDetailsForClaude(t *testing.T) {
+	t.Parallel()
+
+	store, providerRoot := testStore(t)
+	service, err := New(Options{
+		Store:        store,
+		ProviderRoot: providerRoot,
+		Detect: func(string) (projectdetect.Result, error) {
+			return projectdetect.Result{Root: "/tmp/example/project", HasGitMarker: true}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	profile, err := service.CreateProfile(context.Background(), domain.ProviderClaude, "alpha", "/tmp/example/alpha")
+	if err != nil {
+		t.Fatalf("CreateProfile() error = %v", err)
+	}
+	if _, err := service.BindProject(context.Background(), domain.ProviderClaude, profile.Name, "/tmp/example/project"); err != nil {
+		t.Fatalf("BindProject() error = %v", err)
+	}
+
+	status, err := service.StatusForProvider(context.Background(), "/tmp/example/project", domain.ProviderClaude)
+	if err != nil {
+		t.Fatalf("StatusForProvider() error = %v", err)
+	}
+	if status.Profile.Name != profile.Name {
+		t.Fatalf("StatusForProvider().Profile.Name = %q, want %q", status.Profile.Name, profile.Name)
+	}
+}
+
+func TestStatusForProviderReturnsUnboundProjectWhenCodexBoundButNotClaude(t *testing.T) {
+	t.Parallel()
+
+	store, providerRoot := testStore(t)
+	service, err := New(Options{
+		Store:        store,
+		ProviderRoot: providerRoot,
+		Detect: func(string) (projectdetect.Result, error) {
+			return projectdetect.Result{Root: "/tmp/example/project", HasGitMarker: true}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	// Bind a Codex profile — StatusForProvider(Claude) must NOT find it.
+	codexProfile, err := service.CreateProfile(context.Background(), domain.ProviderCodex, "work", "/tmp/example/work")
+	if err != nil {
+		t.Fatalf("CreateProfile(codex) error = %v", err)
+	}
+	if _, err := service.BindProject(context.Background(), domain.ProviderCodex, codexProfile.Name, "/tmp/example/project"); err != nil {
+		t.Fatalf("BindProject(codex) error = %v", err)
+	}
+
+	_, err = service.StatusForProvider(context.Background(), "/tmp/example/project", domain.ProviderClaude)
+	if !errors.Is(err, domain.ErrUnboundProject) {
+		t.Fatalf("StatusForProvider(claude) error = %v, want domain.ErrUnboundProject", err)
+	}
+}
+
 func TestListProfilesReturnsPersistedProfiles(t *testing.T) {
 	t.Parallel()
 

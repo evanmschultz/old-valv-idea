@@ -52,22 +52,29 @@ type Options struct {
 	RealHome string
 	Logger   *log.Logger
 	Notices  io.Writer
+	// OverrideProfile, when non-nil, causes Run to use this profile directly
+	// instead of resolving the binding from the store. The profile's HomePath
+	// is bind-mounted into the container. Used when --account is supplied or
+	// when ensureClaudeBindingReady has already resolved the profile (auto-bind
+	// or picker). When nil, binding resolution proceeds normally via the store.
+	OverrideProfile *domain.Profile
 }
 
 // Service launches Claude containers bound to a Valv project and profile.
 type Service struct {
-	store    Store
-	executor Executor
-	detect   DetectFunc
-	image    docker.ImageRef
-	user     string
-	tty      bool
-	stdin    bool
-	tempRoot string
-	now      func() time.Time
-	realHome string
-	logger   *log.Logger
-	notices  io.Writer
+	store           Store
+	executor        Executor
+	detect          DetectFunc
+	image           docker.ImageRef
+	user            string
+	tty             bool
+	stdin           bool
+	tempRoot        string
+	now             func() time.Time
+	realHome        string
+	logger          *log.Logger
+	notices         io.Writer
+	overrideProfile *domain.Profile
 }
 
 // New constructs a Service from Options. Returns an error if Store, Executor,
@@ -97,28 +104,56 @@ func New(options Options) (Service, error) {
 	}
 
 	return Service{
-		store:    options.Store,
-		executor: options.Executor,
-		detect:   detect,
-		image:    options.Image,
-		user:     strings.TrimSpace(options.User),
-		tty:      options.TTY,
-		stdin:    options.Stdin,
-		tempRoot: tempRoot,
-		now:      now,
-		realHome: strings.TrimSpace(options.RealHome),
-		logger:   options.Logger,
-		notices:  options.Notices,
+		store:           options.Store,
+		executor:        options.Executor,
+		detect:          detect,
+		image:           options.Image,
+		user:            strings.TrimSpace(options.User),
+		tty:             options.TTY,
+		stdin:           options.Stdin,
+		tempRoot:        tempRoot,
+		now:             now,
+		realHome:        strings.TrimSpace(options.RealHome),
+		logger:          options.Logger,
+		notices:         options.Notices,
+		overrideProfile: options.OverrideProfile,
 	}, nil
 }
 
-// Run launches a Claude container bound to the project at cwd. The service
-// resolves the project, binding, and profile, prepares the container runtime,
-// and attaches or detaches depending on the TTY/Stdin flags.
+// Run launches a Claude container bound to the project at cwd. When
+// OverrideProfile is set in Options, that profile is used directly instead of
+// resolving the binding from the store — binding check was already done by the
+// caller (ensureClaudeBindingReady). When OverrideProfile is nil, the service
+// resolves the binding from the store as normal.
 func (s Service) Run(ctx context.Context, cwd string, claudeArgs []string) error {
-	resolved, err := s.resolveBinding(ctx, cwd)
-	if err != nil {
-		return err
+	var resolved resolvedLaunchBinding
+	if s.overrideProfile != nil {
+		workingDir, err := pathutil.Normalize(cwd)
+		if err != nil {
+			return fmt.Errorf("run claude launch service: normalize working directory: %w", err)
+		}
+		projectResult, err := s.detect(workingDir)
+		if err != nil {
+			return fmt.Errorf("run claude launch service: detect project from %q: %w", workingDir, err)
+		}
+		projectRecord, err := s.store.ProjectByRoot(ctx, projectResult.Root)
+		if err != nil {
+			if errors.Is(err, domain.ErrNotFound) {
+				return fmt.Errorf("run claude launch service: project %q: %w", projectResult.Root, domain.ErrUnboundProject)
+			}
+			return fmt.Errorf("run claude launch service: lookup project %q: %w", projectResult.Root, err)
+		}
+		resolved = resolvedLaunchBinding{
+			workingDir: workingDir,
+			project:    projectRecord,
+			profile:    *s.overrideProfile,
+		}
+	} else {
+		var err error
+		resolved, err = s.resolveBinding(ctx, cwd)
+		if err != nil {
+			return err
+		}
 	}
 
 	// Claude isolated-first model: pass profileHome directly as both profile and

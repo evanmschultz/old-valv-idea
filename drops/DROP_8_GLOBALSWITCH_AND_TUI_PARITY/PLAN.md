@@ -101,7 +101,7 @@ Closes the remainder of focus-plan §6.6 + the dogfood binding-UX gap (dev hit "
 
 ### Unit 8.4 — Binding UX: `valv claude` auto-bind / picker / 0-account error
 
-**State:** todo
+**State:** done
 **Paths:**
 - `internal/cli/claude_setup.go` (new file)
 - `internal/cli/claude_setup_test.go` (new file)

@@ -261,6 +261,44 @@ func (s Service) Status(ctx context.Context, startPath string) (StatusResult, er
 	return StatusResult{Detected: projectResult, Project: projectRecord, Profile: profile, Binding: binding}, nil
 }
 
+// StatusForProvider returns the binding status for the given provider.
+// It mirrors Status exactly but passes provider to BindingByProjectID instead
+// of hardcoding domain.ProviderCodex. This is the correct lookup for non-Codex
+// providers (e.g. Claude). Do NOT use Status for Claude binding checks — it
+// always queries the Codex binding row.
+func (s Service) StatusForProvider(ctx context.Context, startPath string, provider domain.Provider) (StatusResult, error) {
+	projectResult, err := s.detect(startPath)
+	if err != nil {
+		return StatusResult{}, fmt.Errorf("manage status: detect project from %q: %w", startPath, err)
+	}
+
+	projectRecord, err := s.store.ProjectByRoot(ctx, projectResult.Root)
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			return StatusResult{}, fmt.Errorf("manage status: project %q: %w", projectResult.Root, domain.ErrUnboundProject)
+		}
+		return StatusResult{}, fmt.Errorf("manage status: lookup project %q: %w", projectResult.Root, err)
+	}
+
+	binding, err := s.store.BindingByProjectID(ctx, projectRecord.ID, provider)
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			return StatusResult{}, fmt.Errorf("manage status: project %q: %w", projectResult.Root, domain.ErrUnboundProject)
+		}
+		return StatusResult{}, fmt.Errorf("manage status: lookup binding for project %q: %w", projectResult.Root, err)
+	}
+
+	profile, err := s.store.ProfileByID(ctx, binding.ProfileID)
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			return StatusResult{}, fmt.Errorf("manage status: profile for project %q: %w", projectResult.Root, domain.ErrUnboundProject)
+		}
+		return StatusResult{}, fmt.Errorf("manage status: lookup profile %q: %w", binding.ProfileID, err)
+	}
+
+	return StatusResult{Detected: projectResult, Project: projectRecord, Profile: profile, Binding: binding}, nil
+}
+
 func (s Service) ListProfiles(ctx context.Context, provider domain.Provider) (ProfileListResult, error) {
 	profiles, err := s.store.ListProfilesByProvider(ctx, provider)
 	if err != nil {

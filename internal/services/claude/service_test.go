@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -546,5 +547,68 @@ func TestRunBubblesExecutorErrors(t *testing.T) {
 	err = service.Run(context.Background(), "/tmp/project", []string{"--resume"})
 	if err == nil || !strings.Contains(err.Error(), "docker failed") {
 		t.Fatalf("Run() error = %v, want wrapped docker error", err)
+	}
+}
+
+// TestRunUsesOverrideProfileHomePath verifies that when OverrideProfile is set,
+// Run uses that profile's HomePath for the container mount instead of the bound
+// profile's home. This exercises the C2 concern from 8.3 QA falsification.
+func TestRunUsesOverrideProfileHomePath(t *testing.T) {
+	t.Parallel()
+
+	// Use os.MkdirTemp directly and EvalSymlinks to get the real path, which
+	// avoids the /var vs /private/var discrepancy on macOS.
+	overrideHomeRaw := t.TempDir()
+	boundHomeRaw := t.TempDir()
+	overrideHome, err := filepath.EvalSymlinks(overrideHomeRaw)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(overrideHome) error = %v", err)
+	}
+	boundHome, err := filepath.EvalSymlinks(boundHomeRaw)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(boundHome) error = %v", err)
+	}
+
+	project := domain.Project{ID: "project-1234567890", Root: "/tmp/project", Name: "proj"}
+	// The store has a bound profile with a DIFFERENT home.
+	store := boundClaudeStore(project, boundHome)
+	executor := &fakeExecutor{}
+
+	overrideProfile := domain.Profile{
+		ID:       "override-profile",
+		Provider: domain.ProviderClaude,
+		Name:     "override",
+		HomePath: overrideHome,
+	}
+
+	service, err := New(Options{
+		Store:           store,
+		Executor:        executor,
+		Detect:          detectAlways(project.Root),
+		Image:           docker.NewImageRef("valv-claude", "dev"),
+		TempRoot:        t.TempDir(),
+		Now:             func() time.Time { return time.Unix(0, 42) },
+		OverrideProfile: &overrideProfile,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if err := service.Run(context.Background(), "/tmp/project", []string{"--prompt", "hello"}); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	// Assert the override profile's home is bind-mounted, not the bound profile's home.
+	foundOverrideMount := false
+	for _, m := range executor.got.Mounts {
+		if m.Source == overrideHome {
+			foundOverrideMount = true
+		}
+		if m.Source == boundHome {
+			t.Fatalf("Run() mount source = %q, want override home %q not bound home", m.Source, overrideHome)
+		}
+	}
+	if !foundOverrideMount {
+		t.Fatalf("Run() mounts = %+v, want mount with source %q (override home)", executor.got.Mounts, overrideHome)
 	}
 }

@@ -68,23 +68,15 @@ func runClaudeCommand(cmd *cobra.Command, paths config.Paths, args []string) err
 		return fmt.Errorf("run claude command: resolve working directory: %w", err)
 	}
 
-	// When --account is supplied, resolve and auth the override profile before
-	// the image check. When accountName is empty, auth runs container-side at
-	// first launch so no host-side check is needed here.
-	if accountName != "" {
-		if err := ensureClaudeAccountReady(cmd, domain.Profile{}, accountAuthOptions{Paths: paths}, accountName); err != nil {
-			return fmt.Errorf("run claude command: %w", err)
-		}
+	// ensureClaudeBindingReady handles all binding resolution:
+	// - accountOverride non-empty: resolve by name, no binding written.
+	// - no override: check existing Claude binding; if unbound, auto-bind or
+	//   launch picker based on account count and TTY availability.
+	// Claude device-code auth is in-container; no host-side auth check here.
+	resolvedProfile, err := ensureClaudeBindingReady(cmd, paths, workingDir, accountName)
+	if err != nil {
+		return fmt.Errorf("run claude command: %w", err)
 	}
-
-	// When an account override is active, skip ValidateBinding (which would fail
-	// for unbound projects). The resolved profile is threaded into the launch
-	// service by Unit 8.4 via OverrideProfile on claudeservice.Options.
-	skipValidate := accountName != ""
-
-	// No ensureClaudeBindingReady: unbound projects surface as ErrUnboundProject
-	// from service.ValidateBinding. Claude device-code auth runs inside the
-	// container at first launch; no host-side auth check required.
 
 	stdinTTY := commandHasTTY(cmd.InOrStdin())
 	stdoutTTY := commandHasTTY(cmd.OutOrStdout())
@@ -109,29 +101,23 @@ func runClaudeCommand(cmd *cobra.Command, paths config.Paths, args []string) err
 	defer store.Close()
 
 	service, err := claudeservice.New(claudeservice.Options{
-		Store:    store,
-		Executor: dockeradapter.NewExecutor(dockeradapter.NewSystemRunner("docker", cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr())),
-		Image:    claudeImageRef(),
-		User:     currentContainerUser(),
-		TTY:      stdinTTY && stdoutTTY,
-		Stdin:    stdinTTY,
-		TempRoot: paths.TempCacheDir,
-		RealHome: realHomeDir(),
-		Logger:   logger,
-		Notices:  cmd.ErrOrStderr(),
+		Store:           store,
+		Executor:        dockeradapter.NewExecutor(dockeradapter.NewSystemRunner("docker", cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr())),
+		Image:           claudeImageRef(),
+		User:            currentContainerUser(),
+		TTY:             stdinTTY && stdoutTTY,
+		Stdin:           stdinTTY,
+		TempRoot:        paths.TempCacheDir,
+		RealHome:        realHomeDir(),
+		Logger:          logger,
+		Notices:         cmd.ErrOrStderr(),
+		OverrideProfile: &resolvedProfile,
 	})
 	if err != nil {
 		return fmt.Errorf("run claude command: initialize launcher: %w", err)
 	}
-	// Validate binding before the image check so unbound-project errors surface
-	// quickly without triggering a docker build. Skip when --account override is
-	// active: the override bypasses the binding store entirely. Unit 8.4 threads
-	// the resolved profile into claudeservice.Options so the launch proceeds.
-	if !skipValidate {
-		if err := service.ValidateBinding(cmd.Context(), workingDir); err != nil {
-			return fmt.Errorf("run claude command: validate binding: %w", err)
-		}
-	}
+	// Image check before launch. ValidateBinding is skipped — ensureClaudeBindingReady
+	// already resolved (and if needed, wrote) the binding.
 	if err := ensureClaudeImageCurrent(cmd, paths); err != nil {
 		return fmt.Errorf("run claude command: %w", err)
 	}

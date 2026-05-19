@@ -3,7 +3,6 @@ package cli
 import (
 	"bytes"
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,7 +11,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/evanmschultz/valv/internal/config"
-	"github.com/evanmschultz/valv/internal/domain"
 )
 
 // TestNewClaudeCommandHelp verifies that newClaudeCommand produces a command
@@ -101,8 +99,8 @@ func TestNewClaudeCommandVersion(t *testing.T) {
 }
 
 // TestRunClaudeCommandUnboundProject verifies that runClaudeCommand returns an
-// error wrapping domain.ErrUnboundProject when the working directory has no
-// associated project record.
+// actionable error when the working directory has no associated project record
+// and no Claude accounts exist.
 func TestRunClaudeCommandUnboundProject(t *testing.T) {
 	paths := testCodexPaths(t)
 	wd, err := os.Getwd()
@@ -124,19 +122,23 @@ func TestRunClaudeCommandUnboundProject(t *testing.T) {
 	cmd.SetErr(&bytes.Buffer{})
 
 	err = cmd.RunE(cmd, []string{"--prompt", "hello"})
-	if !errors.Is(err, domain.ErrUnboundProject) {
-		t.Fatalf("RunE() error = %v, want domain.ErrUnboundProject", err)
+	if err == nil {
+		t.Fatal("RunE() error = nil, want error for unbound project with no accounts")
+	}
+	// ensureClaudeBindingReady returns 0-accounts error when no Claude accounts exist.
+	if !strings.Contains(err.Error(), "project is not bound") {
+		t.Fatalf("RunE() error = %q, want 'project is not bound' guidance", err.Error())
 	}
 }
 
 // TestRunClaudeCommandRejectsWrongProvider verifies that runClaudeCommand
-// returns an error when the project has a Codex binding (not Claude). Since no
-// Claude binding exists, the service returns ErrUnboundProject.
+// returns an actionable error when the project has a Codex binding but no
+// Claude binding and no Claude accounts exist.
 func TestRunClaudeCommandRejectsWrongProvider(t *testing.T) {
 	paths := testCodexPaths(t)
 
-	// Set up a project with a Codex binding — Claude service will not find a
-	// Claude binding and will surface ErrUnboundProject.
+	// Set up a project with a Codex binding — Claude setup will not find a
+	// Claude binding and will surface the 0-accounts error.
 	projectRoot := filepath.Join(t.TempDir(), "project")
 	if err := os.MkdirAll(filepath.Join(projectRoot, ".git"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(.git) error = %v", err)
@@ -161,8 +163,12 @@ func TestRunClaudeCommandRejectsWrongProvider(t *testing.T) {
 	cmd.SetErr(&bytes.Buffer{})
 
 	err = cmd.RunE(cmd, []string{"--prompt", "hello"})
-	if !errors.Is(err, domain.ErrUnboundProject) {
-		t.Fatalf("RunE() error = %v, want domain.ErrUnboundProject (no Claude binding)", err)
+	if err == nil {
+		t.Fatal("RunE() error = nil, want error (no Claude binding, no Claude accounts)")
+	}
+	// ensureClaudeBindingReady returns 0-accounts error since no Claude accounts exist.
+	if !strings.Contains(err.Error(), "project is not bound") {
+		t.Fatalf("RunE() error = %q, want 'project is not bound' guidance", err.Error())
 	}
 }
 

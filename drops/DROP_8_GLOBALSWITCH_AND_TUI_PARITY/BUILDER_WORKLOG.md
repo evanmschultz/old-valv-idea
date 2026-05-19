@@ -236,3 +236,66 @@ Unit 8.3 flipped to `done`.
 ## Hylla Feedback (Unit 8.3 R1)
 
 N/A — Hylla unreachable this session (per spawn prompt paradigm override). All evidence gathered via direct `Read` of source files. Primary sources: `internal/cli/claude.go`, `internal/cli/codex.go`, `internal/cli/codex_setup.go`, `internal/cli/codex_test.go`, `internal/services/manage/service.go`, `internal/services/claude/service.go`, `internal/cli/operator_helpers.go`.
+
+## Unit 8.4 — Round 1
+
+- **Builder:** go-builder-agent
+- **Started:** 2026-05-18
+- **Files touched:**
+  - `internal/cli/claude_setup.go` (NEW — `ensureClaudeBindingReady`, `unboundProjectNoAccountsError`)
+  - `internal/cli/claude_setup_test.go` (NEW — 7 tests)
+  - `internal/cli/claude.go` (rewired `runClaudeCommand`)
+  - `internal/cli/claude_test.go` (updated 2 tests for new behavior)
+  - `internal/services/manage/service.go` (added `StatusForProvider` method)
+  - `internal/services/manage/service_test.go` (added 2 tests for `StatusForProvider`)
+  - `internal/services/claude/service.go` (added `OverrideProfile *domain.Profile` to `Options` + `Service`, updated `New` and `Run`)
+  - `internal/services/claude/service_test.go` (added `TestRunUsesOverrideProfileHomePath`)
+- **Mage targets run:**
+  - `mage testPkg github.com/evanmschultz/valv/internal/services/manage` — PASS (25/25, 75.5% coverage, -race)
+  - `mage testPkg github.com/evanmschultz/valv/internal/services/claude` — PASS (18/18, 79.4% coverage, -race)
+  - `mage testPkg github.com/evanmschultz/valv/internal/cli` — PASS (191/191, 71.8% coverage, -race)
+  - `mage build` — PASS
+
+### Override-threading choice: Option (a) — `OverrideProfile *domain.Profile` on `claudeservice.Options`
+
+**Rationale:** Option (a) keeps `Run`'s public signature unchanged, localizes the override decision to construction time (where the caller already knows the resolved profile), and avoids every `Run` callsite needing to pass a new parameter. The `runClaudeCommand` constructs the service once and immediately calls `Run`; passing the profile at construction is both cleaner and self-documenting (`OverrideProfile` in the options struct makes the intent obvious). Option (b) would require all existing test callsites that call `service.Run` directly to be updated. Decision: option (a).
+
+**`Run` behavior with override:** When `overrideProfile != nil`, `Run` normalizes `cwd`, detects the project, looks up `ProjectByRoot`, then uses the override profile directly without querying the binding store. The container request is built with `overrideProfile.HomePath` — the C2 concern (container launching bound profile's home while using override profile) is fully closed.
+
+### Design notes
+
+**`StatusForProvider` — surgical add, no refactor of `Status`**
+
+`Status` is Codex-hardcoded (`BindingByProjectID(ctx, id, domain.ProviderCodex)`). `StatusForProvider` is an exact copy with the provider threaded through. Per spec, `Status` is not touched — Codex callers (codex_setup.go, codex.go) continue using `service.Status()` which is correct for them.
+
+**`ensureClaudeBindingReady` ErrUnboundProject detection**
+
+Mirrors the pattern in `ensureCodexBindingReady`: `errors.Is(err, domain.ErrUnboundProject) || strings.Contains(err.Error(), domain.ErrUnboundProject.Error())`. The second clause is needed because `StatusForProvider` wraps with `fmt.Errorf("manage status: project %q: %w", ...)` — `errors.Is` unwraps the chain, but the string-contains guard is a belt-and-suspenders defense.
+
+**`runClaudeCommand` rewire**
+
+The `ensureClaudeAccountReady` call (8.3 scaffold) and the `skipValidate` / `service.ValidateBinding` conditional are both removed. `ensureClaudeBindingReady` handles all resolution; `OverrideProfile: &resolvedProfile` threads the result into the service; `ValidateBinding` is skipped (redundant now that binding is guaranteed). The store is opened after the binding-ready call so any binding-error surfaces before the store allocation.
+
+**Test updates to existing `claude_test.go`**
+
+Two tests (`TestRunClaudeCommandUnboundProject`, `TestRunClaudeCommandRejectsWrongProvider`) previously asserted `errors.Is(err, domain.ErrUnboundProject)`. After 8.4, the unbound + 0-accounts path returns `unboundProjectNoAccountsError` which does not wrap `ErrUnboundProject`. Updated to check `strings.Contains(err.Error(), "project is not bound")` instead — still behavior-oriented, covers the new message.
+
+**C1 (test gap from 8.3) — addressed**
+
+`TestEnsureClaudeBindingReadyOverrideUnboundProject` calls `ensureClaudeBindingReady` with `accountOverride="override-account"` against a project with no binding row. Asserts returned profile name == "override-account" AND `ProjectByRoot` returns `ErrNotFound` (no binding written). Direct exercise of the actual override path.
+
+**C2 (runtime mis-wiring from 8.3) — addressed**
+
+`TestRunUsesOverrideProfileHomePath` in `claudeservice` constructs a service with `OverrideProfile` pointing at `overrideHome`, a store with a bound profile at `boundHome` (different path), and asserts the executor's `ContainerRunRequest.Mounts` contains `overrideHome` as source, not `boundHome`. End-to-end proof that the override profile's `HomePath` is used for the container bind-mount.
+
+## Hylla Feedback (Unit 8.4 R1)
+
+N/A — Hylla unreachable this session (per spawn prompt paradigm override). All evidence gathered via direct `Read` of source files. Primary sources:
+- `internal/services/manage/service.go` — `Status` implementation (lines 231-262) as template for `StatusForProvider`.
+- `internal/services/claude/service.go` — `Options`, `Service`, `New`, `Run`, `resolveBinding`.
+- `internal/cli/claude.go` — `runClaudeCommand` (8.3 state).
+- `internal/cli/claude_auth.go` — `ensureClaudeAccountReady` current signature.
+- `internal/cli/codex_setup.go` — `ensureCodexBindingReady` as structural pattern.
+- `internal/cli/operator_helpers.go` — `pickProfile`, `openManageService`, `errSelectionCanceled`.
+- `internal/cli/codex_test.go` — `testCodexPaths`, `runManage` helpers.
+- `internal/services/claude/service_test.go` — `fakeStore`, `fakeExecutor`, `boundClaudeStore`, `detectAlways` helpers.
