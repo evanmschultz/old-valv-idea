@@ -484,54 +484,6 @@ valv manage bind codex work --project /absolute/path/to/repo
 	return cmd
 }
 
-func newManageProjectCommand(paths config.Paths, opts *rootOptions) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "project",
-		Short: "Inspect project-to-account bindings",
-		Long: strings.TrimSpace(`
-Inspect the project paths Valv knows and the provider accounts currently bound to them.
-`),
-		Example: strings.TrimSpace(`
-valv manage project list
-valv manage project list codex
-`),
-		Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			return cmd.Help()
-		},
-	}
-	cmd.AddCommand(newManageProjectListCommand(paths, opts))
-	return cmd
-}
-
-func newManageProjectListCommand(paths config.Paths, opts *rootOptions) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "list [provider]",
-		Short: "List known project bindings",
-		Long: strings.TrimSpace(`
-List the detected project roots Valv knows and the provider accounts currently bound to each one.
-
-Output fields:
-- project: detected project root
-- provider: bound provider
-- account: bound account name
-- auth: current auth mode inferred from the bound account home
-- email: email identity from the bound account when available
-- home: bound provider home path
-`),
-		Example: strings.TrimSpace(`
-valv manage project list
-valv manage project list codex
-valv manage project list codex --format json
-`),
-		Args: cobra.MaximumNArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return runManageProjectList(cmd, paths, opts, args)
-		},
-	}
-	return cmd
-}
-
 func runManageBindInteractive(cmd *cobra.Command, paths config.Paths, opts *rootOptions) error {
 	service, closeStore, err := openManageService(cmd, paths)
 	if err != nil {
@@ -1203,28 +1155,6 @@ func writeAccountsByProvider(cmd *cobra.Command, mode output.Mode, service accou
 	return nil
 }
 
-func runManageProjectList(cmd *cobra.Command, paths config.Paths, opts *rootOptions, args []string) error {
-	mode, err := commandOutputMode(cmd, opts)
-	if err != nil {
-		return fmt.Errorf("resolve output policy: %w", err)
-	}
-	service, closeStore, err := openManageService(cmd, paths)
-	if err != nil {
-		return fmt.Errorf("manage project list: %w", err)
-	}
-	defer closeStore()
-
-	provider, err := parseOptionalProvider(args, "")
-	if err != nil {
-		return err
-	}
-	bindings, err := service.ListBindings(cmd.Context(), provider)
-	if err != nil {
-		return fmt.Errorf("manage project list: %w", err)
-	}
-	return output.WriteListWithKey(cmd.OutOrStdout(), mode, "project bindings", "projects", listItemsForBindings(bindings))
-}
-
 type accountLister interface {
 	ListProfiles(context.Context, domain.Provider) (manageservice.ProfileListResult, error)
 }
@@ -1248,6 +1178,7 @@ func writeNoOpRecord(cmd *cobra.Command, opts *rootOptions, heading, reason stri
 
 func newManageStatusCommand(paths config.Paths, opts *rootOptions) *cobra.Command {
 	var projectPath string
+	var all bool
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show the current project's Valv binding status",
@@ -1262,17 +1193,25 @@ Output fields:
 - email: email identity from the bound account when available
 - home: bound provider home path
 - git marker: git directory used to detect the project root
+
+Use --all to list all project bindings across all providers instead of the
+current project's binding.
 `),
 		Example: strings.TrimSpace(`
-valv manage status
-valv manage status --project /absolute/path/to/repo
+valv status
+valv status --project /absolute/path/to/repo
+valv status --all
 `),
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if all {
+				return runStatusAll(cmd, paths, opts)
+			}
 			return runManageStatus(cmd, paths, opts, projectPath)
 		},
 	}
 	cmd.Flags().StringVar(&projectPath, "project", "", "explicit project path to inspect instead of the current working directory")
+	cmd.Flags().BoolVar(&all, "all", false, "list all project bindings across all providers")
 	return cmd
 }
 
@@ -1299,6 +1238,27 @@ func runManageStatus(cmd *cobra.Command, paths config.Paths, opts *rootOptions, 
 	}
 	identity := readAccountIdentity(status.Profile)
 	return output.WriteRecord(cmd.OutOrStdout(), mode, "Project status", []output.Field{{Label: "project", Value: status.Project.Root, Identifier: true}, {Label: "provider", Value: string(status.Profile.Provider), Muted: true}, {Label: "account", Value: status.Profile.Name, Identifier: true}, {Label: "auth", Value: identity.authDisplay, Muted: true}, {Label: "email", Value: identity.emailDisplay}, {Label: "home", Value: status.Profile.HomePath}, {Label: "git marker", Value: status.Detected.GitMarker, Muted: true}})
+}
+
+// runStatusAll lists all known project bindings across all providers.
+// It is the implementation of `valv status --all`, replacing the deleted
+// `manage project list` command. The empty provider filter returns bindings
+// for all providers, matching the previous `manage project list` default behavior.
+func runStatusAll(cmd *cobra.Command, paths config.Paths, opts *rootOptions) error {
+	mode, err := commandOutputMode(cmd, opts)
+	if err != nil {
+		return fmt.Errorf("resolve output policy: %w", err)
+	}
+	service, closeStore, err := openManageService(cmd, paths)
+	if err != nil {
+		return fmt.Errorf("status --all: %w", err)
+	}
+	defer closeStore()
+	bindings, err := service.ListBindings(cmd.Context(), "")
+	if err != nil {
+		return fmt.Errorf("status --all: %w", err)
+	}
+	return output.WriteListWithKey(cmd.OutOrStdout(), mode, "project bindings", "projects", listItemsForBindings(bindings))
 }
 
 func newManageUpdateCommand(paths config.Paths, opts *rootOptions) *cobra.Command {

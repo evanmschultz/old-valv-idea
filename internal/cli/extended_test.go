@@ -296,7 +296,8 @@ func TestManageProjectListShowsBoundProjects(t *testing.T) {
 	runManage(t, paths, []string{"account", "add", "codex", "personal", "--home", profileHome, "--project", projectRoot})
 	writeTestCodexAuth(t, profileHome, "person@example.com", "Person Example")
 
-	output := runManage(t, paths, []string{"project", "list", "codex"})
+	// "manage project list" is deleted; use "status --all" as the canonical replacement.
+	output := runManage(t, paths, []string{"status", "--all"})
 	for _, want := range []string{projectRoot, "account=personal", "auth=ChatGPT", "email=person@example.com"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("unexpected project list output %q missing %q", output, want)

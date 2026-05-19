@@ -183,6 +183,77 @@ func TestManageBindAndStatusUseRealStoreAndProjectDetection(t *testing.T) {
 	}
 }
 
+// TestStatusViaRootCommandShowsCurrentProjectBinding verifies that
+// `valv status --project <path>` (no `manage` prefix) is registered on the
+// root command and returns the bound account for the specified project.
+// This pins AC1, AC2, AC3, AC4.
+func TestStatusViaRootCommandShowsCurrentProjectBinding(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	projectRoot := filepath.Join(t.TempDir(), "project")
+	workDir := filepath.Join(projectRoot, "nested")
+	if err := os.MkdirAll(filepath.Join(projectRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git) error = %v", err)
+	}
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(workDir) error = %v", err)
+	}
+
+	profileHome := filepath.Join(paths.ProviderRoot, "codex", "profiles", "dev")
+	runManage(t, paths, []string{"account", "add", "codex", "dev", "--home", profileHome, "--skip-login", "--no-bind"})
+	writeTestCodexAuth(t, profileHome, "dev@example.com", "Dev User")
+	runManage(t, paths, []string{"bind", "codex", "dev", "--project", workDir})
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd, err := NewRootCommandWithPaths(context.Background(), &stdout, &stderr, paths)
+	if err != nil {
+		t.Fatalf("NewRootCommandWithPaths() error = %v", err)
+	}
+	cmd.SetArgs([]string{"status", "--project", workDir})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute(status --project) error = %v\nstderr=%s", err, stderr.String())
+	}
+	for _, want := range []string{"account=dev", "provider=codex"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("root status output %q missing %q", stdout.String(), want)
+		}
+	}
+}
+
+// TestStatusAllViaRootCommandShowsAllBindings verifies that
+// `valv status --all` (no `manage` prefix) lists all project bindings
+// across providers. This pins AC5 and AC6.
+func TestStatusAllViaRootCommandShowsAllBindings(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	projectRoot := filepath.Join(t.TempDir(), "project-all")
+	if err := os.MkdirAll(filepath.Join(projectRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git) error = %v", err)
+	}
+
+	profileHome := filepath.Join(paths.ProviderRoot, "codex", "profiles", "alldev")
+	runManage(t, paths, []string{"account", "add", "codex", "alldev", "--home", profileHome, "--skip-login", "--project", projectRoot})
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd, err := NewRootCommandWithPaths(context.Background(), &stdout, &stderr, paths)
+	if err != nil {
+		t.Fatalf("NewRootCommandWithPaths() error = %v", err)
+	}
+	cmd.SetArgs([]string{"status", "--all"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute(status --all) error = %v\nstderr=%s", err, stderr.String())
+	}
+	for _, want := range []string{"project bindings", projectRoot} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("root status --all output %q missing %q", stdout.String(), want)
+		}
+	}
+}
+
 func TestManageAccountBindWithTwoPositionalsBindsProject(t *testing.T) {
 	t.Parallel()
 
@@ -305,8 +376,9 @@ func TestManageProfileAliasNoLongerWorks(t *testing.T) {
 
 // newTestManageContainerCommand creates a bare container command that registers
 // all ex-manage children so tests can route via args like ["account", "add", ...],
-// ["bind", ...], ["status", ...], ["update", ...], ["cleanup", ...], ["project", ...].
+// ["bind", ...], ["status", ...], ["update", ...], ["cleanup", ...].
 // This replaces the deleted newManageCommand for test-only routing purposes.
+// Note: "project list" is deleted; use ["status", "--all"] instead.
 func newTestManageContainerCommand(paths config.Paths, opts *rootOptions) *cobra.Command {
 	container := &cobra.Command{
 		Use:  "manage",
@@ -317,7 +389,6 @@ func newTestManageContainerCommand(paths config.Paths, opts *rootOptions) *cobra
 	}
 	container.AddCommand(newManageAccountCommand(paths, opts))
 	container.AddCommand(newManageBindCommand(paths, opts))
-	container.AddCommand(newManageProjectCommand(paths, opts))
 	container.AddCommand(newManageStatusCommand(paths, opts))
 	container.AddCommand(newManageUpdateCommand(paths, opts))
 	container.AddCommand(newManageCleanupCommand(paths, opts))

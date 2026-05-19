@@ -154,7 +154,7 @@ For `image cleanup` flag-driven dispatch: the current `runManageCleanup` uses a 
 
 ### Unit 9.4 — Flatten `valv status` to top level
 
-- **State:** todo
+- **State:** done (R1 — all 3 mage gates GREEN)
 - **Paths:**
   - `internal/cli/root.go`
   - `internal/cli/manage_test.go`

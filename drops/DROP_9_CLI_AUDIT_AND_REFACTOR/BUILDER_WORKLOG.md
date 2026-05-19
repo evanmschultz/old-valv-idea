@@ -235,3 +235,56 @@ The `coverageThreshold` in `magefile.go` is currently 60.0% (TODO in the mage fi
 None — task touched only recently-added files (DROP_9 work, post-last-ingest). Hylla's last ingest predates all DROP_9 changes. All evidence gathered via direct `Read` of source files and `git diff` context from the worklog. No Hylla queries were applicable given the stale baseline. Non-Go files (markdown, PLAN.md, BUILDER_WORKLOG.md) are outside Hylla's Go-only scope.
 
 None — Hylla answered everything needed. All Go symbol evidence gathered via direct `Read` of source files (Hylla's last ingest predates the DROP_9 work, making the committed index stale for recently-modified files). Evidence flow: `Read` → `git diff` where needed. No Hylla queries were applicable given the stale baseline, and non-Go files (markdown, worklog) are outside Hylla's Go-only scope.
+
+---
+
+## Unit 9.4 — Round 1
+
+- **Builder:** go-builder-agent
+- **Started:** 2026-05-19
+- **Files touched:**
+  - `internal/cli/manage.go` — added `--all` BoolVar to `newManageStatusCommand`; added `runStatusAll`; deleted `newManageProjectCommand`, `newManageProjectListCommand`, `runManageProjectList`
+  - `internal/cli/root.go` — registered `statusCmd` under the `"inspect"` group
+  - `internal/cli/manage_test.go` — removed `newManageProjectCommand` from `newTestManageContainerCommand`; added `TestStatusViaRootCommandShowsCurrentProjectBinding`, `TestStatusAllViaRootCommandShowsAllBindings`
+  - `internal/cli/extended_test.go` — retargeted `TestManageProjectListShowsBoundProjects` from `["project", "list", "codex"]` to `["status", "--all"]`
+  - `drops/DROP_9_CLI_AUDIT_AND_REFACTOR/PLAN.md` — state: todo → in_progress → done
+
+### Design choices
+
+**`newManageProjectCommand` deletion (manage.go):** Deleted `newManageProjectCommand` (487–505), `newManageProjectListCommand` (507–533), and `runManageProjectList` (1206–1226). All three were cleanly self-contained with no callers outside the test container helper. Preferred over leaving dead code per planner guidance.
+
+**`runStatusAll` (manage.go):** New function that inlines the listing logic previously in `runManageProjectList`. Calls `service.ListBindings(cmd.Context(), "")` with an empty provider (returns all providers). Output heading "project bindings", key "projects", items via `listItemsForBindings`. This matches the previous `manage project list` output exactly.
+
+**`--all` flag placement (newManageStatusCommand):** Added `BoolVar` `all` to `newManageStatusCommand`. When set, `RunE` calls `runStatusAll` instead of `runManageStatus`. The `--project` flag is silently ignored when `--all` is set (no conflict guard needed — cobra allows both flags; the `--all` branch doesn't use `projectPath`). This is consistent with the planner's AC5 intent.
+
+**`statusCmd.GroupID = "inspect"` (root.go):** Placed in the inspect group alongside `paths` and `version` commands. Status is an informational read-only command, not an account management command.
+
+**`extended_test.go` retarget:** `TestManageProjectListShowsBoundProjects` was testing the now-deleted `manage project list` command. Per AC5, the canonical replacement is `status --all`. The test output shape is identical (same `listItemsForBindings` rendering). The retarget is a one-line arg change from `["project", "list", "codex"]` to `["status", "--all"]`. The provider filter `"codex"` is dropped since `--all` does not accept a provider filter — but the test still asserts `account=personal` and `email=person@example.com` which are sufficient identity checks.
+
+**`newTestManageContainerCommand` update (manage_test.go):** Removed `container.AddCommand(newManageProjectCommand(paths, opts))` — the only reference to the now-deleted constructor. No other test helper change needed.
+
+### TDD red-green trace
+
+1. Added `TestStatusViaRootCommandShowsCurrentProjectBinding` and `TestStatusAllViaRootCommandShowsAllBindings` to `manage_test.go` before any production changes. Ran `mage testPkg` → 2 FAIL (RED).
+2. Added `--all` flag + `runStatusAll` to `manage.go`; registered `statusCmd` in `root.go`; deleted `newManageProjectCommand` etc.; removed from test helper. Ran `mage testPkg` → 1 FAIL (`TestManageProjectListShowsBoundProjects` in extended_test.go, broken by deletion).
+3. Retargeted `TestManageProjectListShowsBoundProjects` to use `["status", "--all"]`. Ran `mage testPkg` → 206 PASS (GREEN).
+
+### Mage gate results
+
+1. `mage testPkg github.com/evanmschultz/valv/internal/cli` — **PASS** (206 tests, 69.5% coverage > 60% threshold, -race, 0 failures)
+2. `mage integration` — **PASS** (209/209 PASS, 0 skipped, 0 failed)
+3. `mage build` — **PASS** (`./valv` built successfully)
+
+### Coverage note
+
+69.5% is above the enforced 60.0% threshold (per magefile.go). The new `runStatusAll` function is covered by `TestStatusAllViaRootCommandShowsAllBindings`. The `--all` dispatch path in `newManageStatusCommand.RunE` is covered by both the new test and the retargeted extended_test.go test.
+
+### Dead-code note
+
+`runManageHome` in `operator_helpers.go` and `internal/tui/manage` remain dead code. Not touched — DROP_11 handles removal. No new dead code introduced in this unit.
+
+## Hylla Feedback (Unit 9.4 Round 1)
+
+None — Hylla's last ingest predates all DROP_9 changes (snapshot 2 = DROP_8 baseline). All Go symbol evidence gathered via direct `Read` of source files. One Hylla query was attempted:
+
+- **Query:** `hylla_search_keyword` with `"listItemsForBindings listItemsForAccounts"`, node_type=block. **Missed because:** zero results — stale ingest, target functions are in `operator_helpers.go` which has content added post-snapshot. **Worked via:** `Read` on `operator_helpers.go` directly. **Suggestion:** Per-file stale detection hint in query response would help callers know when to skip directly to Read.
