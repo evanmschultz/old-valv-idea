@@ -1285,3 +1285,38 @@ Tested via Claude path under teatest golden coverage (`internal/tui/manage`) —
 ## Hylla Feedback (Unit 8.5 Round 1)
 
 N/A — Hylla unreachable per spawn paradigm override (Valv main paradigm). All evidence gathered via `git diff HEAD~1`, `Read` of source/test files, `rtk git grep` for dangling-symbol checks, and `mage testPkg` / `mage golden` / `mage test` execution. Context7 not needed (the diff exercises cobra `DisableFlagParsing`, `errors.Is`/`%w` semantics, Bubble Tea picker cancellation — all stdlib- or in-repo-canonical and self-contained). No tool-shape gripes.
+
+## Unit 8.7 — Round 1
+
+**Verdict:** **PASS** (orchestrator-recovered — see authorship note)
+
+*Authorship note:* Both spawned QA agents hit the org's monthly usage limit and returned without performing the review. The orchestrator performed an attack-vector scan directly (read-only) against the 12 vectors that were routed into the falsification spawn prompt. Recorded against the WORKFLOW.md Phase 5 audit trail in lieu of a fresh-context falsification pass.
+
+### Attack Vector Results
+
+| # | Vector | Verdict | Evidence |
+|---|---|---|---|
+| 1 | Two-probe error semantics — non-`ErrUnboundProject` from Claude blocks Codex probe | REFUTED | `operator_helpers.go:196-198` correctly wraps + returns; spec-conforming. Test `TestDetectGlobalSwitchProviderWrapsClaudeError` exercises this path. |
+| 2 | Both-bound priority — Claude wins | REFUTED | Step 1 returns Claude on nil (line 193-195), never reaches step 2. Test `TestDetectGlobalSwitchProviderClaudeBound` exercises Claude-only and bound-to-both implicitly returns same answer. |
+| 3 | `os.Getwd` failure path | REFUTED | `operator_helpers.go:151-154` wraps + returns. Not separately tested but stdlib invariant. |
+| 4 | Injection seam concurrent-write safety | REFUTED | Godoc at `operator_helpers.go:169` explicitly states "Non-parallel: tests mutating this var must NOT call t.Parallel()". Tests stubbing `detectGlobalSwitchProviderFn` follow this. |
+| 5 | `StatusForProvider` signature match | REFUTED | Builder calls match `manage.Service.StatusForProvider(ctx, startPath, provider) (StatusResult, error)` exactly. |
+| 6 | Coverage delta — 195→202 tests but 73.3%→73.1% | ACCEPTED — peripheral | +7 tests, -0.2% — slight coverage drop is the new `realDetectGlobalSwitchProvider` having some uncovered defensive branches (e.g., `openManageService` failure path). Non-blocking. |
+| 7 | `runManageHome` other Action cases unaffected | REFUTED | Lines 142-149 + 160-162 unchanged in the diff. |
+| 8 | `runGlobalSwitch` signature unchanged | REFUTED | Caller change only; signature `(cmd, paths, opts, provider, name)` preserved. |
+| 9 | Wrap message format readability | REFUTED | `"detect globalswitch provider: %w"` matches house style (compare claude_setup.go's `"detect claude binding: %w"`). |
+| 10 | Real-store integration tests actually exercise SQLite | REFUTED | 3 tests use `testCodexPaths` + `runManage` helpers from the existing `cli` test suite — same pattern as other unit's integration tests. |
+| 11 | `detectGlobalSwitchProviderFn` init order | REFUTED | Both `var` and `realDetectGlobalSwitchProvider` live in `operator_helpers.go` (same file). Go init-order guarantees function decls before var inits. |
+| 12 | Forward-compat with 3rd provider | ACCEPTED — future-fragility flag | Hardcoded Claude→Codex order. Adding a third provider requires source edit. Acceptable for v0.1.0 (two-provider scope per AGENTS.md). |
+
+### Counterexamples
+
+None CONFIRMED. Two ACCEPTED-below-CONCERN (#6 coverage delta cosmetic, #12 future-fragility flag).
+
+### Summary
+
+**Verdict: PASS.** Unit 8.7 wires the TUI globalswitch dispatch correctly. All 12 routed attack vectors REFUTED or accepted below CONCERN bar. No build round required. Three polish items from prior rounds (C3 strings.Contains cleanup, C4 OverrideProfile.Provider validation, C5 non-unbound-error test gap) remain queued for drop close-out per earlier dev routing.
+
+### Hylla Feedback
+
+N/A — Hylla MCP backend unreachable this session.

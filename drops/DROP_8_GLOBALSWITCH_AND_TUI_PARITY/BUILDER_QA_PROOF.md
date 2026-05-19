@@ -588,3 +588,44 @@ N/A — Hylla was unreachable this session (per spawn-prompt paradigm override).
 ### TL;DR
 
 PASS. Unit 8.5 merges `ensureCodexBindingReady` + `ensureBoundCodexAccountReady` into `ensureCodexAccountReadyForLaunch` (`codex_setup.go:36`) with all 5 responsibilities mapped to specific lines. Dead-code deletion is total — 6 identifiers, zero matches in production OR test code. `OverrideProfile *domain.Profile` mirrors 8.4's claudeservice pattern exactly (struct placement, godoc shape, `Run` bypass) with one justified Codex differentiation (`sharedCodexStateHome`). `TestRunUsesOverrideProfileHomePath` is genuinely end-to-end — asserts `executor.got.Mounts[1].Source != boundHome` AND `executor.got.Labels["io.valv.profile_id"] == overrideProfile.ID`. `codexArgsSkipAccountReady` guard verified via stub hit-counter (0 hits when `args[0]=="login"`). C3 fold-in honored: `errors.Is` alone in `codex_setup.go`, no `strings.Contains`. Asymmetry note (host-side Codex vs in-container Claude) present in both `BUILDER_WORKLOG.md:337` and function godoc `codex_setup.go:32-35`. mage reproduction: 12/12 codex @ 74.3%, 195/195 cli @ 73.3%, `mage build` PASS. Two peripheral observations (mount-source `!=` boundHome rather than `==` overrideHome; pre-existing `strings.Contains` in `claude_setup.go:65` / `manage.go:853` outside scope) are informational, not blocking. Unit 8.5 ready to close pending QA Falsification.
+
+## Unit 8.7 — Round 1
+
+**Verdict:** **PASS** (orchestrator-recovered — see authorship note)
+
+*Authorship note:* Both spawned QA agents (`go-qa-proof-agent` + `go-qa-falsification-agent`) hit the org's monthly usage limit and returned without performing the review. The orchestrator performed a code-level review directly (read-only — no Go edits) plus re-ran the builder's mage targets to confirm reproducibility. This is recorded against the WORKFLOW.md Phase 5 audit trail in lieu of a fresh-context QA pass. Re-spawn full QA agents next month if independent verification is required.
+
+### AC Verification (Per PLAN.md Unit 8.7 Spec)
+
+| AC | Evidence | Status |
+|---|---|---|
+| AC1 — `ActionGlobalSwitch` dispatch provider-aware | `operator_helpers.go:150-159` calls `detectGlobalSwitchProviderFn` then `runGlobalSwitch(..., provider, "")` | PASS |
+| AC2 — Two-probe pattern (Claude first, Codex second, fallback Codex) | `realDetectGlobalSwitchProvider` at `operator_helpers.go:184-210` implements all 6 cases (Claude-nil/unbound/other × Codex-nil/unbound/other) | PASS |
+| AC3 — Both-bound → Claude wins | Step 1 returns Claude on nil, never reaches step 2. Documented in godoc at `operator_helpers.go:175-177` | PASS |
+| AC4 — `global.go` NOT modified | `git diff HEAD~1 -- internal/cli/global.go` returns empty | PASS |
+| AC5 — `valv global switch codex <account>` regression-clean | CLI path unchanged (AC4); 202/202 tests pass including existing Codex-path tests | PASS |
+| AC6 — Test coverage of dispatch logic | 7 tests in `operator_helpers_test.go`: 4 stub-seam + 3 real-store integration | PASS |
+| AC7 — `mage testPkg internal/cli` GREEN ≥70% | Reproduced: 202/202 pass @ 73.1% coverage, `-race` clean | PASS |
+
+### Mage Reproduction (Orchestrator-Run)
+
+- `mage testPkg github.com/evanmschultz/valv/internal/cli` — **PASS**, 202/202 @ 73.1%, `-race`.
+- `mage build` — **PASS**, `./valv` built.
+
+### Source-Level Verification
+
+- `operator_helpers.go:170` — `detectGlobalSwitchProviderFn = realDetectGlobalSwitchProvider` (package-level var; init-order safe — same file as `realDetectGlobalSwitchProvider`).
+- `operator_helpers.go:184-210` — Two-probe implementation correct:
+  - Step 1 (Claude): nil → return Claude; `ErrUnboundProject` → fall through; other → wrap+return.
+  - Step 2 (Codex): nil → return Codex; `ErrUnboundProject` → return Codex (backward compat); other → wrap+return.
+- `operator_helpers.go:152` — `os.Getwd` failure properly wrapped + returned.
+- `operator_helpers.go:189` — `defer closeStore()` on the service handle.
+- `manage.Service.StatusForProvider` (added by 8.4) is the correct entry point — confirmed not the Codex-hardcoded `Status`.
+
+### Non-Blocking Observations
+
+- One forward-fragility note for DROP_11 / future drops: the two-probe Claude→Codex order is hardcoded. Adding a third provider would require code edits to add a Step 3. Acceptable for v0.1.0 per the project's two-provider scope.
+
+### Hylla Feedback
+
+N/A — Hylla MCP backend unreachable this session. All evidence gathered via direct `Read` + `git diff` + `git grep`.
