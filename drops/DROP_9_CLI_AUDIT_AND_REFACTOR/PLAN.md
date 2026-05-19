@@ -18,6 +18,7 @@
 - `internal/cli/claude_setup_test.go`
 - `internal/cli/codex_setup_test.go`
 - `internal/cli/codex_test.go`
+- `internal/cli/operator_helpers_test.go`
 - `internal/domain/repository.go`
 - `internal/adapters/sqlite/store.go`
 - `internal/adapters/sqlite/store_test.go`
@@ -57,7 +58,8 @@ Normalize the Valv CLI surface to a clean tree: delete the `valv manage` namespa
   3. `root.go` `cmd.AddGroup(...)` call: the `&cobra.Group{ID: "manage", Title: "Management Commands"}` entry is removed or renamed. The builder renames the group ID to `"account"` (since `manage` is gone) and updates `accountCmd.GroupID` and `globalCmd.GroupID` to match the new group ID. `globalCmd.GroupID = "manage"` MUST be re-homed — after `manageCmd` is deleted, any command still carrying `GroupID = "manage"` references a non-existent group. Builder scans `root.go` for ALL lines assigning `GroupID = "manage"` (currently: `root.go:130` for `accountCmd`, `root.go:134` for `globalCmd`) and updates each one.
   4. `root.go` examples block is updated to remove all `valv manage ...` examples.
   5. `manage_test.go` tests that previously routed via `newManageCommand(...)` `.Execute()` with `account ...` subargs are rewritten to use `newManageAccountCommand` directly.
-  6. `mage testPkg ./internal/cli` passes (no compilation errors, all tests green).
+  6. All `fmt.Errorf` and other user-facing error/help strings in `manage.go` (and any helpers moved out of it) reference the new normalized command tree. Concrete examples: `valv manage account add codex %s` → `valv account add codex %s` (line 962); `valv manage account list` → `valv account list` (line 962); `valv manage update` → `valv image update` (line 996); `valv manage account add %s %s` → `valv account add %s %s` (line 626). Verify via `git grep "valv manage" -- internal/cli/manage.go` returning zero hits after this unit lands.
+  7. `mage testPkg ./internal/cli` passes (no compilation errors, all tests green).
 - **Blocked by:** —
 
 **Design notes for builder:**
@@ -185,11 +187,12 @@ For `image cleanup` flag-driven dispatch: the current `runManageCleanup` uses a 
   - `internal/cli/codex_setup_test.go`
   - `internal/cli/codex_test.go`
   - `internal/cli/extended_test.go`
+  - `internal/cli/operator_helpers_test.go`
   - `magefile.go`
   - `README.md`
 - **Packages:** `github.com/evanmschultz/valv/internal/cli`
 - **Acceptance:**
-  1. `git grep "valv manage" -- internal/cli/claude.go internal/cli/codex.go internal/cli/claude_setup.go internal/cli/codex_setup.go internal/cli/operator_helpers.go internal/cli/claude_setup_test.go internal/cli/codex_setup_test.go internal/cli/codex_test.go internal/cli/extended_test.go magefile.go README.md` returns zero hits.
+  1. `git grep "valv manage" -- internal/cli/claude.go internal/cli/codex.go internal/cli/claude_setup.go internal/cli/codex_setup.go internal/cli/operator_helpers.go internal/cli/claude_setup_test.go internal/cli/codex_setup_test.go internal/cli/codex_test.go internal/cli/extended_test.go internal/cli/operator_helpers_test.go magefile.go README.md` returns zero hits.
   2. All updated error/help text references the new normalized command tree. Concrete substitutions (builder applies across all files in scope):
      - `valv manage update` → `valv image update`
      - `valv manage update claude` → `valv image update claude`
@@ -227,7 +230,7 @@ This is a mechanical string-substitution unit. No logic changes. Every hit found
   6. `newManageAccountListCommand` positional `[provider]` is unchanged.
   7. At least two tests cover the name-collision error path for one of the modified commands.
   8. `mage testPkg ./internal/cli` passes.
-- **Blocked by:** 9.1
+- **Blocked by:** 9.4.5
 
 **Design notes for builder:**
 
