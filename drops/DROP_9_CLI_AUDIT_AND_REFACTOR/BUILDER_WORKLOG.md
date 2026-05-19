@@ -502,3 +502,45 @@ N/A — task touched only non-Go files (CONTRIBUTING.md, CLAUDE.md) and a string
 ## Hylla Feedback (Units 9.5 + 9.6 Round 1)
 
 None — Hylla's last ingest predates all DROP_9 changes (snapshot = DROP_8 baseline). All Go symbol evidence gathered via direct `Read` of source files and `git diff` context from prior worklog rounds. No Hylla queries were applicable given the stale baseline. Non-Go files (markdown, worklog) are outside Hylla's Go-only scope.
+
+---
+
+## Units 9.5 + 9.6 — Round 2
+
+- **Builder:** go-builder-agent
+- **Started:** 2026-05-19
+- **Round purpose:** Cosmetic help-text fixup only — no logic change.
+- **Files touched:** `internal/cli/manage.go` (1 line)
+
+### R1 finding addressed
+
+Falsification vector 4 (CONFIRMED, MINOR) from `BUILDER_QA_FALSIFICATION.md ## Units 9.5 + 9.6 — Round 1`:
+
+`manage.go:409` — `bind --provider` flag help text was stale after R1 behavioral changes. The 1-arg + no-flag path no longer defaults to Codex; it runs cross-provider collision detection. The old wording referenced "defaults to codex" which was misleading.
+
+### Substitution
+
+**Before (line 409):**
+```
+"provider to use for binding (codex or claude; defaults to codex)"
+```
+
+**After (line 409):**
+```
+"explicit provider override (required when account name is ambiguous across providers)"
+```
+
+This aligns `bind --provider` with the five sibling verbs (inspect @ 89, login @ 116, logout @ 143, rename @ 262, delete @ 286) which all use the canonical wording confirmed by Read.
+
+### Mage gate results
+
+- `mage testPkg github.com/evanmschultz/valv/internal/cli` — PASS (214 tests, 67.5% coverage, unchanged from R1)
+- `mage build` — PASS (produced `./valv` cleanly)
+
+### Scope confirmation
+
+Only `manage.go:409` was modified. No test files touched (no test assertion depends on help-text wording). No sibling QA files touched. No logic change.
+
+## Hylla Feedback (Units 9.5 + 9.6 Round 2)
+
+N/A — task touched only a single help-text string in a Go file; no Hylla symbol queries were needed for a 1-line cosmetic substitution. Evidence gathered via direct `Read` of `manage.go`.

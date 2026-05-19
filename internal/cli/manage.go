@@ -406,7 +406,7 @@ valv account bind profile-name --project /absolute/path/to/repo
 		},
 	}
 	cmd.Flags().StringVar(&projectPath, "project", "", "explicit project path to bind instead of the current working directory")
-	cmd.Flags().StringVar(&providerFlag, "provider", "", "provider to use for binding (codex or claude; defaults to codex)")
+	cmd.Flags().StringVar(&providerFlag, "provider", "", "explicit provider override (required when account name is ambiguous across providers)")
 	return cmd
 }
 

@@ -249,7 +249,7 @@ Workflow: run AC #1a, #1b, #1c greps individually, address every hit, rerun all 
 
 ### Unit 9.5 — Normalize `--provider` flag with positional fallback + `whoami` alias removal
 
-- **State:** done (R1 — collapsed with 9.6 per orchestrator decision; all 3 mage gates GREEN)
+- **State:** done (R2 — R1 help-text drift fixup; mage gates GREEN)
 - **Paths:**
   - `internal/cli/manage.go`
   - `internal/cli/manage_test.go`
@@ -277,7 +277,7 @@ The `whoami` alias removal is a one-line change: remove `Aliases: []string{"whoa
 
 ### Unit 9.6 — Require `--provider` on name collision in cross-provider commands (uniform enforcement)
 
-- **State:** done (R1 — collapsed with 9.5 per orchestrator decision; all 3 mage gates GREEN)
+- **State:** done (R2 — R1 help-text drift fixup; mage gates GREEN)
 - **Paths:**
   - `internal/cli/manage.go`
   - `internal/cli/manage_test.go`
