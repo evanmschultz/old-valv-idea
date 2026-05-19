@@ -327,7 +327,7 @@ The `claudeprovider.ContainerClaudeDir` and `claudeprovider.ContainerHomeDir` co
 
 ### Unit 9.8 — CONCERN B: Ctrl-C exit hardening (`ensureClaudeAccountReady` / `loginClaudeAccount`)
 
-- **State:** todo
+- **State:** done (R1 — mage gates GREEN; Ctrl-C × 2 creds-landed-despite-error path hardened in both auth functions)
 - **Paths:**
   - `internal/cli/claude_auth.go`
   - `internal/cli/claude_auth_test.go`

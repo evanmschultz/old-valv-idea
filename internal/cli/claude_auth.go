@@ -161,8 +161,18 @@ func ensureClaudeAccountReady(cmd *cobra.Command, account domain.Profile, option
 		return fmt.Errorf("announce claude login: %w", err)
 	}
 	runner := claudeAuthRunnerFromContext(cmd.Context())
-	if err := runner.RunInContainer(cmd.Context(), account.HomePath, cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr()); err != nil {
-		return fmt.Errorf("run claude auth container for account %q: %w", account.Name, err)
+	if runErr := runner.RunInContainer(cmd.Context(), account.HomePath, cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr()); runErr != nil {
+		// Ctrl-C × 2 causes a non-zero exit but credentials may have landed.
+		// Check whether .credentials.json is present and non-empty before
+		// treating the container error as fatal.
+		if info, statErr := os.Stat(credPath); statErr == nil && info.Size() > 0 {
+			if logger := LoggerFromContext(cmd.Context()); logger != nil {
+				logger.Debug("container exited non-zero but credentials present; treating as success", "error", runErr)
+			}
+			// Fall through to ReadAccountIdentity.
+		} else {
+			return fmt.Errorf("run claude auth container for account %q: %w", account.Name, runErr)
+		}
 	}
 	identity, err := claudeprovider.ReadAccountIdentity(account.HomePath)
 	if err != nil {
@@ -195,9 +205,20 @@ func loginClaudeAccount(cmd *cobra.Command, account domain.Profile, _ config.Pat
 	); err != nil {
 		return fmt.Errorf("announce claude login: %w", err)
 	}
+	credPath := filepath.Join(strings.TrimSpace(account.HomePath), ".credentials.json")
 	runner := claudeAuthRunnerFromContext(cmd.Context())
-	if err := runner.RunInContainer(cmd.Context(), account.HomePath, cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr()); err != nil {
-		return fmt.Errorf("run claude auth container for account %q: %w", account.Name, err)
+	if runErr := runner.RunInContainer(cmd.Context(), account.HomePath, cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr()); runErr != nil {
+		// Ctrl-C × 2 causes a non-zero exit but credentials may have landed.
+		// Check whether .credentials.json is present and non-empty before
+		// treating the container error as fatal.
+		if info, statErr := os.Stat(credPath); statErr == nil && info.Size() > 0 {
+			if logger := LoggerFromContext(cmd.Context()); logger != nil {
+				logger.Debug("container exited non-zero but credentials present; treating as success", "error", runErr)
+			}
+			// Fall through to ReadAccountIdentity.
+		} else {
+			return fmt.Errorf("run claude auth container for account %q: %w", account.Name, runErr)
+		}
 	}
 	identity, err := claudeprovider.ReadAccountIdentity(account.HomePath)
 	if err != nil {

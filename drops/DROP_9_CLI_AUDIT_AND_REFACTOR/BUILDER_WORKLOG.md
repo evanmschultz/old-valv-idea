@@ -611,3 +611,52 @@ Hylla was the primary evidence source for this unit. Results:
 **Miss:** `currentContainerUser` — not returned by any Hylla query (private unexported function, not indexed by name). **Worked via:** Direct `Read` of `claude.go` and `codex.go` where the function is called (lines 107 and 114 respectively). Since it is in the same package as the test file, it is callable directly — no import needed. **Suggestion:** Index private functions by name in keyword search when they appear as call targets in multiple files (cross-file callsite evidence would surface them).
 
 **Miss:** `commandHasTTY` / `currentContainerUser` definition location — function defined in an unread source file. **Worked via:** Recognizing both are in-package private functions (same `cli` package), which is sufficient for the test — the test calls `currentContainerUser()` directly without needing to know its definition file.
+
+---
+
+## Unit 9.8 — Round 1
+
+- **Builder:** go-builder-agent
+- **Started:** 2026-05-19
+- **Files touched:**
+  - `internal/cli/claude_auth.go` (production: both auth functions hardened)
+  - `internal/cli/claude_auth_test.go` (tests: two new Ctrl-C × 2 covering tests added)
+
+### Production code changes
+
+**`ensureClaudeAccountReady`** (lines 163-176 post-change):
+- Renamed error variable from `err` to `runErr` in `runner.RunInContainer(...)` call.
+- Added post-run creds-presence check: if `os.Stat(credPath)` succeeds and `info.Size() > 0`, debug-log the container error via `LoggerFromContext` (nil-guarded) and fall through to `ReadAccountIdentity` rather than propagating. Otherwise propagate as before.
+- `credPath` was already declared at line 141 (pre-run check) — reused in scope, no duplication.
+
+**`loginClaudeAccount`** (lines 208-222 post-change):
+- Added `credPath := filepath.Join(strings.TrimSpace(account.HomePath), ".credentials.json")` before `RunInContainer` (same derivation pattern as `wipeClaudeCredentials` / pre-run check in `ensureClaudeAccountReady`).
+- Applied identical post-run creds-presence check with nil-guarded `LoggerFromContext` debug log.
+- Renamed error variable from `err` to `runErr` in the `RunInContainer` call.
+
+**Helper extracted:** None — inline duplication at 2 sites is cleaner than a helper for a 3-line block. Accepted per planner guidance.
+
+### Tests added
+
+1. `TestEnsureClaudeAccountReadySucceedsWhenCredsLandDespiteContainerError` — exercises `loginClaudeAccount` (no TTY guard; same hardening path): stub returns `exit status 130` error AND writes `.credentials.json` via `stubRunFunc`. Asserts nil error returned.
+2. `TestLoginClaudeAccountSucceedsWhenCredsLandDespiteContainerError` — same pattern for `loginClaudeAccount` explicitly, also asserts `ReadAccountIdentity` returns `LoggedIn=true`.
+
+Both tests use the existing `stubClaudeAccountAuthRunner` + `writeCredsToDir` helpers — zero new test infrastructure needed.
+
+### Mage gate results
+
+- `mage testPkg github.com/evanmschultz/valv/internal/cli`: **PASS** — 217 tests, 0 failed, coverage 67.4% (gate: ≥60%).
+- `mage build`: **PASS** — `./valv` produced cleanly.
+
+### Design decisions
+
+- **Nil logger guard**: `LoggerFromContext` returns nil when no logger is injected (test context). Added `if logger := LoggerFromContext(...); logger != nil` guard to prevent nil-receiver panic in tests.
+- **No helper extraction**: 3-line inline block at 2 sites is the simplest path; no abstraction for 2 usages.
+- **`credPath` in `loginClaudeAccount`**: declared before `RunInContainer` (after `wipeClaudeCredentials`) — the wipe has already removed the file, so `credPath` is just a path string at that point; computing it is harmless.
+
+## Hylla Feedback
+
+- `LoggerFromContext` — **found** via `hylla_search_keyword` (result 4 in keyword results). Hylla returned the full node including `content` which confirmed the nil-return behavior.
+- `stubClaudeAccountAuthRunner.stubRunFunc` field — **found** in the test file read directly (Hylla is Go-only, not indexed for test files). N/A miss category — non-production file.
+
+None — Hylla answered everything needed for production symbol lookup.
