@@ -1,13 +1,13 @@
 # DROP_8 — GLOBALSWITCH AND TUI PARITY (PLUS BINDING UX)
 
-**State:** building
+**State:** done
 **Blocked by:** DROP_7 (done)
 **Paths (expected):** `internal/services/globalswitch/`, `internal/cli/manage.go` (or post-DROP_9 successor), `internal/cli/claude.go`, `internal/cli/codex.go`, `internal/tui/manage/picker.go` (and new picker for unbound-project bind selection), tests + golden fixtures. Planner refines.
 **Packages (expected):** `internal/services/globalswitch`, `internal/cli`, `internal/tui/manage` (or new `internal/tui/bind/`). Planner confirms.
 **PLAN.md ref:** main/PLAN.md → DROP_8_GLOBALSWITCH_AND_TUI_PARITY row
 **Workflow:** main/drops/WORKFLOW.md
 **Started:** 2026-05-18
-**Closed:** —
+**Closed:** 2026-05-18 (globalswitch Claude + cross-provider account switch + `--account` override + Claude/Codex binding UX + TUI picker parity + TUI globalswitch dispatch wiring + C3/C4/C5 close-out polish)
 
 ## Scope
 
