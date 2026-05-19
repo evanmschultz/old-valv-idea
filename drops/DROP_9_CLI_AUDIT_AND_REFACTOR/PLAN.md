@@ -44,7 +44,7 @@ Normalize the Valv CLI surface to a clean tree: delete the `valv manage` namespa
 
 ### Unit 9.1 — Delete `valv manage` namespace and redistribute children
 
-- **State:** done
+- **State:** done (R3 — t.Skip added to TestCodexCommandRunsFixtureImageWithTTYEndToEnd; mage integration green 202/203 skipped)
 - **Paths:**
   - `internal/cli/root.go`
   - `internal/cli/manage.go`

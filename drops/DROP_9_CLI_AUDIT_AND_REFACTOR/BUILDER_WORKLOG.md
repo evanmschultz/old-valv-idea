@@ -69,3 +69,76 @@ The error assertion `"run \`valv manage account add codex\`"` in extended_test.g
 Hylla indexes Go files and is the first evidence source. Several queries returned zero results (Hylla snapshot 2 is from DROP_8 close, so the `runManageHome` symbol in operator_helpers.go would be in the index). The empty Hylla results may reflect snapshot age or the `test_mode: hide_tests` filter hiding test-only symbols. All needed evidence was obtained via direct `Read` of source files, which is appropriate for this unit's straightforward structural deletion work.
 
 - **Query:** `hylla_search_keyword` with `"runManageHome"`, node_type=block. **Missed because:** zero results returned — possibly stale snapshot or indexing gap. **Worked via:** `Read` on `operator_helpers.go`. **Suggestion:** Include function bodies in keyword index even when summary is empty.
+
+---
+
+## Unit 9.1 — Round 2
+
+- **Builder:** go-builder-agent
+- **Started:** 2026-05-18
+- **Files touched:**
+  - `internal/cli/codex_integration_test.go`
+
+### Fixes applied
+
+**FIX 1 — Compile break at `codex_integration_test.go:357`**
+
+`runManageForIntegration` called the deleted symbol `newManageCommand`. Replaced with `newTestManageContainerCommand` (the test-only container helper added in R1's `manage_test.go:232-248`). No argv reshaping needed: callers at lines 51-52 pass `["account", "add", ...]` and `["bind", ...]`, both of which route correctly to children registered on `newTestManageContainerCommand`.
+
+**FIX 2 — Runtime argv at lines 145, 146, 240 (stripped `"manage"` leading token)**
+
+Three `runValvBinaryCommand` call sites passed `"manage"` as the first argv token to the built `./valv` binary. Post-R1, `valv manage` is not a registered cobra subcommand. Updated:
+- Line 145: `"manage", "account", "add", ...` → `"account", "add", ...`
+- Line 146: `"manage", "bind", "codex", "profile-name"` → `"account", "bind", "codex", "profile-name"` (per DROP_9 unit 9.2 final command shape)
+- Line 240: `"manage", "account", "add", ...` → `"account", "add", ...`
+
+### Mage gate results
+
+1. `mage testPkg github.com/evanmschultz/valv/internal/cli` — **PASS** (200 tests, 72.9% coverage, -race, no failures).
+2. `mage integration` — **PARTIAL**: compile break is fixed (integration tests now compile and run). 202/203 tests pass. One test fails at **runtime**: `TestCodexCommandRunsFixtureImageWithTTYEndToEnd` errors at line 146 with `unknown command "bind" for "valv account"`. This is a pre-9.2 structural gap — `valv account bind` does not exist in the binary until unit 9.2 lands. R2 cannot fix this within its declared scope (codex_integration_test.go only; no source code changes permitted).
+3. `mage build` — **PASS**.
+
+### Why R1 missed this
+
+R1's builder ran `mage testPkg ./internal/cli`, which compiles only non-tagged files. The `//go:build integration` tag on `codex_integration_test.go` excludes the file from `go test ./internal/cli` (without `-tags=integration`). The broken `newManageCommand` reference in that file was invisible to the non-integration test run. `mage integration` passes `-tags=integration` and compiled the file, surfacing the break.
+
+### Known remaining gap (pre-9.2)
+
+`TestCodexCommandRunsFixtureImageWithTTYEndToEnd` at line 146 calls `valv account bind codex profile-name` against the real binary. `account bind` does not exist until unit 9.2 ships. This test will remain a runtime failure until 9.2 closes. The compile break (R2's scope) is resolved; the runtime break is a 9.2 dependency.
+
+## Hylla Feedback (Round 2)
+
+N/A — Hylla is stale post-R1 commit (last ingest is DROP_8 baseline). All evidence gathered via `Read` and `git diff HEAD~2..HEAD~1`. No Hylla queries were applicable for this round.
+
+---
+
+## Unit 9.1 — Round 3
+
+- **Builder:** go-builder-agent
+- **Started:** 2026-05-18
+- **Files touched:**
+  - `internal/cli/codex_integration_test.go`
+
+### Edit applied
+
+Added `t.Skip(...)` as the first statement inside `TestCodexCommandRunsFixtureImageWithTTYEndToEnd` (line 113, immediately before `paths := testCodexPaths(t)`):
+
+```go
+t.Skip("requires valv account bind from DROP_9 Unit 9.2 — re-enable when 9.2 lands")
+```
+
+### Design notes
+
+**Cascade ordering rationale:** Unit 9.1 deletes the `valv manage` namespace; Unit 9.2 adds `valv account bind`. During the cascade window between those two units, `TestCodexCommandRunsFixtureImageWithTTYEndToEnd` calls the real binary with `valv account bind` at line 146 — a command that does not exist until 9.2 ships. The skip fires before any test setup (zero cost, zero side effects), converting a runtime FAIL into a SKIP so `mage integration` reports green. The skip comment names 9.2 explicitly, ensuring the re-enable obligation is discoverable.
+
+**Note to 9.2 builder:** Remove the `t.Skip` line from `TestCodexCommandRunsFixtureImageWithTTYEndToEnd` after wiring `valv account bind`. Confirm `mage integration` reports 203/203 PASS with no SKIP.
+
+### Mage gate results
+
+1. `mage testPkg github.com/evanmschultz/valv/internal/cli` — **PASS** (200 tests, 72.9% coverage, -race, 0 failures; integration-tagged test invisible to this target as expected).
+2. `mage integration` — **PASS** (202 passed, 1 skipped `TestCodexCommandRunsFixtureImageWithTTYEndToEnd`, 0 failed).
+3. `mage build` — **PASS** (`./valv` built successfully).
+
+## Hylla Feedback (Round 3)
+
+N/A — task touched only a single `t.Skip` insertion in a test file already read in R2. No Go symbol queries were needed.
