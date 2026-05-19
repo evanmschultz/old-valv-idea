@@ -1,186 +1,119 @@
 package cli
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
-	"io"
-	"strings"
 
 	"github.com/evanmschultz/laslig"
 	"github.com/spf13/cobra"
 
 	"github.com/evanmschultz/valv/internal/config"
 	"github.com/evanmschultz/valv/internal/domain"
-	"github.com/evanmschultz/valv/internal/output"
-	projectdetect "github.com/evanmschultz/valv/internal/project"
-	manageservice "github.com/evanmschultz/valv/internal/services/manage"
 )
 
-var errCodexSetupCanceled = errors.New("codex setup canceled")
-
-// ensureCodexBindingReady checks whether the current project is bound to a
-// Codex account. When accountOverride is non-empty, the named account is
-// resolved directly via ProfileByName and the binding-store lookup is skipped
-// entirely — no binding row is written. Unit 8.5 will merge this function into
-// ensureCodexAccountReadyForLaunch and inherit the accountOverride parameter.
-func ensureCodexBindingReady(cmd *cobra.Command, paths config.Paths, workingDir string, accountOverride string) error {
+// ensureCodexAccountReadyForLaunch resolves the Codex profile for the current
+// project launch and ensures host-side auth is ready. It returns the resolved
+// domain.Profile so runCodexCommand can thread it into codexservice.Options.OverrideProfile.
+//
+// Resolution order:
+//  1. accountOverride non-empty: resolve by name via ProfileByName. No binding
+//     row is written. Proceeds to step 4.
+//  2. accountOverride empty: check Codex binding via service.Status.
+//     - Bound: store the bound profile and proceed to step 4.
+//     - Unbound (ErrUnboundProject): enumerate ListProfiles(Codex):
+//     -- 0 accounts: return unboundProjectNoAccountsError(codex).
+//     -- 1 account: auto-bind silently, emit laslig notice, proceed to step 4.
+//     -- 2+ accounts, TTY: launch picker, bind, proceed to step 4.
+//     -- 2+ accounts, non-TTY: return error pointing to manual bind command.
+//     - Any other error: wrap with "detect codex binding: %w" and return.
+//  3. Skip step 4 (ensureManagedAccountReady) when codexArgsSkipAccountReady
+//     returns true for args. The profile is still returned in this case.
+//
+// Codex auth is host-side. This function DOES call ensureManagedAccountReady
+// (unlike ensureClaudeBindingReady, which skips it because Claude auth is
+// in-container). This asymmetry is justified by runtime structure: Codex requires
+// host-side login status checked before container launch; Claude does not.
+func ensureCodexAccountReadyForLaunch(cmd *cobra.Command, paths config.Paths, workingDir string, accountOverride string, args []string) (domain.Profile, error) {
 	service, closeStore, err := openManageService(cmd, paths)
 	if err != nil {
-		return fmt.Errorf("initialize manage service: %w", err)
+		return domain.Profile{}, fmt.Errorf("initialize manage service: %w", err)
 	}
 	defer closeStore()
 
-	// When an explicit account override is supplied, resolve the named profile
-	// directly. Binding store is not consulted and no row is written.
+	var profile domain.Profile
+
+	// Step 1: explicit override bypasses the binding store entirely.
 	if accountOverride != "" {
-		if _, err := service.ProfileByName(cmd.Context(), domain.ProviderCodex, accountOverride); err != nil {
-			return fmt.Errorf("resolve override account %q: %w", accountOverride, err)
-		}
-		return nil
-	}
-
-	if _, err := service.Status(cmd.Context(), workingDir); err == nil {
-		return nil
-	} else if !errors.Is(err, domain.ErrUnboundProject) && !strings.Contains(err.Error(), domain.ErrUnboundProject.Error()) {
-		return fmt.Errorf("validate binding: %w", err)
-	}
-
-	project, err := projectdetect.DetectFrom(workingDir)
-	if err != nil {
-		return fmt.Errorf("validate binding: detect project from %q: %w", workingDir, err)
-	}
-	if !commandHasTTY(cmd.InOrStdin()) || !commandHasTTY(cmd.OutOrStdout()) {
-		return fmt.Errorf("validate binding: project %q: %w; run `valv manage account add codex` for the default host-backed account or `valv manage account add codex account-name` for an isolated account", project.Root, domain.ErrUnboundProject)
-	}
-	if err := runCodexFirstRunSetup(cmd, service, project.Root); err != nil {
-		return fmt.Errorf("validate binding: %w", err)
-	}
-	return nil
-}
-
-func runCodexFirstRunSetup(cmd *cobra.Command, service manageservice.Service, projectRoot string) error {
-	reader := bufio.NewReader(cmd.InOrStdin())
-	for {
-		if err := writeCodexSetupIntro(cmd.ErrOrStderr(), projectRoot); err != nil {
-			return fmt.Errorf("write setup intro: %w", err)
-		}
-		selection, err := readPrompt(reader, cmd.ErrOrStderr(), "Select [1-4]: ")
+		resolved, err := service.ProfileByName(cmd.Context(), domain.ProviderCodex, accountOverride)
 		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return errCodexSetupCanceled
-			}
-			return fmt.Errorf("read setup selection: %w", err)
+			return domain.Profile{}, fmt.Errorf("resolve override account %q: %w", accountOverride, err)
 		}
-		switch selection {
-		case "1", "":
-			profile, err := service.CreateDefaultHostProfile(cmd.Context(), domain.ProviderCodex)
+		profile = resolved
+	} else {
+		// Step 2: check whether the project already has a Codex binding.
+		// service.Status hardcodes ProviderCodex internally — correct for Codex.
+		status, err := service.Status(cmd.Context(), workingDir)
+		if err == nil {
+			// Already bound — use the existing profile.
+			profile = status.Profile
+		} else if !errors.Is(err, domain.ErrUnboundProject) {
+			return domain.Profile{}, fmt.Errorf("detect codex binding: %w", err)
+		} else {
+			// Step 3: project is unbound — enumerate Codex accounts.
+			listResult, err := service.ListProfiles(cmd.Context(), domain.ProviderCodex)
 			if err != nil {
-				return fmt.Errorf("prepare default host-backed account: %w", err)
+				return domain.Profile{}, fmt.Errorf("list codex accounts: %w", err)
 			}
-			return loginBindAndReportCodexSetup(cmd, service, projectRoot, profile)
-		case "2":
-			profiles, err := service.ListProfiles(cmd.Context(), domain.ProviderCodex)
-			if err != nil {
-				return fmt.Errorf("list existing accounts: %w", err)
-			}
-			selectedProfile, err := pickProfile(cmd, domain.ProviderCodex, profiles.Profiles)
-			if err != nil {
-				if errors.Is(err, errSelectionCanceled) {
-					return errCodexSetupCanceled
+			profiles := listResult.Profiles
+
+			switch len(profiles) {
+			case 0:
+				return domain.Profile{}, unboundProjectNoAccountsError(domain.ProviderCodex)
+
+			case 1:
+				// Auto-bind the single account silently.
+				p := profiles[0]
+				if _, err := service.BindProject(cmd.Context(), domain.ProviderCodex, p.Name, workingDir); err != nil {
+					return domain.Profile{}, fmt.Errorf("auto-bind codex account %q: %w", p.Name, err)
 				}
-				if strings.Contains(err.Error(), "no codex accounts found") {
-					_ = writeCLINotice(
-						cmd.ErrOrStderr(),
-						laslig.NoticeWarningLevel,
-						"No existing Codex accounts are available yet",
-						"Create one or use the default account flow first.",
-					)
-					continue
-				}
-				return fmt.Errorf("select existing account: %w", err)
-			}
-			return loginBindAndReportCodexSetup(cmd, service, projectRoot, selectedProfile)
-		case "3":
-			name, err := readPrompt(reader, cmd.ErrOrStderr(), "New isolated account name: ")
-			if err != nil {
-				if errors.Is(err, io.EOF) {
-					return errCodexSetupCanceled
-				}
-				return fmt.Errorf("read isolated account name: %w", err)
-			}
-			name = strings.TrimSpace(name)
-			if name == "" {
-				_ = writeCLINotice(
+				if err := writeCLINotice(
 					cmd.ErrOrStderr(),
-					laslig.NoticeErrorLevel,
-					"Account name cannot be empty",
-					"Enter a non-empty isolated account name.",
-				)
-				continue
+					laslig.NoticeInfoLevel,
+					"Project bound",
+					fmt.Sprintf("Bound project to Codex account %q.", p.Name),
+				); err != nil {
+					// Non-fatal: notice write failure must not block launch.
+					_ = err
+				}
+				profile = p
+
+			default:
+				// 2+ accounts: use picker when TTY available.
+				if !commandHasTTY(cmd.InOrStdin()) || !commandHasTTY(cmd.OutOrStdout()) {
+					return domain.Profile{}, fmt.Errorf(
+						"project is not bound to a Codex account; run `valv manage bind codex <name>` to bind one",
+					)
+				}
+				selected, err := pickProfile(cmd, domain.ProviderCodex, profiles)
+				if err != nil {
+					return domain.Profile{}, fmt.Errorf("select codex account: %w", err)
+				}
+				if _, err := service.BindProject(cmd.Context(), domain.ProviderCodex, selected.Name, workingDir); err != nil {
+					return domain.Profile{}, fmt.Errorf("bind codex account %q: %w", selected.Name, err)
+				}
+				profile = selected
 			}
-			profile, err := service.CreateProfile(cmd.Context(), domain.ProviderCodex, name, "")
-			if err != nil {
-				return fmt.Errorf("create isolated account %q: %w", name, err)
-			}
-			return loginBindAndReportCodexSetup(cmd, service, projectRoot, profile)
-		case "4", "q", "quit", "cancel", "esc":
-			return errCodexSetupCanceled
-		default:
-			_ = writeCLINotice(
-				cmd.ErrOrStderr(),
-				laslig.NoticeWarningLevel,
-				"Unknown selection",
-				fmt.Sprintf("Choose one of 1-4, got %q.", selection),
-			)
 		}
 	}
-}
 
-func loginBindAndReportCodexSetup(cmd *cobra.Command, service manageservice.Service, projectRoot string, profile domain.Profile) error {
+	// Step 4: ensure host-side auth is ready. Skip when args indicate a
+	// passthrough command (help, login, logout) that does not need a live session.
+	if codexArgsSkipAccountReady(args) {
+		return profile, nil
+	}
 	if err := ensureManagedAccountReady(cmd, profile.Provider, profile, accountAuthOptions{}); err != nil {
-		return fmt.Errorf("prepare account %q: %w", profile.Name, err)
+		return domain.Profile{}, fmt.Errorf("ensure account %q is ready: %w", profile.Name, err)
 	}
-	result, err := service.BindProject(cmd.Context(), profile.Provider, profile.Name, projectRoot)
-	if err != nil {
-		return fmt.Errorf("bind project to account %q: %w", profile.Name, err)
-	}
-	return writeCodexSetupResult(cmd.ErrOrStderr(), "Account ready and project bound", result.Project.Root, result.Profile)
-}
 
-func writeCodexSetupIntro(out io.Writer, projectRoot string) error {
-	return writeCLINotice(
-		out,
-		laslig.NoticeInfoLevel,
-		"Valv setup needed",
-		fmt.Sprintf("project: %s", projectRoot),
-		"1. Use the default Codex account for this environment and bind it",
-		"2. Choose an existing Valv account",
-		"3. Create a new isolated Valv account",
-		"4. Cancel",
-	)
-}
-
-func writeCodexSetupResult(out io.Writer, heading string, projectRoot string, profile domain.Profile) error {
-	mode := output.ResolveMode(out, output.Policy{Format: domain.OutputFormatAuto, Style: domain.OutputStyleAuto})
-	return output.WriteRecord(out, mode, heading, []output.Field{
-		{Label: "project", Value: projectRoot, Identifier: true},
-		{Label: "provider", Value: string(profile.Provider), Muted: true},
-		{Label: "account", Value: profile.Name, Identifier: true},
-		{Label: "home", Value: profile.HomePath},
-	})
-}
-
-func readPrompt(reader *bufio.Reader, out io.Writer, prompt string) (string, error) {
-	if _, err := fmt.Fprint(out, prompt); err != nil {
-		return "", fmt.Errorf("write prompt: %w", err)
-	}
-	line, err := reader.ReadString('\n')
-	if err != nil && !errors.Is(err, io.EOF) {
-		return "", err
-	}
-	if errors.Is(err, io.EOF) && strings.TrimSpace(line) == "" {
-		return "", io.EOF
-	}
-	return strings.TrimSpace(line), nil
+	return profile, nil
 }

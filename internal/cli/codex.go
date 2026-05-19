@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -73,13 +72,16 @@ func runCodexCommand(cmd *cobra.Command, paths config.Paths, args []string) erro
 	if err != nil {
 		return fmt.Errorf("run codex command: resolve working directory: %w", err)
 	}
-	if err := ensureCodexBindingReady(cmd, paths, workingDir, accountName); err != nil {
-		if errors.Is(err, errCodexSetupCanceled) {
-			return nil
-		}
-		return fmt.Errorf("run codex command: %w", err)
-	}
-	if err := ensureBoundCodexAccountReady(cmd, paths, workingDir, args, accountName); err != nil {
+
+	// ensureCodexAccountReadyForLaunch handles all binding resolution and
+	// host-side auth in one call:
+	// - accountOverride non-empty: resolve by name, no binding written.
+	// - no override: check existing Codex binding; if unbound, auto-bind or
+	//   launch picker based on account count and TTY availability.
+	// - calls ensureManagedAccountReady (host-side auth) unless args signal a
+	//   skip-guard command (login, logout, help).
+	resolvedProfile, err := ensureCodexAccountReadyForLaunch(cmd, paths, workingDir, accountName, args)
+	if err != nil {
 		return fmt.Errorf("run codex command: %w", err)
 	}
 
@@ -106,16 +108,17 @@ func runCodexCommand(cmd *cobra.Command, paths config.Paths, args []string) erro
 	defer store.Close()
 
 	service, err := codexservice.New(codexservice.Options{
-		Store:    store,
-		Executor: dockeradapter.NewExecutor(dockeradapter.NewSystemRunner("docker", cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr())),
-		Image:    codexImageRef(),
-		User:     currentContainerUser(),
-		TTY:      stdinTTY && stdoutTTY,
-		Stdin:    stdinTTY,
-		TempRoot: paths.TempCacheDir,
-		RealHome: realHomeDir(),
-		Logger:   logger,
-		Notices:  cmd.ErrOrStderr(),
+		Store:           store,
+		Executor:        dockeradapter.NewExecutor(dockeradapter.NewSystemRunner("docker", cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr())),
+		Image:           codexImageRef(),
+		User:            currentContainerUser(),
+		TTY:             stdinTTY && stdoutTTY,
+		Stdin:           stdinTTY,
+		TempRoot:        paths.TempCacheDir,
+		RealHome:        realHomeDir(),
+		Logger:          logger,
+		Notices:         cmd.ErrOrStderr(),
+		OverrideProfile: &resolvedProfile,
 	})
 	if err != nil {
 		return fmt.Errorf("run codex command: initialize launcher: %w", err)
@@ -123,14 +126,9 @@ func runCodexCommand(cmd *cobra.Command, paths config.Paths, args []string) erro
 	if err := ensureCodexImageCurrent(cmd, paths); err != nil {
 		return fmt.Errorf("run codex command: %w", err)
 	}
-	// Skip ValidateBinding when an explicit account override is active: the
-	// override bypasses the binding store entirely. Unit 8.5 threads the resolved
-	// profile into the launch service so the container run proceeds.
-	if accountName == "" {
-		if err := service.ValidateBinding(cmd.Context(), workingDir); err != nil {
-			return fmt.Errorf("run codex command: validate binding: %w", err)
-		}
-	}
+	// ValidateBinding is skipped — ensureCodexAccountReadyForLaunch already
+	// resolved (and if needed, wrote) the binding. OverrideProfile is always
+	// set so the service uses the resolved profile directly.
 
 	if err := service.Run(cmd.Context(), workingDir, args); err != nil {
 		return fmt.Errorf("run codex command: %w", err)
@@ -208,43 +206,6 @@ func codexArgsSkipAccountReady(args []string) bool {
 	default:
 		return false
 	}
-}
-
-// ensureBoundCodexAccountReady checks host authentication for the bound (or
-// override) Codex account. When accountOverride is non-empty, the named profile
-// is resolved directly via ProfileByName — the binding store is not consulted.
-// Unit 8.5 will merge this function into ensureCodexAccountReadyForLaunch.
-func ensureBoundCodexAccountReady(cmd *cobra.Command, paths config.Paths, workingDir string, args []string, accountOverride string) error {
-	if codexArgsSkipAccountReady(args) {
-		return nil
-	}
-	service, closeStore, err := openManageService(cmd, paths)
-	if err != nil {
-		return fmt.Errorf("initialize account service: %w", err)
-	}
-	defer closeStore()
-
-	// When an explicit account override is supplied, resolve the named profile
-	// directly. Binding store is not consulted and no row is written.
-	if accountOverride != "" {
-		profile, err := service.ProfileByName(cmd.Context(), domain.ProviderCodex, accountOverride)
-		if err != nil {
-			return fmt.Errorf("resolve override account %q: %w", accountOverride, err)
-		}
-		if err := ensureManagedAccountReady(cmd, profile.Provider, profile, accountAuthOptions{}); err != nil {
-			return fmt.Errorf("ensure override account %q is ready: %w", profile.Name, err)
-		}
-		return nil
-	}
-
-	status, err := service.Status(cmd.Context(), workingDir)
-	if err != nil {
-		return fmt.Errorf("resolve bound account: %w", err)
-	}
-	if err := ensureManagedAccountReady(cmd, status.Profile.Provider, status.Profile, accountAuthOptions{}); err != nil {
-		return fmt.Errorf("ensure bound account %q is ready: %w", status.Profile.Name, err)
-	}
-	return nil
 }
 
 func ensureCodexImageAvailable(ctx context.Context, runner interface {

@@ -288,6 +288,79 @@ Two tests (`TestRunClaudeCommandUnboundProject`, `TestRunClaudeCommandRejectsWro
 
 `TestRunUsesOverrideProfileHomePath` in `claudeservice` constructs a service with `OverrideProfile` pointing at `overrideHome`, a store with a bound profile at `boundHome` (different path), and asserts the executor's `ContainerRunRequest.Mounts` contains `overrideHome` as source, not `boundHome`. End-to-end proof that the override profile's `HomePath` is used for the container bind-mount.
 
+## Unit 8.5 — Round 1
+
+- **Builder:** go-builder-agent
+- **Started:** 2026-05-18
+- **Files touched:**
+  - `internal/cli/codex_setup.go` (full rewrite — merged `ensureCodexBindingReady` + `ensureBoundCodexAccountReady` into `ensureCodexAccountReadyForLaunch`; deleted dead code: `runCodexFirstRunSetup`, `loginBindAndReportCodexSetup`, `writeCodexSetupIntro`, `writeCodexSetupResult`, `readPrompt`, `errCodexSetupCanceled`)
+  - `internal/cli/codex_setup_test.go` (full rewrite — replaced old 3-test suite with 7-test suite for `ensureCodexAccountReadyForLaunch`)
+  - `internal/cli/codex.go` (removed `ensureBoundCodexAccountReady`; rewired `runCodexCommand` to call `ensureCodexAccountReadyForLaunch` once; removed `errCodexSetupCanceled` check; removed `errors` import; added `OverrideProfile: &resolvedProfile` to `codexservice.Options`)
+  - `internal/cli/codex_test.go` (renamed `TestEnsureBoundCodexAccountReady*` → `TestEnsureCodexAccountReadyForLaunch*`; updated `TestRunCodexCommandReturnsUnboundProjectWhenNoProjectRecordExists` to check `"project is not bound"` substring instead of `errors.Is(ErrUnboundProject)`; removed unused `domain` import)
+  - `internal/services/codex/service.go` (added `OverrideProfile *domain.Profile` to `Options` + `Service`; updated `New`; updated `Run` to honor override profile — skip `resolveBinding`, still detect project + normalize cwd)
+  - `internal/services/codex/service_test.go` (added `TestRunUsesOverrideProfileHomePath`)
+- **Mage targets run:**
+  - `mage build` — PASS
+  - `mage testPkg github.com/evanmschultz/valv/internal/services/codex` — PASS (12/12, 74.3% coverage, -race)
+  - `mage testPkg github.com/evanmschultz/valv/internal/cli` — PASS (195/195, 73.3% coverage, -race)
+  - `mage build` — PASS (final)
+
+### Design notes
+
+**Merge rationale: single function, 5 numbered responsibilities**
+
+`ensureCodexAccountReadyForLaunch` absorbs both old functions into a clear step structure:
+1. Override resolution (ProfileByName, no binding row).
+2. Binding check (service.Status — correctly Codex-hardcoded).
+3. 0/1/2+ account branching (unboundProjectNoAccountsError / auto-bind + notice / picker).
+4. Host-side auth via `ensureManagedAccountReady`.
+5. Skip step 4 when `codexArgsSkipAccountReady(args)` is true.
+
+**`errors.Is` alone, no `strings.Contains` belt-and-suspenders (AC 7 / 8.4 falsification C3)**
+
+The unbound check uses `errors.Is(err, domain.ErrUnboundProject)` only. `service.Status` wraps with `%w` (confirmed in `manage/service.go:245-258`), so `errors.Is` unwraps the chain correctly. The old `strings.Contains` fallback also created a self-classification risk (the 0-accounts error message itself contains "project is not bound") and is correctly removed per spec.
+
+**`errCodexSetupCanceled` deletion**
+
+Sentinel and its only consumer (`codex.go:77-80` `errors.Is` check) are both deleted. `git build` confirmation: no undefined-identifier error, no remaining references.
+
+**Dead code confirmed deleted (build evidence)**
+
+`runCodexFirstRunSetup`, `loginBindAndReportCodexSetup`, `writeCodexSetupIntro`, `writeCodexSetupResult`, `readPrompt` — all deleted. The production binary compiles without them. `ensureBoundCodexAccountReady` deleted from `codex.go`.
+
+**`codexservice.OverrideProfile` threading**
+
+Added `OverrideProfile *domain.Profile` to `codexservice.Options` + `Service`. `Run` branches: when non-nil, normalizes cwd, detects project, looks up `ProjectByRoot`, builds `resolvedLaunchBinding` with the override profile directly — skipping `BindingByProjectID` and `ProfileByID` lookups. `buildRequest` uses the override profile's `HomePath` for the container bind mount. `TestRunUsesOverrideProfileHomePath` in `service_test.go` asserts that `profile_id` label and mount source come from the override profile, not the bound profile in the store.
+
+**Asymmetry: Codex has `ensureManagedAccountReady`, Claude does not**
+
+`ensureCodexAccountReadyForLaunch` calls `ensureManagedAccountReady` (step 4) because Codex auth is host-side — the user must be logged in on the host before the container launch. `ensureClaudeBindingReady` does NOT call this because Claude auth is in-container (device-code OAuth runs inside the container at first launch). This asymmetry is justified by runtime structure per PLAN.md Notes § "Asymmetry justification (R3 addition — CX2 merge)" and documented in the function's godoc comment.
+
+**`runCodexCommand` rewire**
+
+Single call to `ensureCodexAccountReadyForLaunch` replaces the old double-call pattern. `ValidateBinding` removed (redundant — binding is guaranteed by the merged function). `OverrideProfile: &resolvedProfile` always set, so `codexservice.Run` uses the resolved profile directly for every code path (override, auto-bind, picker, existing binding).
+
+**`BindProject` upsert idempotency**
+
+Confirmed at `manage/service.go:223`: `BindProject` calls `store.UpsertProjectBinding`. Concurrent `valv codex` auto-bind calls on first run are safe.
+
+**Test updates to `codex_test.go`**
+
+`TestRunCodexCommandReturnsUnboundProjectWhenNoProjectRecordExists` updated: after 8.5, the 0-accounts path returns `unboundProjectNoAccountsError` which does not wrap `ErrUnboundProject` (same behavior as `TestRunClaudeCommandUnboundProject` after 8.4). Updated to check `strings.Contains(err.Error(), "project is not bound")`.
+
+## Hylla Feedback (Unit 8.5 R1)
+
+N/A — Hylla unreachable this session (per spawn prompt paradigm override). All evidence gathered via direct `Read` of source files. Primary sources:
+- `internal/cli/codex_setup.go` (8.3 state — current codex binding check + dead setup menu)
+- `internal/cli/codex.go` (8.3/8.4 state — `ensureBoundCodexAccountReady`, `runCodexCommand`)
+- `internal/cli/claude_setup.go` (8.4 state — structural pattern to mirror)
+- `internal/services/codex/service.go` (Run + resolveBinding — for OverrideProfile extension)
+- `internal/services/claude/service.go` (OverrideProfile pattern to mirror exactly)
+- `internal/services/codex/service_test.go` (existing fakeStore, fakeExecutor helpers)
+- `internal/cli/codex_setup_test.go` (old 3-test suite — replaced)
+- `internal/cli/codex_test.go` (two old ensureBoundCodexAccountReady callers — migrated)
+- `internal/cli/account_auth_test.go` (installStubCodexAccountAuth definition)
+
 ## Hylla Feedback (Unit 8.4 R1)
 
 N/A — Hylla unreachable this session (per spawn prompt paradigm override). All evidence gathered via direct `Read` of source files. Primary sources:

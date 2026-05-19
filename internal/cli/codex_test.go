@@ -13,7 +13,6 @@ import (
 
 	dockeradapter "github.com/evanmschultz/valv/internal/adapters/docker"
 	"github.com/evanmschultz/valv/internal/config"
-	"github.com/evanmschultz/valv/internal/domain"
 )
 
 func TestCodexCommandPassesArgsThroughUnchanged(t *testing.T) {
@@ -64,8 +63,13 @@ func TestRunCodexCommandReturnsUnboundProjectWhenNoProjectRecordExists(t *testin
 	cmd.SetErr(&bytes.Buffer{})
 
 	err = cmd.RunE(cmd, []string{"resume", "session-123"})
-	if !errors.Is(err, domain.ErrUnboundProject) {
-		t.Fatalf("RunE() error = %v, want domain.ErrUnboundProject", err)
+	// After 8.5, the 0-accounts path returns unboundProjectNoAccountsError which
+	// does not wrap ErrUnboundProject — same behavior as Claude (8.4).
+	if err == nil {
+		t.Fatal("RunE() error = nil, want error for unbound project with no accounts")
+	}
+	if !strings.Contains(err.Error(), "project is not bound") {
+		t.Fatalf("RunE() error = %q, want 'project is not bound' guidance", err.Error())
 	}
 }
 
@@ -173,7 +177,7 @@ func TestCodexArgsSkipAccountReady(t *testing.T) {
 	}
 }
 
-func TestEnsureBoundCodexAccountReadyUsesBoundAccount(t *testing.T) {
+func TestEnsureCodexAccountReadyForLaunchUsesBoundAccount(t *testing.T) {
 	t.Parallel()
 
 	paths := testCodexPaths(t)
@@ -191,8 +195,9 @@ func TestEnsureBoundCodexAccountReadyUsesBoundAccount(t *testing.T) {
 	cmd.SetErr(&bytes.Buffer{})
 	stub := installStubCodexAccountAuth(t, cmd, true)
 
-	if err := ensureBoundCodexAccountReady(cmd, paths, projectRoot, []string{"resume", "--last"}, ""); err != nil {
-		t.Fatalf("ensureBoundCodexAccountReady() error = %v", err)
+	profile, err := ensureCodexAccountReadyForLaunch(cmd, paths, projectRoot, "", []string{"resume", "--last"})
+	if err != nil {
+		t.Fatalf("ensureCodexAccountReadyForLaunch() error = %v", err)
 	}
 	if stub.statusHits == 0 {
 		t.Fatal("LoginStatus() hits = 0, want account readiness check")
@@ -200,9 +205,12 @@ func TestEnsureBoundCodexAccountReadyUsesBoundAccount(t *testing.T) {
 	if got := stub.homePaths[0]; !strings.Contains(got, "profiles/work") {
 		t.Fatalf("LoginStatus() home path = %q, want isolated work profile home", got)
 	}
+	if profile.Name != "work" {
+		t.Fatalf("profile.Name = %q, want %q", profile.Name, "work")
+	}
 }
 
-func TestEnsureBoundCodexAccountReadySkipsAccountCheckForLoginCommand(t *testing.T) {
+func TestEnsureCodexAccountReadyForLaunchSkipsAccountCheckForLoginCommand(t *testing.T) {
 	t.Parallel()
 
 	paths := testCodexPaths(t)
@@ -220,11 +228,15 @@ func TestEnsureBoundCodexAccountReadySkipsAccountCheckForLoginCommand(t *testing
 	cmd.SetErr(&bytes.Buffer{})
 	stub := installStubCodexAccountAuth(t, cmd, true)
 
-	if err := ensureBoundCodexAccountReady(cmd, paths, projectRoot, []string{"login"}, ""); err != nil {
-		t.Fatalf("ensureBoundCodexAccountReady() error = %v", err)
+	profile, err := ensureCodexAccountReadyForLaunch(cmd, paths, projectRoot, "", []string{"login"})
+	if err != nil {
+		t.Fatalf("ensureCodexAccountReadyForLaunch(login) error = %v", err)
 	}
 	if stub.statusHits != 0 {
 		t.Fatalf("LoginStatus() hits = %d, want 0 for login passthrough", stub.statusHits)
+	}
+	if profile.Name == "" {
+		t.Fatal("profile.Name empty, want bound account name")
 	}
 }
 

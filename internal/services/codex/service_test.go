@@ -475,6 +475,93 @@ func TestRunRejectsSiblingPathThatSharesProjectPrefix(t *testing.T) {
 	}
 }
 
+func TestRunUsesOverrideProfileHomePath(t *testing.T) {
+	t.Parallel()
+
+	projectRoot := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(projectRoot, 0o755); err != nil {
+		t.Fatalf("MkdirAll(project.Root) error = %v", err)
+	}
+	normalizedProjectRoot, err := pathutil.Normalize(projectRoot)
+	if err != nil {
+		t.Fatalf("Normalize(projectRoot) error = %v", err)
+	}
+
+	// boundHome is what the binding store points to — it must NOT be used when
+	// overrideProfile is set.
+	boundHome := filepath.Join(t.TempDir(), "bound-profile")
+	if err := os.MkdirAll(boundHome, 0o755); err != nil {
+		t.Fatalf("MkdirAll(boundHome) error = %v", err)
+	}
+
+	// overrideHome is what overrideProfile points to — it MUST appear in mounts.
+	overrideHome := filepath.Join(t.TempDir(), "override-profile")
+	if err := os.MkdirAll(overrideHome, 0o755); err != nil {
+		t.Fatalf("MkdirAll(overrideHome) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(overrideHome, "auth.json"), []byte(`{"auth_mode":"chatgpt"}`), 0o600); err != nil {
+		t.Fatalf("WriteFile(auth.json) error = %v", err)
+	}
+
+	project := domain.Project{ID: "project-override-test", Root: normalizedProjectRoot, Name: "project"}
+	// bound store profile points to boundHome — must NOT appear in mounts.
+	boundProfile := domain.Profile{ID: "bound-profile-id", Provider: domain.ProviderCodex, Name: "bound", HomePath: boundHome}
+	binding := domain.ProjectBinding{ProjectID: project.ID, ProfileID: boundProfile.ID, Provider: domain.ProviderCodex}
+	overrideProfile := domain.Profile{ID: "override-profile-id", Provider: domain.ProviderCodex, Name: "override", HomePath: overrideHome}
+
+	executor := &fakeExecutor{}
+	service, err := New(Options{
+		Store: fakeStore{
+			project: project,
+			binding: binding,
+			profile: boundProfile,
+		},
+		Executor: executor,
+		Detect: func(start string) (projectdetect.Result, error) {
+			return projectdetect.Result{Root: project.Root, HasGitMarker: true}, nil
+		},
+		Image:           docker.NewImageRef("valv-codex", "dev"),
+		TempRoot:        t.TempDir(),
+		OverrideProfile: &overrideProfile,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if err := service.Run(context.Background(), normalizedProjectRoot, []string{"resume", "--last"}); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	// The profile mount (index 1) must use overrideHome, not boundHome.
+	if len(executor.got.Mounts) < 2 {
+		t.Fatalf("Run() mounts len = %d, want >= 2", len(executor.got.Mounts))
+	}
+	normalizedOverrideHome, err := pathutil.Normalize(overrideHome)
+	if err != nil {
+		t.Fatalf("Normalize(overrideHome) error = %v", err)
+	}
+	normalizedBoundHome, err := pathutil.Normalize(boundHome)
+	if err != nil {
+		t.Fatalf("Normalize(boundHome) error = %v", err)
+	}
+	normalizedMountSource, err := pathutil.Normalize(executor.got.Mounts[1].Source)
+	if err != nil {
+		t.Fatalf("Normalize(mount source) error = %v", err)
+	}
+	// Mount source must be derived from overrideHome (or a staged copy of it),
+	// and must NOT be derived from boundHome.
+	if normalizedMountSource == normalizedBoundHome {
+		t.Fatalf("Run() profile mount source = %q (bound home), want override home %q", normalizedMountSource, normalizedOverrideHome)
+	}
+	// Confirm overrideProfile.ID appears in labels, not boundProfile.ID.
+	if got := executor.got.Labels["io.valv.profile_id"]; got != overrideProfile.ID {
+		t.Fatalf("Run() profile_id label = %q, want %q (override profile)", got, overrideProfile.ID)
+	}
+	if got := executor.got.Labels["io.valv.profile_id"]; got == boundProfile.ID {
+		t.Fatalf("Run() profile_id label = %q (bound profile), want override profile %q", got, overrideProfile.ID)
+	}
+}
+
 func TestEmitNoticesSuppressesWarningsOnTTY(t *testing.T) {
 	t.Parallel()
 

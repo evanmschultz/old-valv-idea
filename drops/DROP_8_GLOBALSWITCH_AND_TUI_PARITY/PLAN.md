@@ -137,7 +137,7 @@ Closes the remainder of focus-plan §6.6 + the dogfood binding-UX gap (dev hit "
 
 ### Unit 8.5 — Binding UX parity: `valv codex` merged launch-ready function
 
-**State:** todo
+**State:** done
 **Paths:**
 - `internal/cli/codex_setup.go`
 - `internal/cli/codex_setup_test.go`
