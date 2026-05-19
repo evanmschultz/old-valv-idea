@@ -1064,3 +1064,224 @@ Unit 8.4 meets every stated acceptance criterion. `mage testPkg` green across al
 ## Hylla Feedback (Unit 8.4 Round 1)
 
 N/A — Hylla unreachable per spawn paradigm override; all evidence gathered via `Read`, `git diff HEAD~1`, `git grep`, and direct file inspection. Context7 not needed (cobra `DisableFlagParsing`, `errors.Is`/`%w` semantics are stdlib-canonical and the diff is self-contained). No tool-shape gripes.
+
+---
+
+## Unit 8.5 — Round 1
+
+**QA Falsification — `go-qa-falsification-agent`**
+**Date:** 2026-05-18
+**Verdict:** PASS — no CONFIRMED counterexamples. 1 CONCERN (intentional behavior shift worth surfacing) + 1 minor symmetric gap acknowledged.
+
+**Evidence sources used:**
+- `git diff HEAD~1 --stat` (8 files, 542 inserts / 311 deletes).
+- `git diff HEAD~1` on `internal/cli/codex.go`, `internal/cli/codex_setup.go`, `internal/services/codex/service.go`, `internal/services/codex/service_test.go`.
+- Full `Read` of post-merge `internal/cli/codex_setup.go` (120 lines), `internal/cli/codex.go` (291 lines), `internal/cli/claude.go` (224 lines), `internal/cli/claude_setup.go` (114 lines), `internal/services/codex/service.go` (385 lines), and `internal/services/claude/service.go` lines 115-174.
+- `Read` of `internal/cli/codex_setup_test.go` (277 lines, 7 tests).
+- `git show HEAD~1:internal/cli/codex.go` for the deleted `ensureBoundCodexAccountReady`.
+- `git grep` over `internal/` for `readPrompt`, `errCodexSetupCanceled`, `runCodexFirstRunSetup`, `writeCodexSetupIntro` — all return ZERO matches in source.
+- `mage testPkg ./internal/cli` — 195/195 PASS, 73.3% coverage, -race clean.
+- `mage golden` — 24/24 tracked + 1/1 transcript PASS.
+- `mage test` (full project verification) — 476/476 PASS across 20 packages.
+- `internal/cli/operator_helpers.go` `pickProfile` + `realPickProfile` (line 161+) for picker cancel semantics.
+
+**Attack-vector results (in spawn-prompt order):**
+
+### V1 — Merge correctness (REFUTED)
+
+Walked both old functions line-by-line against the merged function.
+
+| Old responsibility | Old loc | New loc | Result |
+|---|---|---|---|
+| `ensureCodexBindingReady`: override → `ProfileByName` + return (no auth) | `codex_setup.go:31-37` (HEAD~1) | `codex_setup.go:46-51` then step 4 at line 114 | Covered — override now also runs through `ensureManagedAccountReady`, MATCHING the prior `ensureBoundCodexAccountReady` override branch (old `codex.go:229-238`). |
+| `ensureCodexBindingReady`: bound (Status no error) → return | `codex_setup.go:39` | `codex_setup.go:55-58` | Covered — profile is captured for step 4. |
+| `ensureCodexBindingReady`: non-unbound Status error → wrap | `codex_setup.go:40-42` | `codex_setup.go:59-60` | Covered — `errors.Is` only (justified — see V11). |
+| `ensureCodexBindingReady`: unbound → `runCodexFirstRunSetup` (4-option menu) | `codex_setup.go:44-54` | `codex_setup.go:63-105` (0/1/2+ branching, auto-bind, picker) | REPLACED per PLAN.md §149-159 decision to drop the 4-option menu — matches Claude UX after Unit 8.4. |
+| `ensureBoundCodexAccountReady`: skip-guard short-circuit | `codex.go:218-220` (HEAD~1) | `codex_setup.go:111-113` (step 5) | Covered — but moved AFTER profile resolution (see Concerns 1 below). |
+| `ensureBoundCodexAccountReady`: override → `ProfileByName` + `ensureManagedAccountReady` | `codex.go:229-238` | `codex_setup.go:46-51` + step 4 line 114 | Covered. |
+| `ensureBoundCodexAccountReady`: bound → `Status` + `ensureManagedAccountReady` | `codex.go:240-246` | `codex_setup.go:55-58` + step 4 line 114 | Covered. |
+
+**No dropped responsibility.** REFUTED.
+
+### V2 — `codexArgsSkipAccountReady` guard honored as step 5 (REFUTED)
+
+`codex_setup.go:111`:
+```go
+if codexArgsSkipAccountReady(args) {
+    return profile, nil
+}
+if err := ensureManagedAccountReady(cmd, profile.Provider, profile, accountAuthOptions{}); err != nil { ... }
+```
+
+Skip-guard short-circuits BEFORE `ensureManagedAccountReady`. Test exists at `codex_setup_test.go:245 TestEnsureCodexAccountReadyForLaunchSkipAccountReadyGuard`:
+- Binds project to `bound-account`.
+- Installs `installStubCodexAccountAuth` and explicitly asserts `stub.statusHits == 0` after calling with `args = ["login"]`.
+- Verifies profile name is still returned (`bound-account`).
+
+Test passes (`mage testPkg ./internal/cli` 195/195). REFUTED.
+
+### V3 — Override + `ensureManagedAccountReady` interaction (REFUTED)
+
+Traced step 1 → step 4: when `accountOverride != ""`, `codex_setup.go:46-51` writes `profile = resolved` where `resolved` is the result of `service.ProfileByName(ctx, ProviderCodex, accountOverride)`. Then at line 114, `ensureManagedAccountReady(cmd, profile.Provider, profile, ...)` is called on THAT override profile.
+
+Tests confirming:
+- `TestEnsureCodexAccountReadyForLaunchOverrideUnboundProject` (`codex_setup_test.go:20`): adds `override-account` (skip-login), calls with `accountOverride="override-account"`, asserts `profile.Name == "override-account"` AND `stub.statusHits != 0` (host-auth checked on override profile, not nothing).
+- `TestEnsureCodexAccountReadyForLaunchOverrideBoundProject` (`codex_setup_test.go:69`): adds `bound-account` + `override-account`, binds project to `bound-account`, calls with `accountOverride="override-account"`, asserts returned profile is `override-account` (override wins).
+
+`ensureManagedAccountReady` receives the OVERRIDE profile, never the bound one. REFUTED.
+
+### V4 — `OverrideProfile` nil-safety in `Run` (REFUTED)
+
+`internal/services/codex/service.go:121-150`:
+```go
+func (s Service) Run(ctx context.Context, cwd string, codexArgs []string) error {
+    var resolved resolvedLaunchBinding
+    if s.overrideProfile != nil {
+        // normalize → detect → ProjectByRoot → build resolved with *s.overrideProfile
+    } else {
+        resolved, err = s.resolveBinding(ctx, cwd)
+        ...
+    }
+    sharedHome := s.sharedCodexStateHome(resolved.profile)
+    ...
+}
+```
+
+The nil-check is at the TOP of `Run` (line 123). NO code touches the override profile before the nil-check. After the nil-check, the override path dereferences `*s.overrideProfile` at line 142 — safe because we just verified non-nil.
+
+Structurally identical to Claude `Run` at `internal/services/claude/service.go:128-157` (same nil-check pattern at the top of `Run`).
+
+Test confirming: `TestRunUsesOverrideProfileHomePath` (`internal/services/codex/service_test.go` new test) — asserts that when `OverrideProfile` is set, the container mount source comes from the override profile's `HomePath`, the `io.valv.profile_id` label is the override profile's ID, and the bound profile's data is NOT used.
+
+REFUTED.
+
+### V5 — `runCodexCommand` profile threading: override always set (REFUTED — intentional 8.4-symmetric design)
+
+Spawn prompt attack claim: "override should be set ONLY when `stripAccountFlag` returned non-empty accountName."
+
+Reality: `codex.go:121` unconditionally sets `OverrideProfile: &resolvedProfile`, mirroring Claude's `claude.go:114` (identical pattern). The architectural intent is to lift binding resolution OUT of `service.Run` and into the CLI layer — `Run` becomes a pure launcher that uses whichever profile the caller has already resolved. Documented in:
+- `codex.go:129-131` comment: "ValidateBinding is skipped — `ensureCodexAccountReadyForLaunch` already resolved (and if needed, wrote) the binding. OverrideProfile is always set so the service uses the resolved profile directly."
+- `internal/services/codex/service.go:51-56` doc-comment on the `OverrideProfile` field: "Used when --account is supplied or when `ensureCodexAccountReadyForLaunch` has already resolved the profile (auto-bind or picker)."
+- BUILDER_WORKLOG.md Unit 8.5 R1 § "`codexservice.OverrideProfile` threading" (line 331-333).
+- PLAN.md §162 — "`runCodexCommand` calls `ensureCodexAccountReadyForLaunch` ONCE … `ValidateBinding` removed (redundant — binding is guaranteed by the merged function)."
+
+The override-always-set design preserves all behavior because the CLI-layer auto-bind/picker writes a binding row before the service runs. The service's `resolveBinding` path is now reachable only when callers construct the service WITHOUT `OverrideProfile` (e.g., the future MCP translation layer or direct service consumers in tests). REFUTED.
+
+### V6 — `errCodexSetupCanceled` deletion impact on picker cancel (REFUTED)
+
+Old sentinel was returned from `runCodexFirstRunSetup` on `bufio.Reader` EOF (the deleted prompt loop). It was checked in `runCodexCommand` and silently returned nil to suppress the "EOF" error trace on stdin-close.
+
+New cancel path (user hits q/esc in `pickProfile`):
+1. `realPickProfile` (`operator_helpers.go:185`) returns `errSelectionCanceled` from `program.Run()` finalization.
+2. `ensureCodexAccountReadyForLaunch:97-100`: wraps as `fmt.Errorf("select codex account: %w", err)`.
+3. `runCodexCommand` returns `fmt.Errorf("run codex command: %w", err)` — user sees `run codex command: select codex account: <canceled>`.
+
+No panic. No swallowed error. Surfaces cleanly via cobra's standard error rendering. Identical handling to Claude's picker cancel (`claude_setup.go:104-107`). REFUTED.
+
+### V7 — Test coverage of non-`ErrUnboundProject` Status error (CONCERN — symmetric gap, not new in 8.5)
+
+The merged function at `codex_setup.go:59-60`:
+```go
+} else if !errors.Is(err, domain.ErrUnboundProject) {
+    return domain.Profile{}, fmt.Errorf("detect codex binding: %w", err)
+}
+```
+
+This branch is reachable when `service.Status` returns e.g. a SQLite read failure. No dedicated unit test exists for this branch in the new 7-test suite (vs the 8 attack vectors PLAN.md §165 enumerates — 6 cases covered + already-bound + skip-guard = 7 tests; the non-unbound Status error case is the 8th vector not covered).
+
+Symmetric gap: Claude's 8.4 suite (`claude_setup_test.go`) has the exact same shape and also lacks this test.
+
+Pre-existing minor coverage gap, not a 8.5 regression. CONCERN (not CONFIRMED).
+
+### V8 — `readPrompt` deletion + dangling references (REFUTED)
+
+`rtk git grep -nE "readPrompt|errCodexSetupCanceled|runCodexFirstRunSetup|writeCodexSetupIntro|writeCodexSetupResult|loginBindAndReportCodexSetup"`:
+- Source code: ZERO matches in `internal/` (production or tests).
+- Markdown: matches only in archived `drops/DROP_5_CLAUDE_LAUNCHER/*` historical record + DROP_8 PLAN.md / WORKLOG.md / PROOF.md (all expected — they document the deletion).
+- `VALV_CLAUDE_CODE_FOCUS_PLAN.md:161` references `runCodexFirstRunSetup` — but as a HISTORICAL reference in a planning doc, not a production caller.
+
+No code-side dangling reference. REFUTED.
+
+### V9 — `mage golden` regression (REFUTED)
+
+`mage golden` run output:
+- `internal/output` + `internal/tui/manage`: 24/24 PASS.
+- `internal/cli` external transcript (`TestCodexInteractiveMCPGolden`): 1/1 PASS.
+
+Picker rewiring did not break any golden fixture. REFUTED.
+
+### V10 — Coverage delta consistency (REFUTED)
+
+Spawn prompt claim: 8.4 had 71.8% / 191 tests; 8.5 has 73.3% / 195 tests; net +4 tests / +1.5% coverage.
+
+Verified:
+- `mage testPkg ./internal/cli` output: `tests: 195`, `cover: 73.3%`. Matches.
+- `codex_setup_test.go` test count: HEAD~1 has 3 tests; HEAD has 7 tests → +4 in this file.
+- `codex_test.go` test count: HEAD~1 has 16; HEAD has 16 → unchanged (the 2 `TestEnsureBoundCodexAccountReady*` were RENAMED in-place to `TestEnsureCodexAccountReadyForLaunch*` per BUILDER_WORKLOG.md:299, so the count stays 16 even though the names changed).
+
+Net +4 in `internal/cli` matches reported delta. Plus `TestRunUsesOverrideProfileHomePath` added to `internal/services/codex` (not counted in the cli total). REFUTED.
+
+### V11 — Symmetry vs 8.4 (REFUTED — with one acknowledged minor asymmetry)
+
+Side-by-side compare `ensureClaudeBindingReady` (post-8.4) vs `ensureCodexAccountReadyForLaunch` (post-8.5):
+
+| Aspect | Claude (8.4) | Codex (8.5) | Result |
+|---|---|---|---|
+| Function signature | Returns `(domain.Profile, error)` | Same | SYMMETRIC |
+| Step 1 (override → `ProfileByName`) | Lines 49-55 | Lines 46-51 | SYMMETRIC |
+| Step 2 (Status check) | Line 58 `StatusForProvider(..., ProviderClaude)` | Line 55 `service.Status(...)` — `Status` hardcodes ProviderCodex | SYMMETRIC in semantics (correct provider in both) |
+| Non-unbound error wrap | Line 65: `errors.Is(...) && !strings.Contains(...)` | Line 59: `errors.Is(...)` only | **Asymmetric, but justified — see below** |
+| 0-account error | Line 78 `unboundProjectNoAccountsError(ProviderClaude)` | Line 71 same with `ProviderCodex` | SYMMETRIC |
+| 1-account auto-bind + notice | Lines 80-95 | Lines 73-88 | SYMMETRIC |
+| 2+ accounts non-TTY error | Lines 100-102 | Lines 92-95 | SYMMETRIC |
+| 2+ accounts picker + bind | Lines 104-110 | Lines 97-104 | SYMMETRIC |
+| `ensureManagedAccountReady` call | NONE (Claude auth in-container) | Step 4 at line 114 (Codex auth host-side) | **Asymmetric, justified by runtime — documented at codex_setup.go:32-35** |
+| Picker cancel handling | `select claude account: %w` | `select codex account: %w` | SYMMETRIC |
+
+**Justified asymmetry 1: `strings.Contains` fallback removed in Codex.** BUILDER_WORKLOG.md §319-321 explicitly addresses this: keeping `strings.Contains` was a self-classification risk because the 0-account error message itself contains "project is not bound" — a substring fallback would have matched that error's text and re-entered the unbound branch. `errors.Is` alone is sufficient because `manage/service.go:240-294` consistently wraps with `%w`. This is a SAFETY improvement over Claude's pattern (Claude should arguably mirror this in a future cleanup pass).
+
+**Justified asymmetry 2: Codex calls `ensureManagedAccountReady`, Claude does not.** Codex auth is host-side (Codex CLI prompts on host); Claude auth is in-container (device-code OAuth runs in container). Documented at `codex_setup.go:32-35` doc-comment, PLAN.md §160-161, BUILDER_WORKLOG.md §335-337.
+
+No other asymmetry. REFUTED.
+
+### V12 — Picker cancel handling parity (REFUTED)
+
+Both functions:
+- Call `pickProfile(cmd, <Provider>, profiles)` for 2+ TTY case.
+- Wrap returned error as `select <provider> account: %w`.
+- Continue with `BindProject` only on selection success.
+
+User cancel (q/esc) → `errSelectionCanceled` from `realPickProfile:185` → wrapped in `select <provider> account: <canceled>` → wrapped again in `run <provider> command: <canceled>` → returned to cobra → cobra prints the chain. No panic, no binding written.
+
+Tested via Claude path under teatest golden coverage (`internal/tui/manage`) — the picker model's `Selected()=false` branch is reachable. Codex follows identical flow. REFUTED.
+
+---
+
+### Counterexamples found
+
+**None CONFIRMED.**
+
+### Concerns (route to drop close-out / future cleanup)
+
+**C1 (intentional behavior shift worth surfacing).** Under the old code, `valv codex login` against an unbound project would (a) launch the 4-option menu via `runCodexFirstRunSetup`, OR (b) error in non-TTY. Under the new code, `valv codex login` against a 1-account unbound project will (1) auto-bind the project to the single account, (2) emit a "Project bound" laslig notice, (3) skip `ensureManagedAccountReady` and return cleanly. The user typed `login` but got `login + implicit-bind`. This is plausibly BETTER UX (next `valv codex` works immediately), is announced via laslig notice, and is consistent with the 8.4 Claude pattern. PLAN.md §149-165 specifies this ordering deliberately. Surfacing as an item the dev may want to verify in dogfood (`valv codex login` from a fresh project dir with one account). Not a regression; an intentional UX shift.
+
+**C2 (pre-existing minor symmetric coverage gap, V7).** Neither Claude (8.4) nor Codex (8.5) has a unit test exercising the non-`ErrUnboundProject` Status error wrap (`detect codex binding: %w`). The branch is one line, the wrap is mechanical, and the chance of regression is low — but the symmetric gap is worth tracking for a future cleanup drop. Not blocking.
+
+**C3 (minor — drop-end PLAN.md update).** `drops/DROP_8_GLOBALSWITCH_AND_TUI_PARITY/PLAN.md:140` currently shows Unit 8.5 `State: done` (modified per `git status`). PLAN.md update is part of close-out, not a builder responsibility — flagging for the orchestrator to confirm the state flip happened post-QA, not pre.
+
+### Verdict
+
+**PASS** — Unit 8.5 Round 1 is approved by falsification.
+
+- All 12 attack vectors REFUTED with concrete evidence.
+- All ACs in PLAN.md §149-167 implemented and tested.
+- `mage testPkg ./internal/cli` 195/195 PASS, 73.3% coverage.
+- `mage golden` 25/25 PASS.
+- `mage test` 476/476 PASS across 20 packages.
+- 3 minor CONCERNS surfaced — none blocking; C1 is intentional and dev-visible via laslig notice, C2 is a symmetric gap inherited from 8.4, C3 is a procedural orchestrator step.
+
+**No build round required for 8.5.** Unit can flip to `done` after orchestrator dispositions the 3 concerns (likely C1 = accept + dogfood verify, C2 = optional cleanup drop, C3 = procedural).
+
+## Hylla Feedback (Unit 8.5 Round 1)
+
+N/A — Hylla unreachable per spawn paradigm override (Valv main paradigm). All evidence gathered via `git diff HEAD~1`, `Read` of source/test files, `rtk git grep` for dangling-symbol checks, and `mage testPkg` / `mage golden` / `mage test` execution. Context7 not needed (the diff exercises cobra `DisableFlagParsing`, `errors.Is`/`%w` semantics, Bubble Tea picker cancellation — all stdlib- or in-repo-canonical and self-contained). No tool-shape gripes.

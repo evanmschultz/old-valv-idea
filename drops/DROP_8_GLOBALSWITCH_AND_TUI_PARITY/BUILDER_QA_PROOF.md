@@ -500,3 +500,91 @@ N/A — Hylla was unreachable this session (per spawn-prompt paradigm override).
 ### TL;DR
 
 PASS. Unit 8.4 wires `ensureClaudeBindingReady` (`claude_setup.go:41-113`), `StatusForProvider` (`manage/service.go:269-300`), and `OverrideProfile *domain.Profile` (`claude/service.go:60, 119, 133-149`) into `runClaudeCommand` (`claude.go:53-129`). All 9 PLAN.md ACs verified against source. C1 (override-no-write) addressed by `TestEnsureClaudeBindingReadyOverrideUnboundProject` asserting `ProjectByRoot → ErrNotFound`; C2 (override-flows-to-mount) addressed by `TestRunUsesOverrideProfileHomePath` asserting executor mount source matches override `HomePath`. `Status` byte-for-byte unchanged. Claude in-container auth preserved (no host-side `ensureManagedAccountReady` call). `mage testPkg` reproduces 25/25 @ 75.5% (manage), 18/18 @ 79.4% (claude), 191/191 @ 71.8% (cli); `mage build` PASS. Three low-severity stylistic findings noted, none blocking. Unit 8.4 ready to close pending QA Falsification.
+
+## Unit 8.5 — Round 1
+
+**Verdict:** PASS
+
+**Reviewer:** go-qa-proof-agent
+**Commit reviewed:** `0fc0339 feat(cli): unit 8.5 codex binding merge + override threading`
+**Files reviewed (git diff HEAD~1 --stat):**
+- `internal/cli/codex_setup.go` (+/- net rewrite, 235 final / 119 lines)
+- `internal/cli/codex_setup_test.go` (+247 lines, consolidated 7-test suite)
+- `internal/cli/codex.go` (-87 net, single-call rewire)
+- `internal/cli/codex_test.go` (+30 net, migrated 2 callers)
+- `internal/services/codex/service.go` (+92 net, `OverrideProfile` + `Run` bypass)
+- `internal/services/codex/service_test.go` (+87 lines, `TestRunUsesOverrideProfileHomePath`)
+- `drops/DROP_8_GLOBALSWITCH_AND_TUI_PARITY/BUILDER_WORKLOG.md` (+73 lines)
+
+### Reproducibility
+
+| Target | Result | Coverage | Match builder claim? |
+|---|---|---|---|
+| `mage testPkg github.com/evanmschultz/valv/internal/services/codex` | 12/12 PASS | 74.3% | yes |
+| `mage testPkg github.com/evanmschultz/valv/internal/cli` | 195/195 PASS | 73.3% | yes |
+| `mage build` | PASS | n/a | yes |
+
+All three reproduce green at builder-claimed numbers.
+
+### Per-AC Verification
+
+**AC1 — Merged function exists in `codex_setup.go` with correct signature.**
+PASS. `codex_setup.go:36` declares `func ensureCodexAccountReadyForLaunch(cmd *cobra.Command, paths config.Paths, workingDir string, accountOverride string, args []string) (domain.Profile, error)` — matches PLAN.md signature exactly.
+
+**AC2 — `errCodexSetupCanceled` sentinel and its `errors.Is` branch in `codex.go` deleted.**
+PASS. `git grep -nE "errCodexSetupCanceled" -- internal/` returns ZERO matches.
+
+**AC3 — Five-responsibility map present in merged function.**
+PASS. End-to-end read of `codex_setup.go:36-119` maps each:
+1. Override resolution: lines 46-51 (`ProfileByName`, no binding write).
+2. Binding check via `service.Status`: lines 55-60 (`errors.Is(err, domain.ErrUnboundProject)` alone — no `strings.Contains`).
+3. 0/1/2+ branching via `ListProfiles`: lines 63-105 (0 → `unboundProjectNoAccountsError`; 1 → auto-bind + `laslig.NoticeInfoLevel` notice; 2+/TTY → `pickProfile`; 2+/non-TTY → error).
+4. `ensureManagedAccountReady` call: lines 114-116 (with profile + `accountAuthOptions{}`).
+5. `codexArgsSkipAccountReady` guard: lines 111-113 (returns profile before step 4 when args match).
+
+**AC4 — `runCodexCommand` rewired to single call.**
+PASS. `codex.go:83` calls `ensureCodexAccountReadyForLaunch(cmd, paths, workingDir, accountName, args)` exactly once. Previous dual-call pattern (`ensureCodexBindingReady` + `ensureBoundCodexAccountReady`) is gone. `codex.go:121` passes the resolved profile via `OverrideProfile: &resolvedProfile`. `codex.go:129-131` documents that `ValidateBinding` is skipped because the resolver already wrote/resolved the binding.
+
+**AC5 — Dead-code deletion.**
+PASS. `git grep -nE "runCodexFirstRunSetup|loginBindAndReportCodexSetup|writeCodexSetupIntro|writeCodexSetupResult|errCodexSetupCanceled|readPrompt" -- 'internal/cli/' 'internal/services/'` returns ZERO matches. All 6 identifiers fully removed from BOTH production and test code (cleaner than the spec required — tests were updated, not just left dangling).
+
+**AC6 — Test migration from `codex_test.go`.**
+PASS. `git grep -nE "ensureBoundCodexAccountReady" -- internal/` returns ZERO matches. The two prior callers at `codex_test.go:194` and `:223` now invoke `ensureCodexAccountReadyForLaunch` (confirmed at `codex_test.go:198` and `:231`).
+
+**AC7 — `Options.OverrideProfile *domain.Profile` added to `codexservice` mirroring 8.4.**
+PASS. `internal/services/codex/service.go:51-56` declares `OverrideProfile` with structurally identical godoc to `internal/services/claude/service.go:55-60`. `Service` struct field at `service.go:72` (`overrideProfile *domain.Profile`) and `New` assignment at `service.go:112` mirror claudeservice exactly. `Run` bypass at `service.go:122-150` follows the same normalize → detect → `ProjectByRoot` → construct-`resolvedLaunchBinding` pattern as `internal/services/claude/service.go:129-150`. One justified differentiation: Codex adds `sharedHome := s.sharedCodexStateHome(resolved.profile)` after the bypass (Claude lacks shared-state-home semantics) — this is correct.
+
+**AC8 — `TestRunUsesOverrideProfileHomePath` is end-to-end.**
+PASS. `service_test.go:478-563` constructs distinct `boundHome` and `overrideHome` directories on real disk, sets `Options.OverrideProfile = &overrideProfile` where `boundProfile != overrideProfile`, calls `service.Run` (real execution path, no mounts stubbed), then asserts:
+- `executor.got.Mounts[1].Source != normalizedBoundHome` (line 553) — proves binding store was not used.
+- `executor.got.Labels["io.valv.profile_id"] == overrideProfile.ID` (line 557) — proves the override profile reached `buildRequest`.
+- `executor.got.Labels["io.valv.profile_id"] != boundProfile.ID` (line 560) — double-check.
+
+The test does NOT mock around mount construction. The `fakeExecutor` captures the real `ContainerRunRequest` produced by `Run → buildRequest`. End-to-end claim verified.
+
+**AC9 — `errors.Is` alone (C3 fold-in honored, no `strings.Contains` belt-and-suspenders).**
+PASS. `git grep -nE "errors\.Is|strings\.Contains" internal/cli/codex_setup.go` returns one match: `codex_setup.go:59` — `else if !errors.Is(err, domain.ErrUnboundProject)`. No `strings.Contains` anywhere in `codex_setup.go`. (Note: `claude_setup.go:65` and `manage.go:853` still have the belt-and-suspenders pattern from prior drops — out of Unit 8.5 scope but flagged below as a peripheral observation.)
+
+**AC10 — Asymmetry note in worklog + function godoc.**
+PASS. `BUILDER_WORKLOG.md:337` explicitly documents: *"`ensureCodexAccountReadyForLaunch` calls `ensureManagedAccountReady` (step 4) because Codex auth is host-side ... `ensureClaudeBindingReady` does NOT call this because Claude auth is in-container."* Function godoc at `codex_setup.go:32-35` carries the same justification.
+
+**AC11 — `codexArgsSkipAccountReady` guard works.**
+PASS. `TestEnsureCodexAccountReadyForLaunchSkipAccountReadyGuard` at `codex_setup_test.go:245-274` binds a real account, installs a stub auth with hit counter, calls the merged function with `args=[]string{"login"}`, and asserts `stub.statusHits == 0`. The guard correctly bypasses `ensureManagedAccountReady`. Profile is still returned (line 270-272).
+
+**AC12 — Consolidated 7-test suite.**
+PASS. `codex_setup_test.go` contains exactly 7 `func Test*` declarations: Override-Unbound, Override-Bound, Zero-Accounts, One-Account-AutoBind, Multiple-Accounts-NonTTY, Already-Bound, Skip-Account-Ready-Guard. Coverage of the spec's branching matrix is complete.
+
+### Findings
+
+None blocking. Two peripheral observations (informational only):
+
+- The test `TestRunUsesOverrideProfileHomePath` asserts mount source `!=` boundHome and labels `==` overrideProfile.ID, but does NOT assert mount source `==` overrideHome (since the runtime may stage a copy). The label assertion provides the strict discriminator; the mount-source assertion is necessary-but-not-sufficient. Adequate for the AC but worth noting.
+- The `strings.Contains(err.Error(), domain.ErrUnboundProject.Error())` belt-and-suspenders pattern still exists in `claude_setup.go:65` and `manage.go:853` (pre-existing, not introduced or modified by Unit 8.5). The C3 fold-in for Unit 8.5 was scoped to `codex_setup.go` only and is honored there. The claude/manage occurrences are outside this unit's blast radius; flag for the dev only if a broader sweep is desired in a later cleanup unit.
+
+### Hylla Feedback
+
+N/A — Hylla was unreachable this session (per spawn-prompt paradigm override). Evidence gathered via direct `Read`, `git diff HEAD~1 --stat`, `git grep`, and `mage testPkg` / `mage build` reproduction. No fallback miss to log.
+
+### TL;DR
+
+PASS. Unit 8.5 merges `ensureCodexBindingReady` + `ensureBoundCodexAccountReady` into `ensureCodexAccountReadyForLaunch` (`codex_setup.go:36`) with all 5 responsibilities mapped to specific lines. Dead-code deletion is total — 6 identifiers, zero matches in production OR test code. `OverrideProfile *domain.Profile` mirrors 8.4's claudeservice pattern exactly (struct placement, godoc shape, `Run` bypass) with one justified Codex differentiation (`sharedCodexStateHome`). `TestRunUsesOverrideProfileHomePath` is genuinely end-to-end — asserts `executor.got.Mounts[1].Source != boundHome` AND `executor.got.Labels["io.valv.profile_id"] == overrideProfile.ID`. `codexArgsSkipAccountReady` guard verified via stub hit-counter (0 hits when `args[0]=="login"`). C3 fold-in honored: `errors.Is` alone in `codex_setup.go`, no `strings.Contains`. Asymmetry note (host-side Codex vs in-container Claude) present in both `BUILDER_WORKLOG.md:337` and function godoc `codex_setup.go:32-35`. mage reproduction: 12/12 codex @ 74.3%, 195/195 cli @ 73.3%, `mage build` PASS. Two peripheral observations (mount-source `!=` boundHome rather than `==` overrideHome; pre-existing `strings.Contains` in `claude_setup.go:65` / `manage.go:853` outside scope) are informational, not blocking. Unit 8.5 ready to close pending QA Falsification.
