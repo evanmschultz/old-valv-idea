@@ -90,3 +90,48 @@ These are NOT counterexamples against unit 9.1 — they were already stale befor
 ## Hylla Feedback
 
 - **Query:** `hylla_search_keyword "newManageCommand"` with `artifact_ref=github.com/evanmschultz/valv@main`, `node_type=block`. **Missed because:** snapshot 2 (DROP_8 close) is stale relative to HEAD — `newManageCommand` was deleted in the commit under review and the snapshot does not yet reflect that, AND the surviving stale call site lives in a `//go:build integration`-gated file which `hide_tests` mode may filter. **Worked via:** `git grep -n "newManageCommand" -- 'internal/cli/*.go'` — returned `internal/cli/codex_integration_test.go:357` immediately. **Suggestion:** when an `id_search_mode=tail_symbol` query for a known-deleted symbol returns empty, surface the snapshot timestamp + a "this symbol was deleted in commit X" hint if the graph_ref has a fresher commit reference. Today the empty result is indistinguishable from "no such symbol ever existed."
+
+## Unit 9.1 — Round 2
+
+- **Reviewer:** go-qa-falsification-agent
+- **Commit under review:** `1b5f712 fix(cli): unit 9.1 r2 integration test fix-up + skip pending 9.2` (HEAD)
+- **Mage targets exercised by reviewer:**
+  - `mage testPkg ./internal/cli` — **PASS** (200 tests, 72.9% coverage)
+  - `mage integration` — **PASS** (202 passed + 1 skipped + 0 failed, exit code 0)
+  - `mage build` — **PASS** (`./valv` produced)
+- **Verdict:** PASS — no counterexamples constructed across the seven prompted attack vectors. R2 (helper swap + argv strip) and R3 (t.Skip) cleanly close the R1 failure without re-introducing latent defects.
+
+### Summary
+
+The R2 diff is mechanically minimal (5 edited lines across the integration test file) and the R3 diff is a single `t.Skip` line inserted as the first statement of the affected test. Both `mage testPkg ./internal/cli` and `mage integration` re-run green; `mage build` succeeds. The skip lands BEFORE any expensive setup (the integration report shows `elapsed: 0.00s` for the skipped test — no fixture image build, no `go build`, no PTY launch). Argv stripping was complete: zero residual `"manage"` string literals or `newManageCommand` symbol references survive in `internal/cli/codex_integration_test.go`. The one durable risk is process-level (vector 5): Unit 9.2's PLAN.md text in this drop does not name "remove the t.Skip line" as an acceptance criterion. The re-enable obligation lives only in `BUILDER_WORKLOG.md` (R3 § "Note to 9.2 builder", line 134). That belongs in PLAN.md so the 9.2 builder spawn carries it. Surfaced as a process Unknown — orchestrator-routed, not a code counterexample.
+
+### Per-vector findings
+
+| # | Vector | Verdict | Notes |
+|---|---|---|---|
+| 1 | `newTestManageContainerCommand` semantics for `runManageForIntegration` argv set | REFUTED | Helper at `internal/cli/manage_test.go:232-248` registers all six ex-children (`Account`, `Bind`, `Project`, `Status`, `Update`, `Cleanup`) as top-level subcommands of a synthetic `Use: "manage"` cobra root with `Args: cobra.ArbitraryArgs`. The integration call sites use `["account", "add", …]` (line 51, routed to `AccountCommand`) and `["bind", "codex", …]` (line 52, routed to `BindCommand`). Both argv shapes resolve to registered subcommands. `mage integration` exercises these paths and reports PASS. |
+| 2 | Argv-stripping completeness — residual `"manage"` literals | REFUTED | `git grep '"manage"\|newManageCommand' -- internal/cli/codex_integration_test.go` returns zero matches. The three production-binary call sites (lines 146, 147, 241) all use the new argv (`"account", "add", ...` / `"account", "bind", ...`). The helper call sites (lines 51, 52) use the test-helper-relative argv (`"account", "add", ...` / `"bind", ...`). Both shapes are correct for their respective execution targets. |
+| 3 | `t.Skip` position — first statement in the test body | REFUTED | Verified at line 113 via direct Read of `codex_integration_test.go:112-114`. The function signature is line 112; line 113 is `t.Skip("requires valv account bind from DROP_9 Unit 9.2 — re-enable when 9.2 lands")`; line 114 begins setup (`paths := testCodexPaths(t)`). No `t.Setenv`, no `os.MkdirAll`, no `t.TempDir()` precedes the skip. |
+| 4 | Expensive setup leakage despite t.Skip | REFUTED | `mage integration` log shows `TestCodexCommandRunsFixtureImageWithTTYEndToEnd [SKIP]` with `elapsed: 0.00s`. No fixture image build, no `go build`, no PTY allocation. No package-level `TestMain` exists in `internal/cli/` to amortize unrelated setup. The skip is true zero-cost. |
+| 5 | Unit 9.2 re-enable directive — discoverability | **PROCESS RISK** (not a code counterexample) | The skip comment names `DROP_9 Unit 9.2` and the R3 worklog (BUILDER_WORKLOG.md line 134) carries an explicit "Note to 9.2 builder: Remove the t.Skip line … Confirm mage integration reports 203/203 PASS with no SKIP." However, **Unit 9.2's PLAN.md acceptance criteria** (PLAN.md AC 1-10 for Unit 9.2) do **not** include "remove t.Skip from TestCodexCommandRunsFixtureImageWithTTYEndToEnd and confirm 203/203 mage integration green." The 9.2 builder spawn prompt, when it fires, must carry this obligation explicitly OR PLAN.md must capture it as an explicit AC. Without that, the skip can silently outlive 9.2 (drop-level test count permanently degraded by one). Routed to orchestrator — not a counterexample against the R2/R3 commit itself. |
+| 6 | `mage integration` exit-code semantics — skipped vs failed | REFUTED | Re-ran `mage integration`: report ends with `[WARNING] Tests passed with skips` and exit code 0 (subsequent commands in the chain succeed). The verb "passed" + the green status line confirms skip ≠ fail under the current mage runner. No flag exists in `magefile.go` that promotes skips to failures. |
+| 7 | Other tests in `codex_integration_test.go` using stale argv | REFUTED | `git grep '^func Test\|t\.Skip\|runManageForIntegration\|runValvBinaryCommand'` enumerates three test functions: `TestCodexCommandRunsFixtureImageEndToEnd` (line 26, uses helper at lines 51-52 with new argv), `TestCodexCommandRunsFixtureImageWithTTYEndToEnd` (line 112, skipped + uses real binary at 146-147 with new argv), `TestCodexInteractiveMCPGolden` (line 189, uses real binary at line 241 with new argv `"account", "add", …`). No fourth test references manage argv. The Skipf at line 301 (`docker unavailable for integration test`) is unrelated — it's the conditional-skip inside `buildFixtureImage`. |
+
+### Counterexamples
+
+None. R2 + R3 cleanly close R1's `CONFIRMED` counterexample (vector 4 of R1: `newManageCommand` residual reference in `codex_integration_test.go:357`). All three mage gates green at HEAD.
+
+### Process risk routed (not a code counterexample)
+
+**Vector 5 escalation for the orchestrator:** Append to Unit 9.2's PLAN.md acceptance criteria — *"AC N: Remove the `t.Skip("requires valv account bind from DROP_9 Unit 9.2 …")` line from `TestCodexCommandRunsFixtureImageWithTTYEndToEnd` at `internal/cli/codex_integration_test.go:113`. Confirm `mage integration` reports 203/203 PASS with zero skipped."* OR ensure the 9.2 builder spawn prompt's appendix explicitly carries this directive. Today the obligation lives only in BUILDER_WORKLOG.md R3, which the 9.2 builder will not necessarily read.
+
+### Self-review / orchestrator hand-off discipline
+
+- Did NOT edit Go code. R2/R3 commit was inspected via `git diff`, not modified.
+- Did NOT edit `PLAN.md` or any sibling QA / WORKLOG file. Vector 5 process risk surfaced via this falsification file for orchestrator routing.
+- Mage-only test invocations (`mage testPkg`, `mage integration`, `mage build`). No raw `go test` / `go build` invocations.
+- Hylla NOT queried this round — the entire R2/R3 review surface is integration-test code on an already-stale snapshot (snapshot 2 = DROP_8). All evidence came from `git diff`, `git grep`, direct `Read`, and mage runners. Recorded in Hylla Feedback below.
+
+## Hylla Feedback (Round 2)
+
+N/A — review touched only test-file deltas in `internal/cli/codex_integration_test.go` which is `//go:build integration`-gated and on a stale snapshot relative to HEAD. `git diff` + `git grep` + direct `Read` were the right primary sources; Hylla would not have helped at this depth on this surface.

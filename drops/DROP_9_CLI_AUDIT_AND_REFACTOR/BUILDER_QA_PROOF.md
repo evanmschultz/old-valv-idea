@@ -44,3 +44,38 @@ None — Hylla was not required for this proof review; the verification is struc
 All 7 acceptance criteria PASS. Out-of-scope verification PASS. Builder's cascade-discipline declarations (dead `runManageHome`, surviving Example blocks in `manage.go`, paired error strings in other files) are correctly scoped and explicitly deferred. mage GREEN reproduced.
 
 **Verdict: PASS**
+
+## Unit 9.1 — Round 2
+
+- **QA agent:** go-qa-proof-agent
+- **Reviewed commit:** 1b5f712 `fix(cli): unit 9.1 r2 integration test fix-up + skip pending 9.2`
+- **Scope:** R2+R3 combined fix-up addressing the R1 falsification finding (3 argv strips + 1 symbol rename + 1 t.Skip).
+- **Verdict:** PASS
+
+### R1 findings → R2/R3 verification
+
+| # | R1 finding | R2/R3 claimed fix | Evidence | Result |
+|---|---|---|---|---|
+| 1 | Compile break at `codex_integration_test.go:357` referencing dead `newManageCommand` | Renamed to `newTestManageContainerCommand` | Line 358 (post-edit) reads `cmd := newTestManageContainerCommand(paths, &rootOptions{})`. `rg "newManageCommand" internal/cli/` → only 1 hit, a doc-comment in `manage_test.go:231` (not a call site). | PASS |
+| 2 | 3 `runValvBinaryCommand` call sites still pass `"manage"` as first argv | Strip `"manage"` token from lines 145, 146 (now 146, 147), and 240 (now 241) | Line 146: `..., "account", "add", "codex", ...` — leading `"manage"` removed. Line 147: `..., "account", "bind", "codex", ...` — leading `"manage"` removed (and `"bind"` rewritten as `"account", "bind"` to match the new flat surface). Line 241: `..., "account", "add", "codex", ...` — leading `"manage"` removed. | PASS |
+| 3 | End-to-end TTY test would still fail because `valv account bind` is not implemented until 9.2 | Add `t.Skip(...)` as first statement of `TestCodexCommandRunsFixtureImageWithTTYEndToEnd` | Line 113 (function body begins line 112 `func ...`): `t.Skip("requires valv account bind from DROP_9 Unit 9.2 — re-enable when 9.2 lands")`. Skip is the FIRST statement, before `paths := testCodexPaths(t)`. | PASS |
+| 4 | (implicit) Skip must name 9.2 so future builders can re-enable | Skip string explicitly references 9.2 | Skip message: `"requires valv account bind from DROP_9 Unit 9.2 — re-enable when 9.2 lands"`. Names both `9.2` and the command (`valv account bind`) and the re-enable trigger. | PASS |
+| 5 | (implicit) All 3 mage gates must reproduce GREEN | Re-run | `mage testPkg ./internal/cli` → 200/200 passed, 72.9% coverage, 5.39s. `mage integration` → 202 passed + 1 skipped + 0 failed, 26.52s; the 1 skip is exactly `TestCodexCommandRunsFixtureImageWithTTYEndToEnd`. `mage build` → SUCCESS Built `./valv`. | PASS |
+
+### Falsification probes (each mitigated)
+
+- **Probe:** Is the Skip on the right function? It must guard `TestCodexCommandRunsFixtureImageWithTTYEndToEnd` specifically. **Mitigation:** Read confirms line 112 `func TestCodexCommandRunsFixtureImageWithTTYEndToEnd(t *testing.T) {` immediately followed by line 113 `t.Skip(...)`. Correct function. `mage integration` skip output names exactly this test.
+- **Probe:** Could there be a different test function in `codex_integration_test.go` still calling `valv ... bind` that needs the same skip? **Mitigation:** `runValvBinaryCommand` on line 241 (the non-TTY variant `TestCodexCommandRunsFixtureImageWithNoAltScreenEndToEnd` or sibling) calls only `"account", "add"` post-R2, NOT `"account", "bind"`. So no other test reaches the unimplemented bind command. Confirmed by the diff: only one `bind` argv call site exists, and it's inside the skipped TTY test.
+- **Probe:** Could `newManageCommand` still be referenced elsewhere causing a hidden compile break under `-tags=integration`? **Mitigation:** `rg "newManageCommand" internal/cli/` → 1 hit, `manage_test.go:231`, a `//` doc-comment. Not a call site. `mage integration` recompiled the package and passed — confirming no integration-tag-gated reference remains.
+- **Probe:** Could the leftover `"manage"` string literals in `extended_test.go:70` and `manage_test.go:234` be argv tokens we missed? **Mitigation:** Both occurrences are inside `cobra.Command{Use: "manage"}` literal-struct definitions inside `newTestManageContainerCommand` and a similar test helper — they declare the test-only container command's Use-string, not argv passed to a production CLI. Correct.
+- **Probe:** Did the fix-up introduce a new gap elsewhere (e.g., `TestCodexCommandRunsFixtureImageEndToEnd` at line 110 also got a Skip but for `account add` — does it need different treatment)? **Mitigation:** That Skip was already in place pre-R2 (R1 worklog covered it) — verified by reading the R2 diff, which shows only ONE `t.Skip` added at line 113. The line 110 Skip is unrelated to this round. Not a new gap.
+
+### Hylla Feedback
+
+None — Hylla was not required for this proof review. Verification is structural (`git diff` + `Read` + `rg` over committed code) and committed-state evidence sufficed via `git diff HEAD~1` / `Read` / `mage`. The reviewed file is `_test.go` which Hylla deprioritizes anyway.
+
+### Conclusion
+
+R1 falsification finding fully resolved. All 5 sub-criteria for the R2/R3 combined fix-up have evidence. mage 3-gate GREEN reproduced (`testPkg` 200/200 at 72.9%, `integration` 202+1skip+0fail, `build` SUCCESS). No new gaps introduced. The single test skip is correctly scoped, correctly named, and explicitly references Unit 9.2 as the re-enable trigger.
+
+**Verdict: PASS**
