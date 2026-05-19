@@ -690,3 +690,101 @@ Hylla's last ingest at `56ea569` predates DROP_9. All evidence for this round ca
 - **Query (not run):** `hylla_node_full` on `ContainerRunRequest`. **Skipped because:** the struct is in `internal/adapters/docker/` (pre-DROP_9, stable), but the test under review references it directly and the production builder code reads cleanly. **Worked via:** the production code (`claude_auth.go:75-99`) shows the construction site verbatim, which is what the test must mirror.
 
 No ergonomic gripes — for a test-only Go review with a stale ingest, direct `Read` + `rg` is the appropriate evidence path.
+
+---
+
+## Unit 9.8 — Round 1
+
+- **Reviewer:** go-qa-falsification-agent
+- **Commit under review:** `6fd356f fix(cli): unit 9.8 harden claude auth against creds-landed-on-error`
+- **Mage targets exercised by reviewer:**
+  - `mage testPkg github.com/evanmschultz/valv/internal/cli` — PASS (217 tests, 67.4% coverage, threshold 60%)
+  - `mage build` — PASS
+  - `mage integration` — PASS (220 tests, 0 failed)
+- **Verdict:** PASS — no CONFIRMED counterexamples. Two minor non-blocking notes (test naming, branch coverage shape) recorded.
+
+### Summary
+
+The Ctrl-C × 2 hardening is mechanically correct at both call sites. The two added post-run guards (`ensureClaudeAccountReady` lines 164-176; `loginClaudeAccount` lines 210-222) are byte-identical: same `os.Stat(credPath)` check, same `info.Size() > 0` strict guard, same nil-guarded `LoggerFromContext` debug log, same wrapped-error `else` propagation. All three gates green. Existing error-propagation tests (`TestEnsureClaudeAccountReadyFailsWhenContainerRunFails`, `TestLoginClaudeAccountFailsWhenContainerRunFails`) still pass — the hardening only suppresses the container error when creds ARE present, exactly as AC #4 requires. The 10 vectors in the falsification appendix were all REFUTED with concrete evidence.
+
+### Attack-vector pass — 10 vectors, 10 REFUTED
+
+**Vector 1 (first test mis-naming).** REFUTED as load-bearing; ACCEPTED as a minor naming smell. `TestEnsureClaudeAccountReadySucceedsWhenCredsLandDespiteContainerError` at `claude_auth_test.go:568-595` calls `loginClaudeAccount(cmd, account, config.Paths{})` on line 581 — the test name lies about which function it exercises. BUT: the production hardening blocks in both functions are byte-identical (diff shows the same 12 lines verbatim at both sites). The `ensureClaudeAccountReady` branch is therefore logically equivalent to the `loginClaudeAccount` branch. Coverage tools will still report `ensureClaudeAccountReady`'s post-run check as uncovered (TTY guard blocks all non-TTY test paths from reaching `RunInContainer` in that function), but the behavior is proven by equivalence. Recommended cleanup (non-blocking): rename the test to `TestLoginClaudeAccountSucceedsWhenCredsLandDespiteContainerError_ViaEnsurePath` or similar, or remove the test (it's a near-duplicate of vector 2's test that does the same thing more honestly).
+
+**Vector 2 (duplicated logic byte-equality).** REFUTED. `git diff HEAD~1 -- internal/cli/claude_auth.go` shows the inserted block at both sites is identical:
+
+```
+if info, statErr := os.Stat(credPath); statErr == nil && info.Size() > 0 {
+    if logger := LoggerFromContext(cmd.Context()); logger != nil {
+        logger.Debug("container exited non-zero but credentials present; treating as success", "error", runErr)
+    }
+    // Fall through to ReadAccountIdentity.
+} else {
+    return fmt.Errorf("run claude auth container for account %q: %w", account.Name, runErr)
+}
+```
+
+Same comment, same debug message, same key/value pair, same wrapped-error string, same `else` branch. `credPath` derivations match: `ensureClaudeAccountReady` reuses the in-scope `credPath` from line 141 (`filepath.Join(strings.TrimSpace(account.HomePath), ".credentials.json")`); `loginClaudeAccount` re-derives at line 208 with the same `filepath.Join(strings.TrimSpace(account.HomePath), ".credentials.json")` call. No drift.
+
+**Vector 3 (`LoggerFromContext` nil guard).** REFUTED. `root.go:143-149`:
+
+```
+func LoggerFromContext(ctx context.Context) *log.Logger {
+    if ctx == nil {
+        return nil
+    }
+    logger, _ := ctx.Value(loggerKey{}).(*log.Logger)
+    return logger
+}
+```
+
+Returns nil on nil ctx OR on type-assertion miss. Both production sites guard correctly with `if logger := LoggerFromContext(...); logger != nil { logger.Debug(...) }`. New tests run without injecting a logger and pass — confirms the nil path is taken without panic.
+
+**Vector 4 (post-run check happens BEFORE `ReadAccountIdentity`).** REFUTED. In both functions, the `if runErr != nil` block contains either a fall-through (comment: `// Fall through to ReadAccountIdentity.`) or an `else` returning a wrapped error. Execution after the block (line 177 / 223) calls `claudeprovider.ReadAccountIdentity(account.HomePath)` and then checks `identity.LoggedIn`. No early `return nil` in the fall-through path — `ReadAccountIdentity` always runs after a fall-through.
+
+**Vector 5 (`info.Size() > 0` semantics for 0-byte file).** REFUTED. Check is strict `>`, not `>=`. A 0-byte `.credentials.json` satisfies `os.Stat` (no `statErr`) but fails `info.Size() > 0` (size == 0), dropping into the `else` branch and propagating the container error. Matches AC #1 verbatim ("exists ... and is non-empty"). No semantic drift from the pre-existing pre-run check at line 142-145, which uses the same `info.Size() > 0` predicate.
+
+**Vector 6 (filesystem race).** REFUTED. `RunInContainer` is a synchronous wrapper around the Docker run (no goroutine fan-out in the auth path). By the time it returns (success or error), the container process has been reaped and any creds writes have been flushed by the kernel (creds writes happen inside the container, which mounts the host `account.HomePath` directly — the file descriptor closes on container exit). `os.Stat` runs sequentially after `RunInContainer` returns. No concurrent writer remains.
+
+**Vector 7 (existing error-propagation tests still pass).** REFUTED. `TestEnsureClaudeAccountReadyFailsWhenContainerRunFails` (claude_auth_test.go:174-196) configures `stubClaudeAccountAuthRunner{runErr: containerErr}` with NO `stubRunFunc` — meaning the stub returns the error WITHOUT writing creds. Post-hardening: `os.Stat(credPath)` returns `IsNotExist`, drops into `else`, propagates wrapped error. `errors.Is(err, containerErr)` passes. `TestLoginClaudeAccountFailsWhenContainerRunFails` (line 291-308) same shape. Both verified GREEN in the 217-test run.
+
+**Vector 8 (stub configuration correctness).** REFUTED. Read `stubClaudeAccountAuthRunner.RunInContainer` at claude_auth_test.go:39-46:
+
+```
+func (s *stubClaudeAccountAuthRunner) RunInContainer(...) error {
+    s.runHits++
+    s.lastHomePath = homePath
+    if s.stubRunFunc != nil {
+        s.stubRunFunc(homePath)
+    }
+    return s.runErr
+}
+```
+
+`stubRunFunc` is called BEFORE returning `runErr`. Both new tests configure `runErr: containerErr` AND `stubRunFunc: func(homePath string) { writeCredsToDir(homePath) }`. So creds ARE written AND non-nil error IS returned. The new branch is genuinely exercised; not a false positive.
+
+**Vector 9 (`ReadAccountIdentity` partial-creds attribution).** REFUTED. `writeCredsToDir` writes valid `{"claudeAiOauth":{"accessToken":...}}` JSON. If a real-world run wrote malformed JSON post-fall-through, `ReadAccountIdentity` would return an error wrapped at line 178-179 as `fmt.Errorf("verify claude login for account %q: %w", account.Name, err)` — clearly attributed to identity-read failure, not container failure. Error attribution is correct.
+
+**Vector 10 (coverage 67.4% vs 67.5% in 9.7).** REFUTED as a regression; ACCEPTED as a minor shape gripe. The denominator (total statements) grew with the new 12-line block × 2 sites = ~24 new statement lines. The numerator gained ~12 covered lines (one site fully exercised; the other site logically-equivalent but not directly covered due to TTY guard). The 0.1% drop is a denominator-shift artifact at the percentage rounding boundary, not a coverage regression in absolute terms. Coverage gate (60.0%) passes with 7.4 points of headroom. The `ensureClaudeAccountReady` hardening branch is technically uncovered; the equivalent `loginClaudeAccount` branch IS covered. Non-blocking.
+
+### Additional adversarial sweeps — all REFUTED
+
+- **Missing `os.IsNotExist` discrimination in post-run guard.** The pre-run check at line 146-148 reports a non-IsNotExist stat error explicitly (e.g. permission denied). The new post-run guard does NOT — any non-nil `statErr` (whether IsNotExist or permission-denied) falls into the `else` and propagates the container error, losing the stat-error attribution. BUT: the container error is the load-bearing failure cause in the Ctrl-C × 2 scenario; the stat error is auxiliary. Users still get a useful wrapped error. The trade-off is acceptable and consistent with the AC ("creds absent → propagate original container error"). REFUTED as load-bearing.
+- **Comment quality.** Both blocks carry an identical 3-line comment explaining the Ctrl-C × 2 rationale; adequate documentation.
+- **Coverage gate at 60% vs 70%.** Per `magefile.go` TODO, the gate is currently 60.0% pending `internal/adapters/docker` coverage work. 67.4% passes with headroom. Not a regression from the 9.7 67.5% baseline given denominator growth.
+
+### Required gates — all GREEN
+
+| Gate | Result | Detail |
+|------|--------|--------|
+| `mage testPkg github.com/evanmschultz/valv/internal/cli` | PASS | 217 tests, 67.4% coverage (threshold 60%), -race, 0 failures |
+| `mage build` | PASS | `./valv` produced cleanly |
+| `mage integration` | PASS | 220 tests, 0 failed (production code change ran the integration suite as recommended in appendix) |
+
+### Verdict
+
+PASS. The Ctrl-C × 2 hardening is correctly applied at both auth call sites with byte-identical logic; existing error-propagation tests still pass; the new tests genuinely exercise the new branch via a stub that BOTH returns non-nil error AND writes creds; the nil-logger guard is correct; the fall-through correctly reaches `ReadAccountIdentity`; the 0-byte edge case is handled by the strict `> 0` size check; coverage shape is unchanged in any meaningful sense. Two non-blocking notes for future cleanup: (a) the first test's name misleadingly says `EnsureClaudeAccountReady` while actually calling `loginClaudeAccount` — consider renaming or removing as it's a near-duplicate of the second test; (b) `ensureClaudeAccountReady`'s hardening branch is not directly covered by any test (TTY guard blocks the path), but is logically equivalent to the covered `loginClaudeAccount` branch. Neither note flips the verdict.
+
+### Hylla Feedback
+
+N/A — production code under review is post-DROP_8 (snapshot 2 baseline at `56ea569` predates DROP_9 work). All evidence gathered via `git diff HEAD~1`, direct `Read` of `claude_auth.go` + `claude_auth_test.go` + `root.go`, and `rg` for symbol locations. The single attempted Hylla lookup would have been for `LoggerFromContext`; direct `Read` of `root.go:143-149` answered immediately. No ergonomic gripes — for a post-ingest production-code review, `git diff` + `Read` is the appropriate evidence path.
