@@ -288,3 +288,128 @@ N/A — Hylla unreachable per spawn-prompt paradigm override. Evidence gathered 
 ### TL;DR
 
 PASS. All three R2 fixes verified end-to-end. Selected() returns `(domain.Profile, bool)` with no unmigrated callers; 0-accounts cross-provider error names both providers and contains no `"all"` sentinel; `args := args` shadow gone at manage_test.go:320. Three mage targets reproduce builder's exact pass counts and coverage (`mage testPkg ./internal/tui/manage` 8/8 @ 91.5%, `mage testPkg ./internal/cli` 167/167 @ 73.1%, `mage golden` 24 + 1 external). New `pickProfileFn = realPickProfile` injection seam is the standard DROP-7 pattern and is provably safe (defaults right, non-parallel mutators, `-race` clean). Unit 8.2 ready to close.
+
+## Unit 8.3 — Round 1
+
+**Verdict:** PASS
+
+**Reviewer:** go-qa-proof-agent
+**Commit reviewed:** `25f252b feat(cli): unit 8.3 strip --account flag and thread override` (HEAD)
+**Files reviewed (diff vs HEAD~1):**
+- `internal/cli/account_flag.go` (new, +55)
+- `internal/cli/account_flag_test.go` (new, +137)
+- `internal/cli/claude.go` (+27/-1)
+- `internal/cli/claude_auth.go` (+27/-7)
+- `internal/cli/claude_auth_test.go` (+3/-3)
+- `internal/cli/codex.go` (+30/-7)
+- `internal/cli/codex_setup.go` (+14/-2)
+- `internal/cli/codex_setup_test.go` (+1/-1)
+- `internal/cli/codex_test.go` (+2/-2)
+- `internal/cli/account_auth.go` (+1/-1)
+
+### Reproducibility
+
+- `mage testPkg github.com/evanmschultz/valv/internal/cli` — **PASS** 184/184 tests, **72.6%** package coverage, `-race` enforced by mage `testPkg`. Matches builder claim #10 exactly.
+- `mage build` — **PASS**, built `./valv`. Matches builder claim #11.
+
+### Per-claim findings
+
+1. **`stripAccountFlag` shape + case coverage (claim #1)** — PASS.
+   - `internal/cli/account_flag.go:15` declares `stripAccountFlag(args []string) (accountName string, remaining []string)` matching the spec.
+   - `--` sentinel hard-stops the scan at L20-22 (`if arg == "--" { return "", args }`).
+   - `--account=<value>` form at L25-35; `--account <value>` form at L38-52.
+   - Malformed `--account` as last token returns `("", args)` (L40-43).
+   - Malformed `--account=` returns `("", args)` (L27-30).
+   - First-match-wins: after assembling `remaining` from `args[:i]` + `args[i+1:]` (or `args[next+1:]`), the loop returns, leaving any later `--account` tokens preserved in `args[i+1:]` / `args[next+1:]`.
+   - `account_flag_test.go` table covers all 15 named cases (no-flag, nil, empty, space-form, equals-form, malformed-last, malformed-empty, mid-args x2, multi space, multi equals, `--`-stop x2, `--account` before `--`, mixed ordered args) plus the `DoesNotMutateInputSlice` test = **16 test cases** (builder claim of "17+" is a slight overcount but immaterial — coverage is complete).
+
+2. **`runClaudeCommand` calls `stripAccountFlag` before skip-binding check (claim #2)** — PASS.
+   - `claude.go:60`: `accountName, args := stripAccountFlag(args)`.
+   - `claude.go:62`: `if claudeArgsSkipProjectBinding(args) { ... }` runs AFTER the strip. Confirmed ordering.
+
+3. **`runCodexCommand` calls `stripAccountFlag` before skip-binding check (claim #3)** — PASS.
+   - `codex.go:66`: `accountName, args := stripAccountFlag(args)`.
+   - `codex.go:68`: `if codexArgsSkipProjectBinding(args) { ... }` runs AFTER. Confirmed.
+
+4. **`ensureClaudeAccountReady` 4-arg signature + override short-circuit (claim #4)** — PASS.
+   - `claude_auth.go:125`: `func ensureClaudeAccountReady(cmd *cobra.Command, account domain.Profile, options accountAuthOptions, accountOverride string) error`. Fourth parameter present.
+   - `claude_auth.go:126-137`: when `accountOverride != ""`, calls `openManageService(cmd, options.Paths)`, then `service.ProfileByName(cmd.Context(), domain.ProviderClaude, accountOverride)`, then `account = resolved`. **No `BindProject` call** anywhere in the override branch — store is queried read-only via `ProfileByName`. Override then falls through to the normal credential-check + auth flow with the resolved profile. **No binding row written.**
+   - `git grep "BindProject"` confirms no call to `BindProject` exists in `claude.go` / `claude_auth.go`.
+
+5. **`ensureCodexBindingReady` 4-arg signature + override short-circuit (claim #5)** — PASS.
+   - `codex_setup.go:27`: `func ensureCodexBindingReady(cmd *cobra.Command, paths config.Paths, workingDir string, accountOverride string) error`. Fourth parameter present.
+   - `codex_setup.go:36-41`: when `accountOverride != ""`, calls `service.ProfileByName(cmd.Context(), domain.ProviderCodex, accountOverride)`, returns nil. The default `service.Status` / `runCodexFirstRunSetup` / `BindProject` path is **never entered**. No binding row written on the override branch.
+
+6. **`ensureBoundCodexAccountReady` accepts `accountOverride` (claim #6)** — PASS.
+   - `codex.go:217`: `func ensureBoundCodexAccountReady(cmd *cobra.Command, paths config.Paths, workingDir string, args []string, accountOverride string) error`. Fifth parameter (`accountOverride`) added.
+   - `codex.go:229-238`: when `accountOverride != ""`, resolves via `ProfileByName` and short-circuits to `ensureManagedAccountReady` with the resolved profile. Bound-status path (`codex.go:240-247`) skipped.
+
+7. **`account_auth.go:42` passes `""` (claim #7)** — PASS.
+   - `account_auth.go:42`: `return ensureClaudeAccountReady(cmd, account, options, "")`. No-override path.
+
+8. **`account_flag_test.go` coverage (claim #8)** — PASS (with the minor count correction above: 15 table cases + 1 standalone = 16, not 17+; still covers all required scenarios including the `--` terminator at L83-94).
+
+9. **`DisableFlagParsing: true` unchanged on both cobra commands (claim #9)** — PASS.
+   - `claude.go:46`: `DisableFlagParsing: true` on `newClaudeCommand`.
+   - `codex.go:52`: `DisableFlagParsing: true` on `newCodexCommand`.
+   - Cobra semantics: `DisableFlagParsing` causes cobra to forward all argv tokens to `RunE` verbatim — required for `stripAccountFlag` to see `--account` at all (otherwise cobra would error on the unknown flag, since neither command registers `--account`).
+
+10. **Mage test reproducibility (claim #10)** — PASS.
+    - `mage testPkg github.com/evanmschultz/valv/internal/cli` reproduces exactly: 184/184 tests, 72.6% coverage, `-race` flag visible in mage `Tests` log line.
+
+11. **`mage build` (claim #11)** — PASS. Reproduced clean.
+
+### Callsite completeness (4-arg / 5-arg consistency)
+
+`git grep "ensureClaudeAccountReady\|ensureCodexBindingReady\|ensureBoundCodexAccountReady"` enumerates every callsite. Every call passes the correct arity:
+
+- `ensureClaudeAccountReady` (4 args required):
+  - `account_auth.go:42` — `(cmd, account, options, "")` — 4 args.
+  - `claude.go:75` — `(cmd, domain.Profile{}, accountAuthOptions{Paths: paths}, accountName)` — 4 args.
+  - `claude_auth_test.go:98`, `:126`, `:157` — all 4 args with `""`.
+- `ensureCodexBindingReady` (4 args required):
+  - `codex.go:76` — `(cmd, paths, workingDir, accountName)` — 4 args.
+  - `codex_setup_test.go:137` — `(cmd, paths, projectRoot, "")` — 4 args.
+- `ensureBoundCodexAccountReady` (5 args required):
+  - `codex.go:82` — `(cmd, paths, workingDir, args, accountName)` — 5 args.
+  - `codex_test.go:194`, `:223` — both 5 args with trailing `""`.
+
+No stale 3-arg / 4-arg callsites remain. The R1 fix-up cleanly closed the duplicate-declaration compile error and the test-build callsite gaps.
+
+### `--` escape hatch — direct verification
+
+The test case at `account_flag_test.go:83-94` (`"-- terminator stops scan (account after -- preserved)"`):
+
+```go
+args:            []string{"--", "--account", "work"},
+wantAccountName: "",
+wantRemaining:   []string{"--", "--account", "work"},
+```
+
+Matches the spawn prompt's required behaviour: `stripAccountFlag(["--", "--account", "work"])` returns `("", ["--", "--account", "work"])`. Source logic at `account_flag.go:20-22` (`if arg == "--" { return "", args }`) confirms — the original slice is returned unmodified, so the caller forwards `--` and everything after it unchanged to the provider CLI. Test passed in the reproducibility run.
+
+### BUILDER_WORKLOG.md accuracy check
+
+The worklog `## Unit 8.3 — Round 1` section (L154-216) accurately describes:
+- Files touched (the actual diff shows the listed files plus the small `account_auth.go` and `claude_auth.go` edits added in the fix-up, which the `### Fix-up` subsection at L217-234 explicitly enumerates).
+- The threading-approach choice (option `(a)` — add `accountOverride` parameter immediately).
+- The fix-up rationale and steps (duplicate-declaration root cause; 4-step structural fix correctly recorded — actually 6 numbered steps in the worklog, slightly over-counted as "4-step" in the prose summary; immaterial).
+- Mage results (`mage build` PASS, `mage testPkg internal/cli` 184/184 @ 72.6%) — match this reviewer's independent reproduction.
+
+The fix-up correctly identifies and resolves the gap: it deleted the R1 stub in `claude.go`, modified the existing `claude_auth.go:125` declaration to add `accountOverride`, and patched all 6 stale callsites. `claude_auth.go:125-137` shows the override short-circuit using `openManageService`, `ProfileByName`, and `account = resolved`, with no `BindProject` write.
+
+### Certificate
+
+- **Premises:** (a) `stripAccountFlag` correctly extracts and removes `--account` per spec including `--` terminator and malformed forms; (b) every callsite of the three modified helpers compiles with the new arity; (c) override short-circuit never writes a binding row; (d) `DisableFlagParsing: true` preserved on both cobra commands.
+- **Evidence:** direct Read of all changed files; `git grep` callsite enumeration; `git diff HEAD~1 --stat` scope; `mage testPkg internal/cli` 184/184 PASS @ 72.6% with `-race`; `mage build` PASS; cobra `DisableFlagParsing` semantics verified inline (raw argv flows to `RunE`).
+- **Trace:** `valv claude --account work resume` → `runClaudeCommand(args=["--account","work","resume"])` → `stripAccountFlag` returns `("work", ["resume"])` → `claudeArgsSkipProjectBinding(["resume"])` false → `accountName != ""` true → `ensureClaudeAccountReady(cmd, Profile{}, {Paths: paths}, "work")` → opens manage service → `ProfileByName(Claude, "work")` → `account = resolved` → credential-check + auth flow with resolved profile → `skipValidate=true` → `service.ValidateBinding` skipped → image check → `service.Run(ctx, workingDir, ["resume"])`. No `BindProject` call on this path.
+- **Conclusion:** PASS. All 11 builder claims verified. Override branch is read-only against the store (no binding-row write). All callsites compile. `--` escape hatch is correct. Mage targets reproduce green at exact builder-reported numbers.
+- **Unknowns:** none for this proof axis. Unit 8.4 (Claude `OverrideProfile` threading into `claudeservice.Options`) and Unit 8.5 (Codex equivalent + merge into `ensureCodexAccountReadyForLaunch`) are out-of-scope for 8.3.
+
+### Hylla Feedback
+
+N/A — Hylla was unreachable this session (per spawn-prompt paradigm override). All evidence gathered via direct `Read`, `git diff HEAD~1 --stat`, `git grep`, and `mage testPkg` / `mage build` reproduction. No fallback miss to log.
+
+### TL;DR
+
+PASS. R1 (post-fixup) implements `--account` flag handling exactly per spec: `stripAccountFlag` with `--` terminator + first-match-wins + malformed-token tolerance; 4-arg `ensureClaudeAccountReady` / `ensureCodexBindingReady` and 5-arg `ensureBoundCodexAccountReady` with consistent callsites and no orphaned 3-arg call; override short-circuit is read-only (`ProfileByName` only, no `BindProject`); `DisableFlagParsing: true` preserved on both cobra commands; `mage testPkg internal/cli` reproduces 184/184 @ 72.6% with `-race`; `mage build` PASS. Unit 8.3 ready to close pending QA Falsification.

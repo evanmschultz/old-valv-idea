@@ -642,3 +642,187 @@ Additionally, even if `realPickProfile` were in another file, Go's spec guarante
 ## Hylla Feedback (Unit 8.2 Round 2)
 
 N/A — Hylla unreachable per spawn paradigm override; all evidence gathered via `Read`, `git grep`, `git diff`, Context7-not-needed (no external library questions), and `mage testPkg` / `mage golden`. No tool-shape gripes.
+
+## Unit 8.3 — Round 1
+
+**Verdict:** `pass-with-concerns`
+
+**Builder commit under attack:** `25f252b feat(cli): unit 8.3 strip --account flag and thread override` (HEAD).
+
+**Scope reviewed:** `internal/cli/account_flag.go` (new), `internal/cli/account_flag_test.go` (new), `internal/cli/claude.go`, `internal/cli/codex.go`, `internal/cli/claude_auth.go`, `internal/cli/codex_setup.go`, `internal/cli/account_auth.go`, and the three mechanical test updates (`claude_auth_test.go`, `codex_setup_test.go`, `codex_test.go`).
+
+**Build verification:** `mage testPkg ./internal/cli` → 184 tests, 0 failed, coverage 72.6% (above the 60% floor). Confirmed prior baseline by checking out `HEAD~1`: 167 tests at 73.1%. Coverage delta is −0.5% across +17 net tests.
+
+### Attack 1 — `stripAccountFlag` edge cases beyond the test matrix
+
+**Hypothesis:** First-match-wins, malformed inputs, and unusual values produce incorrect behavior or panic.
+
+**Verdict:** REFUTED (all sub-cases). Live edge-case traces:
+
+| Input | Output | Correct? |
+|---|---|---|
+| `["--account", "work", "--account", "other"]` | `("work", ["--account", "other"])` | First wins; second preserved. Matches the documented contract and `account_flag_test.go:73`. |
+| `["foo", "--account"]` | `("", ["foo", "--account"])` | Last-token-malformed returns original args via `return "", args` (line 42). Tested at `account_flag_test.go:49`. |
+| `["--account="]` | `("", ["--account="])` | `len(arg) > 10` is false (it's exactly 10), then `arg == "--account"` is also false. Falls through to `return "", args` at line 54. Test at `account_flag_test.go:55`. |
+| `["--account=--account"]` | `("--account", [])` | `value = "--account"` is non-empty; treats the literal string `--account` as the account name. Downstream `ProfileByName("--account")` will return `ErrNotFound` — surfaces as user-facing error, no panic. |
+| `["--account", ""]` | `("", ["--account", ""])` | Empty value branch (line 45) returns original args. Edge case not tested explicitly but covered structurally. |
+| `["--account=", "--account", "work"]` | `("work", ["--account="])` | Malformed `--account=` is skipped (passes the strict `>` length check at line 25), `--account work` resolves at i=1. Acceptable behavior; the malformed token survives in remaining and is passed to claude/codex unchanged. |
+| `["foo", "--account=", "bar"]` | `("", ["foo", "--account=", "bar"])` | Malformed `--account=` in middle preserves args entirely (no flag extraction). Untested but consistent with the `>` length check. |
+
+**Concrete trace of input-slice non-mutation:** `remaining = make([]string, 0, len(args)-1)` allocates a new backing array, then `append(remaining, args[:i]...)` + `append(remaining, args[i+1:]...)` copies. No aliasing. Confirmed by `TestStripAccountFlagDoesNotMutateInputSlice`. No race risk.
+
+### Attack 2 — `--` escape hatch correctness
+
+**Hypothesis:** Terminator handling diverges between forms or positions.
+
+**Verdict:** REFUTED. Three cases verified:
+
+1. `["--", "--account", "work"]` → returns `("", ["--", "--account", "work"])`. Test at `account_flag_test.go:84-88`.
+2. `["foo", "--", "--account", "work"]` → at i=1 `arg == "--"`, return original args. Untested but trivially correct (early return at line 21).
+3. `["--account", "work", "--"]` → at i=0 `arg == "--account"`, next=1, value="work". Returns `("work", ["--"])`. Tested at `account_flag_test.go:96` (variant with `"passthrough"` after `--`). The terminator-AFTER-flag case lands in the extracted branch BEFORE the terminator check, so behavior is correct (account stripped, `--` and trailing args preserved).
+
+### Attack 3 — Override profile resolution failure path (ErrNotFound)
+
+**Hypothesis:** `service.ProfileByName(ctx, Provider, override)` returning `ErrNotFound` panics, leaks DB handles, or surfaces an unreadable error.
+
+**Verdict:** REFUTED. Trace for Claude path (claude.go:75 → claude_auth.go:132):
+
+1. `openManageService(cmd, options.Paths)` is called (claude_auth.go:127) — error propagates wrapped as `"initialize manage service for account override: ..."`.
+2. On success, `defer closeStore()` registered.
+3. `service.ProfileByName(ctx, ProviderClaude, accountOverride)` returns `(domain.Profile{}, wrapErr)` where `wrapErr` wraps `domain.ErrNotFound` via `manage/service.go:189`.
+4. Wrapped twice more: `ensureClaudeAccountReady` wraps with `"resolve override account %q: %w"`; `runClaudeCommand` wraps with `"run claude command: %w"`. Total surface: `"run claude command: resolve override account "missing": lookup profile "claude"/"missing": not found"`.
+5. Store closes via deferred `closeStore()`. No leak. No panic.
+
+Same trace for Codex path (codex.go:230 and codex_setup.go:37). All three paths preserve `errors.Is(err, domain.ErrNotFound)` chain integrity via `%w`. REFUTED.
+
+### Attack 4 — `account_auth.go:42` caller passes `""`
+
+**Hypothesis:** `ensureManagedAccountReady` dispatches `ensureClaudeAccountReady(cmd, account, options, "")` — but should it pass `account.Name` to ALWAYS resolve via override path?
+
+**Verdict:** REFUTED — `""` is correct.
+
+`ensureManagedAccountReady` is called from `loginBindAndReportCodexSetup` (codex_setup.go:141), `manage.go:623` (manage account login), `manage.go:729`, `manage.go:1032`. In every call site, the `account domain.Profile` has already been resolved (looked up by name via `ProfileByName` or constructed via `CreateProfile`). Passing the name as override would force a redundant store lookup and double-wrap errors. Passing `""` correctly causes `ensureClaudeAccountReady` to use the already-resolved `account` value directly.
+
+### Attack 5 — `runClaudeCommand` threads `domain.Profile{}` when override is non-empty
+
+**Hypothesis:** `claude.go:75` calls `ensureClaudeAccountReady(cmd, domain.Profile{}, …, accountName)` with a zero `domain.Profile`. If anything in the override branch reads `account.HomePath` or `account.Name` BEFORE `account = resolved` at claude_auth.go:136, the zero profile causes silent misbehavior.
+
+**Verdict:** REFUTED. Trace:
+
+`claude_auth.go:125` entry → `if accountOverride != ""` true → lines 127-137 resolve and replace `account = resolved`. Only AFTER line 137 does any code read `account.HomePath` (line 141), `account.Name` (line 147), or pass `account` to runner/logger. The branch correctly fully replaces the zero profile before use. REFUTED.
+
+### Attack 6 — Multiple `--account` flags with mixed positional args
+
+**Hypothesis:** `["claude", "--account", "work", "other-arg", "--account=different"]` produces incorrect remaining or skip-binding detection.
+
+**Verdict:** REFUTED.
+
+Trace: i=0 "claude" no match; i=1 "--account" matches, next=2, value="work". Returns `("work", ["claude", "other-arg", "--account=different"])`. First wins, second `--account=different` is preserved in remaining and forwarded to the upstream claude CLI inside the container. Claude CLI does NOT recognize `--account` so it would surface as an unknown-arg error from claude itself. That's a UX-surprise edge case but explicitly within the documented "first match wins" contract — design choice, not a bug. Documented at `account_flag.go:10-11`.
+
+Secondary trace for `claudeArgsSkipProjectBinding(args)` after strip: `args = ["claude", "other-arg", "--account=different"]`. No `--help`/`-h`/`--version`/`-V`/`help` match. Skip-binding returns false. Correct — flag-with-override should still attempt project bind/runtime.
+
+### Attack 7 — `DisableFlagParsing: true` preservation
+
+**Hypothesis:** Builder accidentally toggled `DisableFlagParsing` to false during the refactor.
+
+**Verdict:** REFUTED. Confirmed via `git grep DisableFlagParsing -- internal/cli/`:
+- `claude.go:46`: `DisableFlagParsing: true` (unchanged from HEAD~1 — confirmed via `git diff HEAD~1 -- internal/cli/claude.go` shows only RunE-internal changes, no field toggles).
+- `codex.go:52`: `DisableFlagParsing: true` (unchanged).
+
+### Attack 8 — `service.ProfileByName` signature
+
+**Hypothesis:** Function does not exist with the signature `(ctx, Provider, name) (Profile, error)`.
+
+**Verdict:** REFUTED. `internal/services/manage/service.go:186`:
+```go
+func (s Service) ProfileByName(ctx context.Context, provider domain.Provider, name string) (domain.Profile, error)
+```
+All three new call sites (claude_auth.go:132, codex.go:230, codex_setup.go:37) match.
+
+### Attack 9 — Coverage delta investigation
+
+**Hypothesis:** New override-resolution branches in `ensureClaudeAccountReady`, `ensureBoundCodexAccountReady`, and `ensureCodexBindingReady` are LIVE production code today but lack tests, accounting for the −0.5% coverage drop.
+
+**Verdict:** CONFIRMED (concern, not blocker).
+
+**Repro:** `git grep -nE "accountOverride" -- internal/cli/*_test.go` returns zero matches. Every test in the diff (`claude_auth_test.go`, `codex_setup_test.go`, `codex_test.go`) only updates the trailing arg to `""` — all 17 new tests are in `account_flag_test.go` exercising `stripAccountFlag` in isolation.
+
+**Uncovered live branches:**
+
+| File:Line | Branch | Test coverage |
+|---|---|---|
+| `claude.go:74-78` | `if accountName != "" { ensureClaudeAccountReady(...) }` | none |
+| `claude.go:83` | `skipValidate := accountName != ""` (and `if !skipValidate` at 130) | none |
+| `claude_auth.go:126-137` | `if accountOverride != ""` — both success (resolved!=err) and error (`ProfileByName` returns `ErrNotFound`) | none |
+| `codex.go:82` | `ensureBoundCodexAccountReady(..., accountName)` with non-empty accountName | none |
+| `codex.go:129` | `if accountName == ""` skip-ValidateBinding gating | none |
+| `codex.go:229-238` | `accountOverride != ""` resolution including `ensureManagedAccountReady` invocation | none |
+| `codex_setup.go:36-41` | `accountOverride != ""` ProfileByName branch | none |
+
+**Why this is `pass-with-concerns` not `fail`:** Unit 8.3's acceptance criteria at PLAN.md line 92 explicitly enumerate the test cases required ("no flag present, `--account work`, `--account=work`, `--account` as the last token (malformed), `--account` in the middle of other args, and the case where `--account` appears multiple times (first match wins)") — all about `stripAccountFlag` in isolation. The override-resolution branches' test coverage is explicitly deferred to Unit 8.4 (PLAN.md line 129: "Tests in `claude_setup_test.go` cover: ... `accountOverride` path") and Unit 8.5 (line 165: "Cover: override (unbound project), override (bound project), …"). Unit 8.3 meets its stated acceptance bar.
+
+**Remediation routing:** Surface to Unit 8.4 and 8.5 planning: ensure their `accountOverride` tests actually exercise `ensureClaudeAccountReady`'s override-resolution branch and `ensureCodexAccountReadyForLaunch`'s override-resolution branch (not just the higher-level `ensureClaudeBindingReady` / `ensureCodexAccountReadyForLaunch` wrappers). The 7 branches listed above must reach coverage by end of 8.5 or sooner.
+
+### Attack 10 — Override + already-authed combination
+
+**Hypothesis:** When override is non-empty AND override profile has valid `.credentials.json`, the function might double-call docker or short-circuit incorrectly.
+
+**Verdict:** REFUTED.
+
+Trace `ensureClaudeAccountReady`:
+1. Line 126: `accountOverride != ""` true. Lines 127-137 resolve via store, replace `account = resolved`.
+2. Line 138: `SkipLogin` false (Paths-only options).
+3. Line 141: `credPath = resolved.HomePath/.credentials.json`. `os.Stat` succeeds, size > 0.
+4. Line 143: return nil. Container auth skipped. Correct.
+
+Trace `ensureBoundCodexAccountReady`:
+1. Line 218: skip-account-ready check first (args-based).
+2. Line 221: `openManageService` ok.
+3. Line 229: `accountOverride != ""` true. Resolve profile.
+4. Line 234: `ensureManagedAccountReady` → `ensureCodexAccountReady` → `runner.LoginStatus(account.HomePath)`. If logged in, returns nil at line 83.
+
+Both paths correctly short-circuit on already-authed. REFUTED.
+
+### Attack 11 — Builder mid-round fix-up (duplicate declaration)
+
+**Hypothesis:** Prompt mentions "mid-round fix-up that resolved a duplicate-declaration compile error" — this might indicate sloppy refactor with residual issues.
+
+**Verdict:** REFUTED. Final commit compiles cleanly (`mage testPkg ./internal/cli` succeeds, 184 tests, 0 failures). The fix-up is squashed into commit `25f252b` (no separate fix commit between R1 builder commit and current HEAD per `git log --oneline -5`). No residual issue.
+
+### Attack 12 — codex.go ordering: ValidateBinding vs override skip
+
+**Hypothesis:** `codex.go:129-133` is the skip-ValidateBinding guard for override; but `service.Run` at line 135 might internally call ValidateBinding again, defeating the skip.
+
+**Verdict:** REFUTED. Reading `internal/services/codex/service.go` (not modified in this unit), `service.Run(ctx, workingDir, args)` does not internally call `ValidateBinding` — that is a separate explicit method. The override-skip is correct.
+
+**However a related concern:** when `accountName != ""`, `ensureBoundCodexAccountReady` (codex.go:82) runs BEFORE `service.Run` (line 135). The override branch in `ensureBoundCodexAccountReady` (line 229-238) calls `ensureManagedAccountReady` on the override profile — which runs `LoginStatus` against the override profile's `HomePath`. That's correct: the override identity gets the host-auth check it needs. But `service.Run` will then proceed using the project's BOUND profile (not the override) because no override-threading exists in `codexservice.Options` yet — that's Unit 8.5's job. Today, a `valv codex --account work` invocation with a project bound to "other" will:
+- Auth-check `work`'s HomePath on the host.
+- Then run codex inside docker pointed at `other`'s HomePath via `service.Run`'s reading of the binding.
+
+**Result:** transitional mis-wiring — `--account` is partially honored (host auth check uses override) but the container itself uses the bound account's home. Unit 8.5 will fix this by threading the resolved profile into `codexservice.Options`. Same gap exists for claude (Unit 8.4).
+
+This is NOT a Unit 8.3 acceptance violation: Unit 8.3 PLAN.md explicitly defers the runtime threading to Units 8.4/8.5 ("The extracted `accountName` is threaded through to ... binding-ready call (introduced in Unit 8.4)" / "merged `ensureCodexAccountReadyForLaunch` function (introduced in Unit 8.5)"). But it IS a live UX gap between Unit 8.3 closing and 8.4/8.5 closing — a user who runs `valv claude --account work` mid-drop will see the override host-auth-checked but container-launched with the bound profile. The override appears partially honored.
+
+**Remediation:** orchestrator should ensure no dogfooded `valv claude --account` / `valv codex --account` happens between now and Unit 8.4/8.5 completion. Drop's `state: building` already enforces this. Documented as a known transitional gap, not a counterexample.
+
+### Convergence
+
+- **Attack families exhausted:** stripAccountFlag edge cases (1), `--` escape (2), override resolution failure (3), caller correctness (4-5), multi-flag precedence (6), `DisableFlagParsing` preservation (7), signature verification (8), coverage delta (9), already-authed combination (10), residual-defect probe (11), runtime mis-wiring (12).
+- **CONFIRMED counterexample:** Attack 9 — uncovered override-resolution branches account for the −0.5% coverage drop. Not a blocker because Unit 8.3's stated acceptance covers `stripAccountFlag` only, and override-branch test coverage is explicitly deferred to Units 8.4/8.5.
+- **Transitional gap:** Attack 12 — host auth-check uses override profile but `service.Run` uses bound profile until Units 8.4/8.5 thread the override into `claudeservice.Options` / `codexservice.Options`. Acceptable as a closed-drop transitional state.
+- **Remaining Unknowns:** none. All applicable attack vectors evaluated against concrete code, not memory.
+
+### Verdict & remediation
+
+**Verdict:** `pass-with-concerns`.
+
+Unit 8.3 meets every stated acceptance criterion (PLAN.md lines 87-96). `mage testPkg ./internal/cli` green. `stripAccountFlag` test matrix complete (15 cases + non-mutation invariant). `DisableFlagParsing: true` preserved. `ProfileByName` signature confirmed. Override resolution wired into `runClaudeCommand` / `runCodexCommand`.
+
+**Concerns flagged for orchestrator routing:**
+
+1. **C1 (CONCERN, route to 8.4 / 8.5 planning):** 7 live override-resolution branches across 3 functions have no test coverage today. Unit 8.4 + 8.5 acceptance criteria already require override-path tests; orchestrator must verify those tests EXERCISE the actual `accountOverride != ""` branches in `ensureClaudeAccountReady` / `ensureBoundCodexAccountReady` / `ensureCodexBindingReady` (not just the higher-level wrappers that 8.4/8.5 introduce).
+2. **C2 (CONCERN, document as known transitional gap):** Between Unit 8.3 close and Unit 8.4/8.5 close, `valv claude --account X` / `valv codex --account X` will host-auth-check `X` but container-launch with the project's bound profile (because runtime threading is 8.4/8.5's responsibility). No dogfood smoke test of `--account` should occur until 8.4/8.5 land. Drop's `state: building` already gates this.
+
+## Hylla Feedback (Unit 8.3 Round 1)
+
+N/A — Hylla unreachable per spawn paradigm override; all evidence gathered via `Read`, `git grep`, `git diff`, and `mage testPkg`. Context7 not needed (no external library questions — cobra `DisableFlagParsing` semantics are documented inline in the unit). No tool-shape gripes.
