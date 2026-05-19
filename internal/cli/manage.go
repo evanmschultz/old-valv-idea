@@ -50,6 +50,8 @@ valv manage account delete hylla
 		},
 	}
 	cmd.AddCommand(newManageAccountAddCommand(paths, opts))
+	cmd.AddCommand(newManageAccountBindCommand(paths, opts))
+	cmd.AddCommand(newManageAccountUnbindCommand(paths, opts))
 	cmd.AddCommand(newManageAccountInspectCommand(paths, opts))
 	cmd.AddCommand(newManageAccountLoginCommand(paths, opts))
 	cmd.AddCommand(newManageAccountLogoutCommand(paths, opts))
@@ -323,6 +325,128 @@ valv manage account switch --provider claude
 	cmd.Flags().BoolVar(&skipLogin, "skip-login", false, "skip host-side account login for advanced automation")
 	cmd.Flags().StringVar(&providerFlag, "provider", "", "provider to use for account resolution (required when account name exists in multiple providers)")
 	return cmd
+}
+
+func newManageAccountBindCommand(paths config.Paths, opts *rootOptions) *cobra.Command {
+	var projectPath string
+	var providerFlag string
+	cmd := &cobra.Command{
+		Use:   "bind [provider] <account>",
+		Short: "Bind the current project to a provider account",
+		Long: strings.TrimSpace(`
+Bind one detected project root to one provider account.
+
+After binding, direct runtime commands like ` + "`valv codex ...`" + ` can resolve the account without additional setup.
+
+With one arg, Valv treats it as an account name and uses the default provider (codex). With two args, the first is the provider and the second is the account name.
+
+Output fields:
+- project: detected project root now bound in Valv
+- provider: provider family for the account
+- account: Valv account name
+- auth: current auth mode inferred from the account home
+- email: email identity from the account when available
+- home: host path mounted into provider runtimes as that account's home
+`),
+		Example: strings.TrimSpace(`
+valv account bind profile-name
+valv account bind codex profile-name
+valv account bind profile-name --provider codex
+valv account bind profile-name --project /absolute/path/to/repo
+`),
+		Args: cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var provider domain.Provider
+			var profileName string
+			if len(args) == 2 {
+				p, err := domain.ParseProvider(args[0])
+				if err != nil {
+					return err
+				}
+				provider = p
+				profileName = args[1]
+			} else {
+				profileName = args[0]
+				if providerFlag != "" {
+					p, err := domain.ParseProvider(providerFlag)
+					if err != nil {
+						return err
+					}
+					provider = p
+				} else {
+					provider = domain.ProviderCodex
+				}
+			}
+			return runManageBind(cmd, paths, opts, provider, profileName, projectPath)
+		},
+	}
+	cmd.Flags().StringVar(&projectPath, "project", "", "explicit project path to bind instead of the current working directory")
+	cmd.Flags().StringVar(&providerFlag, "provider", "", "provider to use for binding (codex or claude; defaults to codex)")
+	return cmd
+}
+
+func newManageAccountUnbindCommand(paths config.Paths, opts *rootOptions) *cobra.Command {
+	var projectPath string
+	var providerFlag string
+	cmd := &cobra.Command{
+		Use:   "unbind",
+		Short: "Unbind the current project from its provider account",
+		Long: strings.TrimSpace(`
+Remove the binding between the detected project root and the currently bound provider account.
+
+After unbinding, runtime commands like ` + "`valv codex ...`" + ` will no longer resolve an account for the project.
+`),
+		Example: strings.TrimSpace(`
+valv account unbind
+valv account unbind --provider codex
+valv account unbind --provider claude
+valv account unbind --project /absolute/path/to/repo
+`),
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runManageAccountUnbind(cmd, paths, opts, projectPath, providerFlag)
+		},
+	}
+	cmd.Flags().StringVar(&projectPath, "project", "", "explicit project path to unbind instead of the current working directory")
+	cmd.Flags().StringVar(&providerFlag, "provider", "", "provider to unbind (codex or claude; defaults to codex)")
+	return cmd
+}
+
+func runManageAccountUnbind(cmd *cobra.Command, paths config.Paths, opts *rootOptions, projectPath, providerFlag string) error {
+	mode, err := commandOutputMode(cmd, opts)
+	if err != nil {
+		return fmt.Errorf("resolve output policy: %w", err)
+	}
+	service, closeStore, err := openManageService(cmd, paths)
+	if err != nil {
+		return fmt.Errorf("account unbind: %w", err)
+	}
+	defer closeStore()
+
+	provider := domain.ProviderCodex
+	if providerFlag != "" {
+		p, err := domain.ParseProvider(providerFlag)
+		if err != nil {
+			return err
+		}
+		provider = p
+	}
+
+	startPath := strings.TrimSpace(projectPath)
+	if startPath == "" {
+		startPath, err = os.Getwd()
+		if err != nil {
+			return fmt.Errorf("account unbind: resolve working directory: %w", err)
+		}
+	}
+
+	if err := service.UnbindProject(cmd.Context(), provider, startPath); err != nil {
+		return fmt.Errorf("account unbind: %w", err)
+	}
+	return output.WriteRecord(cmd.OutOrStdout(), mode, "Project unbound", []output.Field{
+		{Label: "provider", Value: string(provider), Muted: true},
+		{Label: "project", Value: startPath, Identifier: true},
+	})
 }
 
 func newManageBindCommand(paths config.Paths, opts *rootOptions) *cobra.Command {

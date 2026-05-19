@@ -228,6 +228,28 @@ func (s Service) BindProject(ctx context.Context, provider domain.Provider, prof
 	return BindResult{Project: projectRecord, Profile: profile, Binding: binding}, nil
 }
 
+func (s Service) UnbindProject(ctx context.Context, provider domain.Provider, startPath string) error {
+	projectResult, err := s.detect(startPath)
+	if err != nil {
+		return fmt.Errorf("unbind project: detect project from %q: %w", startPath, err)
+	}
+
+	projectRecord, err := s.store.ProjectByRoot(ctx, projectResult.Root)
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			return fmt.Errorf("unbind project: project %q: %w", projectResult.Root, domain.ErrNotFound)
+		}
+		return fmt.Errorf("unbind project: lookup project %q: %w", projectResult.Root, err)
+	}
+
+	if err := s.store.DeleteBinding(ctx, projectRecord.ID, provider); err != nil {
+		return fmt.Errorf("unbind project: %w", err)
+	}
+
+	s.debug("unbound project from provider", "project_root", projectRecord.Root, "provider", provider)
+	return nil
+}
+
 func (s Service) Status(ctx context.Context, startPath string) (StatusResult, error) {
 	projectResult, err := s.detect(startPath)
 	if err != nil {

@@ -21,6 +21,7 @@ type BindingRepository interface {
 	UpsertProjectBinding(context.Context, ProjectBinding) (ProjectBinding, error)
 	BindingByProjectID(context.Context, string, Provider) (ProjectBinding, error)
 	ListBindings(context.Context) ([]ProjectBinding, error)
+	DeleteBinding(ctx context.Context, projectID string, provider Provider) error
 }
 
 type RuntimeRepository interface {

@@ -494,6 +494,26 @@ func (s *Store) ListBindings(ctx context.Context) ([]domain.ProjectBinding, erro
 	return bindings, nil
 }
 
+func (s *Store) DeleteBinding(ctx context.Context, projectID string, provider domain.Provider) error {
+	result, err := s.db.ExecContext(
+		ctx,
+		`DELETE FROM project_bindings WHERE project_id = ? AND provider = ?`,
+		projectID,
+		string(provider),
+	)
+	if err != nil {
+		return fmt.Errorf("delete binding %q/%q: %w", projectID, provider, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("delete binding %q/%q: rows affected: %w", projectID, provider, err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("delete binding %q/%q: %w", projectID, provider, domain.ErrNotFound)
+	}
+	return nil
+}
+
 func (s *Store) UpsertRuntime(ctx context.Context, runtime domain.RuntimeRecord) (domain.RuntimeRecord, error) {
 	if _, err := s.db.ExecContext(
 		ctx,

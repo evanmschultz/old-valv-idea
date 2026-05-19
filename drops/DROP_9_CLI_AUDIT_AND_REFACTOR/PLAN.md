@@ -79,7 +79,7 @@ The `account` namespace is already top-level (registered at `root.go:129` via `n
 
 ### Unit 9.2 — Add `valv account bind` and `valv account unbind`
 
-- **State:** todo
+- **State:** done (R1 — all 5 mage gates GREEN; mage integration 205/205 PASS)
 - **Paths:**
   - `internal/cli/manage.go`
   - `internal/cli/manage_test.go`

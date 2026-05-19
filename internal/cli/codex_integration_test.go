@@ -110,7 +110,6 @@ func TestCodexCommandRunsFixtureImageEndToEnd(t *testing.T) {
 }
 
 func TestCodexCommandRunsFixtureImageWithTTYEndToEnd(t *testing.T) {
-	t.Skip("requires valv account bind from DROP_9 Unit 9.2 — re-enable when 9.2 lands")
 	paths := testCodexPaths(t)
 	if err := paths.Ensure(); err != nil {
 		t.Fatalf("paths.Ensure() error = %v", err)

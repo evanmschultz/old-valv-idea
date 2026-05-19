@@ -183,6 +183,84 @@ func TestManageBindAndStatusUseRealStoreAndProjectDetection(t *testing.T) {
 	}
 }
 
+func TestManageAccountBindWithTwoPositionalsBindsProject(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	projectRoot := filepath.Join(t.TempDir(), "project")
+	workDir := filepath.Join(projectRoot, "nested")
+	if err := os.MkdirAll(filepath.Join(projectRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git) error = %v", err)
+	}
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(workDir) error = %v", err)
+	}
+
+	profileHome := filepath.Join(paths.ProviderRoot, "codex", "profiles", "profile-name")
+	// Create account without binding.
+	runManage(t, paths, []string{"account", "add", "codex", "profile-name", "--home", profileHome, "--skip-login", "--no-bind"})
+	// account bind <provider> <name> — two positionals matching integration test pattern.
+	out := runManage(t, paths, []string{"account", "bind", "codex", "profile-name", "--project", workDir})
+	if !strings.Contains(out, "account=profile-name") {
+		t.Fatalf("unexpected bind output: %q", out)
+	}
+	if !strings.Contains(out, "provider=codex") {
+		t.Fatalf("unexpected bind output: %q", out)
+	}
+
+	store, err := sqliteadapter.NewStore(paths.DatabasePath)
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+	normalizedProjectRoot, err := pathutil.Normalize(projectRoot)
+	if err != nil {
+		t.Fatalf("Normalize(projectRoot) error = %v", err)
+	}
+	project, err := store.ProjectByRoot(context.Background(), normalizedProjectRoot)
+	if err != nil {
+		t.Fatalf("ProjectByRoot() error = %v", err)
+	}
+	if _, err := store.BindingByProjectID(context.Background(), project.ID, domain.ProviderCodex); err != nil {
+		t.Fatalf("BindingByProjectID() error = %v (want binding to exist after account bind)", err)
+	}
+}
+
+func TestManageAccountUnbindRemovesBinding(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	projectRoot := filepath.Join(t.TempDir(), "project")
+	workDir := filepath.Join(projectRoot, "nested")
+	if err := os.MkdirAll(filepath.Join(projectRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git) error = %v", err)
+	}
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(workDir) error = %v", err)
+	}
+
+	profileHome := filepath.Join(paths.ProviderRoot, "codex", "profiles", "profile-name")
+	runManage(t, paths, []string{"account", "add", "codex", "profile-name", "--home", profileHome, "--skip-login", "--project", workDir})
+	runManage(t, paths, []string{"account", "unbind", "--project", workDir})
+
+	store, err := sqliteadapter.NewStore(paths.DatabasePath)
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+	normalizedProjectRoot, err := pathutil.Normalize(projectRoot)
+	if err != nil {
+		t.Fatalf("Normalize(projectRoot) error = %v", err)
+	}
+	project, err := store.ProjectByRoot(context.Background(), normalizedProjectRoot)
+	if err != nil {
+		t.Fatalf("ProjectByRoot() error = %v", err)
+	}
+	if _, err := store.BindingByProjectID(context.Background(), project.ID, domain.ProviderCodex); err == nil {
+		t.Fatal("BindingByProjectID() error = nil, want ErrNotFound after unbind")
+	}
+}
+
 func TestManageAccountHelpSubcommandWorks(t *testing.T) {
 	t.Parallel()
 

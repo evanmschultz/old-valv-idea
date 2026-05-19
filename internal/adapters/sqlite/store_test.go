@@ -380,6 +380,45 @@ func TestStoreCompositeBindingsCoexistByProvider(t *testing.T) {
 	}
 }
 
+func TestStoreDeleteBindingRemovesBoundRow(t *testing.T) {
+	t.Parallel()
+
+	store := newBootstrappedStore(t)
+	project, _ := domain.NewProject("/tmp/example/project")
+	profile := mustProfile(t, domain.ProviderCodex, "dev", "/tmp/valv/providers/codex/dev")
+	if _, err := store.CreateProject(context.Background(), project); err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	if _, err := store.CreateProfile(context.Background(), profile); err != nil {
+		t.Fatalf("CreateProfile() error = %v", err)
+	}
+	binding, err := domain.NewProjectBinding(project.ID, profile.ID, domain.ProviderCodex)
+	if err != nil {
+		t.Fatalf("NewProjectBinding() error = %v", err)
+	}
+	if _, err := store.UpsertProjectBinding(context.Background(), binding); err != nil {
+		t.Fatalf("UpsertProjectBinding() error = %v", err)
+	}
+
+	if err := store.DeleteBinding(context.Background(), project.ID, domain.ProviderCodex); err != nil {
+		t.Fatalf("DeleteBinding() error = %v", err)
+	}
+
+	if _, err := store.BindingByProjectID(context.Background(), project.ID, domain.ProviderCodex); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("BindingByProjectID() after delete error = %v, want domain.ErrNotFound", err)
+	}
+}
+
+func TestStoreDeleteBindingReturnsErrNotFoundWhenAbsent(t *testing.T) {
+	t.Parallel()
+
+	store := newBootstrappedStore(t)
+	err := store.DeleteBinding(context.Background(), "non-existent-project", domain.ProviderCodex)
+	if !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("DeleteBinding() error = %v, want domain.ErrNotFound", err)
+	}
+}
+
 func TestStoreMigrationPreservesLegacyCodexBinding(t *testing.T) {
 	t.Parallel()
 

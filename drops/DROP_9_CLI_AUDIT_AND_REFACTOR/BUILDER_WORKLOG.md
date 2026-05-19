@@ -142,3 +142,50 @@ t.Skip("requires valv account bind from DROP_9 Unit 9.2 — re-enable when 9.2 l
 ## Hylla Feedback (Round 3)
 
 N/A — task touched only a single `t.Skip` insertion in a test file already read in R2. No Go symbol queries were needed.
+
+---
+
+## Unit 9.2 — Round 1
+
+- **Builder:** go-builder-agent
+- **Started:** 2026-05-18
+- **Files touched:**
+  - `internal/domain/repository.go`
+  - `internal/adapters/sqlite/store.go`
+  - `internal/adapters/sqlite/store_test.go`
+  - `internal/services/manage/service.go`
+  - `internal/services/manage/service_test.go`
+  - `internal/cli/manage.go`
+  - `internal/cli/manage_test.go`
+  - `internal/cli/codex_integration_test.go`
+  - `drops/DROP_9_CLI_AUDIT_AND_REFACTOR/PLAN.md`
+
+### Design choices
+
+**Bind command shape — Option (b):** Created a new thin `newManageAccountBindCommand` that wraps `runManageBind` with a new arg/flag shape. Did NOT rename or modify `newManageBindCommand` (the old `manage bind` constructor). Option (b) is surgical and leaves the existing bind run path untouched.
+
+**`account bind` arg parsing:** Accepts `RangeArgs(1, 2)`. When 2 args: first is provider, second is account name (matching existing `codex_integration_test.go` call at line 147: `"account", "bind", "codex", "profile-name"`). When 1 arg: account name only, provider from `--provider` flag or defaults to Codex. This is consistent with the `delete`, `rename`, `login`, `logout` pattern already in the codebase.
+
+**`account unbind` signature:** `Args: cobra.NoArgs`. Accepts `--provider` flag (default Codex) and `--project` flag. Calls `service.UnbindProject`. Returns a brief "Project unbound" record output consistent with other commands.
+
+**Implementation order (domain → sqlite → service → cli):** The compile gate enforced this — `sqlite.Store` must implement `DeleteBinding` before the manage service tests can compile, because `manage.Store` embeds `domain.BindingRepository`.
+
+**`UnbindProject` error handling:** Returns descriptive wrapped errors at two failure points: (1) project not found in store → wraps `domain.ErrNotFound`; (2) binding not found → `store.DeleteBinding` returns wrapped `domain.ErrNotFound`. Both bubble cleanly through `errors.Is` checks in tests.
+
+**`t.Skip` removal (AC #11):** Removed from `codex_integration_test.go` line 113. The integration test now runs end-to-end with the real binary, calling `account add codex profile-name` then `account bind codex profile-name` then `valv codex resume session-tty` via PTY.
+
+### Mage gate results
+
+1. `mage testPkg github.com/evanmschultz/valv/internal/cli` — **PASS** (202 tests, 72.6% coverage, -race, 0 failures)
+2. `mage testPkg github.com/evanmschultz/valv/internal/adapters/sqlite` — **PASS** (21 tests, 78.4% coverage, -race, 0 failures)
+3. `mage testPkg github.com/evanmschultz/valv/internal/services/manage` — **PASS** (28 tests, 75.8% coverage, -race, 0 failures)
+4. `mage integration` — **PASS** (205/205 PASS, 0 skipped, 0 failed)
+5. `mage build` — **PASS** (`./valv` built successfully)
+
+### `internal/tui/manage` dead-code note
+
+`runManageHome` in `operator_helpers.go` (and `internal/tui/manage`) remain dead code as noted in 9.1. Not touched — DROP_11 or a cleanup drop handles removal.
+
+## Hylla Feedback (Unit 9.2 Round 1)
+
+None — Hylla answered everything needed. All Go symbol evidence gathered via direct `Read` of source files (Hylla's last ingest predates the DROP_9 work, making the committed index stale for recently-modified files). Evidence flow: `Read` → `git diff` where needed. No Hylla queries were applicable given the stale baseline, and non-Go files (markdown, worklog) are outside Hylla's Go-only scope.

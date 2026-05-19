@@ -748,6 +748,90 @@ func TestCleanupDuplicateAliasesDeletesUnboundLegacyHostAliases(t *testing.T) {
 	}
 }
 
+func TestUnbindProjectRemovesBoundProjectBinding(t *testing.T) {
+	t.Parallel()
+
+	store, providerRoot := testStore(t)
+	service, err := New(Options{
+		Store:        store,
+		ProviderRoot: providerRoot,
+		Detect: func(string) (projectdetect.Result, error) {
+			return projectdetect.Result{Root: "/tmp/example/project", HasGitMarker: true}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	profile, err := service.CreateProfile(context.Background(), domain.ProviderCodex, "dev", "/tmp/example/profile")
+	if err != nil {
+		t.Fatalf("CreateProfile() error = %v", err)
+	}
+	if _, err := service.BindProject(context.Background(), domain.ProviderCodex, profile.Name, "/tmp/example/project"); err != nil {
+		t.Fatalf("BindProject() error = %v", err)
+	}
+
+	if err := service.UnbindProject(context.Background(), domain.ProviderCodex, "/tmp/example/project"); err != nil {
+		t.Fatalf("UnbindProject() error = %v", err)
+	}
+
+	if _, err := service.Status(context.Background(), "/tmp/example/project"); !errors.Is(err, domain.ErrUnboundProject) {
+		t.Fatalf("Status() after unbind error = %v, want domain.ErrUnboundProject", err)
+	}
+}
+
+func TestUnbindProjectReturnsErrNotFoundWhenProjectHasNoBinding(t *testing.T) {
+	t.Parallel()
+
+	store, providerRoot := testStore(t)
+	service, err := New(Options{
+		Store:        store,
+		ProviderRoot: providerRoot,
+		Detect: func(string) (projectdetect.Result, error) {
+			return projectdetect.Result{Root: "/tmp/example/project", HasGitMarker: true}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	// Create the project record but no binding.
+	project, err := domain.NewProject("/tmp/example/project")
+	if err != nil {
+		t.Fatalf("NewProject() error = %v", err)
+	}
+	if _, err := store.CreateProject(context.Background(), project); err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	err = service.UnbindProject(context.Background(), domain.ProviderCodex, "/tmp/example/project")
+	if !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("UnbindProject() error = %v, want domain.ErrNotFound", err)
+	}
+}
+
+func TestUnbindProjectReturnsErrWhenProjectNotKnown(t *testing.T) {
+	t.Parallel()
+
+	store, providerRoot := testStore(t)
+	service, err := New(Options{
+		Store:        store,
+		ProviderRoot: providerRoot,
+		Detect: func(string) (projectdetect.Result, error) {
+			return projectdetect.Result{Root: "/tmp/example/project", HasGitMarker: true}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	// Project is completely unknown (never created).
+	err = service.UnbindProject(context.Background(), domain.ProviderCodex, "/tmp/example/project")
+	if !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("UnbindProject() for unknown project error = %v, want domain.ErrNotFound", err)
+	}
+}
+
 func testStore(t *testing.T) (*sqliteadapter.Store, string) {
 	t.Helper()
 
