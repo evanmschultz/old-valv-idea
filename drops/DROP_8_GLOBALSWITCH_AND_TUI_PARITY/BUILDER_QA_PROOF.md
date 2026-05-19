@@ -413,3 +413,90 @@ N/A — Hylla was unreachable this session (per spawn-prompt paradigm override).
 ### TL;DR
 
 PASS. R1 (post-fixup) implements `--account` flag handling exactly per spec: `stripAccountFlag` with `--` terminator + first-match-wins + malformed-token tolerance; 4-arg `ensureClaudeAccountReady` / `ensureCodexBindingReady` and 5-arg `ensureBoundCodexAccountReady` with consistent callsites and no orphaned 3-arg call; override short-circuit is read-only (`ProfileByName` only, no `BindProject`); `DisableFlagParsing: true` preserved on both cobra commands; `mage testPkg internal/cli` reproduces 184/184 @ 72.6% with `-race`; `mage build` PASS. Unit 8.3 ready to close pending QA Falsification.
+
+## Unit 8.4 — Round 1
+
+**Verdict:** PASS
+
+**Reviewer:** go-qa-proof-agent
+**Commit reviewed:** `aa11233 feat(cli): unit 8.4 claude binding UX + override threading`
+**Files reviewed (diff vs HEAD~1):**
+- `internal/cli/claude_setup.go` (+113/-0, new file)
+- `internal/cli/claude_setup_test.go` (+247/-0, new file)
+- `internal/cli/claude.go` (+25/-31; mostly removal of pre-flight `service.ValidateBinding` + new override threading)
+- `internal/cli/claude_test.go` (+25/-5; existing tests adjusted for new resolver wiring)
+- `internal/services/manage/service.go` (+38/-0, additive `StatusForProvider`)
+- `internal/services/manage/service_test.go` (+62/-0; two new `StatusForProvider*` tests)
+- `internal/services/claude/service.go` (+65/-30; new `OverrideProfile` field + Run branch)
+- `internal/services/claude/service_test.go` (+64/-0; `TestRunUsesOverrideProfileHomePath`)
+
+### Reproducibility
+
+All three mage `testPkg` targets + `mage build` reproduced GREEN at the builder-reported counts:
+
+| Target | Tests | Coverage | Result |
+|---|---|---|---|
+| `mage testPkg github.com/evanmschultz/valv/internal/services/manage` | 25/25 | 75.5% | PASS |
+| `mage testPkg github.com/evanmschultz/valv/internal/services/claude` | 18/18 | 79.4% | PASS |
+| `mage testPkg github.com/evanmschultz/valv/internal/cli` | 191/191 | 71.8% | PASS |
+| `mage build` | — | — | PASS (`./valv` produced) |
+
+`-race` is on for all `testPkg` runs (mage runs `go test -race -cover -count=1`). Package-coverage gate (60% mage floor; AGENTS.md § 11's 70% floor) satisfied across the board.
+
+### Per-AC verification
+
+- **AC1 — new helper signature.** `ensureClaudeBindingReady(cmd *cobra.Command, paths config.Paths, workingDir string, accountOverride string) (domain.Profile, error)` present at `internal/cli/claude_setup.go:41`. Returns `domain.Profile` exactly as spec'd. ✓
+- **AC2 — override path resolves by name, no binding written.** Lines `claude_setup.go:48-55`: `service.ProfileByName(cmd.Context(), domain.ProviderClaude, accountOverride)`, returns immediately. No `BindProject` call on this branch. Verified end-to-end by `TestEnsureClaudeBindingReadyOverrideUnboundProject` (lines 19-60): after override, `store.ProjectByRoot(ctx, projectRoot)` returns `domain.ErrNotFound` — no project record, therefore no binding row. ✓
+- **AC3 — `StatusForProvider` used (not `Status`).** `claude_setup.go:58`: `service.StatusForProvider(cmd.Context(), workingDir, domain.ProviderClaude)`. Side-by-side comparison of `Status` (`service.go:231-262`) and `StatusForProvider` (`service.go:269-300`) confirms: the only meaningful diff is the hardcoded `domain.ProviderCodex` → `provider` parameter at the `BindingByProjectID` call (line 245 vs 283). ✓
+- **AC4 — auto-bind for 1 account + notice + writes binding.** `claude_setup.go:80-95`: `BindProject(ctx, ProviderClaude, profile.Name, workingDir)` then `writeCLINotice(cmd.ErrOrStderr(), laslig.NoticeInfoLevel, "Project bound", ...)`. `TestEnsureClaudeBindingReadyOneAccountAutoBind` (lines 129-170) asserts the binding row was persisted by re-calling `ensureClaudeBindingReady` and confirming it returns the same profile via the already-bound short-circuit. ✓
+- **AC5 — 2+ accounts picker on TTY, error on non-TTY.** `claude_setup.go:97-112`: non-TTY branch returns error referencing `valv manage bind claude <name>`; TTY branch calls `pickProfile(cmd, ProviderClaude, profiles)` then `BindProject`. `TestEnsureClaudeBindingReadyMultipleAccountsNonTTY` (lines 176-201) asserts the non-TTY error message contains `valv manage bind claude`. ✓
+- **AC6 — 0 accounts error message.** `claude_setup.go:78`: returns `unboundProjectNoAccountsError(domain.ProviderClaude)`. The helper at `claude_setup.go:15-22` formats: `"project is not bound; no claude accounts found — run \`valv manage account add claude\` to create one"`. `TestEnsureClaudeBindingReadyZeroAccounts` asserts both substrings present. ✓
+- **AC7 — runClaudeCommand threads override profile through `OverrideProfile`.** `claude.go:76-114`: calls `ensureClaudeBindingReady`, stores result in `resolvedProfile`, passes `OverrideProfile: &resolvedProfile` to `claudeservice.New`. Pre-launch `service.ValidateBinding` call is gone (the old block was removed; comment at `claude.go:119-120` documents this). ✓
+- **AC8 — Claude auth is in-container; no `ensureManagedAccountReady` call.** `git grep "ensureManagedAccountReady" -- internal/cli/claude_setup.go internal/cli/claude.go` returns only the negation comment at `claude_setup.go:40`. No actual call site exists. ✓
+- **AC9 — coverage tests for all 5 spec branches.** `claude_setup_test.go` covers: override-unbound (line 19), override-bound (line 65), 0 accounts (line 100), 1 account auto-bind (line 129), 2+ accounts non-TTY (line 176), already-bound (line 206), and the shared error helper (line 235). ✓
+
+### Per-concern verification (C1 / C2 from Unit 8.3 QA Falsification)
+
+- **C1 (override path must not persist binding).** Addressed by `TestEnsureClaudeBindingReadyOverrideUnboundProject` (`claude_setup_test.go:19-60`). Test sets up an unbound project with NO project record, calls `ensureClaudeBindingReady(..., "override-account")`, asserts (a) returned `profile.Name == "override-account"` AND (b) `store.ProjectByRoot(ctx, projectRoot)` returns `domain.ErrNotFound` — proving no project/binding row was created. This is stronger than the spawn-prompt's `BindingByProjectID` check (no project means no binding can exist). ✓
+- **C2 (override profile flows through to container mounts).** Addressed by `TestRunUsesOverrideProfileHomePath` (`internal/services/claude/service_test.go:553-614`). Test constructs a store with a `boundHome` profile, passes a separate `overrideProfile.HomePath = overrideHome` via `OverrideProfile`, runs the service, and asserts `executor.got.Mounts` contains a mount with `Source == overrideHome` AND no mount has `Source == boundHome`. End-to-end coverage of the override branch through the runtime mount build. ✓
+
+### Verification checklist (spawn-prompt items 1-9)
+
+1. ✓ Re-ran all three `mage testPkg` targets + `mage build` — all green, counts match builder.
+2. ✓ Every PLAN.md AC mapped to source above.
+3. ✓ C1 addressed via `TestEnsureClaudeBindingReadyOverrideUnboundProject`; assertion uses `ProjectByRoot → ErrNotFound`.
+4. ✓ C2 addressed via `TestRunUsesOverrideProfileHomePath`; assertion checks mount Source.
+5. ✓ `StatusForProvider` mirrors `Status` exactly except for the provider param (see AC3 note + finding 1.1 below for minor error-message wording).
+6. ✓ `Status` itself NOT modified — `git diff HEAD~1 HEAD -- internal/services/manage/service.go` shows only an additive block at line 261. No changes to lines 231-262.
+7. ✓ `ensureClaudeBindingReady` does NOT call `ensureManagedAccountReady` — only mention is the negation comment.
+8. ✓ Non-`ErrUnboundProject` error path: `claude_setup.go:65-67` wraps with `fmt.Errorf("detect claude binding: %w", err)` and returns immediately. The check uses `errors.Is(err, domain.ErrUnboundProject) || strings.Contains(err.Error(), domain.ErrUnboundProject.Error())` — see finding 1.2 below for the substring fallback.
+9. ✓ Shared `unboundProjectNoAccountsError(provider)` helper present at `claude_setup.go:17-22`, takes `domain.Provider` and formats both the message subject and the `valv manage account add <provider>` suffix. 8.5 will reuse.
+
+### Findings (informational, non-blocking)
+
+- **1.1 [Axis: spec-conformance] [severity: low]** `StatusForProvider`'s error messages at lines 286, 288, 294 use `projectResult.Root`, while the original `Status` uses `projectRecord.Root` at the equivalent lines (248, 250, 256). After a successful `ProjectByRoot` lookup these should be the same path, so behavior is equivalent — but the divergence means `StatusForProvider` does not literally "mirror Status exactly" as the doc-comment at `service.go:265` claims. Recommend either updating both to one convention or rewording the doc-comment. Low-severity stylistic finding; does NOT block close. → `internal/services/manage/service.go:286,288,294` vs `:248,250,256` → align the two functions in a follow-up, or accept and reword the doc-comment.
+- **1.2 [Axis: spec-conformance] [severity: low]** The Claude binding-detection check at `claude_setup.go:65` uses `errors.Is(err, domain.ErrUnboundProject) || strings.Contains(err.Error(), domain.ErrUnboundProject.Error())`. The `errors.Is` should be sufficient given `StatusForProvider` wraps with `%w` (`service.go:278, 286, 294`). The `strings.Contains` fallback suggests a defense against a non-wrapping error path that, given the current code, does not exist. Recommend dropping the substring fallback in a future cleanup OR adding a code-comment explaining the historical reason. Non-blocking. → `internal/cli/claude_setup.go:65` → drop the `strings.Contains` clause once confirmed all `StatusForProvider` paths wrap with `%w` (they do — verified above).
+- **1.3 [Axis: completion-checklist-audit] [severity: low]** `writeCLINotice` failure at `claude_setup.go:91-94` is silently swallowed via `_ = err`. This matches the spec ("non-fatal: notice write failure must not block launch") and the explicit comment, but stylistically Go would prefer no assignment at all if the error is to be ignored. Truly non-blocking — just noting. → `internal/cli/claude_setup.go:91-94` → optionally drop `_ = err` for cleaner idiom.
+
+### Missing evidence
+
+None.
+
+### Certificate
+
+- **Premises:** Unit 8.4 implements the Claude binding UX exactly as PLAN.md specifies — new helper `ensureClaudeBindingReady`, new `StatusForProvider` method, new `OverrideProfile` field, rewired `runClaudeCommand` — with (a) no binding written on the override path, (b) the override profile threaded all the way through to the container mounts, (c) no `Status`-method mutation, (d) no host-side auth (Claude is in-container), (e) mage targets green at the builder-reported counts.
+- **Evidence:** direct `Read` of `claude_setup.go`, `claude_setup_test.go`, `claude.go`, `claude/service.go`, `manage/service.go`, `claude/service_test.go`; `git diff HEAD~1 HEAD --` for both service files; `git grep` for all four target symbols + `ensureManagedAccountReady`; reproducibility of all three mage targets + `mage build`.
+- **Trace:**
+  - **Override path:** `valv claude --account override-name resume` → `stripAccountFlag` → `accountName="override-name", args=["resume"]` → `claudeArgsSkipProjectBinding(["resume"])` false → `workingDir = os.Getwd()` → `ensureClaudeBindingReady(cmd, paths, workingDir, "override-name")` → `service.ProfileByName(Claude, "override-name")` → returns `(profile, nil)` → no binding write → back in `runClaudeCommand`: `claudeservice.New(... OverrideProfile: &resolvedProfile ...)` → `service.Run(ctx, workingDir, ["resume"])` → in `Run`, `s.overrideProfile != nil` branch taken → `resolved.profile = *s.overrideProfile` (override's `HomePath`) → container mount built from `resolved.profile.HomePath`, NOT from any store-resolved profile. Asserted by `TestRunUsesOverrideProfileHomePath`.
+  - **Unbound + 1 account auto-bind:** `valv claude` (no flag) → `stripAccountFlag` → `accountName="", args=[]` → `claudeArgsSkipProjectBinding([])` false → `ensureClaudeBindingReady(cmd, paths, workingDir, "")` → `service.StatusForProvider(ctx, workingDir, Claude)` returns wrapped `ErrUnboundProject` → `errors.Is` true → `service.ListProfiles(ctx, Claude)` returns 1 profile → `service.BindProject(ctx, Claude, profile.Name, workingDir)` → `writeCLINotice` notice emitted → returns `(profile, nil)` → `runClaudeCommand` threads profile via `OverrideProfile`. (Note: even on the auto-bind path, the profile flows through `OverrideProfile` — the service does NOT re-resolve via `resolveBinding`. This is correct: the binding was just written by `BindProject` but the resolver path is bypassed cleanly.)
+  - **Already-bound short-circuit:** `valv claude` → `ensureClaudeBindingReady` → `StatusForProvider` returns `(status, nil)` → returns `status.Profile` immediately. No `ListProfiles` / `BindProject` calls. Asserted by `TestEnsureClaudeBindingReadyAlreadyBound`.
+- **Conclusion:** PASS. All 9 spawn-prompt verification points satisfied. C1 + C2 from Unit 8.3 QA Falsification both addressed with end-to-end tests. Three findings are low-severity stylistic; none block close.
+- **Unknowns:** none. Unit 8.5 (Codex equivalent + merged `ensureCodexAccountReadyForLaunch`) is out-of-scope.
+
+### Hylla Feedback
+
+N/A — Hylla was unreachable this session (per spawn-prompt paradigm override). All evidence gathered via direct `Read`, `git diff HEAD~1 HEAD`, `git grep`, and `mage testPkg` / `mage build` reproduction. No fallback miss to log.
+
+### TL;DR
+
+PASS. Unit 8.4 wires `ensureClaudeBindingReady` (`claude_setup.go:41-113`), `StatusForProvider` (`manage/service.go:269-300`), and `OverrideProfile *domain.Profile` (`claude/service.go:60, 119, 133-149`) into `runClaudeCommand` (`claude.go:53-129`). All 9 PLAN.md ACs verified against source. C1 (override-no-write) addressed by `TestEnsureClaudeBindingReadyOverrideUnboundProject` asserting `ProjectByRoot → ErrNotFound`; C2 (override-flows-to-mount) addressed by `TestRunUsesOverrideProfileHomePath` asserting executor mount source matches override `HomePath`. `Status` byte-for-byte unchanged. Claude in-container auth preserved (no host-side `ensureManagedAccountReady` call). `mage testPkg` reproduces 25/25 @ 75.5% (manage), 18/18 @ 79.4% (claude), 191/191 @ 71.8% (cli); `mage build` PASS. Three low-severity stylistic findings noted, none blocking. Unit 8.4 ready to close pending QA Falsification.

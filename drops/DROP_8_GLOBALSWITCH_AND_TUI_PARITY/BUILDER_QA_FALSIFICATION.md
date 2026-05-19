@@ -826,3 +826,241 @@ Unit 8.3 meets every stated acceptance criterion (PLAN.md lines 87-96). `mage te
 ## Hylla Feedback (Unit 8.3 Round 1)
 
 N/A — Hylla unreachable per spawn paradigm override; all evidence gathered via `Read`, `git grep`, `git diff`, and `mage testPkg`. Context7 not needed (no external library questions — cobra `DisableFlagParsing` semantics are documented inline in the unit). No tool-shape gripes.
+
+## Unit 8.4 — Round 1
+
+**Verdict:** `pass-with-concerns`
+
+**Builder commit under attack:** `aa11233 feat(cli): unit 8.4 claude binding UX + override threading`
+
+**Scope reviewed:** `internal/cli/claude.go`, `internal/cli/claude_setup.go` (NEW), `internal/cli/claude_setup_test.go` (NEW), `internal/cli/claude_test.go`, `internal/services/manage/service.go`, `internal/services/manage/service_test.go`, `internal/services/claude/service.go`, `internal/services/claude/service_test.go`. Also read `internal/adapters/providers/claude/runtime.go` (for vector 1 mount-time semantics), `internal/cli/operator_helpers.go` (vector 8 picker cancel), `internal/cli/codex_setup.go` (vector 5 / standards-violation cross-check), `internal/adapters/sqlite/store.go::BindingByProjectID` (vector 2 SQL-level provider filter), `internal/domain/errors.go` (vector 5 sentinel text), `internal/services/manage/service.go::BindProject` (vector 9 upsert semantics).
+
+### Attack 1 — Override + skip-ValidateBinding without HomePath existence check
+
+**Hypothesis:** New override path skips `service.ValidateBinding`. If the resolved override profile's `HomePath` doesn't exist on disk (manually deleted, never created), the container launch fails at mount time. Override path doesn't validate existence before launching.
+
+**Verdict:** REFUTED.
+
+**Trace:**
+- `ValidateBinding` (`claude/service.go:219-222`) just calls `resolveBinding` — DB lookups only, **does NOT check HomePath existence on disk**. So the premise of the attack ("ValidateBinding would have caught a missing HomePath") was false.
+- `PrepareRuntime` (`internal/adapters/providers/claude/runtime.go:82`) does `os.MkdirAll(sharedHome, 0o755)` on the profile home before mount construction. This silently CREATES the directory if missing. Both bound and override paths go through the same `PrepareRuntime` → both share the same `MkdirAll`-on-missing semantics.
+- Result: a typo'd / missing-on-disk override HomePath does not fail at mount time; instead Docker mounts a freshly-created empty directory. This is suboptimal UX (user mounts the wrong dir silently) but **is NOT a regression introduced by 8.4** — it is the pre-existing behavior of the bound-profile launch path. The override path inherits it.
+
+**Counterexample status:** none against 8.4. Pre-existing UX gap (not unit 8.4's responsibility). No remediation required by 8.4.
+
+### Attack 2 — `StatusForProvider` line-by-line symmetry with `Status`
+
+**Hypothesis:** Builder claims surgical clone. Look for divergence beyond the provider parameter.
+
+**Verdict:** REFUTED.
+
+**Trace:**
+- `Status` (`internal/services/manage/service.go:231-262`) vs `StatusForProvider` (`:264-302`). Diff: only line that differs is `BindingByProjectID(..., domain.ProviderCodex)` → `BindingByProjectID(..., provider)`.
+- Error wrapping format strings identical (`"manage status: project %q: %w"`, etc.).
+- Project-record lookup identical (`ProjectByRoot`, `ErrNotFound` → `ErrUnboundProject` wrap).
+- `BindingByProjectID` SQL filters by `(project_id, provider)` (`internal/adapters/sqlite/store.go:429`) — so the provider parameter is correctly propagated all the way to the SQL `WHERE` clause.
+- Identity-attribute population: `Profile` populated via `ProfileByID(binding.ProfileID)` — same code path for both.
+- Tests `TestStatusForProviderReturnsBoundProjectDetailsForClaude` and `TestStatusForProviderReturnsUnboundProjectWhenCodexBoundButNotClaude` cover the positive and negative provider-filter cases.
+
+**Counterexample status:** none. Clean clone with sole intended divergence.
+
+### Attack 3 — `unboundProjectNoAccountsError` helper format / sentinel leak
+
+**Hypothesis:** Verify same error format across providers; mentions `valv manage account add <provider>` correctly; does NOT leak any sentinel like `Provider("all")`.
+
+**Verdict:** REFUTED.
+
+**Trace:**
+- Helper (`claude_setup.go:17-22`): `fmt.Errorf("project is not bound; no %s accounts found — run \`valv manage account add %s\` to create one", provider, provider)`.
+- Single call site in the diff: `unboundProjectNoAccountsError(domain.ProviderClaude)` (`claude_setup.go:79`). Sub-output: `"project is not bound; no claude accounts found — run \`valv manage account add claude\` to create one"`. Correct.
+- No `Provider("all")` literal exists in the diff. `git grep` for `Provider("all")` in `internal/cli/` returns zero matches. No sentinel leak.
+- Helper is reusable for Codex (`unboundProjectNoAccountsError(domain.ProviderCodex)` would produce equivalent codex-flavored message), satisfying the 8.4/8.5 cross-provider format requirement.
+
+**Counterexample status:** none.
+
+### Attack 4 — `OverrideProfile` field nil-safety in `Run`
+
+**Hypothesis:** Are there code paths where the nil check is missed? Especially in `Run`'s prelude.
+
+**Verdict:** REFUTED.
+
+**Trace:**
+- `Run` (`internal/services/claude/service.go:128-157`) opens with `var resolved resolvedLaunchBinding; if s.overrideProfile != nil { ... } else { resolved, err = s.resolveBinding(...) ... }`. The nil check is the FIRST thing `Run` does — no code path touches `s.overrideProfile` without the guard.
+- Only `s.overrideProfile != nil` branch dereferences via `*s.overrideProfile` (line 149). Safe.
+- `New` simply assigns `options.OverrideProfile` into `Service.overrideProfile` (line 119) — zero-value is `nil`, so callers who don't set `OverrideProfile` get the resolveBinding path automatically. Backwards-compatible.
+
+**Counterexample status:** none.
+
+### Attack 5 — Non-`ErrUnboundProject` error wrapping test coverage
+
+**Hypothesis:** Builder claim — non-unbound errors wrap and return immediately. Find the test. Does it actually inject a non-unbound error and assert the wrapped message?
+
+**Verdict:** **CONFIRMED counterexample, severity LOW (CONCERN).**
+
+**Trace:**
+- `claude_setup.go:65-67` — branch `if !errors.Is(err, domain.ErrUnboundProject) && !strings.Contains(err.Error(), domain.ErrUnboundProject.Error())` wraps as `"detect claude binding: %w"`.
+- Six tests in `claude_setup_test.go` cover: override-unbound, override-bound, zero-accounts, one-account-auto-bind, multi-non-TTY, already-bound, helper-format. **NO test injects a non-`ErrUnboundProject` error** (e.g., a `domain.ErrIO`-style store failure) to verify the `"detect claude binding: %w"` wrap fires correctly.
+- Why this branch is hard to test: `ensureClaudeBindingReady` opens a real SQLite store via `openManageService`. A store failure path is reproducible by closing the store before the call or by injecting a corrupted DB file, but no test does either.
+- This is the same kind of uncovered-branch concern raised in 8.3 C1, scoped tighter (one branch in one new function).
+
+**Remediation:** add a test that pre-corrupts `paths.DatabasePath` (e.g., `os.WriteFile(paths.DatabasePath, []byte("not a sqlite file"), 0o644)` AFTER `testCodexPaths` returns) and asserts the error wraps with `"detect claude binding"`. LOW severity because the branch is short, defensive, and the wrap format matches existing patterns. Route to drop close-out, not to a new build round.
+
+### Attack 6 — C2 end-to-end test fidelity (`TestRunUsesOverrideProfileHomePath`)
+
+**Hypothesis:** Test must go through the FULL `Run` path (build `ContainerRunRequest` from override profile) and assert mounts, not just check that `OverrideProfile.HomePath != ""` at some intermediate step.
+
+**Verdict:** REFUTED.
+
+**Trace:**
+- Test (`service_test.go:553-614`) constructs a service with `boundClaudeStore(project, boundHome)` (different from override home) and `OverrideProfile: &overrideProfile` (HomePath = `overrideHome`).
+- Calls `service.Run(context.Background(), "/tmp/project", []string{"--prompt", "hello"})`. This is the REAL `Run` method, not a stub.
+- `Run` → override branch (`overrideProfile != nil`) → `s.detect()` → `s.store.ProjectByRoot()` → `PrepareRuntime(ProfileHome: overrideHome)` → `buildRequest(...)` → `executor.Run(request)`.
+- Assertion: walks `executor.got.Mounts`, fails if any mount's `Source` equals `boundHome`, fails if no mount's `Source` equals `overrideHome`. **The mount spec is the actual container-launch input, not an intermediate value.** This is end-to-end fidelity.
+- `filepath.EvalSymlinks` is applied to both home tempdirs (handles macOS `/var` → `/private/var` symlink discrepancy that would otherwise produce false negatives). Good defensive code.
+
+**C2 carry-forward (from 8.3):** RESOLVED.
+
+### Attack 7 — 2+ accounts non-TTY error doesn't list available accounts
+
+**Hypothesis:** AC says: non-TTY → error pointing to `valv manage bind claude <name>`. Does the error LIST the available accounts so the user knows the names?
+
+**Verdict:** REFUTED-with-polish-item.
+
+**Trace:**
+- `claude_setup.go:95-99`: error format is `"project is not bound to a Claude account; run \`valv manage bind claude <name>\` to bind one"`. No account names listed.
+- `TestEnsureClaudeBindingReadyMultipleAccountsNonTTY` asserts substring `"valv manage bind claude"` — passes.
+- AC (PLAN.md unit 8.4 lines around `non-TTY → error`) — verified to require only the `valv manage bind claude` pointer, not enumeration. The implementation matches the spec exactly.
+- Polish-item rationale: user can `valv manage list claude` (or whatever the list command is) to find names. Two-step user flow is acceptable for a non-TTY error path; this is not on the happy path.
+
+**Counterexample status:** spec-conformant. Polish item routed to DROP_9 CLI audit (see project memory: `project_valv_cli_audit_proposal`).
+
+### Attack 8 — Picker cancel handling in `ensureClaudeBindingReady`
+
+**Hypothesis:** `pickProfile` now returns `(domain.Profile, error)` per 8.2 R2. Does `ensureClaudeBindingReady`'s picker branch correctly distinguish picker-cancel from bind-failure?
+
+**Verdict:** REFUTED-with-polish-item.
+
+**Trace:**
+- `realPickProfile` (`operator_helpers.go:165-188`) returns `errSelectionCanceled` on cancel.
+- `ensureClaudeBindingReady` line 101: `if err != nil { return domain.Profile{}, fmt.Errorf("select claude account: %w", err) }` — wraps the cancel error with `"select claude account: %w"`, preserving the underlying `errSelectionCanceled` via `%w`. Caller (`runClaudeCommand`) returns wrapped as `"run claude command: %w"`. Final user-visible message: `"run claude command: select claude account: <cancel string>"`.
+- This is informative but not pretty. A cleaner approach would be: `if errors.Is(err, errSelectionCanceled) { return domain.Profile{}, errSelectionCanceled }` — let Cobra suppress the user-canceled trace. **Not a correctness issue, UX polish.**
+
+**Counterexample status:** Picker-cancel is correctly distinguishable via `errors.Is(err, errSelectionCanceled)` because `%w` preserves it. Polish item: consider passing cancel through unwrapped in 8.5 / future polish round.
+
+### Attack 9 — Concurrent first-run bind race
+
+**Hypothesis:** Two concurrent `valv claude` invocations in the same project race on first-run bind. Does `BindProject` use upsert?
+
+**Verdict:** REFUTED with documented gap.
+
+**Trace:**
+- `BindProject` (`internal/services/manage/service.go:194-229`):
+  - Line 200: `ProjectByRoot` — read.
+  - Line 209: `s.store.CreateProject(...)` if not found — **NOT upsert**. Concurrent invocations on a never-created project race here: one wins, the other gets a uniqueness-violation error.
+  - Line 223: `s.store.UpsertProjectBinding(binding)` — **upsert**. Concurrent invocations on an existing project (binding row write) are safe; last-writer-wins on the profile assignment.
+- Concrete race window: two concurrent `valv claude` invocations from a project that has never been bound AND never had a project record. One creates the project; the other gets `CreateProject` failure. The failing invocation's wrap: `"bind project: persist project %q: %w"` — wraps the SQLite uniqueness-violation error.
+- Probability: very low in practice (`valv claude` is an interactive CLI; users rarely launch two concurrently as the very-first action in a project). User-visible: the loser gets a confusing SQL-looking error.
+- 8.4 acceptance criteria don't mention concurrency. This is a pre-existing concern in `BindProject`, not introduced by 8.4.
+
+**Counterexample status:** documented pre-existing gap. ACCEPT for 8.4. Route to a future cleanup drop if user reports.
+
+### Attack 10 — `OverrideProfile` set even for already-bound case (bypasses `Run`'s validation)
+
+**Hypothesis:** `runClaudeCommand` passes `OverrideProfile: &resolvedProfile` UNCONDITIONALLY. This bypasses `Run`'s `resolveBinding` validation EVEN for bound projects, which the attack prompt claims is wrong.
+
+**Verdict:** REFUTED on the surface (intentional design), but a defensive-check gap is CONFIRMED.
+
+**Trace:**
+- `runClaudeCommand` (`claude.go` post-diff line 109): `OverrideProfile: &resolvedProfile` — always non-nil.
+- This is **the new design**: `ensureClaudeBindingReady` does the resolution; `Run` trusts the profile. The old `service.ValidateBinding` call (8.3 carryover) was REMOVED in this diff.
+- Semantic equivalence check: old path resolves via `resolveBinding` (project + binding-by-(id, provider) + profile-by-ID + provider checks); new path for bound projects resolves via `StatusForProvider` (project + binding-by-(id, provider) + profile-by-ID). The DB queries are identical except `resolveBinding` adds two redundant provider-equality assertions on lines 257 and 268 of the old code, which `StatusForProvider`'s SQL-level provider filter already enforces for `binding.Provider`. **`profile.Provider` is NOT checked** by `StatusForProvider`, but neither is it checked by the override `Run` path. This is the defensive-check gap.
+- Defensive-check gap rationale: `Run`'s override branch (lines 130-150) trusts that `s.overrideProfile.Provider == domain.ProviderClaude`. Today's only caller (`runClaudeCommand`) only ever passes Claude profiles (sourced from `ProfileByName(ProviderClaude)`, `StatusForProvider(...,ProviderClaude).Profile`, or `ListProfiles(ProviderClaude)`). A future caller could pass a non-Claude profile and `Run` would silently mount it. CONCERN, severity LOW.
+
+**Counterexample status:** the intentional-design claim is correct (no behavioral regression). Defensive-check gap is a real CONCERN, routed as a hardening item.
+
+### Attack 11 — `strings.Contains(err.Error(), ErrUnboundProject.Error())` violates AGENTS.md § 6
+
+**Hypothesis:** AGENTS.md § 6 — "never string-match an error." `claude_setup.go:65` uses both `errors.Is` AND `strings.Contains(err.Error(), domain.ErrUnboundProject.Error())`. The string-match clause is a "belt-and-suspenders" defense, per the builder's worklog.
+
+**Verdict:** **CONFIRMED counterexample against project standards, severity LOW (CONCERN).**
+
+**Trace:**
+- `domain.ErrUnboundProject.Error()` = `"project is not bound"` (`internal/domain/errors.go:8`).
+- `unboundProjectNoAccountsError(provider).Error()` starts with `"project is not bound; no claude accounts found..."` — also contains `"project is not bound"`.
+- The non-TTY 2+ accounts error starts with `"project is not bound to a Claude account..."` — also contains `"project is not bound"`.
+- Any future error message accidentally containing `"project is not bound"` will be MIS-CLASSIFIED as `ErrUnboundProject` by the `strings.Contains` guard, triggering the unbound-project codepath erroneously.
+- `errors.Is` alone is correct because `StatusForProvider` wraps via `%w` (lines 280 / 287 / 295 of `service.go`). The `strings.Contains` clause is genuinely redundant AND introduces a future-correctness risk.
+- Builder admits this in the worklog: "the string-contains guard is a belt-and-suspenders defense." But the same pattern exists in `internal/cli/codex_setup.go:45` (pre-existing), so this is propagated tech debt, not new tech debt unique to 8.4.
+
+**Remediation:** delete the `strings.Contains(...)` clause from BOTH `claude_setup.go:65` AND `codex_setup.go:45`. Keep only `errors.Is(err, domain.ErrUnboundProject)`. If a Codex test starts failing after that, the wrap chain is broken and needs fixing at the wrap site, not the receiver site. Route as a CONCERN for drop close-out polish, not a build-blocker on 8.4 alone (because deleting it from `claude_setup.go` only would create asymmetry with the codex side).
+
+### Attack 12 — `DisableFlagParsing: true` invariant preservation
+
+**Hypothesis:** 8.3's invariant — `DisableFlagParsing: true` on the claude command — must remain true after 8.4's rewire.
+
+**Verdict:** REFUTED.
+
+**Trace:**
+- `git diff HEAD~1 -- internal/cli/claude.go` shows zero changes to `newClaudeCommand`'s `DisableFlagParsing` setting. The rewire is purely inside `runClaudeCommand`'s body.
+- `TestNewClaudeCommandHelp` and `TestNewClaudeCommandVersion` (unchanged) still pass per builder's `mage testPkg ./internal/cli` report — verifying the help/version flags are still routed correctly.
+
+**Counterexample status:** none.
+
+### Attack 13 — Auto-open re-introduction
+
+**Hypothesis:** Builder may have re-introduced auto-open machinery in some form (per project-memory item `feedback_manual_workflow_is_the_decision`).
+
+**Verdict:** REFUTED.
+
+**Trace:**
+- `git diff HEAD~1 -- internal/cli/ internal/services/` — no `open.Run`, `exec.Command("open"`, browser-launch, or similar. The auto-bind path (1-account case) writes a binding row and a CLI notice, then returns. No external command spawned for "open browser" purposes.
+- `writeCLINotice` (called on `claude_setup.go:84`) is a structured laslig notice writer — it writes to stderr, not a browser or external command.
+
+**Counterexample status:** none.
+
+### Attack family exhaustion summary
+
+| # | Attack | Status |
+|---|---|---|
+| 1 | Override + skip-Validate HomePath check | REFUTED (premise was wrong; pre-existing MkdirAll behavior) |
+| 2 | `StatusForProvider` divergence from `Status` | REFUTED |
+| 3 | `unboundProjectNoAccountsError` sentinel leak | REFUTED |
+| 4 | `OverrideProfile` nil-safety in `Run` | REFUTED |
+| 5 | Non-`ErrUnboundProject` error test coverage | **CONFIRMED (CONCERN)** |
+| 6 | C2 end-to-end test fidelity | REFUTED — C2 resolved |
+| 7 | Non-TTY error doesn't list accounts | REFUTED (spec-conformant; polish) |
+| 8 | Picker cancel handling | REFUTED (`errors.Is` works via `%w`; polish) |
+| 9 | Concurrent first-run bind race | REFUTED (pre-existing gap, ACCEPT) |
+| 10 | `OverrideProfile` always-non-nil bypass | REFUTED on design; defensive-check gap CONCERN |
+| 11 | `strings.Contains` error match (AGENTS.md § 6) | **CONFIRMED (CONCERN)** |
+| 12 | `DisableFlagParsing: true` preserved | REFUTED |
+| 13 | Auto-open re-introduction | REFUTED |
+
+**C1 (test gap from 8.3) — RESOLVED.** `TestEnsureClaudeBindingReadyOverrideUnboundProject` and `TestEnsureClaudeBindingReadyOverrideBoundProject` directly exercise the override branches in the new `ensureClaudeBindingReady`, asserting both behavior (resolved profile name) and side-effect absence (no binding row written for override path).
+
+**C2 (runtime mis-wiring from 8.3) — RESOLVED.** `TestRunUsesOverrideProfileHomePath` exercises `Run` end-to-end with `OverrideProfile` set, asserting the executor's mount source is the override home and explicitly failing if the bound home leaks into mounts.
+
+### Verdict & remediation
+
+**Verdict:** `pass-with-concerns`.
+
+Unit 8.4 meets every stated acceptance criterion. `mage testPkg` green across all three touched packages (manage / claude / cli) at builder report (75.5% / 79.4% / 71.8% coverage). C1 and C2 from 8.3 are both fully closed. `DisableFlagParsing: true` invariant preserved. No auto-open re-introduction. Override threading reaches `Run`'s mount construction (verified end-to-end via real `Run` invocation, not stubs).
+
+**Concerns flagged for orchestrator routing:**
+
+1. **C3 (CONCERN, route to drop close-out polish):** `claude_setup.go:65` and `codex_setup.go:45` use `errors.Is(err, ErrUnboundProject) || strings.Contains(err.Error(), ErrUnboundProject.Error())`. The `strings.Contains` clause violates AGENTS.md § 6 ("never string-match an error") and creates a future-correctness risk: any error whose message contains `"project is not bound"` (which includes `unboundProjectNoAccountsError`'s own output) is mis-classified as `ErrUnboundProject`. `errors.Is` alone is correct because `StatusForProvider` wraps via `%w`. Remediation: delete the `strings.Contains(...)` clause from BOTH files in a single follow-up commit. Verify by running `mage testPkg ./internal/cli` after deletion.
+
+2. **C4 (CONCERN, route to a future Claude `Run` hardening drop):** `Run`'s override branch (`internal/services/claude/service.go:130-150`) trusts that `s.overrideProfile.Provider == domain.ProviderClaude`. Today's only caller passes Claude profiles. A future caller could mis-wire a non-Claude profile; `Run` would silently mount it. Remediation: add a defensive check `if s.overrideProfile != nil && s.overrideProfile.Provider != domain.ProviderClaude { return fmt.Errorf("run claude launch service: override profile provider %q: expected %q", s.overrideProfile.Provider, domain.ProviderClaude) }` near line 130. Low priority — no caller mis-wires it today.
+
+3. **C5 (CONCERN, route to drop close-out test polish):** The non-`ErrUnboundProject` error branch in `ensureClaudeBindingReady` (`claude_setup.go:65-67`) has no test coverage. Remediation: add a test that corrupts `paths.DatabasePath` after `testCodexPaths` to force a non-unbound store error, then asserts the wrap `"detect claude binding: ..."` fires. Low severity — defensive branch with stable wrap format.
+
+4. **Polish items (NOT BLOCK):**
+   - Non-TTY 2+ accounts error does not enumerate available account names (Attack 7).
+   - Picker-cancel error chain is informative but verbose — could pass `errSelectionCanceled` through unwrapped (Attack 8).
+   - `BindProject`'s `CreateProject` is not upsert; two concurrent never-bound-project `valv claude` invocations race on the project-create (Attack 9). Pre-existing; not on 8.4's hook.
+
+**No build round required for 8.4** — concerns are all polish-level and route to drop close-out (C3/C5) or a future drop (C4). Unit can flip to `done` after orchestrator review of these concerns.
+
+## Hylla Feedback (Unit 8.4 Round 1)
+
+N/A — Hylla unreachable per spawn paradigm override; all evidence gathered via `Read`, `git diff HEAD~1`, `git grep`, and direct file inspection. Context7 not needed (cobra `DisableFlagParsing`, `errors.Is`/`%w` semantics are stdlib-canonical and the diff is self-contained). No tool-shape gripes.
