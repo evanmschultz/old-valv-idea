@@ -44,7 +44,7 @@ Normalize the Valv CLI surface to a clean tree: delete the `valv manage` namespa
 
 ### Unit 9.1 — Delete `valv manage` namespace and redistribute children
 
-- **State:** todo
+- **State:** done
 - **Paths:**
   - `internal/cli/root.go`
   - `internal/cli/manage.go`

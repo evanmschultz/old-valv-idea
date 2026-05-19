@@ -91,25 +91,9 @@ func TestHelpAliasDisplaysRootHelp(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	for _, want := range []string{"Usage:", "help", "manage"} {
+	for _, want := range []string{"Usage:", "help", "account"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("unexpected help output %q missing %q", stdout.String(), want)
-		}
-	}
-}
-
-func TestManageAliasWorks(t *testing.T) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-
-	cmd := newTestRootCommand(t, &stdout, &stderr)
-	cmd.SetArgs([]string{"m"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-	for _, want := range []string{"Operator workflows", "account", "cleanup"} {
-		if !strings.Contains(stdout.String(), want) {
-			t.Fatalf("unexpected manage alias output %q missing %q", stdout.String(), want)
 		}
 	}
 }
@@ -142,22 +126,6 @@ func TestGlobalAliasWorks(t *testing.T) {
 	for _, want := range []string{"Host-global convenience commands", "switch"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("unexpected global alias output %q missing %q", stdout.String(), want)
-		}
-	}
-}
-
-func TestManageHelpSubcommandWorks(t *testing.T) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-
-	cmd := newTestRootCommand(t, &stdout, &stderr)
-	cmd.SetArgs([]string{"manage", "help"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-	for _, want := range []string{"Operator workflows", "bind", "update"} {
-		if !strings.Contains(stdout.String(), want) {
-			t.Fatalf("unexpected manage help output %q missing %q", stdout.String(), want)
 		}
 	}
 }

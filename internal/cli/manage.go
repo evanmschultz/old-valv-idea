@@ -19,43 +19,6 @@ import (
 	manageservice "github.com/evanmschultz/valv/internal/services/manage"
 )
 
-func newManageCommand(paths config.Paths, opts *rootOptions) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:     "manage",
-		Aliases: []string{"m"},
-		Short:   "Operator workflows for bindings, runtimes, and updates",
-		Long: strings.TrimSpace(`
-Operator workflows for bindings, runtimes, and updates.
-
-Use the management surface to create provider accounts, bind projects, rebuild provider images, and clean up Valv-managed state.
-
-This surface owns setup and repair flows. The direct ` + "`valv codex ...`" + ` path stays a Codex pass-through launcher.
-`),
-		Example: strings.TrimSpace(`
-valv manage account add codex
-valv manage account add codex work
-valv manage account list
-valv manage project list
-valv manage status
-valv manage update
-valv manage cleanup all
-`),
-		Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runManageHome(cmd, paths, opts)
-		},
-	}
-
-	cmd.AddCommand(newManageAccountCommand(paths, opts))
-	cmd.AddCommand(newManageBindCommand(paths, opts))
-	cmd.AddCommand(newManageProjectCommand(paths, opts))
-	cmd.AddCommand(newManageStatusCommand(paths, opts))
-	cmd.AddCommand(newManageUpdateCommand(paths, opts))
-	cmd.AddCommand(newManageCleanupCommand(paths, opts))
-	installBranchHelpCommands(cmd)
-	return cmd
-}
-
 func newManageAccountCommand(paths config.Paths, opts *rootOptions) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "account",
@@ -623,7 +586,7 @@ func runManageAccountSwitch(cmd *cobra.Command, paths config.Paths, opts *rootOp
 	account, err := service.ProfileByName(cmd.Context(), provider, profileName)
 	if err != nil {
 		if errors.Is(err, domain.ErrNotFound) {
-			return fmt.Errorf("manage account switch: account %q not found for provider %q; run `valv manage account add %s %s` or `valv manage account list %s`", profileName, provider, provider, profileName, provider)
+			return fmt.Errorf("manage account switch: account %q not found for provider %q; run `valv account add %s %s` or `valv account list %s`", profileName, provider, provider, profileName, provider)
 		}
 		return fmt.Errorf("manage account switch: resolve account %q: %w", profileName, err)
 	}
@@ -959,7 +922,7 @@ func resolveAccountSwitchTarget(
 	}
 	switch len(matches) {
 	case 0:
-		return "", "", fmt.Errorf("account %q not found in any provider; run `valv manage account add codex %s` or `valv manage account list` to see all available accounts", accountName, accountName)
+		return "", "", fmt.Errorf("account %q not found in any provider; run `valv account add codex %s` or `valv account list` to see all available accounts", accountName, accountName)
 	case 1:
 		return matches[0].provider, accountName, nil
 	default:
@@ -993,7 +956,7 @@ func pickProfileCrossProvider(cmd *cobra.Command, service crossProviderLister) (
 	// FIX 2: guard before calling the picker so the "all" sentinel never
 	// leaks into user-facing error text.
 	if len(allProfiles) == 0 {
-		return "", "", fmt.Errorf("no accounts found across any provider; run `valv manage account add codex <name>` or `valv manage account add claude <name>` to create one")
+		return "", "", fmt.Errorf("no accounts found across any provider; run `valv account add codex <name>` or `valv account add claude <name>` to create one")
 	}
 	// Use the generic provider label for the cross-provider picker.
 	// Selected() returns a full domain.Profile with Provider set, so the

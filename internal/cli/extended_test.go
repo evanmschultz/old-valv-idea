@@ -58,35 +58,21 @@ func (s statusStubService) Status(context.Context, string) (manageservice.Status
 	return s.status, s.err
 }
 
-func TestManageCommandWithoutTTYShowsHelp(t *testing.T) {
-	t.Parallel()
-
-	paths := testCodexPaths(t)
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-
-	cmd := newManageCommand(paths, &rootOptions{})
-	cmd.SetContext(context.Background())
-	cmd.SetOut(&stdout)
-	cmd.SetErr(&stderr)
-	cmd.SetArgs(nil)
-
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-	for _, want := range []string{"Operator workflows", "account", "cleanup"} {
-		if !strings.Contains(stdout.String(), want) {
-			t.Fatalf("unexpected manage help output %q missing %q", stdout.String(), want)
-		}
-	}
-}
-
 func TestRunManageHomeWithoutTTYShowsHelp(t *testing.T) {
 	t.Parallel()
 
 	paths := testCodexPaths(t)
 	var stdout bytes.Buffer
-	cmd := newManageCommand(paths, &rootOptions{})
+	// Use a bare command with the same Long text so runManageHome can print help
+	// when no TTY is attached. The manage command has been deleted from the root
+	// tree; runManageHome remains callable directly for this test.
+	cmd := &cobra.Command{
+		Use:  "manage",
+		Long: "Operator workflows for bindings, runtimes, and updates.",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return cmd.Help()
+		},
+	}
 	cmd.SetContext(context.Background())
 	cmd.SetIn(bytes.NewBuffer(nil))
 	cmd.SetOut(&stdout)
@@ -147,12 +133,12 @@ func TestManageAccountListJSONUsesCommandKey(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	opts := &rootOptions{format: "json"}
-	cmd := newManageCommand(paths, opts)
+	cmd := newManageAccountCommand(paths, opts)
 	cmd.PersistentFlags().StringVar(&opts.format, "format", "json", "output format: auto, human, plain, json")
 	cmd.SetContext(context.Background())
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
-	cmd.SetArgs([]string{"--format", "json", "account", "list", "codex"})
+	cmd.SetArgs([]string{"--format", "json", "list", "codex"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v\nstderr=%s", err, stderr.String())
 	}
@@ -218,7 +204,7 @@ func TestManageAccountSwitchMissingAccountShowsActionableGuidance(t *testing.T) 
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	cmd := newManageCommand(paths, &rootOptions{})
+	cmd := newTestManageContainerCommand(paths, &rootOptions{})
 	cmd.SetContext(context.Background())
 	cmd.SetIn(bytes.NewBuffer(nil))
 	cmd.SetOut(&stdout)
@@ -227,7 +213,7 @@ func TestManageAccountSwitchMissingAccountShowsActionableGuidance(t *testing.T) 
 	installStubCodexAccountAuth(t, cmd, true)
 
 	err := cmd.Execute()
-	if err == nil || !strings.Contains(err.Error(), "run `valv manage account add codex work`") {
+	if err == nil || !strings.Contains(err.Error(), "run `valv account add codex work`") {
 		t.Fatalf("Execute() error = %v, want missing-account guidance", err)
 	}
 }
@@ -287,11 +273,11 @@ func TestManageAccountDeleteRejectsBoundAccount(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	cmd := newManageCommand(paths, &rootOptions{})
+	cmd := newManageAccountCommand(paths, &rootOptions{})
 	cmd.SetContext(context.Background())
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
-	cmd.SetArgs([]string{"account", "delete", "personal"})
+	cmd.SetArgs([]string{"delete", "personal"})
 	err := cmd.Execute()
 	if err == nil || !strings.Contains(err.Error(), "still bound to project paths") {
 		t.Fatalf("Execute() error = %v, want bound-project failure", err)
@@ -327,12 +313,12 @@ func TestManageAccountLoginUsesExistingAccount(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	cmd := newManageCommand(paths, &rootOptions{})
+	cmd := newManageAccountCommand(paths, &rootOptions{})
 	cmd.SetContext(context.Background())
 	cmd.SetIn(bytes.NewBuffer(nil))
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
-	cmd.SetArgs([]string{"account", "login", "hylla"})
+	cmd.SetArgs([]string{"login", "hylla"})
 	stub := installStubCodexAccountAuth(t, cmd, false)
 
 	if err := cmd.Execute(); err != nil {
@@ -352,12 +338,12 @@ func TestManageAccountLogoutUsesExistingAccount(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	cmd := newManageCommand(paths, &rootOptions{})
+	cmd := newManageAccountCommand(paths, &rootOptions{})
 	cmd.SetContext(context.Background())
 	cmd.SetIn(bytes.NewBuffer(nil))
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
-	cmd.SetArgs([]string{"account", "logout", "hylla"})
+	cmd.SetArgs([]string{"logout", "hylla"})
 	stub := installStubCodexAccountAuth(t, cmd, true)
 
 	if err := cmd.Execute(); err != nil {
@@ -438,11 +424,11 @@ func TestManageUpdateUsesFakeDockerAndWritesBuildContext(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	cmd := newManageCommand(paths, &rootOptions{})
+	cmd := newManageUpdateCommand(paths, &rootOptions{})
 	cmd.SetContext(context.Background())
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
-	cmd.SetArgs([]string{"update"})
+	cmd.SetArgs([]string{})
 
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v\nstderr=%s", err, stderr.String())
@@ -482,11 +468,11 @@ func TestManageUpdateUsesOverrideImageRepository(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	cmd := newManageCommand(paths, &rootOptions{})
+	cmd := newManageUpdateCommand(paths, &rootOptions{})
 	cmd.SetContext(context.Background())
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
-	cmd.SetArgs([]string{"update"})
+	cmd.SetArgs([]string{})
 
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v\nstderr=%s", err, stderr.String())
@@ -542,11 +528,11 @@ func TestManageCleanupAllRemovesLocalStateAndInvokesDocker(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	cmd := newManageCommand(paths, &rootOptions{})
+	cmd := newManageCleanupCommand(paths, &rootOptions{})
 	cmd.SetContext(context.Background())
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
-	cmd.SetArgs([]string{"cleanup"})
+	cmd.SetArgs([]string{})
 
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v\nstderr=%s", err, stderr.String())
@@ -598,11 +584,11 @@ func TestManageCleanupImagesRemovesProviderImagesOnly(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	cmd := newManageCommand(paths, &rootOptions{})
+	cmd := newManageCleanupCommand(paths, &rootOptions{})
 	cmd.SetContext(context.Background())
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
-	cmd.SetArgs([]string{"cleanup", "images"})
+	cmd.SetArgs([]string{"images"})
 
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v\nstderr=%s", err, stderr.String())

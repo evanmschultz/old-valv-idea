@@ -56,9 +56,8 @@ Use the direct runtime commands for provider execution and the management surfac
 valv paths
 valv account list
 valv account login
-valv manage update
-valv manage account add codex
-valv manage account add codex work
+valv account add codex
+valv account add codex work
 valv codex --help
 valv claude --help
 valv claude --version
@@ -109,7 +108,7 @@ valv claude --version
 	cmd.AddGroup(
 		&cobra.Group{ID: "inspect", Title: "Inspect Commands"},
 		&cobra.Group{ID: "runtime", Title: "Runtime Commands"},
-		&cobra.Group{ID: "manage", Title: "Management Commands"},
+		&cobra.Group{ID: "account", Title: "Account Commands"},
 	)
 
 	cmd.PersistentFlags().StringVar(&opts.configPath, "config", config.DefaultConfigPath(paths), "path to the valv config file")
@@ -127,13 +126,11 @@ valv claude --version
 	claudeCmd := newClaudeCommand(paths, nil)
 	claudeCmd.GroupID = "runtime"
 	accountCmd := newManageAccountCommand(paths, opts)
-	accountCmd.GroupID = "manage"
-	manageCmd := newManageCommand(paths, opts)
-	manageCmd.GroupID = "manage"
+	accountCmd.GroupID = "account"
 	globalCmd := newGlobalCommand(paths, opts)
-	globalCmd.GroupID = "manage"
+	globalCmd.GroupID = "account"
 
-	cmd.AddCommand(pathsCmd, versionCmd, codexCmd, claudeCmd, accountCmd, manageCmd, globalCmd)
+	cmd.AddCommand(pathsCmd, versionCmd, codexCmd, claudeCmd, accountCmd, globalCmd)
 	installBranchHelpCommands(cmd)
 
 	return cmd, nil

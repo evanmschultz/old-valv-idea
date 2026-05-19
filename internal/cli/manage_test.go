@@ -37,11 +37,11 @@ func TestManageAccountAddCreatesIsolatedNamedAccountAndBindsProject(t *testing.T
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
-	cmd := newManageCommand(paths, &rootOptions{})
+	cmd := newManageAccountCommand(paths, &rootOptions{})
 	cmd.SetContext(context.Background())
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
-	cmd.SetArgs([]string{"account", "add", "codex", "profile-name", "--project", workDir})
+	cmd.SetArgs([]string{"add", "codex", "profile-name", "--project", workDir})
 	installStubCodexAccountAuth(t, cmd, true)
 
 	if err := cmd.Execute(); err != nil {
@@ -190,11 +190,11 @@ func TestManageAccountHelpSubcommandWorks(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
-	cmd := newManageCommand(paths, &rootOptions{})
+	cmd := newManageAccountCommand(paths, &rootOptions{})
 	cmd.SetContext(context.Background())
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
-	cmd.SetArgs([]string{"account", "help"})
+	cmd.SetArgs([]string{"help"})
 
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v", err)
@@ -213,7 +213,7 @@ func TestManageProfileAliasNoLongerWorks(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
-	cmd := newManageCommand(paths, &rootOptions{})
+	cmd := newManageAccountCommand(paths, &rootOptions{})
 	cmd.SetContext(context.Background())
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
@@ -225,12 +225,34 @@ func TestManageProfileAliasNoLongerWorks(t *testing.T) {
 	}
 }
 
+// newTestManageContainerCommand creates a bare container command that registers
+// all ex-manage children so tests can route via args like ["account", "add", ...],
+// ["bind", ...], ["status", ...], ["update", ...], ["cleanup", ...], ["project", ...].
+// This replaces the deleted newManageCommand for test-only routing purposes.
+func newTestManageContainerCommand(paths config.Paths, opts *rootOptions) *cobra.Command {
+	container := &cobra.Command{
+		Use:  "manage",
+		Args: cobra.ArbitraryArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return cmd.Help()
+		},
+	}
+	container.AddCommand(newManageAccountCommand(paths, opts))
+	container.AddCommand(newManageBindCommand(paths, opts))
+	container.AddCommand(newManageProjectCommand(paths, opts))
+	container.AddCommand(newManageStatusCommand(paths, opts))
+	container.AddCommand(newManageUpdateCommand(paths, opts))
+	container.AddCommand(newManageCleanupCommand(paths, opts))
+	installBranchHelpCommands(container)
+	return container
+}
+
 func runManage(t *testing.T, paths config.Paths, args []string) string {
 	t.Helper()
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	cmd := newManageCommand(paths, &rootOptions{})
+	cmd := newTestManageContainerCommand(paths, &rootOptions{})
 	cmd.SetContext(context.Background())
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
@@ -271,11 +293,11 @@ func TestRunManageUpdateClaudeBuildsImage(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	cmd := newManageCommand(paths, &rootOptions{})
+	cmd := newManageUpdateCommand(paths, &rootOptions{})
 	cmd.SetContext(context.Background())
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
-	cmd.SetArgs([]string{"update", "claude"})
+	cmd.SetArgs([]string{"claude"})
 
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v\nstderr=%s", err, stderr.String())
@@ -317,7 +339,7 @@ func TestRunManageUpdateClaudeBuildsImage(t *testing.T) {
 }
 
 func TestRunManageUpdateCodexRegression(t *testing.T) {
-	for _, args := range [][]string{{"update"}, {"update", "codex"}} {
+	for _, args := range [][]string{{}, {"codex"}} {
 		t.Run(strings.Join(args, "_"), func(t *testing.T) {
 			paths := testCodexPaths(t)
 			logPath := installFakeDocker(t)
@@ -325,7 +347,7 @@ func TestRunManageUpdateCodexRegression(t *testing.T) {
 
 			var stdout bytes.Buffer
 			var stderr bytes.Buffer
-			cmd := newManageCommand(paths, &rootOptions{})
+			cmd := newManageUpdateCommand(paths, &rootOptions{})
 			cmd.SetContext(context.Background())
 			cmd.SetOut(&stdout)
 			cmd.SetErr(&stderr)
@@ -395,14 +417,14 @@ func TestManageAccountAddClaudeWithSkipLoginSkipsImageEnsure(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	cmd := newManageCommand(paths, &rootOptions{})
+	cmd := newManageAccountCommand(paths, &rootOptions{})
 	cmd.SetContext(context.Background())
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
-	cmd.SetArgs([]string{"account", "add", "claude", "work", "--skip-login", "--no-bind"})
+	cmd.SetArgs([]string{"add", "claude", "work", "--skip-login", "--no-bind"})
 
 	if err := cmd.Execute(); err != nil {
-		t.Fatalf("Execute(account add claude work --skip-login) error = %v\nstderr=%s", err, stderr.String())
+		t.Fatalf("Execute(add claude work --skip-login) error = %v\nstderr=%s", err, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "account=work") {
 		t.Fatalf("unexpected output %q missing account=work", stdout.String())
@@ -441,15 +463,15 @@ func TestManageAccountAddClaudeWithExistingCredsAndImageOverrideSucceeds(t *test
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	cmd := newManageCommand(paths, &rootOptions{})
+	cmd := newManageAccountCommand(paths, &rootOptions{})
 	cmd.SetContext(context.Background())
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
 	// Use --home to point at the pre-authed profile home we created above.
-	cmd.SetArgs([]string{"account", "add", "claude", "preauthed", "--home", profileHome, "--no-bind"})
+	cmd.SetArgs([]string{"add", "claude", "preauthed", "--home", profileHome, "--no-bind"})
 
 	if err := cmd.Execute(); err != nil {
-		t.Fatalf("Execute(account add claude preauthed --home) error = %v\nstderr=%s", err, stderr.String())
+		t.Fatalf("Execute(add claude preauthed --home) error = %v\nstderr=%s", err, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "account=preauthed") {
 		t.Fatalf("unexpected output %q missing account=preauthed", stdout.String())
@@ -474,7 +496,7 @@ func runManageExpectError(t *testing.T, paths config.Paths, args []string) strin
 	t.Helper()
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	cmd := newManageCommand(paths, &rootOptions{})
+	cmd := newTestManageContainerCommand(paths, &rootOptions{})
 	cmd.SetContext(context.Background())
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
