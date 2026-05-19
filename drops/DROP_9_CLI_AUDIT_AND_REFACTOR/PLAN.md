@@ -183,6 +183,7 @@ For `image cleanup` flag-driven dispatch: the current `runManageCleanup` uses a 
   - `internal/cli/claude_setup.go`
   - `internal/cli/codex_setup.go`
   - `internal/cli/operator_helpers.go`
+  - `internal/cli/manage.go`
   - `internal/cli/claude_setup_test.go`
   - `internal/cli/codex_setup_test.go`
   - `internal/cli/codex_test.go`
@@ -192,7 +193,35 @@ For `image cleanup` flag-driven dispatch: the current `runManageCleanup` uses a 
   - `README.md`
 - **Packages:** `github.com/evanmschultz/valv/internal/cli`
 - **Acceptance:**
-  1. `git grep "valv manage" -- internal/cli/claude.go internal/cli/codex.go internal/cli/claude_setup.go internal/cli/codex_setup.go internal/cli/operator_helpers.go internal/cli/claude_setup_test.go internal/cli/codex_setup_test.go internal/cli/codex_test.go internal/cli/extended_test.go internal/cli/operator_helpers_test.go magefile.go README.md` returns zero hits.
+  1. Zero stale `valv manage` strings remain. Verified by three separate checks, each of which must return zero hits:
+
+     **AC #1a — cli helper files (excluding manage.go):**
+     ```
+     git grep "valv manage" -- \
+       internal/cli/claude.go \
+       internal/cli/codex.go \
+       internal/cli/claude_setup.go \
+       internal/cli/codex_setup.go \
+       internal/cli/operator_helpers.go \
+       internal/cli/claude_setup_test.go \
+       internal/cli/codex_setup_test.go \
+       internal/cli/codex_test.go \
+       internal/cli/operator_helpers_test.go
+     ```
+     Must return **zero hits**.
+
+     **AC #1b — manage.go (including surviving constructor Example blocks):**
+     ```
+     git grep "valv manage" -- internal/cli/manage.go
+     ```
+     Must return **zero hits**. As of the last ingest, manage.go contains 68 `valv manage` occurrences. Units 9.1–9.4 update the 3 `fmt.Errorf` runtime strings at manage.go lines 626/962/996 and delete the `newManageCommand` constructor (taking its Example block with it). This unit sweeps the remaining stale strings in surviving cobra constructor `Example:` fields — the ~16 account-* and image-* constructors whose Example blocks still reference the old `valv manage ...` form. Every such string must be rewritten to the normalized command tree (e.g., `valv manage account add codex hylla` → `valv account add codex hylla`).
+
+     **AC #1c — bare `manage` form in non-Go files:**
+     ```
+     git grep -E '"manage [a-z]+|manage [a-z]+"' -- magefile.go README.md
+     ```
+     Must return **zero hits**. Catches the quoted-string bare-manage form: `mage run "manage status"` (README.md line 36), `mage dev:run "manage update"` (README.md lines 44, 45), and the `magefile.go` bootstrap label at line 682.
+
   2. All updated error/help text references the new normalized command tree. Concrete substitutions (builder applies across all files in scope):
      - `valv manage update` → `valv image update`
      - `valv manage update claude` → `valv image update claude`
@@ -204,13 +233,16 @@ For `image cleanup` flag-driven dispatch: the current `runManageCleanup` uses a 
   3. Test assertions in `claude_setup_test.go`, `codex_setup_test.go`, `codex_test.go`, `extended_test.go` that check for specific error message substrings are updated to match the new command names. All assertions must still pass.
   4. `magefile.go` bootstrap label in `printDevHomeMessage` (line 682 approximately: `"manage update"`) is updated to `"image update"`.
   5. `README.md` mage run examples (lines 36, 44, 45 approximately: `mage run "manage status"`, `mage dev:run "manage update"`, `mage dev:run "manage status"`) are updated to reference the new subcommands (`image update`, `status`).
-  6. `manage.go`'s own example blocks (cobra `Example:` string literals) are OUT OF SCOPE for this unit — they are updated in-situ by units 9.1–9.4 as each constructor is modified or deleted.
-  7. `mage testPkg ./internal/cli` passes with all updated test assertions.
+  6. `mage testPkg ./internal/cli` passes with all updated test assertions.
 - **Blocked by:** 9.1, 9.2, 9.3, 9.4 (all units finalizing the new command tree must land first so strings reference the correct final shape)
 
 **Design notes for builder:**
 
-This is a mechanical string-substitution unit. No logic changes. Every hit found by the acceptance criterion's `git grep` command is a required fix. Builder runs the grep, addresses each hit, reruns the grep to confirm zero, then runs `mage testPkg ./internal/cli` to confirm all test assertions still hold. For test files, updated assertions must match the new error strings exactly — if the underlying error is now `"run \`valv image update\`"`, the test must assert that substring. Builder may also find hits in `manage.go`'s own example blocks that survived 9.1–9.4 edits and should fix those too if present (belt-and-suspenders).
+This is a mechanical string-substitution unit. No logic changes.
+
+Ownership split with unit 9.1: unit 9.1 owns (a) structural deletion of `newManageCommand` + redistribution of children, (b) the 3 `fmt.Errorf` runtime strings at manage.go:626/962/996, and (c) root.go examples block. Unit 9.4.5 owns the sweep of cobra `Example:` string literals in ALL surviving manage.go constructors (the account-* and image-* constructors that remain in manage.go after 9.1 restructures the file). The 9.4.5 blocker chain (9.1 + 9.2 + 9.3 + 9.4) is correct: 9.1 must finish the structural rewiring before 9.4.5 can sweep what survives.
+
+Workflow: run AC #1a, #1b, #1c greps individually, address every hit, rerun all three to confirm zero, then `mage testPkg ./internal/cli`. For test files, updated assertions must match the new error strings exactly — if the underlying error is now `"run \`valv image update\`"`, the test must assert that substring.
 
 ---
 
