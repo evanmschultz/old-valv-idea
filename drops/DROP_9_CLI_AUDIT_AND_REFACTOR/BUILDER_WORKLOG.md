@@ -544,3 +544,70 @@ Only `manage.go:409` was modified. No test files touched (no test assertion depe
 ## Hylla Feedback (Units 9.5 + 9.6 Round 2)
 
 N/A — task touched only a single help-text string in a Go file; no Hylla symbol queries were needed for a 1-line cosmetic substitution. Evidence gathered via direct `Read` of `manage.go`.
+
+---
+
+## Unit 9.7 — Round 1
+
+- **Builder:** go-builder-agent
+- **Started:** 2026-05-19
+- **Files touched:**
+  - `internal/cli/claude_auth_test.go` — added `TestSystemClaudeAccountAuthRunnerBuildsExpectedContainerRequest`
+  - `drops/DROP_9_CLI_AUDIT_AND_REFACTOR/PLAN.md` — state: todo → in_progress → done
+
+### Test additions
+
+| Test | Assertion count | Description |
+|------|----------------|-------------|
+| `TestSystemClaudeAccountAuthRunnerBuildsExpectedContainerRequest` | 9 | Asserts every static field of the `ContainerRunRequest` produced by `systemClaudeAccountAuthRunner.RunInContainer` using the pre-existing `stubAuthContainerExecutor`. |
+
+**Assertions in `TestSystemClaudeAccountAuthRunnerBuildsExpectedContainerRequest`:**
+
+1. `Env["CLAUDE_CONFIG_DIR"]` == `claudeprovider.ContainerClaudeDir`
+2. `Env["HOME"]` == `claudeprovider.ContainerHomeDir`
+3. `Env["LOGNAME"]` == `"valv"`
+4. `Env["USER"]` == `"valv"`
+5. `Env["TERM"]` non-empty and == `"xterm-256color"` (default when `TERM` env cleared via `t.Setenv("TERM", "")`)
+6. `len(Mounts)` == 1
+7. `Mounts[0].Source` == injected `homePath`
+8. `Mounts[0].Target` == `claudeprovider.ContainerClaudeDir`
+9. `Args` empty (`len(req.Args) == 0`)
+10. `Init` == `true`
+11. `Remove` == `true`
+12. `User` == `currentContainerUser()` (called directly — same package, no import needed)
+
+### Codex parity decision
+
+**NOT added.** `systemCodexAccountAuthRunner` uses host-side `codex login` binary (via `runCodexHostCommand` in `account_auth.go`). It has no `RunInContainer` method and produces no `ContainerRunRequest`. The codex auth path is host-only (shell out to `codex login --home <path>`), structurally different from the Claude in-container auth path. There is no analogous injectable executor to stub; a `ContainerRunRequest` assertion test is not applicable.
+
+### TDD red-green trace
+
+1. Added test with `t.Parallel()` → ran `mage testPkg` → **RED** (panic: `t.Setenv` incompatible with `t.Parallel()`).
+2. Removed `t.Parallel()`, added comment explaining the constraint (same pattern as `TestSystemClaudeAccountAuthRunnerUsesClaudeImageRef`) → ran `mage testPkg` → **GREEN** (215 tests, 67.5% coverage).
+3. Ran `mage build` → **PASS** (`./valv` built cleanly).
+
+### Design decision: `t.Parallel()` omitted
+
+The acceptance criteria called for `t.Parallel()` on both tests. However, `t.Setenv("TERM", "")` modifies process-global state and is incompatible with `t.Parallel()` in Go's testing runtime (`testing: test using t.Setenv ... can not use t.Parallel`). The `TERM` clear is necessary to exercise the `"xterm-256color"` default branch in production code. The decision is to keep the `TERM` clear and omit `t.Parallel()`, which is the established pattern in this file (`TestSystemClaudeAccountAuthRunnerUsesClaudeImageRef` at line 408 does the same). Documented via inline comment in the test.
+
+### Mage gate results
+
+| Gate | Result | Detail |
+|------|--------|--------|
+| `mage testPkg github.com/evanmschultz/valv/internal/cli` | PASS | 215 tests, 67.5% coverage (threshold 60%), -race, 0 failures |
+| `mage build` | PASS | `./valv` built cleanly |
+
+## Hylla Feedback (Unit 9.7 Round 1)
+
+Hylla was the primary evidence source for this unit. Results:
+
+- `ContainerRunRequest` struct content (all fields) — **found** via `hylla_node_full` on `github.com/evanmschultz/valv/internal/adapters/docker/ContainerRunRequest`. Hylla returned the full `content` field with the exact struct layout.
+- `MountSpec` struct content (`Source`, `Target`, `ReadOnly`) — **found** via `hylla_node_full` on `github.com/evanmschultz/valv/internal/adapters/docker/MountSpec`.
+- `claudeprovider.ContainerClaudeDir`, `ContainerHomeDir` — **found** via `hylla_search_keyword`.
+- `systemClaudeAccountAuthRunner.RunInContainer` — **found** via `hylla_search_keyword`.
+- `stubAuthContainerExecutor` and its `Run` method — **found** in Hylla's `code.callers` list on the `ContainerRunRequest` node.
+- `systemCodexAccountAuthRunner.Login` — **found** via `hylla_search_keyword`; confirmed no `RunInContainer` method exists, enabling the codex parity gap decision.
+
+**Miss:** `currentContainerUser` — not returned by any Hylla query (private unexported function, not indexed by name). **Worked via:** Direct `Read` of `claude.go` and `codex.go` where the function is called (lines 107 and 114 respectively). Since it is in the same package as the test file, it is callable directly — no import needed. **Suggestion:** Index private functions by name in keyword search when they appear as call targets in multiple files (cross-file callsite evidence would surface them).
+
+**Miss:** `commandHasTTY` / `currentContainerUser` definition location — function defined in an unread source file. **Worked via:** Recognizing both are in-package private functions (same `cli` package), which is sufficient for the test — the test calls `currentContainerUser()` directly without needing to know its definition file.

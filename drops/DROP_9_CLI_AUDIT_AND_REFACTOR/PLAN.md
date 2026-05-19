@@ -296,7 +296,7 @@ The `whoami` alias removal is a one-line change: remove `Aliases: []string{"whoa
 
 ### Unit 9.7 — CONCERN A: Static `ContainerRunRequest` field assertion tests
 
-- **State:** todo
+- **State:** done (R1 — mage gates GREEN; codex parity documented as gap)
 - **Paths:**
   - `internal/cli/claude_auth_test.go`
 - **Packages:** `github.com/evanmschultz/valv/internal/cli`

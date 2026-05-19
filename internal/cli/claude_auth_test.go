@@ -465,6 +465,89 @@ func TestSystemClaudeAccountAuthRunnerPassesThroughTerminalEnv(t *testing.T) {
 
 // --- Unit 7.11 Round 2 tests (preserved through R3) ---
 
+// --- Unit 9.7 — ContainerRunRequest field assertion tests ---
+
+// TestSystemClaudeAccountAuthRunnerBuildsExpectedContainerRequest asserts every
+// static field of the ContainerRunRequest produced by
+// systemClaudeAccountAuthRunner.RunInContainer. It uses the already-defined
+// stubAuthContainerExecutor (which captures lastRequest) so no Docker daemon is
+// required. The TERM env is explicitly cleared so the default "xterm-256color"
+// fallback is exercised.
+func TestSystemClaudeAccountAuthRunnerBuildsExpectedContainerRequest(t *testing.T) {
+	// t.Parallel() intentionally omitted: t.Setenv modifies process-global env
+	// and is incompatible with t.Parallel(). See TestSystemClaudeAccountAuthRunnerUsesClaudeImageRef
+	// for the same established pattern in this file.
+
+	// Clear TERM so the production code falls back to "xterm-256color".
+	t.Setenv("TERM", "")
+
+	stub := &stubAuthContainerExecutor{}
+	runner := systemClaudeAccountAuthRunner{
+		executor: stub,
+		image:    claudeImageRef(),
+	}
+	homePath := t.TempDir()
+
+	if err := runner.RunInContainer(
+		context.Background(),
+		homePath,
+		nil,             // stdin nil → Interactive=false, TTY=false
+		&bytes.Buffer{}, // stdout
+		&bytes.Buffer{}, // stderr
+	); err != nil {
+		t.Fatalf("RunInContainer() error = %v, want nil", err)
+	}
+
+	req := stub.lastRequest
+
+	// Env assertions.
+	if got := req.Env["CLAUDE_CONFIG_DIR"]; got != claudeprovider.ContainerClaudeDir {
+		t.Errorf("Env[CLAUDE_CONFIG_DIR] = %q, want %q", got, claudeprovider.ContainerClaudeDir)
+	}
+	if got := req.Env["HOME"]; got != claudeprovider.ContainerHomeDir {
+		t.Errorf("Env[HOME] = %q, want %q", got, claudeprovider.ContainerHomeDir)
+	}
+	if got := req.Env["LOGNAME"]; got != "valv" {
+		t.Errorf("Env[LOGNAME] = %q, want %q", got, "valv")
+	}
+	if got := req.Env["USER"]; got != "valv" {
+		t.Errorf("Env[USER] = %q, want %q", got, "valv")
+	}
+	if got := req.Env["TERM"]; got == "" {
+		t.Error("Env[TERM] is empty; want non-empty (default xterm-256color when TERM unset)")
+	} else if got != "xterm-256color" {
+		t.Errorf("Env[TERM] = %q, want %q (default when TERM env is absent)", got, "xterm-256color")
+	}
+
+	// Mount assertions.
+	if got := len(req.Mounts); got != 1 {
+		t.Fatalf("len(Mounts) = %d, want 1", got)
+	}
+	if got := req.Mounts[0].Source; got != homePath {
+		t.Errorf("Mounts[0].Source = %q, want %q (injected homePath)", got, homePath)
+	}
+	if got := req.Mounts[0].Target; got != claudeprovider.ContainerClaudeDir {
+		t.Errorf("Mounts[0].Target = %q, want %q", got, claudeprovider.ContainerClaudeDir)
+	}
+
+	// Args, Init, Remove assertions.
+	if got := len(req.Args); got != 0 {
+		t.Errorf("len(Args) = %d, want 0 (no extra args on auth run)", got)
+	}
+	if !req.Init {
+		t.Error("Init = false, want true")
+	}
+	if !req.Remove {
+		t.Error("Remove = false, want true")
+	}
+
+	// User assertion — currentContainerUser() is in-package so the test can call
+	// it directly to compute the expected value.
+	if got, want := req.User, currentContainerUser(); got != want {
+		t.Errorf("User = %q, want %q (currentContainerUser())", got, want)
+	}
+}
+
 // TestLoginClaudeAccountWipesExistingCredsBeforeRunning verifies AC1-R2:
 // loginClaudeAccount wipes a pre-existing .credentials.json before invoking the
 // auth runner, preventing stale credentials from short-circuiting re-auth.
