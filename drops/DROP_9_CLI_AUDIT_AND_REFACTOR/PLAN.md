@@ -104,6 +104,7 @@ The `account` namespace is already top-level (registered at `root.go:129` via `n
   8. Tests in `internal/adapters/sqlite/store_test.go`: `DeleteBinding` — bound row removed (success); non-existent row returns `domain.ErrNotFound`-wrapped error.
   9. Tests in `internal/services/manage/service_test.go`: `UnbindProject` — bound project unbound successfully; unbound project returns clean wrapped error; provider defaults correctly.
   10. `mage testPkg ./internal/cli` passes. `mage testPkg ./internal/adapters/sqlite` passes. `mage testPkg ./internal/services/manage` passes. All with `-race` and ≥70% coverage per package.
+  11. **Re-enable `TestCodexCommandRunsFixtureImageWithTTYEndToEnd`** in `internal/cli/codex_integration_test.go`: remove the `t.Skip("requires valv account bind from DROP_9 Unit 9.2 — re-enable when 9.2 lands")` line that 9.1 R3 added at line 113. After this unit lands, `mage integration` MUST report 203/203 PASS (zero skipped + zero failed). Per `feedback_mage_integration_when_deleting_symbols`, 9.2 builder MUST run `mage integration` as a verification gate; the previously-skipped test now exercises the newly-wired `valv account bind` end-to-end.
 - **Blocked by:** 9.1
 
 **Design notes for builder:**
