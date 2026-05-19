@@ -129,8 +129,10 @@ valv claude --version
 	accountCmd.GroupID = "account"
 	globalCmd := newGlobalCommand(paths, opts)
 	globalCmd.GroupID = "account"
+	imageCmd := newImageCommand(paths, opts)
+	imageCmd.GroupID = "account"
 
-	cmd.AddCommand(pathsCmd, versionCmd, codexCmd, claudeCmd, accountCmd, globalCmd)
+	cmd.AddCommand(pathsCmd, versionCmd, codexCmd, claudeCmd, accountCmd, globalCmd, imageCmd)
 	installBranchHelpCommands(cmd)
 
 	return cmd, nil

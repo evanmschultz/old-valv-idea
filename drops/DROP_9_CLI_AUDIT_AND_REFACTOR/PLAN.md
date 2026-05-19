@@ -121,7 +121,7 @@ For `unbind`: `manage.Service` currently has no `UnbindProject` method (confirme
 
 ### Unit 9.3 — Add `valv image` namespace (update, cleanup, inspect)
 
-- **State:** todo
+- **State:** done (R1 — all 3 mage gates GREEN)
 - **Paths:**
   - `internal/cli/manage.go`
   - `internal/cli/root.go`

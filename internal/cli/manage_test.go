@@ -321,6 +321,7 @@ func newTestManageContainerCommand(paths config.Paths, opts *rootOptions) *cobra
 	container.AddCommand(newManageStatusCommand(paths, opts))
 	container.AddCommand(newManageUpdateCommand(paths, opts))
 	container.AddCommand(newManageCleanupCommand(paths, opts))
+	container.AddCommand(newImageCommand(paths, opts))
 	installBranchHelpCommands(container)
 	return container
 }
@@ -807,6 +808,67 @@ type fakeCrossProviderLister struct {
 
 func (f *fakeCrossProviderLister) ListProfiles(_ context.Context, p domain.Provider) (manageservice.ProfileListResult, error) {
 	return manageservice.ProfileListResult{Profiles: f.results[p]}, nil
+}
+
+// ----------------------------------------------------------------------------
+// Unit 9.3 — valv image namespace (update, cleanup, inspect)
+// ----------------------------------------------------------------------------
+
+// TestImageUpdateCommandRoutes verifies that newImageCommand registers an
+// "update" subcommand that routes to the Codex image update path (default
+// provider) without error. A fake docker binary and stubbed version resolver
+// are installed so no real Docker or network calls are made.
+//
+// Non-parallel: installFakeDocker calls t.Setenv which is incompatible with
+// t.Parallel().
+func TestImageUpdateCommandRoutes(t *testing.T) {
+	paths := testCodexPaths(t)
+	installFakeDocker(t)
+	stubCodexVersionResolver(t, "0.99.0")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd := newImageCommand(paths, &rootOptions{})
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"update"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("image update Execute() error = %v\nstderr=%s", err, stderr.String())
+	}
+	for _, want := range []string{"Provider image", "provider=codex"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("image update output %q missing %q", stdout.String(), want)
+		}
+	}
+}
+
+// TestImageCleanupAllImagesFlagConflict verifies that combining --all with any
+// individual scope flag (e.g. --images) produces an error message that names
+// all conflicting flags. The error must be returned from RunE (not from cobra
+// flag parsing) so callers get a clear, actionable message.
+func TestImageCleanupAllImagesFlagConflict(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd := newImageCommand(paths, &rootOptions{})
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"cleanup", "--all", "--images"})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("image cleanup --all --images: Execute() error = nil, want flag-conflict error")
+	}
+	wantSubstr := "--all is mutually exclusive with --images"
+	if !strings.Contains(err.Error(), wantSubstr) {
+		t.Fatalf("image cleanup --all --images: error = %q, want substring %q", err.Error(), wantSubstr)
+	}
 }
 
 func testJWT(t *testing.T, claims map[string]string) string {

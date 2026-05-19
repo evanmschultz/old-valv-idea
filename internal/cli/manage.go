@@ -1513,3 +1513,315 @@ func providerCleanupImageFilters() map[string]string {
 		"label": "io.valv.managed=true",
 	}
 }
+
+// newImageCommand constructs the "image" namespace cobra command with three
+// subcommands: update, cleanup, and inspect. It is registered in root.go under
+// the "account" group alongside the account and global commands.
+func newImageCommand(paths config.Paths, opts *rootOptions) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "image",
+		Short: "Manage Valv provider images",
+		Long: strings.TrimSpace(`
+Manage the Docker images Valv uses for containerized provider runtimes.
+
+Subcommands:
+- update: rebuild and rotate provider client images
+- cleanup: prune Valv-managed Docker artifacts (dry-run by default)
+- inspect: show the current provider image state
+`),
+		Example: strings.TrimSpace(`
+valv image update
+valv image update codex
+valv image update claude
+valv image cleanup
+valv image cleanup --images
+valv image cleanup --all --apply
+valv image inspect
+valv image inspect claude
+`),
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return cmd.Help()
+		},
+	}
+	cmd.AddCommand(newImageUpdateCommand(paths, opts))
+	cmd.AddCommand(newImageCleanupCommand(paths, opts))
+	cmd.AddCommand(newImageInspectCommand(paths, opts))
+	return cmd
+}
+
+// newImageUpdateCommand constructs "valv image update [provider]". It calls the
+// existing runManageUpdate run function, which already handles both Codex and
+// Claude providers. Provider defaults to Codex when omitted.
+func newImageUpdateCommand(paths config.Paths, opts *rootOptions) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "update [provider]",
+		Short: "Rebuild and rotate provider client images",
+		Long: strings.TrimSpace(`
+Rebuild the provider client image Valv uses for containerized runtime launches.
+
+Output fields:
+- provider: provider whose runtime image was checked
+- image: default image tag Valv will run next
+- tags: all image tags Valv expects for the current installed client
+- version: latest client version Valv resolved and installed
+- checked at: latest upstream version check timestamp
+- context: generated Docker build context under the Valv cache root
+`),
+		Example: strings.TrimSpace(`
+valv image update
+valv image update codex
+valv image update claude
+`),
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			provider, err := parseOptionalProvider(args, domain.ProviderCodex)
+			if err != nil {
+				return err
+			}
+			return runManageUpdate(cmd, paths, opts, provider)
+		},
+	}
+	return cmd
+}
+
+// imageCleanupFlags holds the flag values for "valv image cleanup".
+type imageCleanupFlags struct {
+	images     bool
+	containers bool
+	state      bool
+	buildCache bool
+	all        bool
+	apply      bool
+}
+
+// newImageCleanupCommand constructs "valv image cleanup". It uses a flag-driven
+// interface rather than positional args: --images, --containers, --state,
+// --build-cache, --all (scope selection) and --apply (disable dry-run).
+//
+// Flag combination rules:
+//   - --all is mutually exclusive with individual scope flags.
+//   - Individual scope flags are additive.
+//   - No scope flag = equivalent to --all.
+//   - Default is dry-run; --apply (or --yes) actually deletes.
+func newImageCleanupCommand(paths config.Paths, opts *rootOptions) *cobra.Command {
+	var flags imageCleanupFlags
+	cmd := &cobra.Command{
+		Use:   "cleanup",
+		Short: "Prune Valv-managed Docker artifacts (dry-run by default)",
+		Long: strings.TrimSpace(`
+Prune Valv-managed Docker artifacts.
+
+Only Valv-managed artifacts are touched (those with the io.valv.managed=true label).
+
+Flags control which artifact categories are included:
+  --images        provider images
+  --containers    leaked Valv runtime containers
+  --state         local logs, caches, and runtime scratch
+  --build-cache   Docker builder cache
+  --all           all of the above (mutually exclusive with individual scope flags)
+
+By default, this command performs a dry-run and prints what would be cleaned
+without deleting anything. Pass --apply to actually execute the cleanup.
+`),
+		Example: strings.TrimSpace(`
+valv image cleanup
+valv image cleanup --images
+valv image cleanup --containers --state
+valv image cleanup --all
+valv image cleanup --all --apply
+`),
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runImageCleanup(cmd, paths, opts, flags)
+		},
+	}
+	cmd.Flags().BoolVar(&flags.images, "images", false, "include provider images")
+	cmd.Flags().BoolVar(&flags.containers, "containers", false, "include leaked Valv runtime containers")
+	cmd.Flags().BoolVar(&flags.state, "state", false, "include local logs, caches, and runtime scratch")
+	cmd.Flags().BoolVar(&flags.buildCache, "build-cache", false, "include Docker builder cache")
+	cmd.Flags().BoolVar(&flags.all, "all", false, "include all Valv-managed artifacts (mutually exclusive with individual scope flags)")
+	cmd.Flags().BoolVar(&flags.apply, "apply", false, "actually execute the cleanup (default is dry-run)")
+	cmd.Flags().BoolVar(&flags.apply, "yes", false, "alias for --apply")
+	return cmd
+}
+
+func runImageCleanup(cmd *cobra.Command, paths config.Paths, opts *rootOptions, flags imageCleanupFlags) error {
+	// Validate --all mutual exclusivity with individual scope flags.
+	if flags.all && (flags.images || flags.containers || flags.state || flags.buildCache) {
+		return fmt.Errorf("--all is mutually exclusive with --images, --containers, --state, --build-cache")
+	}
+
+	// Default (no scope flag): equivalent to --all.
+	noScopeSet := !flags.images && !flags.containers && !flags.state && !flags.buildCache && !flags.all
+	effectiveAll := flags.all || noScopeSet
+
+	// Determine which scopes are active.
+	doImages := effectiveAll || flags.images
+	doContainers := effectiveAll || flags.containers
+	doState := effectiveAll || flags.state
+	doBuildCache := effectiveAll || flags.buildCache
+
+	mode, err := commandOutputMode(cmd, opts)
+	if err != nil {
+		return fmt.Errorf("resolve output policy: %w", err)
+	}
+
+	// Dry-run: report what would be cleaned without executing.
+	if !flags.apply {
+		var scopes []string
+		if doImages {
+			scopes = append(scopes, "images")
+		}
+		if doContainers {
+			scopes = append(scopes, "containers")
+		}
+		if doState {
+			scopes = append(scopes, "state")
+		}
+		if doBuildCache {
+			scopes = append(scopes, "build-cache")
+		}
+		return output.WriteRecord(cmd.OutOrStdout(), mode, "Cleanup dry-run (pass --apply to execute)", []output.Field{
+			{Label: "scopes", Value: strings.Join(scopes, ", "), Identifier: true},
+			{Label: "dry-run", Value: "true", Muted: true},
+		})
+	}
+
+	service, err := newCleanupService(cmd, paths)
+	if err != nil {
+		return fmt.Errorf("image cleanup: initialize cleanup service: %w", err)
+	}
+	local := cleanupservice.LocalCleanupRequest{Paths: cleanupservice.DefaultLocalTargets(paths)}
+	dockerRequest := cleanupservice.DockerCleanupRequest{
+		Force: true,
+	}
+	if doImages {
+		dockerRequest.ImageFilters = providerCleanupImageFilters()
+	}
+	if doContainers {
+		dockerRequest.ContainerLabels = map[string]string{
+			"label": "io.valv.managed=true",
+		}
+	}
+	if doBuildCache {
+		dockerRequest.PruneBuilder = true
+		dockerRequest.PruneBuilderAll = true
+	}
+
+	var summary []output.Field
+	err = runWithCLIQuietSpinner(
+		cmd.ErrOrStderr(),
+		"Running image cleanup",
+		"Cleanup complete",
+		"Cleanup failed",
+		func() error {
+			if doState {
+				localResult, localErr := service.CleanLocal(cmd.Context(), local)
+				if localErr != nil {
+					return localErr
+				}
+				summary = append(summary, output.Field{Label: "removed paths", Value: fmt.Sprintf("%d", len(localResult.Removed)), Identifier: true})
+			}
+			if doImages || doContainers || doBuildCache {
+				dockerResult, dockerErr := service.CleanDocker(cmd.Context(), dockerRequest)
+				if dockerErr != nil {
+					return dockerErr
+				}
+				if doContainers {
+					summary = append(summary, output.Field{Label: "containers", Value: fmt.Sprintf("%d removed", len(dockerResult.RemovedContainers)), Identifier: true})
+				}
+				if doImages {
+					summary = append(summary, output.Field{Label: "images", Value: fmt.Sprintf("%d refs", len(dockerResult.RemovedImages)), Identifier: true})
+				}
+				if doBuildCache {
+					summary = append(summary, output.Field{Label: "build-cache", Value: "pruned", Muted: true})
+				}
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("image cleanup: %w", err)
+	}
+	if len(summary) == 0 {
+		summary = []output.Field{{Label: "result", Value: "nothing to clean", Muted: true}}
+	}
+	return output.WriteRecord(cmd.OutOrStdout(), mode, "Cleanup completed", summary)
+}
+
+// newImageInspectCommand constructs "valv image inspect [provider]". It reads
+// the current provider image state from the store (via service.CurrentState)
+// without making any network calls. Provider defaults to Codex when omitted.
+//
+// Implementation choice: service.CurrentState is the minimal path — it reads
+// the SQLite state record for the provider without calling EnsureLatest (no
+// network, no Docker call). If no state record exists, it reports "not installed".
+func newImageInspectCommand(paths config.Paths, opts *rootOptions) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "inspect [provider]",
+		Short: "Show current provider image version and installed state",
+		Long: strings.TrimSpace(`
+Show the current provider image version, last-checked-at timestamp, and installed state.
+
+Reads from the Valv state store — no network calls or Docker calls are made.
+
+Output fields:
+- provider: the queried provider
+- installed version: the currently installed image version
+- latest version: the last resolved upstream version
+- image ref: the installed Docker image reference
+- checked at: the last upstream version check timestamp
+`),
+		Example: strings.TrimSpace(`
+valv image inspect
+valv image inspect codex
+valv image inspect claude
+`),
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			provider, err := parseOptionalProvider(args, domain.ProviderCodex)
+			if err != nil {
+				return err
+			}
+			return runImageInspect(cmd, paths, opts, provider)
+		},
+	}
+	return cmd
+}
+
+func runImageInspect(cmd *cobra.Command, paths config.Paths, opts *rootOptions, provider domain.Provider) error {
+	mode, err := commandOutputMode(cmd, opts)
+	if err != nil {
+		return fmt.Errorf("resolve output policy: %w", err)
+	}
+	service, closeImages, err := openImagesService(cmd, paths, provider)
+	if err != nil {
+		return fmt.Errorf("image inspect: initialize image service: %w", err)
+	}
+	defer closeImages()
+
+	state, err := service.CurrentState(cmd.Context())
+	if err != nil {
+		return fmt.Errorf("image inspect: %w", err)
+	}
+
+	if state.InstalledVersion == "" {
+		return output.WriteRecord(cmd.OutOrStdout(), mode, "Provider image not installed", []output.Field{
+			{Label: "provider", Value: string(provider), Muted: true},
+			{Label: "installed", Value: "false", Muted: true},
+		})
+	}
+
+	checkedAt := ""
+	if !state.LatestCheckedAt.IsZero() {
+		checkedAt = state.LatestCheckedAt.Format(time.RFC3339)
+	}
+	return output.WriteRecord(cmd.OutOrStdout(), mode, "Provider image state", []output.Field{
+		{Label: "provider", Value: string(provider), Muted: true},
+		{Label: "installed version", Value: state.InstalledVersion, Identifier: true},
+		{Label: "latest version", Value: state.LatestVersion, Muted: state.LatestVersion == ""},
+		{Label: "image ref", Value: state.InstalledImageRef, Identifier: true},
+		{Label: "checked at", Value: checkedAt, Muted: checkedAt == ""},
+	})
+}
