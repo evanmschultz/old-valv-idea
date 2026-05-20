@@ -1,6 +1,6 @@
 # DROP_10 — CROSS_PROVIDER_CONTAINER
 
-**State:** planning
+**State:** building
 **Blocked by:** DROP_9 (done)
 **Paths (expected):**
 - `internal/services/images/service.go` (Dockerfile recipes — add OTHER CLI to each)
