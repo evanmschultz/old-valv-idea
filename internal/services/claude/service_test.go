@@ -26,6 +26,15 @@ type fakeStore struct {
 	bindingErr error
 	profile    domain.Profile
 	profileErr error
+	// crossBinding / crossBindingErr are returned when BindingByProjectID is
+	// called with domain.ProviderCodex. Set crossBindingErr to domain.ErrNotFound
+	// in existing fixtures to opt out of cross-mount behaviour.
+	crossBinding    domain.ProjectBinding
+	crossBindingErr error
+	// crossProfile / crossProfileErr are returned when ProfileByID is called
+	// with crossProfile.ID. Falls back to the primary profile for any other ID.
+	crossProfile    domain.Profile
+	crossProfileErr error
 }
 
 func (f fakeStore) CreateProject(context.Context, domain.Project) (domain.Project, error) {
@@ -44,7 +53,10 @@ func (f fakeStore) CreateProfile(context.Context, domain.Profile) (domain.Profil
 	panic("unexpected call")
 }
 
-func (f fakeStore) ProfileByID(_ context.Context, _ string) (domain.Profile, error) {
+func (f fakeStore) ProfileByID(_ context.Context, id string) (domain.Profile, error) {
+	if f.crossProfile.ID != "" && id == f.crossProfile.ID {
+		return f.crossProfile, f.crossProfileErr
+	}
 	return f.profile, f.profileErr
 }
 
@@ -68,7 +80,10 @@ func (f fakeStore) UpsertProjectBinding(context.Context, domain.ProjectBinding) 
 	panic("unexpected call")
 }
 
-func (f fakeStore) BindingByProjectID(context.Context, string, domain.Provider) (domain.ProjectBinding, error) {
+func (f fakeStore) BindingByProjectID(_ context.Context, _ string, provider domain.Provider) (domain.ProjectBinding, error) {
+	if provider == domain.ProviderCodex {
+		return f.crossBinding, f.crossBindingErr
+	}
 	return f.binding, f.bindingErr
 }
 
@@ -132,7 +147,10 @@ func (f *fakeExecutor) RemoveContainer(_ context.Context, request docker.Contain
 }
 
 // boundClaudeStore returns a fakeStore pre-wired with a valid Claude project,
-// binding, and profile for the given project.
+// binding, and profile for the given project. crossBindingErr is set to
+// domain.ErrNotFound so that the cross-provider codex lookup is silently
+// skipped — tests that need cross-mount behaviour wire crossBinding /
+// crossProfile explicitly.
 func boundClaudeStore(project domain.Project, profileHome string) fakeStore {
 	profile := domain.Profile{
 		ID:       "profile-claude-1",
@@ -146,9 +164,10 @@ func boundClaudeStore(project domain.Project, profileHome string) fakeStore {
 		Provider:  domain.ProviderClaude,
 	}
 	return fakeStore{
-		project: project,
-		binding: binding,
-		profile: profile,
+		project:         project,
+		binding:         binding,
+		profile:         profile,
+		crossBindingErr: domain.ErrNotFound,
 	}
 }
 
@@ -586,6 +605,151 @@ func TestRunBubblesExecutorErrors(t *testing.T) {
 	err = service.Run(context.Background(), "/tmp/project", []string{"--resume"})
 	if err == nil || !strings.Contains(err.Error(), "docker failed") {
 		t.Fatalf("Run() error = %v, want wrapped docker error", err)
+	}
+}
+
+// TestRunCrossProviderMountWhenCodexBound verifies the cross-provider mount
+// logic in Service.Run: when a codex binding exists for the project, its
+// profile home is passed to PrepareRuntime so that /home/valv/.codex is
+// mounted with CODEX_HOME set. When the codex binding is absent (ErrNotFound),
+// the run succeeds with no cross-mount. When the store returns an unexpected
+// error, Run surfaces it as a fatal error.
+func TestRunCrossProviderMountWhenCodexBound(t *testing.T) {
+	t.Parallel()
+
+	project := domain.Project{ID: "project-cross-1", Root: "/tmp/project", Name: "crossproject"}
+
+	claudeProfile := domain.Profile{
+		ID:       "profile-claude-1",
+		Provider: domain.ProviderClaude,
+		Name:     "default",
+		HomePath: t.TempDir(),
+	}
+	claudeBinding := domain.ProjectBinding{
+		ProjectID: project.ID,
+		ProfileID: claudeProfile.ID,
+		Provider:  domain.ProviderClaude,
+	}
+
+	codexProfileHome, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks error = %v", err)
+	}
+	codexProfile := domain.Profile{
+		ID:       "profile-codex-1",
+		Provider: domain.ProviderCodex,
+		Name:     "codex-default",
+		HomePath: codexProfileHome,
+	}
+	codexBinding := domain.ProjectBinding{
+		ProjectID: project.ID,
+		ProfileID: codexProfile.ID,
+		Provider:  domain.ProviderCodex,
+	}
+
+	storeError := errors.New("store unavailable")
+
+	cases := []struct {
+		name            string
+		crossBinding    domain.ProjectBinding
+		crossBindingErr error
+		crossProfile    domain.Profile
+		crossProfileErr error
+		wantErr         bool
+		wantCodexMount  bool
+		wantCodexEnv    bool
+	}{
+		{
+			name:           "codex bound",
+			crossBinding:   codexBinding,
+			crossProfile:   codexProfile,
+			wantErr:        false,
+			wantCodexMount: true,
+			wantCodexEnv:   true,
+		},
+		{
+			name:            "codex not bound (ErrNotFound)",
+			crossBindingErr: domain.ErrNotFound,
+			wantErr:         false,
+			wantCodexMount:  false,
+			wantCodexEnv:    false,
+		},
+		{
+			name:            "codex store error",
+			crossBindingErr: storeError,
+			wantErr:         true,
+			wantCodexMount:  false,
+			wantCodexEnv:    false,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := fakeStore{
+				project:         project,
+				binding:         claudeBinding,
+				profile:         claudeProfile,
+				crossBinding:    tc.crossBinding,
+				crossBindingErr: tc.crossBindingErr,
+				crossProfile:    tc.crossProfile,
+				crossProfileErr: tc.crossProfileErr,
+			}
+			executor := &fakeExecutor{}
+
+			svc, err := New(Options{
+				Store:    store,
+				Executor: executor,
+				Detect:   detectAlways(project.Root),
+				Image:    docker.NewImageRef("valv-claude", "dev"),
+				TempRoot: t.TempDir(),
+				Now:      func() time.Time { return time.Unix(0, 42) },
+			})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			runErr := svc.Run(context.Background(), "/tmp/project", []string{"--resume"})
+
+			if tc.wantErr {
+				if runErr == nil {
+					t.Fatalf("Run() error = nil, want non-nil error")
+				}
+				return
+			}
+			if runErr != nil {
+				t.Fatalf("Run() error = %v, want nil", runErr)
+			}
+
+			// Check for /home/valv/.codex mount.
+			foundCodexMount := false
+			for _, m := range executor.got.Mounts {
+				if m.Target == "/home/valv/.codex" {
+					foundCodexMount = true
+					if tc.wantCodexMount && m.Source != codexProfileHome {
+						t.Errorf("Run() codex mount source = %q, want %q", m.Source, codexProfileHome)
+					}
+					break
+				}
+			}
+			if tc.wantCodexMount && !foundCodexMount {
+				t.Errorf("Run() mounts = %+v, want mount with target /home/valv/.codex", executor.got.Mounts)
+			}
+			if !tc.wantCodexMount && foundCodexMount {
+				t.Errorf("Run() unexpected /home/valv/.codex mount present")
+			}
+
+			// Check CODEX_HOME env var.
+			codexHome := executor.got.Env["CODEX_HOME"]
+			if tc.wantCodexEnv && codexHome != "/home/valv/.codex" {
+				t.Errorf("Run() CODEX_HOME = %q, want /home/valv/.codex", codexHome)
+			}
+			if !tc.wantCodexEnv && codexHome != "" {
+				t.Errorf("Run() CODEX_HOME = %q, want empty", codexHome)
+			}
+		})
 	}
 }
 

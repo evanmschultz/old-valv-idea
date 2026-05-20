@@ -102,6 +102,40 @@ Hylla was queried to confirm the `docker.BuildImageArgs` sort behavior. The func
   - `mage testPkg github.com/evanmschultz/valv/internal/adapters/providers/codex`: 24 tests passed (was 22), 0 failed, coverage 74.9% (floor 60%). GREEN.
   - `mage build`: `./valv` produced cleanly. GREEN.
 
-## Hylla Feedback (Unit 10.3)
+## Unit 10.4 — Round 1
 
-None — Hylla answered everything needed. The existing codex `runtime.go` and `runtime_test.go` structures were confirmed via `Read` (not Hylla) since Unit 10.2 had just been completed and the files were not yet re-ingested. The claude runtime (Unit 10.2's output) was confirmed via `Read` to validate the mirror pattern. No Hylla queries were issued for Go symbol lookups in this unit — evidence was gathered via file reads for files changed since last ingest. Categorized as N/A (changed files, Hylla stale until reingest).
+- **Builder:** go-builder-agent
+- **Started:** 2026-05-19
+- **Files touched:**
+  - `internal/services/claude/service.go`
+  - `internal/services/claude/service_test.go`
+  - `drops/DROP_10_CROSS_PROVIDER_CONTAINER/PLAN.md` (state flip)
+  - `drops/DROP_10_CROSS_PROVIDER_CONTAINER/BUILDER_WORKLOG.md` (this file)
+
+- **Production changes (`service.go`):**
+  - Added cross-binding lookup block in `Service.Run`, inserted between the `resolved` population convergence point and the `clauderuntime.PrepareRuntime` call (original line 162 area). Block: call `s.store.BindingByProjectID(ctx, resolved.project.ID, domain.ProviderCodex)`; on success, call `s.store.ProfileByID(ctx, otherBinding.ProfileID)` and set `otherProfileHome`; on `domain.ErrNotFound`, silently skip; on any other error, return `fmt.Errorf("run claude launch service: lookup codex binding for project %q: %w", ...)`.
+  - `PrepareRuntime` call updated to pass `OtherProviderProfileHome: otherProfileHome` (and aligned multi-value struct literal with gofumpt-style tabs).
+
+- **`fakeStore` extension (`service_test.go`):**
+  - Added fields: `crossBinding domain.ProjectBinding`, `crossBindingErr error`, `crossProfile domain.Profile`, `crossProfileErr error`.
+  - `BindingByProjectID` now dispatches on `provider`: returns `f.crossBinding, f.crossBindingErr` when `provider == domain.ProviderCodex`; returns primary `f.binding, f.bindingErr` otherwise.
+  - `ProfileByID` now dispatches on `id`: returns `f.crossProfile, f.crossProfileErr` when `f.crossProfile.ID != "" && id == f.crossProfile.ID`; returns primary `f.profile, f.profileErr` otherwise.
+  - `boundClaudeStore` helper updated to set `crossBindingErr: domain.ErrNotFound` — all existing tests using this helper continue to pass with no cross-mount side effects (opt-out by default).
+
+- **Test additions:**
+  - `TestRunCrossProviderMountWhenCodexBound` — table-driven, 3 rows:
+    - `"codex bound"`: cross binding + profile resolve successfully → `PreparedRuntime` contains a mount with `Target == "/home/valv/.codex"` sourced from `codexProfileHome` AND `Env["CODEX_HOME"] == "/home/valv/.codex"`.
+    - `"codex not bound (ErrNotFound)"`: `crossBindingErr = domain.ErrNotFound` → Run succeeds, no `/home/valv/.codex` mount, no `CODEX_HOME` env var.
+    - `"codex store error"`: `crossBindingErr = errors.New("store unavailable")` → Run returns non-nil error.
+
+- **TDD cycle:**
+  - RED: tests written first; ran `mage testPkg` → 3 failures (correct reasons — no cross-lookup in service.go yet).
+  - GREEN: cross-lookup + `OtherProviderProfileHome` pass added to `service.go`; ran `mage testPkg` → 23/23 pass, 80.9% coverage.
+
+- **Mage gate results:**
+  - `mage testPkg github.com/evanmschultz/valv/internal/services/claude`: 23 tests passed, 0 failed, coverage 80.9% (floor 60%). GREEN.
+  - `mage build`: `./valv` produced cleanly. GREEN.
+
+## Hylla Feedback (Unit 10.4)
+
+N/A — task touched files changed since last ingest (`service.go` and `service_test.go` are new edits in DROP_10; runtime files modified in 10.2–10.3 are also stale in Hylla). All evidence gathered via `Read` directly. No Hylla queries issued for Go symbol lookups. Domain constants (`ProviderCodex`, `ErrNotFound`) confirmed via `Read` of `internal/domain/types.go` and `internal/domain/errors.go`.

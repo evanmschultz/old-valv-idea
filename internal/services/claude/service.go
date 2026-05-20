@@ -159,15 +159,31 @@ func (s Service) Run(ctx context.Context, cwd string, claudeArgs []string) error
 		}
 	}
 
+	// Cross-provider binding lookup: when a codex profile is bound to this
+	// project, pass its home path so PrepareRuntime can mount it at
+	// /home/valv/.codex with CODEX_HOME set. ErrNotFound means codex is not
+	// bound — skip silently. Any other store error is fatal.
+	var otherProfileHome string
+	otherBinding, err := s.store.BindingByProjectID(ctx, resolved.project.ID, domain.ProviderCodex)
+	if err == nil {
+		otherProfile, profileErr := s.store.ProfileByID(ctx, otherBinding.ProfileID)
+		if profileErr == nil {
+			otherProfileHome = otherProfile.HomePath
+		}
+	} else if !errors.Is(err, domain.ErrNotFound) {
+		return fmt.Errorf("run claude launch service: lookup codex binding for project %q: %w", resolved.project.Root, err)
+	}
+
 	// Claude isolated-first model: pass profileHome directly as both profile and
 	// shared home. SharedHome is intentionally empty — the adapter collapses
 	// empty SharedHome to profileHome, skipping the temp-copy branch.
 	prepared, err := clauderuntime.PrepareRuntime(ctx, clauderuntime.PrepareRequest{
-		ProfileHome: resolved.profile.HomePath,
-		SharedHome:  "",
-		ProjectRoot: resolved.project.Root,
-		TempRoot:    s.tempRoot,
-		Logger:      s.logger,
+		ProfileHome:              resolved.profile.HomePath,
+		SharedHome:               "",
+		ProjectRoot:              resolved.project.Root,
+		TempRoot:                 s.tempRoot,
+		OtherProviderProfileHome: otherProfileHome,
+		Logger:                   s.logger,
 	})
 	if err != nil {
 		return fmt.Errorf("run claude launch service: prepare runtime: %w", err)
