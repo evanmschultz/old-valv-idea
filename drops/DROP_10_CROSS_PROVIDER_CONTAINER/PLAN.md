@@ -309,7 +309,7 @@ file's Notes section records the deferral.
 
 | Field | Value |
 |---|---|
-| State | todo |
+| State | done (R1 — mage gates GREEN; cross-binding lookup + fakeStore opt-out defaults applied) |
 | Paths | `internal/services/codex/service.go`, `internal/services/codex/service_test.go` |
 | Packages | `github.com/evanmschultz/valv/internal/services/codex` |
 | Blocked by | 10.3 |

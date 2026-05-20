@@ -136,6 +136,59 @@ Hylla was queried to confirm the `docker.BuildImageArgs` sort behavior. The func
   - `mage testPkg github.com/evanmschultz/valv/internal/services/claude`: 23 tests passed, 0 failed, coverage 80.9% (floor 60%). GREEN.
   - `mage build`: `./valv` produced cleanly. GREEN.
 
+## Unit 10.5 — Round 1
+
+- **Builder:** go-builder-agent
+- **Started:** 2026-05-19
+- **Files touched:**
+  - `internal/services/codex/service.go`
+  - `internal/services/codex/service_test.go`
+  - `drops/DROP_10_CROSS_PROVIDER_CONTAINER/PLAN.md` (state flip)
+  - `drops/DROP_10_CROSS_PROVIDER_CONTAINER/BUILDER_WORKLOG.md` (this file)
+
+- **Production changes (`service.go`):**
+  - Added cross-binding lookup block in `Service.Run`, inserted between the `resolved` convergence point (end of both `overrideProfile` and `else` branches, line 153) and the `sharedHome` + `PrepareRuntime` call (original line 155). Block: call `s.store.BindingByProjectID(ctx, resolved.project.ID, domain.ProviderClaude)`; on success, call `s.store.ProfileByID(ctx, otherBinding.ProfileID)` and set `otherProfileHome`; on `domain.ErrNotFound`, silently skip; on any other error, return `fmt.Errorf("run codex launch service: lookup claude binding for project %q: %w", ...)`.
+  - `PrepareRuntime` call updated to pass `OtherProviderProfileHome: otherProfileHome` (aligned multi-value struct literal with gofumpt-style tabs).
+
+- **`fakeStore` extension (`service_test.go`):**
+  - Removed tracking fields `projectRoot` and `profileID` (were never read in assertions; removed to avoid unused-field writes).
+  - Added fields: `crossBinding domain.ProjectBinding`, `crossBindingErr error`, `crossProfile domain.Profile`, `crossProfileErr error`.
+  - `BindingByProjectID` now dispatches on `provider`: returns `f.crossBinding, f.crossBindingErr` when `provider == domain.ProviderClaude`; returns primary `f.binding, f.bindingErr` otherwise.
+  - `ProfileByID` now dispatches on `id`: returns `f.crossProfile, f.crossProfileErr` when `f.crossProfile.ID != "" && id == f.crossProfile.ID`; returns primary `f.profile, f.profileErr` otherwise.
+  - Added `boundCodexStore` helper: pre-wires project + codex binding + profile with `crossBindingErr: domain.ErrNotFound` (opt-out default, mirrors `boundClaudeStore` pattern from claude package).
+  - Added `detectAlways` helper: returns a `DetectFunc` that always resolves to the given root with `HasGitMarker: true`.
+
+- **Opt-out defaults applied to all existing inline `fakeStore` Run-path tests:**
+  - `TestRunReturnsUnboundProjectWhenProjectMissing` — added `crossBindingErr: domain.ErrNotFound`.
+  - `TestRunBuildsDockerRequestFromProjectBindingAndProfile` — added `crossBindingErr: domain.ErrNotFound`.
+  - `TestRunRejectsOverrideProfileWithWrongProvider` — added `crossBindingErr: domain.ErrNotFound`.
+  - `TestRunBubblesExecutorErrors` — added `crossBindingErr: domain.ErrNotFound`.
+  - `TestRunBuildsNonInteractiveDockerRequestWhenTTYDisabled` — added `crossBindingErr: domain.ErrNotFound`.
+  - `TestRunRejectsWorkingDirectoryOutsideProjectRoot` — added `crossBindingErr: domain.ErrNotFound`.
+  - `TestRunUsesSharedHostHomeForCodexStateWhenRealHomeIsSet` — added `crossBindingErr: domain.ErrNotFound`.
+  - `TestRunRejectsSiblingPathThatSharesProjectPrefix` — added `crossBindingErr: domain.ErrNotFound`.
+  - `TestRunUsesOverrideProfileHomePath` — added `crossBindingErr: domain.ErrNotFound`.
+
+- **Test additions:**
+  - `TestRunCrossProviderMountWhenClaudeBound` — table-driven, 3 rows:
+    - `"claude bound"`: cross binding + profile resolve → mount with `Target == "/home/valv/.claude"` sourced from `claudeProfileHome` (EvalSymlinks-normalized) AND `Env["CLAUDE_CONFIG_DIR"] == "/home/valv/.claude"`.
+    - `"claude not bound (ErrNotFound)"`: `crossBindingErr = domain.ErrNotFound` → Run succeeds, no `/home/valv/.claude` mount, no `CLAUDE_CONFIG_DIR` env var.
+    - `"claude store error"`: `crossBindingErr = errors.New("store unavailable")` → Run returns non-nil error.
+  - macOS symlink fix: `claudeProfileHome` obtained via `filepath.EvalSymlinks(t.TempDir())` to match `pathutil.Normalize`'s resolved path used in mount source.
+
+- **TDD cycle:**
+  - RED: tests written first; ran `mage testPkg` → 3 failures (correct reasons — no cross-lookup in service.go yet).
+  - GREEN (attempt 1): production change landed; `mage testPkg` → 2 failures (macOS `/var` vs `/private/var` symlink mismatch in mount source comparison).
+  - GREEN (attempt 2): applied `filepath.EvalSymlinks` to `claudeProfileHome`; `mage testPkg` → 17/17 pass, 76.0% coverage.
+
+- **Mage gate results:**
+  - `mage testPkg github.com/evanmschultz/valv/internal/services/codex`: 17 tests passed, 0 failed, coverage 76.0% (floor 60%). GREEN.
+  - `mage build`: `./valv` produced cleanly. GREEN.
+
 ## Hylla Feedback (Unit 10.4)
 
 N/A — task touched files changed since last ingest (`service.go` and `service_test.go` are new edits in DROP_10; runtime files modified in 10.2–10.3 are also stale in Hylla). All evidence gathered via `Read` directly. No Hylla queries issued for Go symbol lookups. Domain constants (`ProviderCodex`, `ErrNotFound`) confirmed via `Read` of `internal/domain/types.go` and `internal/domain/errors.go`.
+
+## Hylla Feedback (Unit 10.5)
+
+N/A — task touched files changed since last ingest (both `codex/service.go` and `codex/service_test.go` are new DROP_10 edits; the codex runtime `PrepareRequest.OtherProviderProfileHome` field landed in 10.3 which is also stale in Hylla). All evidence gathered via `Read` directly — codex service, claude service (for mirror pattern), codex runtime, claude service test (for fakeStore extension pattern). No Hylla queries issued.
