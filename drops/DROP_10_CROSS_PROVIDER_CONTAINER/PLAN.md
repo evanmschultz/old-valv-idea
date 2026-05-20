@@ -74,7 +74,7 @@ file's Notes section records the deferral.
 
 | Field | Value |
 |---|---|
-| State | todo |
+| State | done (R1 — mage gates GREEN; both Dockerfiles install both CLIs; Build() emits both build-args) |
 | Paths | `internal/services/images/service.go`, `internal/services/images/service_test.go` |
 | Packages | `github.com/evanmschultz/valv/internal/services/images` |
 | Blocked by | — |

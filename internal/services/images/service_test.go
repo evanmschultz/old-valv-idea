@@ -107,7 +107,23 @@ func TestServiceBuildAddsVersionAndUsesDefaultImageInfo(t *testing.T) {
 	if len(runner.calls) != 1 {
 		t.Fatalf("runner call count = %d, want 1", len(runner.calls))
 	}
-	want := []string{"buildx", "build", "--load", "-f", "/tmp/codex-image/Dockerfile", "-t", "ghcr.io/valv/codex:dev", "--build-arg", "CODEX_VERSION=0.117.0", "--build-arg", fmt.Sprintf("VALV_GID=%d", gid), "--build-arg", fmt.Sprintf("VALV_UID=%d", uid), "--label", "io.valv.managed=true", "--label", "io.valv.provider=codex", "--label", fmt.Sprintf("%s=%s", recipeHashLabel, svc.recipeHash()), "--label", "io.valv.scope=image", "--label", "io.valv.version=0.117.0", "/tmp/codex-image"}
+	// Alphabetic build-arg order (sort.Strings on map keys):
+	// CLAUDE_VERSION < CODEX_VERSION < VALV_GID < VALV_UID
+	want := []string{
+		"buildx", "build", "--load",
+		"-f", "/tmp/codex-image/Dockerfile",
+		"-t", "ghcr.io/valv/codex:dev",
+		"--build-arg", "CLAUDE_VERSION=latest",
+		"--build-arg", "CODEX_VERSION=0.117.0",
+		"--build-arg", fmt.Sprintf("VALV_GID=%d", gid),
+		"--build-arg", fmt.Sprintf("VALV_UID=%d", uid),
+		"--label", "io.valv.managed=true",
+		"--label", "io.valv.provider=codex",
+		"--label", fmt.Sprintf("%s=%s", recipeHashLabel, svc.recipeHash()),
+		"--label", "io.valv.scope=image",
+		"--label", "io.valv.version=0.117.0",
+		"/tmp/codex-image",
+	}
 	if !reflect.DeepEqual(runner.calls[0], want) {
 		t.Fatalf("Build() args = %#v, want %#v", runner.calls[0], want)
 	}
@@ -368,10 +384,15 @@ func TestWriteDefaultCodexContextWritesDockerfile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile() error = %v", err)
 	}
-	if !strings.Contains(string(content), `@openai/codex@${CODEX_VERSION}`) {
-		t.Fatalf("dockerfile missing package install: %q", string(content))
-	}
 	for _, want := range []string{
+		// Primary CLI (codex)
+		`@openai/codex@${CODEX_VERSION}`,
+		// Cross-provider CLI (claude) — installed in the same image
+		`@anthropic-ai/claude-code@${CLAUDE_VERSION}`,
+		// Both config dirs are created at image build time
+		`/home/valv/.codex`,
+		`/home/valv/.claude`,
+		// Standard env / user setup
 		"NPM_CONFIG_UPDATE_NOTIFIER=false",
 		"NPM_CONFIG_FUND=false",
 		"NPM_CONFIG_AUDIT=false",
@@ -412,15 +433,50 @@ func TestBuildIncludesExtraTags(t *testing.T) {
 	if len(result.Tags) != 2 {
 		t.Fatalf("result tags len = %d, want 2", len(result.Tags))
 	}
-	if !reflect.DeepEqual(runner.calls[0], []string{"buildx", "build", "--load", "-f", "/tmp/codex-image/Dockerfile", "-t", "ghcr.io/valv/codex:dev", "-t", "ghcr.io/valv/codex:0-117-0", "--build-arg", "CODEX_VERSION=0.117.0", "--build-arg", fmt.Sprintf("VALV_GID=%d", gid), "--build-arg", fmt.Sprintf("VALV_UID=%d", uid), "--label", "io.valv.managed=true", "--label", "io.valv.provider=codex", "--label", fmt.Sprintf("%s=%s", recipeHashLabel, svc.recipeHash()), "--label", "io.valv.scope=image", "--label", "io.valv.version=0.117.0", "/tmp/codex-image"}) {
-		t.Fatalf("Build() args = %#v", runner.calls[0])
+	// Alphabetic build-arg order: CLAUDE_VERSION < CODEX_VERSION < VALV_GID < VALV_UID
+	wantArgs := []string{
+		"buildx", "build", "--load",
+		"-f", "/tmp/codex-image/Dockerfile",
+		"-t", "ghcr.io/valv/codex:dev",
+		"-t", "ghcr.io/valv/codex:0-117-0",
+		"--build-arg", "CLAUDE_VERSION=latest",
+		"--build-arg", "CODEX_VERSION=0.117.0",
+		"--build-arg", fmt.Sprintf("VALV_GID=%d", gid),
+		"--build-arg", fmt.Sprintf("VALV_UID=%d", uid),
+		"--label", "io.valv.managed=true",
+		"--label", "io.valv.provider=codex",
+		"--label", fmt.Sprintf("%s=%s", recipeHashLabel, svc.recipeHash()),
+		"--label", "io.valv.scope=image",
+		"--label", "io.valv.version=0.117.0",
+		"/tmp/codex-image",
+	}
+	if !reflect.DeepEqual(runner.calls[0], wantArgs) {
+		t.Fatalf("Build() args = %#v, want %#v", runner.calls[0], wantArgs)
 	}
 }
 
 func TestServiceBuildFallsBackToLegacyBuildWhenBuildxUnavailable(t *testing.T) {
 	uid := os.Getuid()
 	gid := os.Getgid()
-	firstCall := strings.Join([]string{"buildx", "build", "--load", "-f", "/tmp/codex-image/Dockerfile", "-t", "ghcr.io/valv/codex:dev", "--build-arg", "CODEX_VERSION=0.117.0", "--build-arg", fmt.Sprintf("VALV_GID=%d", gid), "--build-arg", fmt.Sprintf("VALV_UID=%d", uid), "--label", "io.valv.managed=true", "--label", "io.valv.provider=codex", "--label", fmt.Sprintf("%s=%s", recipeHashLabel, svcRecipeHashForTest("/tmp/codex-image", "Dockerfile")), "--label", "io.valv.scope=image", "--label", "io.valv.version=0.117.0", "/tmp/codex-image"}, " ")
+	recipeHash := svcRecipeHashForTest("/tmp/codex-image", "Dockerfile")
+	// Alphabetic build-arg order: CLAUDE_VERSION < CODEX_VERSION < VALV_GID < VALV_UID.
+	// The first call (buildx) triggers the error that forces the legacy fallback.
+	firstCallParts := []string{
+		"buildx", "build", "--load",
+		"-f", "/tmp/codex-image/Dockerfile",
+		"-t", "ghcr.io/valv/codex:dev",
+		"--build-arg", "CLAUDE_VERSION=latest",
+		"--build-arg", "CODEX_VERSION=0.117.0",
+		"--build-arg", fmt.Sprintf("VALV_GID=%d", gid),
+		"--build-arg", fmt.Sprintf("VALV_UID=%d", uid),
+		"--label", "io.valv.managed=true",
+		"--label", "io.valv.provider=codex",
+		"--label", fmt.Sprintf("%s=%s", recipeHashLabel, recipeHash),
+		"--label", "io.valv.scope=image",
+		"--label", "io.valv.version=0.117.0",
+		"/tmp/codex-image",
+	}
+	firstCall := strings.Join(firstCallParts, " ")
 	runner := &runnerRecorder{
 		errs: map[string]error{
 			firstCall: fmt.Errorf("docker buildx is required but unavailable"),
@@ -446,8 +502,24 @@ func TestServiceBuildFallsBackToLegacyBuildWhenBuildxUnavailable(t *testing.T) {
 	if len(runner.calls) != 2 {
 		t.Fatalf("runner call count = %d, want 2", len(runner.calls))
 	}
-	if got, want := runner.calls[1], []string{"build", "-f", "/tmp/codex-image/Dockerfile", "-t", "ghcr.io/valv/codex:dev", "--build-arg", "CODEX_VERSION=0.117.0", "--build-arg", fmt.Sprintf("VALV_GID=%d", gid), "--build-arg", fmt.Sprintf("VALV_UID=%d", uid), "--label", "io.valv.managed=true", "--label", "io.valv.provider=codex", "--label", fmt.Sprintf("%s=%s", recipeHashLabel, svcRecipeHashForTest("/tmp/codex-image", "Dockerfile")), "--label", "io.valv.scope=image", "--label", "io.valv.version=0.117.0", "/tmp/codex-image"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("fallback args = %#v, want %#v", got, want)
+	// Legacy fallback uses "build" (not "buildx build --load") but same build-args.
+	wantFallback := []string{
+		"build",
+		"-f", "/tmp/codex-image/Dockerfile",
+		"-t", "ghcr.io/valv/codex:dev",
+		"--build-arg", "CLAUDE_VERSION=latest",
+		"--build-arg", "CODEX_VERSION=0.117.0",
+		"--build-arg", fmt.Sprintf("VALV_GID=%d", gid),
+		"--build-arg", fmt.Sprintf("VALV_UID=%d", uid),
+		"--label", "io.valv.managed=true",
+		"--label", "io.valv.provider=codex",
+		"--label", fmt.Sprintf("%s=%s", recipeHashLabel, recipeHash),
+		"--label", "io.valv.scope=image",
+		"--label", "io.valv.version=0.117.0",
+		"/tmp/codex-image",
+	}
+	if got := runner.calls[1]; !reflect.DeepEqual(got, wantFallback) {
+		t.Fatalf("fallback args = %#v, want %#v", got, wantFallback)
 	}
 }
 
@@ -489,9 +561,18 @@ func TestWriteDefaultClaudeContextWritesDockerfile(t *testing.T) {
 		t.Fatalf("ReadFile() error = %v", err)
 	}
 	for _, want := range []string{
+		// Primary CLI (claude)
 		`@anthropic-ai/claude-code@${CLAUDE_VERSION}`,
 		`CLAUDE_CONFIG_DIR=/home/valv/.claude`,
 		`ENTRYPOINT ["claude"]`,
+		// Cross-provider CLI (codex) — installed in the same image
+		`@openai/codex@${CODEX_VERSION}`,
+		// CODEX_HOME env so cross-provider codex calls find their config dir
+		`CODEX_HOME=/home/valv/.codex`,
+		// Both config dirs are created at image build time
+		`/home/valv/.claude`,
+		`/home/valv/.codex`,
+		// Standard env / user setup
 		"NPM_CONFIG_UPDATE_NOTIFIER=false",
 		"NPM_CONFIG_FUND=false",
 		"NPM_CONFIG_AUDIT=false",
@@ -500,7 +581,6 @@ func TestWriteDefaultClaudeContextWritesDockerfile(t *testing.T) {
 		`apt-get install -y --no-install-recommends bubblewrap ca-certificates git ncurses-term`,
 		`getent group "${VALV_GID}" >/dev/null || groupadd -g "${VALV_GID}" valv`,
 		`useradd -o -m -u "${VALV_UID}" -g "${VALV_GID}" -s /bin/sh valv`,
-		`mkdir -p /home/valv/.claude /workspace`,
 		`chown -R "${VALV_UID}:${VALV_GID}" /home/valv /workspace`,
 	} {
 		if !strings.Contains(string(content), want) {

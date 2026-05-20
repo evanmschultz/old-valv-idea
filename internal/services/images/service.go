@@ -88,10 +88,15 @@ type Service struct {
 }
 
 type BuildRequest struct {
-	Version   string
-	Pull      bool
-	NoCache   bool
-	ExtraTags []docker.ImageRef
+	Version string
+	// CrossProviderVersion is the version of the OTHER provider CLI to install in
+	// the image (e.g. the claude version when building a codex image, and vice
+	// versa). When empty, "latest" is used so the cross-provider npm install
+	// always succeeds even when the caller does not pin the secondary version.
+	CrossProviderVersion string
+	Pull                 bool
+	NoCache              bool
+	ExtraTags            []docker.ImageRef
 }
 
 type BuildResult struct {
@@ -310,15 +315,20 @@ func (s Service) Build(ctx context.Context, request BuildRequest) (BuildResult, 
 		tags = append(tags, extra)
 	}
 
+	crossVersion := strings.TrimSpace(request.CrossProviderVersion)
+	if crossVersion == "" {
+		crossVersion = "latest"
+	}
 	buildRequest := docker.ImageBuildRequest{
 		ContextDir: s.contextDir,
 		Dockerfile: filepath.Join(s.contextDir, s.dockerfile),
 		Tags:       tags,
 		Builder:    "auto",
 		BuildArgs: map[string]string{
-			s.providerVersionBuildArg(): version,
-			"VALV_GID":                  fmt.Sprintf("%d", s.groupID),
-			"VALV_UID":                  fmt.Sprintf("%d", s.userID),
+			s.providerVersionBuildArg():      version,
+			s.crossProviderVersionBuildArg(): crossVersion,
+			"VALV_GID":                       fmt.Sprintf("%d", s.groupID),
+			"VALV_UID":                       fmt.Sprintf("%d", s.userID),
 		},
 		Labels: map[string]string{
 			"io.valv.managed":  "true",
@@ -556,6 +566,17 @@ func (s Service) providerVersionBuildArg() string {
 	return "CODEX_VERSION"
 }
 
+// crossProviderVersionBuildArg returns the Docker build-arg name for the OTHER
+// provider's CLI version pin. Both Dockerfiles install both CLIs, so a build-arg
+// for the secondary CLI must always be present. Codex image needs CLAUDE_VERSION;
+// Claude image needs CODEX_VERSION.
+func (s Service) crossProviderVersionBuildArg() string {
+	if s.provider == domain.ProviderClaude {
+		return "CODEX_VERSION"
+	}
+	return "CLAUDE_VERSION"
+}
+
 func (s Service) versionImageRef(version string) docker.ImageRef {
 	return docker.NewImageRef(s.repository, strings.ReplaceAll(strings.TrimSpace(version), ".", "-"))
 }
@@ -634,7 +655,7 @@ RUN apt-get update \
 
 RUN getent group "${VALV_GID}" >/dev/null || groupadd -g "${VALV_GID}" valv \
     && useradd -o -m -u "${VALV_UID}" -g "${VALV_GID}" -s /bin/sh valv \
-    && mkdir -p /home/valv/.codex /workspace \
+    && mkdir -p /home/valv/.codex /home/valv/.claude /workspace \
     && chown -R "${VALV_UID}:${VALV_GID}" /home/valv /workspace
 
 ENV NPM_CONFIG_UPDATE_NOTIFIER=false \
@@ -646,6 +667,9 @@ ENV NPM_CONFIG_UPDATE_NOTIFIER=false \
 
 ARG CODEX_VERSION
 RUN npm install --global "@openai/codex@${CODEX_VERSION}"
+
+ARG CLAUDE_VERSION
+RUN npm install --global "@anthropic-ai/claude-code@${CLAUDE_VERSION}"
 
 USER valv
 WORKDIR /workspace
@@ -677,7 +701,9 @@ func WriteDefaultClaudeContext(root string) (string, error) {
 // packages, same valv user creation, same NPM_CONFIG env — and swaps in
 // Claude-specific bits: the @anthropic-ai/claude-code npm install, a
 // /home/valv/.claude config dir, a CLAUDE_CONFIG_DIR env var, a CLAUDE_VERSION
-// build arg, and a `claude` entrypoint.
+// build arg, and a `claude` entrypoint. Both CLIs (@openai/codex and
+// @anthropic-ai/claude-code) are installed so that a Claude Code agent running
+// inside this container can invoke `codex exec` directly.
 func DefaultClaudeDockerfile() string {
 	return strings.TrimSpace(`
 FROM node:22-bookworm-slim
@@ -691,7 +717,7 @@ RUN apt-get update \
 
 RUN getent group "${VALV_GID}" >/dev/null || groupadd -g "${VALV_GID}" valv \
     && useradd -o -m -u "${VALV_UID}" -g "${VALV_GID}" -s /bin/sh valv \
-    && mkdir -p /home/valv/.claude /workspace \
+    && mkdir -p /home/valv/.claude /home/valv/.codex /workspace \
     && chown -R "${VALV_UID}:${VALV_GID}" /home/valv /workspace
 
 ENV NPM_CONFIG_UPDATE_NOTIFIER=false \
@@ -700,10 +726,14 @@ ENV NPM_CONFIG_UPDATE_NOTIFIER=false \
     HOME=/home/valv \
     LOGNAME=valv \
     USER=valv \
-    CLAUDE_CONFIG_DIR=/home/valv/.claude
+    CLAUDE_CONFIG_DIR=/home/valv/.claude \
+    CODEX_HOME=/home/valv/.codex
 
 ARG CLAUDE_VERSION
 RUN npm install --global "@anthropic-ai/claude-code@${CLAUDE_VERSION}"
+
+ARG CODEX_VERSION
+RUN npm install --global "@openai/codex@${CODEX_VERSION}"
 
 USER valv
 WORKDIR /workspace
