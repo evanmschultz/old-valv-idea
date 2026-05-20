@@ -39,3 +39,34 @@ Append a `## Unit N.M — Round K` section per build attempt. See `main/drops/WO
 ## Hylla Feedback
 
 Hylla was queried to confirm the `docker.BuildImageArgs` sort behavior. The function is in `internal/adapters/docker/ops.go`, which is a Go file covered by Hylla. The information was confirmed via direct `Read` of `ops.go` rather than Hylla because the relevant detail (the `sort.Strings(keys)` call on line 83) is more efficiently verified by reading the file directly. No Hylla query was issued that produced a miss — the task was scoped to files I already had in context from the file reads. Categorized as: N/A (evidence gathered via Read for a file already loaded in context; Hylla not queried).
+
+## Unit 10.2 — Round 1
+
+- **Builder:** go-builder-agent
+- **Started:** 2026-05-19
+- **Files touched:**
+  - `internal/adapters/providers/claude/runtime.go`
+  - `internal/adapters/providers/claude/runtime_test.go`
+  - `drops/DROP_10_CROSS_PROVIDER_CONTAINER/PLAN.md` (state flip)
+  - `drops/DROP_10_CROSS_PROVIDER_CONTAINER/BUILDER_WORKLOG.md` (this file)
+
+- **Symbols added:**
+  - `PrepareRequest.OtherProviderProfileHome string` — optional host-side profile home of the other provider (codex). When non-empty, `PrepareRuntime` mounts it at `/home/valv/.codex` read-write and sets `CODEX_HOME=/home/valv/.codex` in the container env. When empty, cross-mount and env var are skipped.
+
+- **Production changes (runtime.go):**
+  - `PrepareRequest` struct: added `OtherProviderProfileHome string` field with doc comment, in a comment-separated group after `TempRoot` and before `Logger`.
+  - Reformatted all four `debugLog(request.Logger, ...)` call sites to `debugLog(\n\trequest.Logger,\n\t...)` to satisfy gofumpt's multi-line call hugging rule — these were pre-existing calls that gofumpt re-evaluated once the struct field alignment changed.
+  - `PrepareRuntime`: added conditional cross-mount block (lines ~133–140 after edit) after the primary `env` map is built and before `envPassthrough`. Block: normalize `OtherProviderProfileHome` via `pathutil.Normalize`, append `NewMountSpec(otherHome, "/home/valv/.codex", false)` to `mounts`, set `env["CODEX_HOME"] = "/home/valv/.codex"`.
+
+- **Test changes (runtime_test.go):**
+  - Renamed `TestPrepareRuntimeHasNoCodexEnv` → `TestPrepareRuntimeSkipsCodexMountWhenNotProvided`. Updated body: passes explicit `OtherProviderProfileHome: ""`, asserts `CODEX_HOME` absent from `Env` AND no mount with target `/home/valv/.codex`.
+  - Added `TestPrepareRuntimeMountsCodexHomeWhenProvided`: passes `OtherProviderProfileHome: t.TempDir()`, asserts `Env["CODEX_HOME"] == "/home/valv/.codex"` AND `findMountTarget` finds a non-read-only mount at `/home/valv/.codex`.
+
+- **Mage gate results:**
+  - `mage testPkg github.com/evanmschultz/valv/internal/adapters/providers/claude`: 22 tests passed, 0 failed, coverage 78.6% (floor 60%). GREEN.
+  - `mage build`: `./valv` produced cleanly. GREEN.
+
+## Hylla Feedback (Unit 10.2)
+
+- `hylla_search_keyword` with `query=NewMountSpec` returned the correct node (`github.com/evanmschultz/valv/internal/adapters/docker/NewMountSpec`) in one query — Hylla answered this lookup correctly. Followed up with a direct `Read` of `types.go` to confirm the `MountSpec` struct field names (`Source`, `Target`, `ReadOnly`) since Hylla returns the node ID but not the struct field layout inline. Suggestion: Hylla struct nodes could expose field names in their summary to save the follow-up `Read`.
+- All other evidence (runtime.go current state, existing test names, imports) gathered via `Read` on files not yet in context — no Hylla misses on Go symbol queries.

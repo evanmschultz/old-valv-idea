@@ -28,7 +28,14 @@ type PrepareRequest struct {
 	SharedHome  string
 	ProjectRoot string
 	TempRoot    string
-	Logger      *log.Logger
+	// OtherProviderProfileHome is the host-side profile home of the OTHER
+	// provider (e.g. the codex profile home when launching a claude container).
+	// When non-empty, PrepareRuntime mounts it at /home/valv/.codex read-write
+	// and sets CODEX_HOME=/home/valv/.codex in the container environment so the
+	// other CLI can authenticate using its native auth-file layout.
+	// When empty, the cross-mount and env var are skipped.
+	OtherProviderProfileHome string
+	Logger                   *log.Logger
 }
 
 // PreparedRuntime holds the runtime environment prepared for a Claude
@@ -82,7 +89,8 @@ func PrepareRuntime(ctx context.Context, request PrepareRequest) (PreparedRuntim
 	if err := os.MkdirAll(sharedHome, 0o755); err != nil {
 		return PreparedRuntime{}, fmt.Errorf("prepare claude runtime: ensure shared home %q: %w", sharedHome, err)
 	}
-	debugLog(request.Logger,
+	debugLog(
+		request.Logger,
 		"preparing claude runtime",
 		"profile_home", profileHome,
 		"shared_home", sharedHome,
@@ -106,7 +114,8 @@ func PrepareRuntime(ctx context.Context, request PrepareRequest) (PreparedRuntim
 		if err := copyDirContents(sharedHome, runtimeClaudeHome, nil); err != nil {
 			return PreparedRuntime{}, fmt.Errorf("prepare claude runtime: stage shared home %q: %w", sharedHome, err)
 		}
-		debugLog(request.Logger,
+		debugLog(
+			request.Logger,
 			"staged shared claude home for account runtime",
 			"runtime_claude_home", runtimeClaudeHome,
 			"shared_home", sharedHome,
@@ -123,12 +132,22 @@ func PrepareRuntime(ctx context.Context, request PrepareRequest) (PreparedRuntim
 		"USER":              "valv",
 	}
 
+	if strings.TrimSpace(request.OtherProviderProfileHome) != "" {
+		otherHome, err := pathutil.Normalize(request.OtherProviderProfileHome)
+		if err != nil {
+			return PreparedRuntime{}, fmt.Errorf("prepare claude runtime: normalize other provider home: %w", err)
+		}
+		mounts = append(mounts, dockeradapter.NewMountSpec(otherHome, "/home/valv/.codex", false))
+		env["CODEX_HOME"] = "/home/valv/.codex"
+	}
+
 	envPassthrough := TerminalEnvPassthrough()
 
 	cleanup := func() error {
 		var errs []error
 		if runtimeClaudeHome != sharedHome {
-			debugLog(request.Logger,
+			debugLog(
+				request.Logger,
 				"syncing shared claude state back to host home",
 				"runtime_claude_home", runtimeClaudeHome,
 				"shared_home", sharedHome,
@@ -145,7 +164,8 @@ func PrepareRuntime(ctx context.Context, request PrepareRequest) (PreparedRuntim
 		return errorsJoin(errs...)
 	}
 
-	debugLog(request.Logger,
+	debugLog(
+		request.Logger,
 		"prepared claude runtime",
 		"runtime_claude_home", runtimeClaudeHome,
 		"env", env,

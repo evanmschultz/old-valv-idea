@@ -141,7 +141,7 @@ file's Notes section records the deferral.
 
 | Field | Value |
 |---|---|
-| State | todo |
+| State | done (R1 — mage gates GREEN; cross-mount + CODEX_HOME conditional path landed) |
 | Paths | `internal/adapters/providers/claude/runtime.go`, `internal/adapters/providers/claude/runtime_test.go` |
 | Packages | `github.com/evanmschultz/valv/internal/adapters/providers/claude` |
 | Blocked by | — |

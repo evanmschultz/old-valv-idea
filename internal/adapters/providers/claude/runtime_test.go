@@ -83,7 +83,7 @@ func TestPrepareRuntimeMountsClaudeDir(t *testing.T) {
 	}
 }
 
-func TestPrepareRuntimeHasNoCodexEnv(t *testing.T) {
+func TestPrepareRuntimeSkipsCodexMountWhenNotProvided(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
@@ -98,9 +98,10 @@ func TestPrepareRuntimeHasNoCodexEnv(t *testing.T) {
 	}
 
 	prepared, err := PrepareRuntime(context.Background(), PrepareRequest{
-		ProfileHome: profileHome,
-		ProjectRoot: projectRoot,
-		TempRoot:    tempRoot,
+		ProfileHome:              profileHome,
+		ProjectRoot:              projectRoot,
+		TempRoot:                 tempRoot,
+		OtherProviderProfileHome: "",
 	})
 	if err != nil {
 		t.Fatalf("PrepareRuntime() error = %v", err)
@@ -112,7 +113,51 @@ func TestPrepareRuntimeHasNoCodexEnv(t *testing.T) {
 	}()
 
 	if _, ok := prepared.Env["CODEX_HOME"]; ok {
-		t.Fatalf("Env contains CODEX_HOME = %q, must not be set in claude runtime", prepared.Env["CODEX_HOME"])
+		t.Fatalf("Env contains CODEX_HOME = %q, must not be set when OtherProviderProfileHome is empty", prepared.Env["CODEX_HOME"])
+	}
+	for _, m := range prepared.Mounts {
+		if m.Target == "/home/valv/.codex" {
+			t.Fatalf("mounts contain /home/valv/.codex target = %+v, must not be present when OtherProviderProfileHome is empty", m)
+		}
+	}
+}
+
+func TestPrepareRuntimeMountsCodexHomeWhenProvided(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	profileHome := filepath.Join(root, "profile")
+	projectRoot := filepath.Join(root, "project")
+	tempRoot := filepath.Join(root, "tmp")
+	otherHome := t.TempDir()
+	if err := os.MkdirAll(profileHome, 0o755); err != nil {
+		t.Fatalf("MkdirAll(profileHome) error = %v", err)
+	}
+	if err := os.MkdirAll(projectRoot, 0o755); err != nil {
+		t.Fatalf("MkdirAll(projectRoot) error = %v", err)
+	}
+
+	prepared, err := PrepareRuntime(context.Background(), PrepareRequest{
+		ProfileHome:              profileHome,
+		ProjectRoot:              projectRoot,
+		TempRoot:                 tempRoot,
+		OtherProviderProfileHome: otherHome,
+	})
+	if err != nil {
+		t.Fatalf("PrepareRuntime() error = %v", err)
+	}
+	defer func() {
+		if err := prepared.Close(); err != nil {
+			t.Fatalf("prepared.Close() error = %v", err)
+		}
+	}()
+
+	if got := prepared.Env["CODEX_HOME"]; got != "/home/valv/.codex" {
+		t.Fatalf("Env[CODEX_HOME] = %q, want /home/valv/.codex", got)
+	}
+	mount := findMountTarget(t, prepared.Mounts, "/home/valv/.codex")
+	if mount.ReadOnly {
+		t.Fatalf("codex cross-mount ReadOnly = true, want false (read-write so codex can write session state)")
 	}
 }
 
