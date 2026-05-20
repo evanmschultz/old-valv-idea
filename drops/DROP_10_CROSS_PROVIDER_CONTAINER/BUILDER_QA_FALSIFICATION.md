@@ -194,3 +194,82 @@ None — Hylla not queried for this round. All Go-symbol evidence (current `runt
 ### Verdict
 
 **PASS.** No CONFIRMED counterexample across the eight enumerated attack vectors. Attack 4 (cleanup-on-normalize-error) flagged as an inherited pre-existing pattern shared by the claude package (already accepted at Unit 10.2 falsification) and by other early-return sites in the same function — not a 10.3 regression. Both required mage gates re-ran green on HEAD (`mage testPkg .../codex`: 24/24 tests, 74.9% coverage; `mage build`: green).
+
+## Unit 10.4 — Round 1
+
+**Commit under review:** `d449416` — `feat(claude): unit 10.4 wire codex cross-binding lookup in service`.
+
+**Files in diff:**
+
+- `internal/services/claude/service.go` (cross-binding lookup block + `OtherProviderProfileHome` pass-through)
+- `internal/services/claude/service_test.go` (`fakeStore` cross-fields + `ProfileByID` / `BindingByProjectID` dispatch + `boundClaudeStore` default + `TestRunCrossProviderMountWhenCodexBound` table-driven)
+- `drops/DROP_10_CROSS_PROVIDER_CONTAINER/{PLAN.md,BUILDER_WORKLOG.md}` (docs)
+
+### Attacks attempted
+
+**1. `fakeStore` zero-value cross-binding leak across pre-existing fixtures — REFUTED.**
+
+The Plan-QA R2 advisory required every pre-existing fixture using `boundClaudeStore` to inherit `crossBindingErr: domain.ErrNotFound` so the cross lookup short-circuits without dereferencing a zero-value `crossBinding`. Confirmed at `service_test.go:170` — the helper sets `crossBindingErr: domain.ErrNotFound` exactly once, and every reachable cross-lookup site is therefore safe. Flow-traced the remaining inline `fakeStore{}` literals:
+
+- `TestNewRequiresDependencies` (line 186-191): `New()` rejects at construction → `Run` never reached → cross-lookup unreached.
+- `TestRunReturnsUnboundProjectWhenNoProject` (line 287): `projectErr` triggers inside `resolveBinding` (service.go:144-148) → returns before cross-lookup.
+- `TestRunReturnsUnboundProjectWhenNoBinding` (line 313): `bindingErr` triggers inside `resolveBinding` (service.go:269-275) → returns before cross-lookup.
+- `TestRunRejectsWrongBindingProvider` (line 339): wrong-provider guard at service.go:276-278 → exits before cross-lookup.
+- `TestRunRejectsWrongProfileProvider` (line 374): wrong-profile guard at service.go:287-289 → exits before cross-lookup.
+
+All tests that do reach the cross-lookup go through `boundClaudeStore`, which carries the ErrNotFound default. No counterexample.
+
+**2. `ProfileByID` dispatch correctness with zero/empty IDs — REFUTED.**
+
+`service_test.go:57` guards the cross-profile branch with `if f.crossProfile.ID != "" && id == f.crossProfile.ID`. The non-empty cross-ID requirement is explicit; when `crossProfile` is the zero value (`ID == ""`), the guard fails and dispatch falls through to the primary profile. There is no path where an empty requested ID coincidentally matches a zero-value cross profile.
+
+**3. Insertion site — REFUTED.**
+
+`service.go:160` closes the `else { resolveBinding }` branch; both branches converge into a fully-populated `resolved`. Lines 162-175 perform the cross-lookup. Line 180 calls `clauderuntime.PrepareRuntime` with `OtherProviderProfileHome: otherProfileHome`. The insertion site is exactly between resolution convergence and `PrepareRuntime`, as required.
+
+**4. `resolved.project.ID` reference — REFUTED.**
+
+`resolvedLaunchBinding` (service.go:243-247) embeds `project domain.Project`. `domain.Project.ID` exists as a string field (verified by grepping the domain package — `Project` struct carries `ID string`, used throughout `resolveBinding` at line 269 with `projectRecord.ID`). The cross-lookup at line 167 uses `resolved.project.ID` correctly.
+
+**5. `ProfileByID` error handling parity with Option A — REFUTED.**
+
+`service.go:169-172` uses a nested `if profileErr == nil` block. When `ProfileByID` returns ANY non-nil error (including ErrNotFound or arbitrary store errors), `otherProfileHome` remains empty and the cross-mount is silently skipped. This is consistent with the dev-decided Option A semantics (orphaned binding tolerated, silent skip). The outer binding-lookup is strictly typed (ErrNotFound silent, anything else fatal), but the inner profile lookup is uniformly silent — the deliberate asymmetry matches the spec.
+
+**6. `otherProfileHome` empty-string passthrough — REFUTED.**
+
+`internal/adapters/providers/claude/runtime.go:135` guards the cross-mount block with `if strings.TrimSpace(request.OtherProviderProfileHome) != ""`. When `Service.Run` passes the empty default, the runtime layer skips both the mount append and the `CODEX_HOME` env var. The contract is symmetric end-to-end.
+
+**7. Test row coverage — REFUTED.**
+
+`TestRunCrossProviderMountWhenCodexBound` (service_test.go:617-754):
+
+- Row `"codex bound"` (line 663-669): asserts `wantCodexMount` (mount target `/home/valv/.codex` sourced from `codexProfileHome`) AND `wantCodexEnv` (`CODEX_HOME == /home/valv/.codex`).
+- Row `"codex not bound (ErrNotFound)"` (line 670-675): asserts NO `/home/valv/.codex` mount AND empty `CODEX_HOME` env.
+- Row `"codex store error"` (line 677-683): asserts `Run` returns non-nil error; early-returns at line 720 to avoid stale-state checks.
+
+Each row has independent assertions matching its semantics. No row is a false positive.
+
+**8. Service mock dependencies / caller signature stability — REFUTED.**
+
+`Service.Run` signature unchanged: `(ctx context.Context, cwd string, claudeArgs []string) error`. The cross-lookup is purely internal store-call expansion. No external caller (cli, tui) sees a different surface.
+
+**9. Stripping `ProfileByID` orphaned-binding path — REFUTED.**
+
+Confirmed by the dev-decided Option A spec: when a binding row resolves but its `ProfileID` no longer exists, `ProfileByID` returns ErrNotFound, the inner `if profileErr == nil` skips, and `otherProfileHome` stays empty → cross-mount silently skipped. Identical UX to "codex not bound". Consistent with the planner's stated semantics.
+
+**10. Cross-pollution from existing test fixtures — REFUTED.**
+
+Re-verified attack 1's flow trace. All five inline `fakeStore{}` literals exit before reaching the cross-lookup; the single helper `boundClaudeStore` carries the ErrNotFound default. No fixture leaves `crossBindingErr` as nil at a site that can reach the cross-lookup. Adversarial steelman: could a future test author add an inline `fakeStore{}` literal whose flow reaches cross-lookup? Yes, but that future risk is not a 10.4 regression — the doc comment at `service_test.go:29-31` explicitly tells future authors to set `crossBindingErr: domain.ErrNotFound` to opt out. Mitigation documented.
+
+### Mage gates (re-run on HEAD `d449416`)
+
+- `mage testPkg github.com/evanmschultz/valv/internal/services/claude`: 23 tests passed, 0 failed, coverage 80.9% (floor 60%). GREEN.
+- `mage build`: `./valv` produced cleanly. GREEN.
+
+### Hylla Feedback
+
+None — Hylla not queried for this round. All Go-symbol evidence (current `service.go` shape, `service_test.go` fixtures, `runtime.go` cross-mount contract, `resolvedLaunchBinding` struct, `domain.Project.ID` field) was gathered via `Read` because HEAD `d449416` is mid-drop with four commits post-baseline — Hylla index is necessarily stale for the touched files until drop-end reingest. Per protocol this is N/A (changed files, Hylla stale until reingest), not a Hylla miss.
+
+### Verdict
+
+**PASS.** No CONFIRMED counterexample across the ten enumerated attack vectors. Plan-QA R2's promoted advisory (default `crossBindingErr: domain.ErrNotFound` in `boundClaudeStore`) was applied correctly; the single-helper consolidation means no inline-literal fixture leaks. Cross-binding lookup placement, profile-dispatch correctness, runtime empty-string passthrough, and test-row coverage all confirmed via direct code reads. Mage gates re-ran green (`mage testPkg .../claude`: 23/23 tests, 80.9% coverage; `mage build`: green).

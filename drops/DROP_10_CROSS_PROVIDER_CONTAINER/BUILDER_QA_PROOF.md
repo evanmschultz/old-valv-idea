@@ -239,3 +239,50 @@ durable proof certificate for that build round.
 ### Hylla Feedback
 
 N/A — proof review used `Read` directly on the two Go files plus `mage testPkg` / `mage build` outputs. No Hylla query was attempted, so there is no miss to report.
+
+## Unit 10.4 — Round 1
+
+- **Reviewer:** go-qa-proof-agent
+- **Verdict:** PASS
+- **Files reviewed:**
+  - `internal/services/claude/service.go`
+  - `internal/services/claude/service_test.go`
+- **Re-run mage gates:**
+  - `mage testPkg github.com/evanmschultz/valv/internal/services/claude`: 23/23 pass, 80.9% coverage, floor 60% — GREEN. Matches the worklog claim exactly.
+  - `mage build`: `[SUCCESS] Built valv (./valv)` — GREEN.
+
+### AC-by-AC evidence
+
+1. **Cross-binding lookup inserted in `Service.Run` AFTER `resolved` populated AND BEFORE `clauderuntime.PrepareRuntime` call.** `service.go:162-175` sits immediately after the `if s.overrideProfile != nil { ... } else { resolved, err = s.resolveBinding(...) }` convergence block (ends line 160) and before the `clauderuntime.PrepareRuntime(...)` call at line 180. Placement is correct.
+2. **Lookup uses `BindingByProjectID(ctx, resolved.project.ID, domain.ProviderCodex)` + `ProfileByID(ctx, otherBinding.ProfileID)`.** `service.go:167` (`s.store.BindingByProjectID(ctx, resolved.project.ID, domain.ProviderCodex)`) and `service.go:169` (`s.store.ProfileByID(ctx, otherBinding.ProfileID)`). Exact symbol + arg match to spec.
+3. **ErrNotFound silently skipped; other errors fatal.** `service.go:173-175`: `else if !errors.Is(err, domain.ErrNotFound) { return fmt.Errorf("run claude launch service: lookup codex binding for project %q: %w", resolved.project.Root, err) }`. The success path leaves `otherProfileHome=""` when `ProfileByID` fails too — the nested `profileErr == nil` guard means a profile lookup failure also silently degrades to no cross-mount. Spec says "other errors fatal" applies to the binding lookup; profile-lookup degrade is a defensible Option A behaviour (matches the "fail cleanly, no cross-mount" intent) and is not contradicted by the AC text.
+4. **`OtherProviderProfileHome: otherProfileHome` passed to `PrepareRequest`.** `service.go:185` — explicit named field in the `clauderuntime.PrepareRequest{...}` struct literal.
+5. **`fakeStore` extended with cross-keyed dispatch (`crossBinding`, `crossBindingErr`, `crossProfile`, `crossProfileErr`).** `service_test.go:29-38` declares all four fields with doc comments. `service_test.go:83-88` (`BindingByProjectID`) dispatches on `provider == domain.ProviderCodex` → returns `crossBinding/crossBindingErr`. `service_test.go:56-61` (`ProfileByID`) dispatches on `id == f.crossProfile.ID` → returns `crossProfile/crossProfileErr`. Dispatch is correct and avoids contaminating the primary path.
+6. **CRITICAL — `boundClaudeStore` sets `crossBindingErr: domain.ErrNotFound` as default.** `service_test.go:166-171`: returned `fakeStore` literal includes `crossBindingErr: domain.ErrNotFound`. Every existing test using `boundClaudeStore` opts out of cross-mount via ErrNotFound, so the new lookup is silently skipped and the runtime request remains unchanged from pre-10.4 behaviour. Verified: `TestRunSucceedsWithBoundProject`, `TestValidateBindingReturnsNilForBoundProject`, `TestRunRejectsWorkingDirectoryOutsideProjectRoot`, `TestRunRejectsSiblingPathThatSharesProjectPrefix`, `TestRunBuildsNonInteractiveDockerRequestWhenTTYDisabled`, `TestRunRejectsOverrideProfileWithWrongProvider`, `TestRunBubblesExecutorErrors`, `TestRunUsesOverrideProfileHomePath` all consume `boundClaudeStore` and all pass under the re-run.
+7. **`TestRunCrossProviderMountWhenCodexBound` exists with 3 rows (bound, ErrNotFound, store-error).** `service_test.go:617-754`. Rows: `"codex bound"` (line 663) wires `crossBinding=codexBinding`, `crossProfile=codexProfile`, expects mount + env; `"codex not bound (ErrNotFound)"` (line 671) wires `crossBindingErr=domain.ErrNotFound`, expects success + no mount + no env; `"codex store error"` (line 678) wires `crossBindingErr=storeError`, expects non-nil error. Each row's assertions match spec.
+8. **All existing tests pass.** Confirmed by the re-run: 23/23 pass. The pre-existing 22 tests + `TestRunCrossProviderMountWhenCodexBound`'s 3-row subtest = 22 base + 1 parent = 23 reported by mage (subtests collapse to the parent in the test count). No regressions.
+9. **`mage testPkg .../services/claude` GREEN (claim: 23 @ 80.9%).** Re-run captured above matches exactly: `23 tests passed`, `80.9%` coverage.
+
+### Certificate
+
+- **Premises**
+  - The cross-binding lookup sits at the exact convergence point (after `resolved` populated, before `clauderuntime.PrepareRuntime`).
+  - Lookup arg + symbol shape matches the spec (`BindingByProjectID(ctx, resolved.project.ID, ProviderCodex)` then `ProfileByID(ctx, otherBinding.ProfileID)`).
+  - `ErrNotFound` is silently skipped; other errors return as wrapped fatal.
+  - `OtherProviderProfileHome` is passed into `PrepareRequest`.
+  - `fakeStore` exposes four cross-keyed fields with correct dispatch.
+  - `boundClaudeStore` defaults `crossBindingErr: domain.ErrNotFound`, opting all pre-existing tests out of cross-mount.
+  - `TestRunCrossProviderMountWhenCodexBound` covers all three rows.
+  - `mage testPkg` + `mage build` are green and match the worklog claim exactly.
+- **Evidence** — `service.go:162-187`, `service_test.go:29-38`, `service_test.go:56-61`, `service_test.go:83-88`, `service_test.go:154-172`, `service_test.go:617-754`; mage outputs (`23/23 @ 80.9%`, `[SUCCESS] Built valv`).
+- **Trace or cases**
+  - "Codex bound" → `BindingByProjectID(ProviderCodex)` returns `codexBinding,nil` → `ProfileByID(codexBinding.ProfileID)` returns `codexProfile,nil` → `otherProfileHome=codexProfileHome` → `PrepareRequest.OtherProviderProfileHome=codexProfileHome` → `PrepareRuntime` appends `/home/valv/.codex` mount + sets `CODEX_HOME` → assertions PASS.
+  - "Codex not bound (ErrNotFound)" → `BindingByProjectID(ProviderCodex)` returns `_,ErrNotFound` → `errors.Is(err, ErrNotFound)` true → silent skip → `otherProfileHome=""` → `PrepareRuntime` conditional bypassed → no `/home/valv/.codex` mount, no `CODEX_HOME` → assertions PASS.
+  - "Codex store error" → `BindingByProjectID(ProviderCodex)` returns `_,storeError` → `errors.Is(err, ErrNotFound)` false → `return fmt.Errorf(...)` → Run returns non-nil → assertion PASS.
+  - Regression path: every existing test goes through `boundClaudeStore` → `crossBindingErr=ErrNotFound` → silent skip → request unchanged → all pre-existing assertions remain valid. Confirmed by 23/23 green.
+- **Conclusion** — PASS. All nine ACs have direct file:line citation evidence. Both mage gates re-run green and match the worklog claim exactly (23 tests @ 80.9%, `./valv` built). The plan-QA promoted advisory (`boundClaudeStore` default) is honored — no regression on any pre-existing test.
+- **Unknowns** — None.
+
+### Hylla Feedback
+
+N/A — proof review used `Read` directly on the two Go files (both modified in this drop, so necessarily stale in Hylla) plus `mage testPkg` / `mage build` outputs. No Hylla query was attempted, so there is no miss to report.
