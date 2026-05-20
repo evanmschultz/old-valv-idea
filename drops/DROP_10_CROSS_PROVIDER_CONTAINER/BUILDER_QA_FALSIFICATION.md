@@ -273,3 +273,87 @@ None — Hylla not queried for this round. All Go-symbol evidence (current `serv
 ### Verdict
 
 **PASS.** No CONFIRMED counterexample across the ten enumerated attack vectors. Plan-QA R2's promoted advisory (default `crossBindingErr: domain.ErrNotFound` in `boundClaudeStore`) was applied correctly; the single-helper consolidation means no inline-literal fixture leaks. Cross-binding lookup placement, profile-dispatch correctness, runtime empty-string passthrough, and test-row coverage all confirmed via direct code reads. Mage gates re-ran green (`mage testPkg .../claude`: 23/23 tests, 80.9% coverage; `mage build`: green).
+
+## Unit 10.5 — Round 1
+
+**Commit under review:** `5bcaecc` — `feat(codex): unit 10.5 wire claude cross-binding lookup in service`.
+
+**Files in diff:**
+
+- `internal/services/codex/service.go` (+21 / -5)
+- `internal/services/codex/service_test.go` (+234 / -37)
+- `drops/DROP_10_CROSS_PROVIDER_CONTAINER/{PLAN.md,BUILDER_WORKLOG.md}` (docs)
+
+### Attacks attempted
+
+**1. fakeStore opt-out completeness — REFUTED.**
+
+Plan-QA R2 advisory + 10.4 lesson: every inline `fakeStore{...}` literal whose Run path reaches the new cross-lookup must set `crossBindingErr: domain.ErrNotFound`. Enumerated all 11 inline `fakeStore{` sites in `service_test.go` (lines 166, 194, 222, 337, 365, 394, 424, 502, 547, 606, 739):
+
+- Line 166 is inside `boundCodexStore`'s own body — has `crossBindingErr: domain.ErrNotFound` at line 170.
+- Lines 194, 222, 337, 365, 394, 424, 502, 547, 606 are existing Run-path tests — each has `crossBindingErr: domain.ErrNotFound` added (verified at lines 196, 226, 341, 369, 398, 428, 506, 551, 610 respectively).
+- Line 739 is the new `TestRunCrossProviderMountWhenClaudeBound` fixture — table-driven, populates `crossBindingErr` from `tc.crossBindingErr` per row (`ErrNotFound`, `nil`, and a custom store error).
+
+All Run-path fakeStore literals correctly opt out. No site leaves `crossBindingErr` as the zero-value `nil` at a position the cross-lookup can reach. No counterexample.
+
+**2. macOS symlink in temp dirs — REFUTED.**
+
+`service_test.go:681-685` calls `filepath.EvalSymlinks(t.TempDir())` to normalize the macOS `/var/folders/...` → `/private/var/folders/...` symlink. On linux CI where `t.TempDir()` returns a path without symlinks, `EvalSymlinks` is effectively a no-op (returns the input path unchanged, modulo cleaning). Cross-platform safe. The expected mount source uses `claudeProfileHome` directly (same EvalSymlinks-normalized value) so the comparison at line 779-780 matches what `pathutil.Normalize` produces inside `codexruntime.PrepareRuntime`. No counterexample.
+
+**3. Insertion site — REFUTED.**
+
+The cross-binding lookup at `service.go:155-168` sits after both `overrideProfile` (lines 122-146) and `else { resolved = resolveBinding(...) }` (lines 147-153) — i.e. `resolved` is fully populated. Lines 170-178 call `codexruntime.PrepareRuntime` with `OtherProviderProfileHome: otherProfileHome`. The lookup is between `resolved` convergence and runtime preparation as required. Downstream logic (`sharedHome = s.sharedCodexStateHome(resolved.profile)` at line 170, `s.emitNotices(...)` at line 183, request building at 185-188, `runAttached` at 206-209) is untouched. The `sharedHome` value is computed from `resolved.profile` (primary codex profile), not cross profile — so cross-binding has no effect on shared-state pathing. No counterexample.
+
+**4. `detectAlways` helper conflict — REFUTED.**
+
+`detectAlways` is defined at `internal/services/codex/service_test.go:174` and a sibling defined at `internal/services/claude/service_test.go:174`. Different packages = different scopes; Go allows the same name in different packages. No conflict; no test compilation issue. Both functions return their respective package's `DetectFunc` type (since both packages define an unrelated `DetectFunc` type alias).
+
+**5. Test count delta — REFUTED.**
+
+Pre-10.5 service_test.go had 13 top-level `Test*` funcs (verified via `git show HEAD~1:internal/services/codex/service_test.go | grep -c '^func Test'`). Post-10.5 has 14 (one new: `TestRunCrossProviderMountWhenClaudeBound`). `mage testPkg` reports 17 tests because the new test runs three table-driven sub-rows ("claude bound", "claude not bound (ErrNotFound)", "claude store error") and `go test -json` counts sub-tests independently. 14 parent funcs + 3 reported sub-rows from the new table-driven test = 17 reported tests. Reconciled.
+
+**6. `ProfileByID` dispatch — REFUTED.**
+
+`fakeStore.ProfileByID` at lines 57-62 dispatches on `id`: when `f.crossProfile.ID != "" && id == f.crossProfile.ID`, returns `(f.crossProfile, f.crossProfileErr)`; otherwise returns primary `(f.profile, f.profileErr)`. The guard `f.crossProfile.ID != ""` short-circuits the cross check when fixtures don't set `crossProfile` — so existing tests that lookup primary `profile.ID` always return the primary profile. The new cross-mount test sets `crossProfile.ID = "profile-claude-1"` and `binding.ProfileID = "profile-codex-1"` so the two ID spaces never collide. Dispatch correct.
+
+**7. `resolved.project.ID` reference — REFUTED.**
+
+`resolvedLaunchBinding` at `service.go:247-251` carries `project domain.Project`; `domain.Project` exposes `ID string` field (used by existing `BindingByProjectID(ctx, projectRecord.ID, ...)` in `resolveBinding` at line 273). `resolved.project.ID` accesses the same field; no nil-pointer risk because `resolved.project` is a value type, not a pointer. Correct reference.
+
+**8. Symmetry with 10.4 — REFUTED.**
+
+Side-by-side compare of `internal/services/claude/service.go:162-175` vs `internal/services/codex/service.go:155-168`:
+
+- claude: `BindingByProjectID(..., domain.ProviderCodex)` + error wrap `"run claude launch service: lookup codex binding for project %q: %w"`.
+- codex: `BindingByProjectID(..., domain.ProviderClaude)` + error wrap `"run codex launch service: lookup claude binding for project %q: %w"`.
+- Both share the identical inner structure: `if err == nil { otherProfile, profileErr := s.store.ProfileByID(...); if profileErr == nil { otherProfileHome = otherProfile.HomePath } } else if !errors.Is(err, domain.ErrNotFound) { return ... }`.
+- Both pass `OtherProviderProfileHome: otherProfileHome` to their respective `PrepareRuntime`.
+
+Provider-swap symmetric. The codex side additionally carries `SharedHome: sharedHome` (the codex-specific shared state pattern from before DROP_10) which the claude side intentionally omits (`SharedHome: ""`, claude's isolated-first model). That asymmetry predates DROP_10 and is unrelated to the cross-binding feature. No counterexample.
+
+**9. Error message scope drift — REFUTED.**
+
+The new wrap `"run codex launch service: lookup claude binding for project %q: %w"` matches the package's existing wrap style: every error in `service.go` is prefixed `"run codex launch service: …"` (verified via `rg 'run codex launch service' service.go` → 11 matches, all consistent). The format mirrors the existing `"run codex launch service: lookup project %q: %w"` and `"run codex launch service: lookup binding for project %q: %w"` patterns at lines 140 and 278. No scope drift.
+
+**10. Coverage decline plausibility — REFUTED.**
+
+Codex package coverage 76.0% vs claude 80.9% (Δ = 4.9 points). The codex package has additional code paths not present in the claude package: (a) `sharedCodexStateHome` (lines 228-240) computes a shared-host home via `codexruntime.DefaultHostProfile`; (b) `emitNotices` (lines 356-369) — codex-specific MCP-warning surface that claude doesn't have; (c) `runAttached` (lines 217-226) — codex-specific attached-run wrapper. Each adds untested branches (e.g. `s.realHome == ""` skip in `sharedCodexStateHome`, `DefaultHostProfile` error path). The delta is plausible. No counterexample.
+
+### Additional findings (not counterexamples)
+
+**Dead helper `boundCodexStore` defined but unused.** The builder added `boundCodexStore` at `service_test.go:154-172` (mirroring `boundClaudeStore` from the claude package) but did NOT refactor any of the 10 inline `fakeStore{...}` Run-path literals to use it. In the claude package, `boundClaudeStore` is invoked at 8+ call sites (lines 230, 413, 436, 461, 486, 557, 591, 777). In the codex package, the helper has zero call sites. This is asymmetric with 10.4's pattern and leaves the helper as dead code. The current magefile does not run `staticcheck`/U1000, so this does not break the build — `mage testPkg` passes — and the inline opt-outs are functionally correct. Flagging as a minor code-hygiene concern, not a counterexample to functional correctness. If a future drop enables staticcheck, this will trip U1000.
+
+**Silent profile-error swallow on cross-lookup.** The cross-binding lookup at `service.go:159-168` silently swallows any `ProfileByID` error (e.g. orphan binding pointing at a deleted profile, transient store error). The PLAN.md prescribed exactly this pattern and the claude side at `service.go:166-175` (10.4) carries the identical shape. Symmetric across both providers; matches PLAN.md prescribed code at PLAN.md:322-333. Not a 10.5 regression — the design choice predates 10.5 in 10.4. Flagging for awareness only; if surfaced as a future concern, both providers must be updated together.
+
+### Mage gates (re-run on HEAD `5bcaecc`)
+
+- `mage testPkg github.com/evanmschultz/valv/internal/services/codex`: 17 tests passed, 0 failed, coverage 76.0% (floor 60%). GREEN.
+- `mage build`: `./valv` produced cleanly. GREEN.
+
+### Hylla Feedback
+
+N/A — task touched files changed since last ingest (codex `service.go` and `service_test.go` are new DROP_10 edits, codex `runtime.go` updated in 10.3 is also stale until drop-end reingest). All evidence gathered via `Read` + `rtk grep` on the current checkout. No Hylla queries issued.
+
+### Verdict
+
+**PASS.** No CONFIRMED counterexample across the ten enumerated attack vectors. The fakeStore opt-out coverage is complete across all 10 inline Run-path literals; the macOS symlink fix (`filepath.EvalSymlinks`) is cross-platform safe; insertion-site placement, dispatch correctness, symmetry with 10.4, and error-wrap style all confirmed. Mage gates green on HEAD `5bcaecc` (17/17 tests, 76.0% coverage; build green). Two minor non-counterexample findings recorded for awareness: dead `boundCodexStore` helper (asymmetric with 10.4 usage; harmless until staticcheck lands) and silent profile-error swallow (symmetric design carried from 10.4; matches PLAN.md prescription).

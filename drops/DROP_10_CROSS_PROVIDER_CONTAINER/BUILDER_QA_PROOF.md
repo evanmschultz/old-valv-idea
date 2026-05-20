@@ -286,3 +286,60 @@ N/A — proof review used `Read` directly on the two Go files plus `mage testPkg
 ### Hylla Feedback
 
 N/A — proof review used `Read` directly on the two Go files (both modified in this drop, so necessarily stale in Hylla) plus `mage testPkg` / `mage build` outputs. No Hylla query was attempted, so there is no miss to report.
+
+## Unit 10.5 — Round 1
+
+### Verdict: PASS
+
+### Scope
+
+Mirror of 10.4 against `codex.Service.Run`: insert a Claude cross-binding lookup at the convergence point, plumb `OtherProviderProfileHome` into `codexruntime.PrepareRequest`, extend `fakeStore` with cross-keyed dispatch, opt all pre-existing Run-path fixtures out of cross-mount via `crossBindingErr: domain.ErrNotFound`, and add `TestRunCrossProviderMountWhenClaudeBound` (3 rows).
+
+Commit under review: `5bcaecc feat(codex): unit 10.5 wire claude cross-binding lookup in service`.
+
+### Evidence
+
+1. **Lookup placement (AFTER `resolved`, BEFORE `PrepareRuntime`).** `internal/services/codex/service.go:155-168`. Branch resolution lands at lines 142-146 (override) or line 149 (`resolveBinding`), then control reaches 153. Lookup block starts at 155 with `// Cross-provider binding lookup:` and ends at 168. PrepareRuntime is invoked at line 171. No other store/runtime call sits between them. Placement is correct.
+2. **Lookup arg + symbol shape.** `service.go:160`: `otherBinding, err := s.store.BindingByProjectID(ctx, resolved.project.ID, domain.ProviderClaude)`. `service.go:162`: `otherProfile, profileErr := s.store.ProfileByID(ctx, otherBinding.ProfileID)`. Symbols match spec exactly.
+3. **ErrNotFound silently skipped; other errors fatal.** `service.go:161-168`: success branch (`err == nil`) reads the profile; `else if !errors.Is(err, domain.ErrNotFound)` returns a wrapped fatal `fmt.Errorf("run codex launch service: lookup claude binding for project %q: %w", resolved.project.Root, err)`; ErrNotFound falls through both branches → `otherProfileHome` stays "" → silent skip. Trace covers all three error states.
+4. **`OtherProviderProfileHome: otherProfileHome` passed to PrepareRequest.** `service.go:176` — named field in the `codexruntime.PrepareRequest{...}` struct literal between `TempRoot` and `Logger`. Consumer side at `internal/adapters/providers/codex/runtime.go:122-129` reads the field, normalizes via `pathutil.Normalize`, appends a `/home/valv/.claude` mount, and sets `env["CLAUDE_CONFIG_DIR"] = "/home/valv/.claude"`.
+5. **`fakeStore` extended with cross-keyed dispatch.** `service_test.go:29-43` declares `crossBinding`, `crossBindingErr`, `crossProfile`, `crossProfileErr` with doc comments explaining the opt-out contract. `service_test.go:82-87` (`BindingByProjectID`): `if provider == domain.ProviderClaude { return f.crossBinding, f.crossBindingErr }` otherwise primary. `service_test.go:58-60` (`ProfileByID`): `if f.crossProfile.ID != "" && id == f.crossProfile.ID { return f.crossProfile, f.crossProfileErr }` otherwise primary. Dispatch is precise.
+6. **Opt-out default applied to existing fixtures.** All 10 pre-existing inline `fakeStore{}` literals in Run-path tests now carry `crossBindingErr: domain.ErrNotFound` (lines 196, 226, 341, 369, 398, 428, 506, 551, 610). The new `boundCodexStore` helper at `service_test.go:154-172` also sets `crossBindingErr: domain.ErrNotFound` (line 170). Verified by ripgrep cross-check: 10 fakeStore literals in pre-10.5 test functions, 10 matching `crossBindingErr: domain.ErrNotFound` lines.
+7. **`TestRunCrossProviderMountWhenClaudeBound` 3 rows.** `service_test.go:664-802`. Table rows at lines 710-731: `"claude bound"` (wires `crossBinding=claudeBinding`, `crossProfile=claudeProfile`, asserts mount + env present + source matches `claudeProfileHome`); `"claude not bound (ErrNotFound)"` (wires only `crossBindingErr=domain.ErrNotFound`, asserts success + no mount + no env); `"claude store error"` (wires `crossBindingErr=storeError` from `errors.New("store unavailable")`, asserts non-nil error). Subtests are `t.Parallel()`-clean with `tc := tc` capture.
+8. **Mount-source path normalization.** `service_test.go:681-685`: `filepath.EvalSymlinks(t.TempDir())` pre-resolves macOS `/var → /private/var` symlinks so that `pathutil.Normalize` inside the consumer produces the same string the test asserts at line 779-780.
+9. **`mage testPkg .../services/codex` GREEN at 17 @ 76.0%.** Re-run captured during this review:
+
+   ```
+   [PKG PASS] github.com/evanmschultz/valv/internal/services/codex (1.27s)
+   tests: 17 / passed: 17 / failed: 0
+   coverage: 76.0% (threshold 60.0%) — SUCCESS
+   ```
+
+   Matches the worklog claim exactly. 16 pre-existing tests + 1 new parent (`TestRunCrossProviderMountWhenClaudeBound`) — subtests collapse into the parent for the headline count, consistent with the 10.4 mirror's reporting.
+
+### Certificate
+
+- **Premises**
+  - Cross-binding lookup occupies the exact convergence point (after `resolved`, before `PrepareRuntime`).
+  - Symbol/arg shape matches spec (`BindingByProjectID(..., ProviderClaude)` then `ProfileByID(otherBinding.ProfileID)`).
+  - ErrNotFound silently skipped; other errors return wrapped fatal.
+  - `OtherProviderProfileHome` flows from service into `codexruntime.PrepareRequest`, producing the `/home/valv/.claude` mount + `CLAUDE_CONFIG_DIR` env on the consumer side.
+  - `fakeStore` cross dispatch is consistent and isolated from the primary path.
+  - Every pre-existing Run-path fixture opts out via `crossBindingErr: domain.ErrNotFound`.
+  - `TestRunCrossProviderMountWhenClaudeBound` covers bound / not-bound / store-error rows.
+  - `mage testPkg` gate matches the claim (17 @ 76.0%).
+- **Evidence** — `service.go:155-168`, `service.go:171-178`, `service_test.go:29-43`, `service_test.go:58-60`, `service_test.go:82-87`, `service_test.go:154-172`, `service_test.go:664-802`; `codex/runtime.go:122-129`; mage re-run output above.
+- **Trace or cases**
+  - "claude bound" → BindingByProjectID(ProviderClaude) → `claudeBinding, nil` → ProfileByID(claudeBinding.ProfileID) → `claudeProfile, nil` → `otherProfileHome = claudeProfileHome` → PrepareRequest.OtherProviderProfileHome populated → codex/runtime.go appends `/home/valv/.claude` mount + sets `CLAUDE_CONFIG_DIR` → mount and env assertions both fire.
+  - "claude not bound (ErrNotFound)" → BindingByProjectID returns `_, ErrNotFound` → `errors.Is(err, ErrNotFound)` true → silent skip → `otherProfileHome = ""` → consumer skips the conditional → no `/home/valv/.claude` mount, no `CLAUDE_CONFIG_DIR` → assertions pass.
+  - "claude store error" → BindingByProjectID returns `_, storeError` → `errors.Is(err, ErrNotFound)` false → wrapped fatal returned → Run returns non-nil → wantErr assertion passes.
+  - Regression path: every pre-existing test injects `crossBindingErr: ErrNotFound` → silent skip → request shape unchanged from pre-10.5 → all 16 inherited assertions remain valid; verified by the 17/17 green re-run.
+- **Conclusion** — PASS. All 9 ACs supported by direct file:line evidence; the per-package gate re-runs cleanly and matches the worklog claim exactly.
+- **Unknowns**
+  - None blocking. Two informational notes for orchestrator awareness (carried over from the 10.4 pattern, not 10.5-specific findings):
+    - `service.go:162-164` swallows `profileErr` from `ProfileByID` (cross-binding succeeds but profile load errors → silent skip rather than fatal). Inherited verbatim from 10.4's claude/Service.Run; identical pattern passed plan-QA + build-QA there. Worth a future planning decision whether to tighten symmetrically across both services, but not a 10.5 finding.
+    - `service_test.go:154-172` defines `boundCodexStore` but no test currently calls it. The unit applied the opt-out default directly on the 10 inline `fakeStore{}` literals instead, leaving the helper dead until a future test wants the convenience. Go allows unused unexported funcs, gofumpt does not flag, and `mage testPkg` is green — no correctness issue, just dead code that a future refactor could either delete or adopt.
+
+### Hylla Feedback
+
+`hylla_node_full` on `github.com/evanmschultz/valv/internal/adapters/providers/codex/PrepareRequest` returned the **pre-10.3** struct content (no `OtherProviderProfileHome` field, only ProfileHome/SharedHome/ProjectRoot/TempRoot/Logger). The artifact is stale relative to HEAD — expected for in-drop changes that have not been reingested. Worked via `Read` on `internal/adapters/providers/codex/runtime.go:115-129` plus `rtk grep` for the symbol. Standard mid-drop staleness, not a Hylla defect — recording here for the drop-end aggregate.
