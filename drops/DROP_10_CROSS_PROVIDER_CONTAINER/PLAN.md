@@ -35,7 +35,321 @@
 
 ## Planner
 
-<Filled by go-planning-agent in Phase 1.>
+### Scope confirmation
+
+DROP_10 adds in-container cross-provider tool use across three change layers:
+(a) both Dockerfiles install BOTH CLIs; (b) `PrepareRuntime` for each provider
+accepts an optional OTHER-provider profile home and conditionally adds a second
+mount + env var; (c) `Service.Run` for each provider looks up the OTHER
+provider's binding for the same project and passes the resolved `HomePath`
+through to `PrepareRequest`. When the OTHER provider is not bound, the
+cross-mount is silently skipped (Option A — fail cleanly with CLI's native
+"not logged in" error).
+
+### Open questions resolved
+
+**Version-resolver shape:** Smallest-diff path is a `CrossProviderVersion
+string` field added to `images.BuildRequest`. `Build()` always emits both
+`--build-arg CODEX_VERSION=<v>` and `--build-arg CLAUDE_VERSION=<v>` regardless
+of provider. When `CrossProviderVersion` is empty the defaulting in `Build()`
+substitutes `"latest"` — valid npm syntax, not reproducible but acceptable for
+the cross-provider secondary install at dogfood stage. No second `VersionResolver`
+is added to `images.Options`; callers that want a pinned cross-version set the
+field explicitly. This avoids touching `Options`, `Service`, or `EnsureLatest`.
+
+**Integration test scope:** The real in-container cross-call test (Claude Code
+agent running `codex exec` against a mounted codex profile) requires an actual
+container with both CLIs installed. That test is deferred to
+DROP_11_E2E_AND_RELEASE, which already owns `claude_integration_test.go`.
+DROP_10's acceptance is `mage test` green across all five touched packages.
+
+**README paragraph:** Deferred to DROP_11 (full README rewrite). A note in this
+file's Notes section records the deferral.
+
+### Units
+
+---
+
+#### Unit 10.1 — Dockerfile dual-CLI install + Build() dual-arg + service test updates
+
+| Field | Value |
+|---|---|
+| State | todo |
+| Paths | `internal/services/images/service.go`, `internal/services/images/service_test.go` |
+| Packages | `github.com/evanmschultz/valv/internal/services/images` |
+| Blocked by | — |
+
+**What changes:**
+
+- `DefaultCodexDockerfile()`: add `ARG CLAUDE_VERSION` build-arg declaration,
+  add `mkdir -p /home/valv/.claude` to the user-creation RUN block (alongside
+  the existing `/home/valv/.codex`), and add a second `npm install` RUN layer:
+  `RUN npm install --global "@anthropic-ai/claude-code@${CLAUDE_VERSION}"`.
+  Keep entrypoint as `["codex"]`.
+
+- `DefaultClaudeDockerfile()`: mirror — add `ARG CODEX_VERSION`, extend the
+  `mkdir -p` to include `/home/valv/.codex`, add
+  `RUN npm install --global "@openai/codex@${CODEX_VERSION}"`. Keep entrypoint
+  as `["claude"]`. Also add `CODEX_HOME=/home/valv/.codex` to the `ENV` block
+  (the directory exists; the env var makes it discoverable).
+
+- `Build()`: after the primary build-arg (`CODEX_VERSION` or `CLAUDE_VERSION`),
+  add the cross-provider build-arg. Add `CrossProviderVersion string` to
+  `BuildRequest`. When `CrossProviderVersion` is empty, use `"latest"` as the
+  default cross-version. Always emit both `--build-arg CODEX_VERSION=<v>` and
+  `--build-arg CLAUDE_VERSION=<v>` in `BuildRequest.BuildArgs`.
+
+- `service_test.go` arg-comparison tests: three existing tests compare the
+  exact `--build-arg` slice via `reflect.DeepEqual` —
+  `TestServiceBuildAddsVersionAndUsesDefaultImageInfo`,
+  `TestBuildIncludesExtraTags`,
+  `TestServiceBuildFallsBackToLegacyBuildWhenBuildxUnavailable`. Each must be
+  updated to include both `CODEX_VERSION` and `CLAUDE_VERSION` args in the
+  expected slice. The order is `providerVersionBuildArg()` first, then the
+  cross-provider arg — verify this matches the implementation. (The "new, not yet
+  in tree" symbol: `BuildRequest.CrossProviderVersion`.)
+
+- `TestWriteDefaultCodexContextWritesDockerfile` and
+  `TestWriteDefaultClaudeContextWritesDockerfile`: add assertions for the new
+  cross-CLI install line and the cross-home dir. Recipe-hash tests that call
+  `DefaultCodexDockerfile()` / `DefaultClaudeDockerfile()` directly
+  (`fakeCodexRecipeHash`, `fakeClaudeRecipeHash`, `svcRecipeHashForTest`,
+  `TestServiceBuildRecipeHashMatchesProviderDockerfile`) auto-update because they
+  call the functions dynamically — no manual constant change needed.
+
+**Acceptance:**
+- `DefaultCodexDockerfile()` output contains both `@openai/codex@${CODEX_VERSION}`
+  and `@anthropic-ai/claude-code@${CLAUDE_VERSION}`, and both `/home/valv/.codex`
+  and `/home/valv/.claude` in the `mkdir -p` line.
+- `DefaultClaudeDockerfile()` mirrors symmetrically.
+- `Build()` args include `CODEX_VERSION=<v>` and `CLAUDE_VERSION=<v>` in every
+  invocation regardless of provider.
+- `mage testPkg github.com/evanmschultz/valv/internal/services/images` passes
+  green (including coverage gate).
+- Note: `internal/cli` tests that call `fakeCodexRecipeHash()` /
+  `fakeClaudeRecipeHash()` will also auto-pass because those functions delegate
+  to the updated Dockerfile functions; verify with `mage test` at drop-end.
+
+---
+
+#### Unit 10.2 — claude.PrepareRuntime cross-provider mount + test flip
+
+| Field | Value |
+|---|---|
+| State | todo |
+| Paths | `internal/adapters/providers/claude/runtime.go`, `internal/adapters/providers/claude/runtime_test.go` |
+| Packages | `github.com/evanmschultz/valv/internal/adapters/providers/claude` |
+| Blocked by | — |
+
+**What changes:**
+
+- `PrepareRequest` gains `OtherProviderProfileHome string` (new field, not yet
+  in tree).
+
+- `PrepareRuntime`: after building `mounts` and `env` for the primary Claude
+  home, add a conditional block:
+
+  ```go
+  if strings.TrimSpace(request.OtherProviderProfileHome) != "" {
+      otherHome, err := pathutil.Normalize(request.OtherProviderProfileHome)
+      if err != nil {
+          return PreparedRuntime{}, fmt.Errorf("prepare claude runtime: normalize other provider home: %w", err)
+      }
+      mounts = append(mounts, dockeradapter.NewMountSpec(otherHome, "/home/valv/.codex", false))
+      env["CODEX_HOME"] = "/home/valv/.codex"
+  }
+  ```
+
+  The `OtherProviderProfileHome` path is the raw host path (e.g. the codex
+  profile's `HomePath`); it is mounted read-write so that codex can write session
+  state back just as it would in a native codex container. (Cleanup for the cross-
+  mount is NOT added — the cross-mount target is the raw profile home, not a
+  staged copy; no sync-back is needed for the cross-provider home.)
+
+- `runtime_test.go` changes:
+  - Rename `TestPrepareRuntimeHasNoCodexEnv` →
+    `TestPrepareRuntimeSkipsCodexMountWhenNotProvided`. Update its body: pass an
+    empty `OtherProviderProfileHome` (as today) and assert `CODEX_HOME` is absent
+    from `Env` AND that no mount with target `/home/valv/.codex` exists.
+  - Add `TestPrepareRuntimeMountsCodexHomeWhenProvided`: pass a non-empty
+    `OtherProviderProfileHome` (a `t.TempDir()`), assert `CODEX_HOME` is set to
+    `/home/valv/.codex` in `Env` AND a mount exists with target
+    `/home/valv/.codex`.
+
+**Acceptance:**
+- `TestPrepareRuntimeSkipsCodexMountWhenNotProvided` passes (no CODEX_HOME, no
+  `/home/valv/.codex` mount when `OtherProviderProfileHome` empty).
+- `TestPrepareRuntimeMountsCodexHomeWhenProvided` passes (CODEX_HOME set, mount
+  present when `OtherProviderProfileHome` is a valid dir).
+- All existing claude runtime tests still pass (no regressions).
+- `mage testPkg github.com/evanmschultz/valv/internal/adapters/providers/claude`
+  passes green.
+
+---
+
+#### Unit 10.3 — codex.PrepareRuntime cross-provider mount + new tests
+
+| Field | Value |
+|---|---|
+| State | todo |
+| Paths | `internal/adapters/providers/codex/runtime.go`, `internal/adapters/providers/codex/runtime_test.go` |
+| Packages | `github.com/evanmschultz/valv/internal/adapters/providers/codex` |
+| Blocked by | — |
+
+**What changes:**
+
+- `PrepareRequest` gains `OtherProviderProfileHome string` (new field, not yet
+  in tree). Mirror of 10.2.
+
+- `PrepareRuntime`: after the primary codex mounts/env, add:
+
+  ```go
+  if strings.TrimSpace(request.OtherProviderProfileHome) != "" {
+      otherHome, err := pathutil.Normalize(request.OtherProviderProfileHome)
+      if err != nil {
+          return PreparedRuntime{}, fmt.Errorf("prepare codex runtime: normalize other provider home: %w", err)
+      }
+      mounts = append(mounts, dockeradapter.NewMountSpec(otherHome, "/home/valv/.claude", false))
+      env["CLAUDE_CONFIG_DIR"] = "/home/valv/.claude"
+  }
+  ```
+
+- `runtime_test.go` additions (no existing tests need renaming in the codex
+  package — there is no `TestPrepareRuntimeHasNoClaude*` test to flip):
+  - Add `TestPrepareRuntimeSkipsClaudeMountWhenNotProvided`: empty
+    `OtherProviderProfileHome`, assert `CLAUDE_CONFIG_DIR` absent, no mount
+    with target `/home/valv/.claude`.
+  - Add `TestPrepareRuntimeMountsClaudeHomeWhenProvided`: non-empty
+    `OtherProviderProfileHome`, assert `CLAUDE_CONFIG_DIR=/home/valv/.claude`
+    and mount present.
+
+**Acceptance:**
+- Both new tests pass.
+- All existing codex runtime tests still pass.
+- `mage testPkg github.com/evanmschultz/valv/internal/adapters/providers/codex`
+  passes green.
+
+---
+
+#### Unit 10.4 — claude.Service.Run cross-binding lookup + service tests
+
+| Field | Value |
+|---|---|
+| State | todo |
+| Paths | `internal/services/claude/service.go`, `internal/services/claude/service_test.go` |
+| Packages | `github.com/evanmschultz/valv/internal/services/claude` |
+| Blocked by | 10.2 |
+
+**What changes:**
+
+- `Service.Run`: after `resolved` is fully populated (at the end of both the
+  `overrideProfile` branch and the `else` branch), and before calling
+  `clauderuntime.PrepareRuntime`, add a cross-binding lookup:
+
+  ```go
+  var otherProfileHome string
+  otherBinding, err := s.store.BindingByProjectID(ctx, resolved.project.ID, domain.ProviderCodex)
+  if err == nil {
+      otherProfile, profileErr := s.store.ProfileByID(ctx, otherBinding.ProfileID)
+      if profileErr == nil {
+          otherProfileHome = otherProfile.HomePath
+      }
+  } else if !errors.Is(err, domain.ErrNotFound) {
+      return fmt.Errorf("run claude launch service: lookup codex binding for project %q: %w", resolved.project.Root, err)
+  }
+  ```
+
+  Then pass `OtherProviderProfileHome: otherProfileHome` to `PrepareRequest`.
+
+  Error handling: only `ErrNotFound` is silently skipped; unexpected store errors
+  are returned as fatal. This follows the existing pattern in `resolveBinding`.
+
+- `service_test.go`:
+  - Extend `fakeStore` to support provider-keyed bindings. Add
+    `crossBinding domain.ProjectBinding` and `crossBindingErr error` and
+    `crossProfile domain.Profile` and `crossProfileErr error`. Override
+    `BindingByProjectID` to return `f.crossBinding, f.crossBindingErr` when
+    the requested provider is `domain.ProviderCodex`, and `f.binding, f.bindingErr`
+    for `domain.ProviderClaude`. (The current single-field approach needs this
+    disambiguation.) Add `ProfileByID` to also dispatch on profile ID between
+    primary and cross profile.
+  - Add table-driven `TestRunCrossProviderMountWhenCodexBound`:
+    - Row "codex bound": cross binding resolves → `PreparedRuntime` has mount
+      with target `/home/valv/.codex` and `CODEX_HOME` in Env.
+    - Row "codex not bound (ErrNotFound)": `BindingByProjectID` for codex returns
+      `ErrNotFound` → Run succeeds, no `/home/valv/.codex` mount in request.
+    - Row "codex store error": `BindingByProjectID` for codex returns a non-
+      `ErrNotFound` error → Run returns an error.
+  - Existing `TestRunSucceedsWithBoundProject` and similar must still pass
+    (no cross binding wired → cross mount absent → container request unchanged
+    from today's shape).
+
+**Acceptance:**
+- `TestRunCrossProviderMountWhenCodexBound` passes all three rows.
+- All existing claude service tests pass (regression-free).
+- `mage testPkg github.com/evanmschultz/valv/internal/services/claude` passes
+  green.
+
+---
+
+#### Unit 10.5 — codex.Service.Run cross-binding lookup + service tests
+
+| Field | Value |
+|---|---|
+| State | todo |
+| Paths | `internal/services/codex/service.go`, `internal/services/codex/service_test.go` |
+| Packages | `github.com/evanmschultz/valv/internal/services/codex` |
+| Blocked by | 10.3 |
+
+**What changes:**
+
+- `Service.Run`: mirror of 10.4's change. After `resolved` is populated, add
+  cross-binding lookup for `domain.ProviderClaude`:
+
+  ```go
+  var otherProfileHome string
+  otherBinding, err := s.store.BindingByProjectID(ctx, resolved.project.ID, domain.ProviderClaude)
+  if err == nil {
+      otherProfile, profileErr := s.store.ProfileByID(ctx, otherBinding.ProfileID)
+      if profileErr == nil {
+          otherProfileHome = otherProfile.HomePath
+      }
+  } else if !errors.Is(err, domain.ErrNotFound) {
+      return fmt.Errorf("run codex launch service: lookup claude binding for project %q: %w", resolved.project.Root, err)
+  }
+  ```
+
+  Then pass `OtherProviderProfileHome: otherProfileHome` to codexruntime's
+  `PrepareRequest`.
+
+- `service_test.go`:
+  - Extend codex `fakeStore` with provider-keyed binding dispatch, same pattern
+    as 10.4's extension to claude `fakeStore`.
+  - Add table-driven `TestRunCrossProviderMountWhenClaudeBound`:
+    - Row "claude bound": cross binding resolves → mount with target
+      `/home/valv/.claude` and `CLAUDE_CONFIG_DIR` in Env.
+    - Row "claude not bound (ErrNotFound)": silent skip → Run succeeds, no
+      `/home/valv/.claude` mount.
+    - Row "claude store error": non-`ErrNotFound` → Run returns error.
+  - Existing codex service tests pass unchanged.
+
+**Acceptance:**
+- `TestRunCrossProviderMountWhenClaudeBound` passes all three rows.
+- All existing codex service tests pass.
+- `mage testPkg github.com/evanmschultz/valv/internal/services/codex` passes
+  green.
+
+---
+
+### Drop-end verification
+
+After all five units pass per-unit QA:
+- `mage test` from `main/` (full test + coverage + gofumpt check) must pass clean.
+- No `mage integration` needed for this drop (no symbol deletions, no CLI argv
+  changes, no Docker-backed code paths changed in a way that would alter the
+  integration test surface).
+- After `mage test` green: `git push`, `gh run watch --exit-status`, then
+  `mage build` before handing back to the dev.
 
 ## Notes
 
