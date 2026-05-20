@@ -70,3 +70,38 @@ Hylla was queried to confirm the `docker.BuildImageArgs` sort behavior. The func
 
 - `hylla_search_keyword` with `query=NewMountSpec` returned the correct node (`github.com/evanmschultz/valv/internal/adapters/docker/NewMountSpec`) in one query — Hylla answered this lookup correctly. Followed up with a direct `Read` of `types.go` to confirm the `MountSpec` struct field names (`Source`, `Target`, `ReadOnly`) since Hylla returns the node ID but not the struct field layout inline. Suggestion: Hylla struct nodes could expose field names in their summary to save the follow-up `Read`.
 - All other evidence (runtime.go current state, existing test names, imports) gathered via `Read` on files not yet in context — no Hylla misses on Go symbol queries.
+
+## Unit 10.3 — Round 1
+
+- **Builder:** go-builder-agent
+- **Started:** 2026-05-19
+- **Files touched:**
+  - `internal/adapters/providers/codex/runtime.go`
+  - `internal/adapters/providers/codex/runtime_test.go`
+  - `drops/DROP_10_CROSS_PROVIDER_CONTAINER/PLAN.md` (state flip)
+  - `drops/DROP_10_CROSS_PROVIDER_CONTAINER/BUILDER_WORKLOG.md` (this file)
+
+- **Symbols added:**
+  - `PrepareRequest.OtherProviderProfileHome string` — optional host-side profile home of the other provider (claude). When non-empty, `PrepareRuntime` mounts it at `/home/valv/.claude` read-write and sets `CLAUDE_CONFIG_DIR=/home/valv/.claude` in the container env. When empty, cross-mount and env var are skipped.
+
+- **Production changes (runtime.go):**
+  - `PrepareRequest` struct: added `OtherProviderProfileHome string` field with doc comment (mirroring Unit 10.2's claude runtime pattern), in a comment-separated group after `TempRoot` and before `Logger`.
+  - `PrepareRuntime`: added conditional cross-mount block immediately after the `env := map[string]string{...}` block and before the `newBridgeManager` call (original lines 113→115). Block: normalize `OtherProviderProfileHome` via `pathutil.Normalize`, append `NewMountSpec(otherHome, "/home/valv/.claude", false)` to `mounts`, set `env["CLAUDE_CONFIG_DIR"] = "/home/valv/.claude"`. `strings` and `pathutil` were already imported — no import changes needed.
+
+- **Insertion site:** Between the `env` map initialization (original line 113) and the `newBridgeManager` call (original line 115). This is in the early simple section of `PrepareRuntime`, before any complex bridge-manager or config-translation logic — correct per spec.
+
+- **Test additions (runtime_test.go):**
+  - `TestPrepareRuntimeSkipsClaudeMountWhenNotProvided`: passes explicit `OtherProviderProfileHome: ""`, asserts `CLAUDE_CONFIG_DIR` absent from `Env` AND no mount with target `/home/valv/.claude`. Marked `t.Parallel()`.
+  - `TestPrepareRuntimeMountsClaudeHomeWhenProvided`: creates a real `t.TempDir()` for `claudeHome`, passes it as `OtherProviderProfileHome`, asserts `Env["CLAUDE_CONFIG_DIR"] == "/home/valv/.claude"` AND `findMountTarget` returns a non-read-only mount at `/home/valv/.claude` with the normalized `claudeHome` as source. Marked `t.Parallel()`.
+
+- **TDD cycle:**
+  - RED: tests added first; `mage testPkg` produced build error (field `OtherProviderProfileHome` undefined).
+  - GREEN: production changes landed; `mage testPkg` — 24 tests passed, 0 failed, 74.9% coverage.
+
+- **Mage gate results:**
+  - `mage testPkg github.com/evanmschultz/valv/internal/adapters/providers/codex`: 24 tests passed (was 22), 0 failed, coverage 74.9% (floor 60%). GREEN.
+  - `mage build`: `./valv` produced cleanly. GREEN.
+
+## Hylla Feedback (Unit 10.3)
+
+None — Hylla answered everything needed. The existing codex `runtime.go` and `runtime_test.go` structures were confirmed via `Read` (not Hylla) since Unit 10.2 had just been completed and the files were not yet re-ingested. The claude runtime (Unit 10.2's output) was confirmed via `Read` to validate the mirror pattern. No Hylla queries were issued for Go symbol lookups in this unit — evidence was gathered via file reads for files changed since last ingest. Categorized as N/A (changed files, Hylla stale until reingest).

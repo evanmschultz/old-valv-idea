@@ -198,7 +198,7 @@ file's Notes section records the deferral.
 
 | Field | Value |
 |---|---|
-| State | todo |
+| State | done (R1 — mage gates GREEN; cross-mount + CLAUDE_CONFIG_DIR conditional path landed) |
 | Paths | `internal/adapters/providers/codex/runtime.go`, `internal/adapters/providers/codex/runtime_test.go` |
 | Packages | `github.com/evanmschultz/valv/internal/adapters/providers/codex` |
 | Blocked by | — |

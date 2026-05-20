@@ -417,6 +417,94 @@ func TestPrepareRuntimeUsesSharedHomeAndOverlaysAccountAuth(t *testing.T) {
 	}
 }
 
+func TestPrepareRuntimeSkipsClaudeMountWhenNotProvided(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	profileHome := filepath.Join(root, "profile")
+	projectRoot := filepath.Join(root, "project")
+	tempRoot := filepath.Join(root, "tmp")
+	if err := os.MkdirAll(profileHome, 0o755); err != nil {
+		t.Fatalf("MkdirAll(profileHome) error = %v", err)
+	}
+	if err := os.MkdirAll(projectRoot, 0o755); err != nil {
+		t.Fatalf("MkdirAll(projectRoot) error = %v", err)
+	}
+
+	prepared, err := PrepareRuntime(context.Background(), PrepareRequest{
+		ProfileHome:              profileHome,
+		ProjectRoot:              projectRoot,
+		TempRoot:                 tempRoot,
+		OtherProviderProfileHome: "",
+	})
+	if err != nil {
+		t.Fatalf("PrepareRuntime() error = %v", err)
+	}
+	defer func() {
+		if err := prepared.Close(); err != nil {
+			t.Fatalf("prepared.Close() error = %v", err)
+		}
+	}()
+
+	if _, ok := prepared.Env["CLAUDE_CONFIG_DIR"]; ok {
+		t.Fatalf("Env[CLAUDE_CONFIG_DIR] = %q, want absent when OtherProviderProfileHome is empty", prepared.Env["CLAUDE_CONFIG_DIR"])
+	}
+	for _, mount := range prepared.Mounts {
+		if mount.Target == "/home/valv/.claude" {
+			t.Fatalf("found unexpected mount with target /home/valv/.claude: %+v", mount)
+		}
+	}
+}
+
+func TestPrepareRuntimeMountsClaudeHomeWhenProvided(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	profileHome := filepath.Join(root, "profile")
+	projectRoot := filepath.Join(root, "project")
+	tempRoot := filepath.Join(root, "tmp")
+	claudeHome := filepath.Join(root, "claude-profile")
+	if err := os.MkdirAll(profileHome, 0o755); err != nil {
+		t.Fatalf("MkdirAll(profileHome) error = %v", err)
+	}
+	if err := os.MkdirAll(projectRoot, 0o755); err != nil {
+		t.Fatalf("MkdirAll(projectRoot) error = %v", err)
+	}
+	if err := os.MkdirAll(claudeHome, 0o755); err != nil {
+		t.Fatalf("MkdirAll(claudeHome) error = %v", err)
+	}
+
+	prepared, err := PrepareRuntime(context.Background(), PrepareRequest{
+		ProfileHome:              profileHome,
+		ProjectRoot:              projectRoot,
+		TempRoot:                 tempRoot,
+		OtherProviderProfileHome: claudeHome,
+	})
+	if err != nil {
+		t.Fatalf("PrepareRuntime() error = %v", err)
+	}
+	defer func() {
+		if err := prepared.Close(); err != nil {
+			t.Fatalf("prepared.Close() error = %v", err)
+		}
+	}()
+
+	if got := prepared.Env["CLAUDE_CONFIG_DIR"]; got != "/home/valv/.claude" {
+		t.Fatalf("Env[CLAUDE_CONFIG_DIR] = %q, want /home/valv/.claude", got)
+	}
+	wantClaudeHome, err := pathutil.Normalize(claudeHome)
+	if err != nil {
+		t.Fatalf("Normalize(claudeHome) error = %v", err)
+	}
+	claudeMount := findMountTarget(t, prepared.Mounts, "/home/valv/.claude")
+	if claudeMount.Source != wantClaudeHome {
+		t.Fatalf("claude mount source = %q, want %q", claudeMount.Source, wantClaudeHome)
+	}
+	if claudeMount.ReadOnly {
+		t.Fatalf("claude mount should be read-write, got ReadOnly=true")
+	}
+}
+
 func mustReadFile(t *testing.T, path string) []byte {
 	t.Helper()
 	content, err := os.ReadFile(path)

@@ -26,7 +26,14 @@ type PrepareRequest struct {
 	SharedHome  string
 	ProjectRoot string
 	TempRoot    string
-	Logger      *log.Logger
+	// OtherProviderProfileHome is the host-side profile home of the OTHER
+	// provider (e.g. the claude profile home when launching a codex container).
+	// When non-empty, PrepareRuntime mounts it at /home/valv/.claude read-write
+	// and sets CLAUDE_CONFIG_DIR=/home/valv/.claude in the container environment
+	// so the other CLI can authenticate using its native auth-file layout.
+	// When empty, the cross-mount and env var are skipped.
+	OtherProviderProfileHome string
+	Logger                   *log.Logger
 }
 
 type PreparedRuntime struct {
@@ -110,6 +117,15 @@ func PrepareRuntime(ctx context.Context, request PrepareRequest) (PreparedRuntim
 		"LOGNAME":    "valv",
 		"TERM":       normalizedContainerTERM(),
 		"USER":       "valv",
+	}
+
+	if strings.TrimSpace(request.OtherProviderProfileHome) != "" {
+		otherHome, err := pathutil.Normalize(request.OtherProviderProfileHome)
+		if err != nil {
+			return PreparedRuntime{}, fmt.Errorf("prepare codex runtime: normalize other provider home: %w", err)
+		}
+		mounts = append(mounts, dockeradapter.NewMountSpec(otherHome, "/home/valv/.claude", false))
+		env["CLAUDE_CONFIG_DIR"] = "/home/valv/.claude"
 	}
 
 	bridgeManager, err := newBridgeManager(ctx, request.Logger)
