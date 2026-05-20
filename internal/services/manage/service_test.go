@@ -832,6 +832,69 @@ func TestUnbindProjectReturnsErrWhenProjectNotKnown(t *testing.T) {
 	}
 }
 
+func TestDeleteProfileRemovesManagedHomeDir(t *testing.T) {
+	t.Parallel()
+
+	store, providerRoot := testStore(t)
+	service, err := New(Options{Store: store, ProviderRoot: providerRoot})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	// CreateProfile with empty homePath → managed home under providerRoot.
+	profile, err := service.CreateProfile(context.Background(), domain.ProviderCodex, "hylla", "")
+	if err != nil {
+		t.Fatalf("CreateProfile() error = %v", err)
+	}
+
+	// Confirm the directory was created on disk.
+	if _, err := os.Stat(profile.HomePath); err != nil {
+		t.Fatalf("profile home dir missing before delete: %v", err)
+	}
+
+	_, err = service.DeleteProfile(context.Background(), domain.ProviderCodex, profile.Name)
+	if err != nil {
+		t.Fatalf("DeleteProfile() error = %v", err)
+	}
+
+	// Managed home must be gone.
+	if _, err := os.Stat(profile.HomePath); !os.IsNotExist(err) {
+		t.Fatalf("profile home dir still exists after DeleteProfile: err = %v", err)
+	}
+}
+
+func TestDeleteProfileLeavesCustomHomePathUntouched(t *testing.T) {
+	t.Parallel()
+
+	store, providerRoot := testStore(t)
+	service, err := New(Options{Store: store, ProviderRoot: providerRoot})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	// Custom home is a t.TempDir() — NOT under providerRoot.
+	customHome := t.TempDir()
+	profile, err := service.CreateProfile(context.Background(), domain.ProviderCodex, "custom", customHome)
+	if err != nil {
+		t.Fatalf("CreateProfile() error = %v", err)
+	}
+
+	// Confirm the directory exists before delete.
+	if _, err := os.Stat(customHome); err != nil {
+		t.Fatalf("custom home dir missing before delete: %v", err)
+	}
+
+	_, err = service.DeleteProfile(context.Background(), domain.ProviderCodex, profile.Name)
+	if err != nil {
+		t.Fatalf("DeleteProfile() error = %v", err)
+	}
+
+	// Custom home must still exist — safety guard must have skipped removal.
+	if _, err := os.Stat(customHome); err != nil {
+		t.Fatalf("custom home dir was removed by DeleteProfile (should be untouched): %v", err)
+	}
+}
+
 func testStore(t *testing.T) (*sqliteadapter.Store, string) {
 	t.Helper()
 

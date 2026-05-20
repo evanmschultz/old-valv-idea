@@ -380,6 +380,28 @@ func (s Service) DeleteProfile(ctx context.Context, provider domain.Provider, na
 	if err := s.store.DeleteProfile(ctx, provider, profile.Name); err != nil {
 		return domain.Profile{}, fmt.Errorf("delete profile: %w", err)
 	}
+	// Remove the managed-home directory from disk only when it is under the
+	// Valv-managed providers root. Custom --home paths outside that tree are
+	// left untouched to avoid accidental removal of user-owned directories.
+	//
+	// Both sides are resolved via filepath.EvalSymlinks before comparison so
+	// that macOS /var → /private/var symlink aliasing does not cause a
+	// spurious prefix mismatch.
+	resolvedProviderRoot := filepath.Clean(s.providerRoot)
+	if resolved, err := filepath.EvalSymlinks(resolvedProviderRoot); err == nil {
+		resolvedProviderRoot = resolved
+	}
+	resolvedHomePath := filepath.Clean(profile.HomePath)
+	if resolved, err := filepath.EvalSymlinks(resolvedHomePath); err == nil {
+		resolvedHomePath = resolved
+	}
+	if strings.HasPrefix(resolvedHomePath, resolvedProviderRoot) {
+		if err := os.RemoveAll(profile.HomePath); err != nil {
+			return domain.Profile{}, fmt.Errorf("delete profile: remove managed home %q: %w", profile.HomePath, err)
+		}
+	} else {
+		s.debug("delete profile: skipping removal of custom home (outside managed-providers root)", "home", profile.HomePath)
+	}
 	return profile, nil
 }
 
