@@ -1,6 +1,6 @@
 # DROP_10 — CROSS_PROVIDER_CONTAINER
 
-**State:** building
+**State:** done
 **Blocked by:** DROP_9 (done)
 **Paths (expected):**
 - `internal/services/images/service.go` (Dockerfile recipes — add OTHER CLI to each)
@@ -27,7 +27,7 @@
 **PLAN.md ref:** main/PLAN.md → DROP_10_CROSS_PROVIDER_CONTAINER row
 **Workflow:** main/drops/WORKFLOW.md
 **Started:** 2026-05-19
-**Closed:** —
+**Closed:** 2026-05-19
 
 ## Scope
 
