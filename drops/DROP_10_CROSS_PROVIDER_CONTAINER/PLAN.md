@@ -105,9 +105,14 @@ file's Notes section records the deferral.
   `TestBuildIncludesExtraTags`,
   `TestServiceBuildFallsBackToLegacyBuildWhenBuildxUnavailable`. Each must be
   updated to include both `CODEX_VERSION` and `CLAUDE_VERSION` args in the
-  expected slice. The order is `providerVersionBuildArg()` first, then the
-  cross-provider arg — verify this matches the implementation. (The "new, not yet
-  in tree" symbol: `BuildRequest.CrossProviderVersion`.)
+  expected slice. `docker.BuildImageArgs` sorts the `BuildArgs` map keys
+  alphabetically via `sort.Strings(keys)` (confirmed: `internal/adapters/docker/ops.go`
+  `BuildImageArgs`). Alphabetic order of the four keys is:
+  `CLAUDE_VERSION` < `CODEX_VERSION` < `VALV_GID` < `VALV_UID`. The expected
+  `want` slice must therefore be ordered:
+  `[]string{"--build-arg", "CLAUDE_VERSION=<v>", "--build-arg", "CODEX_VERSION=<v>", "--build-arg", "VALV_GID=<gid>", "--build-arg", "VALV_UID=<uid>", ...}`
+  regardless of which provider is being built. (The "new, not yet in tree"
+  symbol: `BuildRequest.CrossProviderVersion`.)
 
 - `TestWriteDefaultCodexContextWritesDockerfile` and
   `TestWriteDefaultClaudeContextWritesDockerfile`: add assertions for the new
@@ -177,10 +182,12 @@ file's Notes section records the deferral.
     `/home/valv/.codex`.
 
 **Acceptance:**
-- `TestPrepareRuntimeSkipsCodexMountWhenNotProvided` passes (no CODEX_HOME, no
-  `/home/valv/.codex` mount when `OtherProviderProfileHome` empty).
-- `TestPrepareRuntimeMountsCodexHomeWhenProvided` passes (CODEX_HOME set, mount
-  present when `OtherProviderProfileHome` is a valid dir).
+- `TestPrepareRuntimeSkipsCodexMountWhenNotProvided` passes: when
+  `OtherProviderProfileHome` is empty, `CODEX_HOME` is absent from `Env` AND
+  no mount with `Target == "/home/valv/.codex"` exists.
+- `TestPrepareRuntimeMountsCodexHomeWhenProvided` passes: when
+  `OtherProviderProfileHome` is a valid dir, `Env["CODEX_HOME"] == "/home/valv/.codex"`
+  AND `mounts` contains a `MountSpec` with `Target == "/home/valv/.codex"`.
 - All existing claude runtime tests still pass (no regressions).
 - `mage testPkg github.com/evanmschultz/valv/internal/adapters/providers/claude`
   passes green.
@@ -201,7 +208,8 @@ file's Notes section records the deferral.
 - `PrepareRequest` gains `OtherProviderProfileHome string` (new field, not yet
   in tree). Mirror of 10.2.
 
-- `PrepareRuntime`: after the primary codex mounts/env, add:
+- `PrepareRuntime`: immediately after the initial `mounts := []dockeradapter.MountSpec{...}` +
+  `env := map[string]string{...}` block, BEFORE the `newBridgeManager` call, add:
 
   ```go
   if strings.TrimSpace(request.OtherProviderProfileHome) != "" {
@@ -224,7 +232,12 @@ file's Notes section records the deferral.
     and mount present.
 
 **Acceptance:**
-- Both new tests pass.
+- `TestPrepareRuntimeSkipsClaudeMountWhenNotProvided` passes: when
+  `OtherProviderProfileHome` is empty, `CLAUDE_CONFIG_DIR` is absent from `Env`
+  AND no mount with `Target == "/home/valv/.claude"` exists.
+- `TestPrepareRuntimeMountsClaudeHomeWhenProvided` passes: when
+  `OtherProviderProfileHome` is a valid dir, `Env["CLAUDE_CONFIG_DIR"] == "/home/valv/.claude"`
+  AND `mounts` contains a `MountSpec` with `Target == "/home/valv/.claude"`.
 - All existing codex runtime tests still pass.
 - `mage testPkg github.com/evanmschultz/valv/internal/adapters/providers/codex`
   passes green.
@@ -365,7 +378,7 @@ After all five units pass per-unit QA:
 
 ### Cache-busting for image rebuild
 
-Both Dockerfile recipes change → recipe-hash changes → `mage image update claude` / `mage image update codex` naturally rebuilds. Tests that hard-code `fakeClaudeRecipeHash` / `fakeCodexRecipeHash` (in `internal/cli/extended_test.go`) need constant updates to match the new hashes. Mechanical churn — the planner should call out the exact files needing constant updates.
+Both Dockerfile recipes change → recipe-hash changes → `mage image update claude` / `mage image update codex` naturally rebuilds. Tests that delegate to `DefaultCodexDockerfile()` / `DefaultClaudeDockerfile()` (including `fakeClaudeRecipeHash` / `fakeCodexRecipeHash` in `internal/cli/extended_test.go`) auto-update because they call the functions dynamically — no constant churn needed.
 
 ### Version-resolver awareness
 
