@@ -152,3 +152,90 @@ durable proof certificate for that build round.
   - Regression path (no field passed at all, as in `TestPrepareRuntimeSetsClaudeConfigDirEnv` and the existing terminal/TERM/shared-home tests) → struct zero-value of `OtherProviderProfileHome` is `""` → conditional branch is bypassed → all pre-existing assertions remain valid. PASS.
 - **Conclusion** — PASS. Every AC has direct file:line citation evidence; both mage gates re-run green and match the worklog claim exactly (22 tests @ 78.6%, `./valv` built).
 - **Unknowns** — None.
+
+## Unit 10.3 — Round 1
+
+- **Reviewer:** go-qa-proof-agent
+- **Commit under review:** HEAD (Unit 10.3 codex.PrepareRuntime cross-provider mount)
+- **Verdict:** PASS
+
+### Acceptance criteria evidence
+
+**AC1 — `PrepareRequest.OtherProviderProfileHome string` field added in `codex/runtime.go`.**
+- `internal/adapters/providers/codex/runtime.go:24-37` — `PrepareRequest` struct now carries `OtherProviderProfileHome string` (line 35) with a six-line doc comment (lines 29-34) that explicitly describes both halves of the behaviour: mount at `/home/valv/.claude` read-write + set `CLAUDE_CONFIG_DIR=/home/valv/.claude` when non-empty; skip both when empty. Field is positioned after `TempRoot` (line 28) and before `Logger` (line 36), matching the placement style used in the symmetric claude-side Unit 10.2.
+
+**AC2 — `PrepareRuntime` conditionally appends cross-mount + env when field non-empty.**
+- `internal/adapters/providers/codex/runtime.go:122-129` — conditional block fires when `strings.TrimSpace(request.OtherProviderProfileHome) != ""`:
+  - Normalizes the path via `pathutil.Normalize` with a wrapped error (`"prepare codex runtime: normalize other provider home: %w"`, line 125).
+  - Appends `dockeradapter.NewMountSpec(otherHome, "/home/valv/.claude", false)` (line 127) — `false` = read-write, symmetric to the claude-side design constraint so claude can write session state back if needed.
+  - Sets `env["CLAUDE_CONFIG_DIR"] = "/home/valv/.claude"` (line 128).
+- Both halves of AC2 live inside the same `if`-block — there is no path where one fires without the other, except the normalize-error path which returns early with neither mount nor env applied.
+
+**AC3 (CRITICAL — R2 spec) — Insertion is BEFORE `newBridgeManager` call.**
+- Conditional block ends at `internal/adapters/providers/codex/runtime.go:129`.
+- `newBridgeManager` call lives at `internal/adapters/providers/codex/runtime.go:131` — `bridgeManager, err := newBridgeManager(ctx, request.Logger)`.
+- The conditional is therefore in the simple early section (after `mounts` and `env` are initialized at lines 111-120; before any bridge manager / cleanup closure / translateConfigFile machinery starts). Matches R2 spec exactly.
+- This ordering avoids two failure modes the planner flagged: (a) the cross-mount must not depend on bridge manager state, and (b) if a downstream error returns before reaching the conditional, the cross-mount must not be silently dropped.
+
+**AC4 — `TestPrepareRuntimeSkipsClaudeMountWhenNotProvided` exists and asserts both invariants.**
+- `internal/adapters/providers/codex/runtime_test.go:420-457` — new test. Body:
+  - `t.Parallel()` at line 421.
+  - Builds `profileHome` + `projectRoot` + `tempRoot` under `t.TempDir()` (lines 423-432).
+  - Passes explicit `OtherProviderProfileHome: ""` (line 438) — the cross-mount branch is therefore exercised at its "skip" side.
+  - Asserts `CLAUDE_CONFIG_DIR` is absent from `prepared.Env` (lines 449-451). The map-existence check (`_, ok := prepared.Env["CLAUDE_CONFIG_DIR"]`) is strictly stronger than a `== ""` value check.
+  - Asserts no mount has target `/home/valv/.claude` (lines 452-456) — iterates the slice and fatals on any match. Captures the AC's mount-absent invariant directly.
+
+**AC5 — `TestPrepareRuntimeMountsClaudeHomeWhenProvided` exists and asserts mount + env present.**
+- `internal/adapters/providers/codex/runtime_test.go:459-506` — new test. Body:
+  - `t.Parallel()` at line 460.
+  - Creates `claudeHome := filepath.Join(root, "claude-profile")` (line 466) and `os.MkdirAll`s it (lines 473-475).
+  - Passes non-empty `OtherProviderProfileHome: claudeHome` (line 481) — fires the cross-mount branch.
+  - Asserts `prepared.Env["CLAUDE_CONFIG_DIR"] == "/home/valv/.claude"` (lines 492-494).
+  - Uses `findMountTarget` (line 499) to locate the mount with target `/home/valv/.claude`; the helper fatals on miss, so a missing mount fails the test.
+  - Asserts the mount source matches the normalized `claudeHome` path (lines 500-502) — `pathutil.Normalize(claudeHome)` is used as the expected value, mirroring the runtime's normalization on the input side.
+  - Asserts the mount is NOT read-only (lines 503-505) — over-AC defensive check that confirms the read-write design constraint is honored.
+
+**AC6 — All existing codex runtime tests still pass.**
+- Pre-existing tests in `runtime_test.go` (still present, bodies unchanged): `TestPrepareRuntimeNormalizesEnvAndTranslatesConfig` (line 14), `TestPrepareRuntimeOmitsBrokenHostCommandBridgeEntries` (line 126), `TestPrepareRuntimePassesThroughRemoteMCPHeaderEnvWithoutOverlay` (line 180), `TestPrepareRuntimePassesThroughTerminalEnv` (line 225), `TestPrepareRuntimePreservesHostTERM` (line 268), `TestPrepareRuntimeFallsBackWhenTERMEmpty` (line 301), `TestPrepareRuntimeUsesSharedHomeAndOverlaysAccountAuth` (line 334).
+- None of those tests pass `OtherProviderProfileHome` — they rely on the zero-value `""`, which deterministically takes the skip branch. So pre-existing semantics are preserved.
+- `mage testPkg` output reports `tests: 24 / passed: 24 / failed: 0` — 22 pre-existing + 2 new = 24 total. No regressions.
+
+**AC7 — `mage testPkg github.com/evanmschultz/valv/internal/adapters/providers/codex` GREEN with 24 tests @ 74.9%.**
+- Re-run output (full, just-now):
+  ```
+  [PKG PASS] github.com/evanmschultz/valv/internal/adapters/providers/codex (3.38s)
+  Test summary
+    tests: 24
+    passed: 24
+    failed: 0
+  cover: 74.9% (floor 60.0%) — threshold met
+  ```
+  Matches the worklog claim EXACTLY (24 tests @ 74.9%). GREEN.
+
+### Mage gate re-runs
+
+- `mage testPkg github.com/evanmschultz/valv/internal/adapters/providers/codex`: 24/24 pass, 74.9% coverage, floor 60% — GREEN (output captured above).
+- `mage build`: `[SUCCESS] Built valv (./valv)` — binary produced cleanly; no compile breaks anywhere in the transitive dependency graph from the new field or conditional block.
+
+### Certificate
+
+- **Premises**
+  - The `PrepareRequest` struct exposes a new optional `OtherProviderProfileHome string` field with a clear doc comment.
+  - `PrepareRuntime` conditionally adds a `/home/valv/.claude` mount AND sets `CLAUDE_CONFIG_DIR=/home/valv/.claude` when the field is non-empty, and skips both when empty.
+  - The conditional block is inserted BEFORE the `newBridgeManager` call, in the simple early section of `PrepareRuntime`.
+  - `TestPrepareRuntimeSkipsClaudeMountWhenNotProvided` exists and asserts both the env-absent and mount-absent invariants.
+  - `TestPrepareRuntimeMountsClaudeHomeWhenProvided` exists and asserts the env-set and mount-present (read-write) invariants.
+  - All pre-existing codex runtime tests still pass.
+  - `mage testPkg` + `mage build` are green.
+- **Evidence** — `internal/adapters/providers/codex/runtime.go:24-37, 111-129, 131`; `internal/adapters/providers/codex/runtime_test.go:420-506`; mage outputs above (`24/24 @ 74.9%` + `[SUCCESS] Built valv`).
+- **Trace or cases**
+  - Empty `OtherProviderProfileHome` → `TestPrepareRuntimeSkipsClaudeMountWhenNotProvided` exercises lines 111-120 + skips lines 122-129 → env has no `CLAUDE_CONFIG_DIR`, mounts has no `/home/valv/.claude` target. PASS.
+  - Non-empty `OtherProviderProfileHome` (a `t.TempDir()` subdir) → `TestPrepareRuntimeMountsClaudeHomeWhenProvided` exercises lines 111-129 → env has `CLAUDE_CONFIG_DIR=/home/valv/.claude`, mounts contains a read-write `MountSpec` with that target and the normalized source. PASS.
+  - Regression path (no field passed, as in every pre-existing test) → struct zero-value of `OtherProviderProfileHome` is `""` → conditional branch is bypassed at line 122 → all pre-existing assertions remain valid. PASS.
+  - Placement-before-newBridgeManager (line 129 ends conditional; line 131 starts bridge manager) → no failure path between mount-append and bridge-init can drop the cross-mount silently. PASS.
+- **Conclusion** — PASS. Every AC has direct file:line citation evidence; both mage gates re-run green and match the worklog claim exactly (24 tests @ 74.9%, `./valv` built). Critical R2 placement constraint (insertion BEFORE `newBridgeManager`) verified at lines 122-129 vs 131.
+- **Unknowns** — None.
+
+### Hylla Feedback
+
+N/A — proof review used `Read` directly on the two Go files plus `mage testPkg` / `mage build` outputs. No Hylla query was attempted, so there is no miss to report.

@@ -135,3 +135,62 @@ Pre-10.2 `mounts` slice has one entry with target `ContainerClaudeDir = "/home/v
 ### Verdict
 
 **PASS.** No CONFIRMED counterexample across the eight enumerated attack vectors. Attack 7 (normalize-error coverage gap) flagged as EXHAUSTED with a noted minor gap consistent with the package's existing pattern — not a falsification. Both required mage gates re-ran green on HEAD (`mage testPkg .../claude`: 22/22 tests, 78.6% coverage; `mage build`: green).
+
+## Unit 10.3 — Round 1
+
+**Commit under review:** `90ac73a` — `feat(codex): unit 10.3 add cross-provider mount + CLAUDE_CONFIG_DIR env`.
+
+**Files in diff:**
+
+- `internal/adapters/providers/codex/runtime.go` (+17 / -1)
+- `internal/adapters/providers/codex/runtime_test.go` (+88 / -0)
+- `drops/DROP_10_CROSS_PROVIDER_CONTAINER/{PLAN.md,BUILDER_WORKLOG.md}` (docs)
+
+Plan-aligned: `PLAN.md:202` declares `paths` = the two production files touched. No file-scope drift.
+
+### Attacks attempted
+
+**1. Insertion site correctness — REFUTED.**
+
+The new conditional block at `runtime.go:122-129` is placed AFTER `mounts := []dockeradapter.MountSpec{...}` (lines 111-113) and `env := map[string]string{...}` (lines 114-120) are initialized, and BEFORE `bridgeManager, err := newBridgeManager(...)` at line 131. The block uses `append` on `mounts` and a map-key write on `env` — both purely additive against the primary entries. Primary mount `runtimeCodexHome → /home/valv/.codex` (line 112) is preserved; primary env keys `CODEX_HOME`, `HOME`, `LOGNAME`, `TERM`, `USER` (lines 115-119) are preserved. No clobbering. No counterexample.
+
+**2. Downstream mount-slice append ordering — REFUTED.**
+
+After the cross-mount block, `PrepareRuntime` appends additional mounts at `runtime.go:195` (profile overlay → `/home/valv/.codex/config.toml`, read-only) and `runtime.go:215` (project overlay → `<projectRoot>/.codex/config.toml`, read-only). These appends extend the slice; the cross-mount lives at index 1. Tests use target-based lookup (`findMountTarget`) not index-based access, and downstream Docker consumes the slice as unordered `-v` flags (Docker bind-mount semantics are order-insensitive across distinct targets). No counterexample.
+
+**3. bridgeManager interaction with env/mounts — REFUTED.**
+
+`bridgeManager` is created at `runtime.go:131` AFTER the cross-mount block. Per `bridge.go:22-167`, the manager owns its own state (HTTP listeners, bridge command processes) and never reads or modifies the outer `env` map or `mounts` slice — `translateConfigFile` passes the manager to translate MCP server entries inside config TOML, which writes to the overlay file, not to the outer `env`/`mounts`. No conflict.
+
+**4. Cleanup contract on cross-mount-normalize error — REFUTED (inherited pre-existing pattern).**
+
+When `OtherProviderProfileHome` is set but `pathutil.Normalize` fails at `runtime.go:124`, `PrepareRuntime` returns at line 125 — the `runtimeDir` created at line 91 (`os.MkdirTemp`) is NOT cleaned up on this early-return path. However: (a) this is the identical pattern already present in the file for the pre-existing early-returns at lines 99-101 (`os.MkdirAll(runtimeCodexHome)` failure) and 102-104 (`copyDirContents` failure), neither of which removes `runtimeDir`; (b) the same pattern exists in `claude/runtime.go` (lines 111-113, 114-116) and was accepted by Unit 10.2 falsification attack 7 as "consistent with the package's existing pattern, not a 10.2 regression"; (c) `pathutil.Normalize` failure modes (per `pathutil` tests) are essentially impossible for valid host-side paths the upstream wiring layer would pass. Not a 10.3-introduced regression. No counterexample.
+
+**5. config.toml translation interaction with /home/valv/.claude — REFUTED.**
+
+`translateConfigFile` calls at `runtime.go:162-173` (profile) and `runtime.go:200-211` (project) write overlay TOML to `runtimeDir`-rooted paths and then either stage into `runtimeCodexHome` (lines 188-193) or mount at `ContainerCodexDir/config.toml` (line 195) or at `<projectConfigPath>` (line 215). All overlay targets are under `/home/valv/.codex` or `<projectRoot>/.codex`. The cross-mount target `/home/valv/.claude` is a disjoint container path. Zero interaction. No counterexample.
+
+**6. auth.json cross-pollination — REFUTED.**
+
+The cross-mount points the host's claude profile home (containing `.credentials.json` — claude's auth shape) at `/home/valv/.claude` in the container. The codex CLI inside the container reads its auth from `CODEX_HOME` (set to `/home/valv/.codex` at line 115), which maps to the primary mount at line 112 (`runtimeCodexHome` with codex's `auth.json`). Codex CLI does NOT look under `/home/valv/.claude` for auth. `CLAUDE_CONFIG_DIR=/home/valv/.claude` (set at line 128) is read by the claude CLI when invoked-from-inside-the-codex-container, pointing it at claude's native auth-file layout. Two CLIs, two distinct env vars, two distinct mount points, two distinct auth-file shapes. No cross-pollination. No counterexample.
+
+**7. Test isolation — REFUTED.**
+
+Both new tests (`TestPrepareRuntimeSkipsClaudeMountWhenNotProvided` at `runtime_test.go:420`, `TestPrepareRuntimeMountsClaudeHomeWhenProvided` at `runtime_test.go:459`) use independent `t.TempDir()` allocations for `profileHome`, `projectRoot`, `tempRoot`, and `claudeHome`. Both call `t.Parallel()`. No shared state, no env-var leakage between them. No counterexample.
+
+**8. Test count delta — REFUTED.**
+
+Builder claims 22 → 24 (+2) in the codex package. Verified: `runtime_test.go` now contains 9 top-level `Test*` functions (was 7; the diff adds exactly 2 — `TestPrepareRuntimeSkipsClaudeMountWhenNotProvided` and `TestPrepareRuntimeMountsClaudeHomeWhenProvided`, no renames). Package-wide test count comes from three files: `account_test.go` (3 `Test*` funcs), `runtime_test.go` (9), `bridge_test.go` (8) = 20 top-level — but mage reports 24, indicating 4 `t.Run` subtests across `bridge_test.go`. Re-run `mage testPkg .../codex` confirms `tests: 24 / passed: 24 / failed: 0`. Delta matches claim. No counterexample.
+
+### Required gates
+
+- `mage testPkg github.com/evanmschultz/valv/internal/adapters/providers/codex` → **PASS**, 24/24 tests, 74.9% coverage (≥ 60% gate).
+- `mage build` → **PASS**, produced `./valv`.
+
+### Hylla Feedback
+
+None — Hylla not queried for this round. All Go-symbol evidence (current `runtime.go` shape, test function inventory, `bridgeManager` surface in `bridge.go`, callers via `rg`, comparison against `claude/runtime.go`) was gathered via `Read` and `rg` because (a) HEAD `90ac73a` is mid-drop with three commits post-baseline `eecf29d` — Hylla index is necessarily stale for the touched files until drop-end reingest, and (b) all evidence-bearing files were either in the diff itself or directly adjacent under `git status`. Per protocol this is N/A (changed files, Hylla stale until reingest), not a Hylla miss.
+
+### Verdict
+
+**PASS.** No CONFIRMED counterexample across the eight enumerated attack vectors. Attack 4 (cleanup-on-normalize-error) flagged as an inherited pre-existing pattern shared by the claude package (already accepted at Unit 10.2 falsification) and by other early-return sites in the same function — not a 10.3 regression. Both required mage gates re-ran green on HEAD (`mage testPkg .../codex`: 24/24 tests, 74.9% coverage; `mage build`: green).
