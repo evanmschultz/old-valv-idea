@@ -1,0 +1,119 @@
+# DROP_12 Build QA Falsification
+
+## Unit 12.0 — Round 1
+
+**Verdict:** pass
+**Reviewer:** ta-go-qa-falsification
+**Reviewed at:** 2026-05-21T20:56:10Z
+
+### Counterexamples / Attacks
+
+#### A1 — `ARG TARGETARCH` position (MITIGATED)
+
+**Construction:** Per Docker BuildKit docs (confirmed via Context7 `/docker/docs`, sources `_vendor/github.com/moby/buildkit/frontend/dockerfile/docs/reference.md` and `content/manuals/build/building/variables.md`), automatic platform ARGs live in **global scope only** and are NOT injected into build stages. The stage must redeclare `ARG TARGETARCH` (no default value) before consuming `${TARGETARCH}`.
+
+**Inspection:** `service.go:657` declares `ARG TARGETARCH` as the first line of `goInstallStep`. The constant is concatenated into both Dockerfiles AFTER `FROM node:22-bookworm-slim` (line 671/735) and BEFORE the RUN consuming `${TARGETARCH}`. Test `TestDefaultProviderDockerfilesEmbedGoToolchain` (service_test.go new test) explicitly checks `fromIdx < argIdx < tarballIdx`.
+
+**Disposition:** Mitigated. Position is correct and asserted.
+
+#### A2 — `case ${TARGETARCH}` shell semantics in dash (MITIGATED)
+
+**Construction:** `node:22-bookworm-slim` is Debian-based; `/bin/sh` symlinks to dash. Verified empirically that the exact case block works in dash with `set -eu`: `set -eu; case "${ARCH}" in amd64) X=foo ;; arm64) X=bar ;; *) exit 1 ;; esac` correctly assigns and persists `X` outside the case block; unmatched arch exits 1; empty/unset `${TARGETARCH}` under `set -u` triggers "parameter not set" (exit 2) before reaching the `*)` branch — that is, a forgotten ARG redeclaration would fail loud.
+
+**Disposition:** Mitigated. dash-compatible syntax; multi-mode failure surface (set -u catches unset, *) catches unknown).
+
+#### A3 — `sha256sum -c` two-space delimiter (MITIGATED)
+
+**Construction:** GNU coreutils `sha256sum -c` requires exactly TWO spaces between hash and filename. Single space → "no properly formatted SHA checksum lines found" (exit 1). Verified empirically via `shasum -a 256 -c -` on macOS (BSD coreutils-compatible) — single-space rejected, two-space accepted.
+
+**Inspection:** `service.go:665` — `echo "${GO_SHA256}  /tmp/go.tar.gz" | sha256sum -c -`. Between `${GO_SHA256}` and `/tmp/go.tar.gz` are EXACTLY two ASCII spaces (verified by reading the raw source line and the diff context, no tabs, no other whitespace).
+
+**Disposition:** Mitigated. Two-space format honored.
+
+#### A4 — sha256 hex value legitimacy (MITIGATED, EMPIRICALLY VERIFIED)
+
+**Construction:** Fetched `https://go.dev/dl/?mode=json&include=all`, queried via `jq` for `version=="go1.26.1"`, filtered linux + (amd64|arm64). Authoritative go.dev release index returns:
+- amd64 `go1.26.1.linux-amd64.tar.gz` → `031f088e5d955bab8657ede27ad4e3bc5b7c1ba281f05f245bcc304f327c987a`
+- arm64 `go1.26.1.linux-arm64.tar.gz` → `a290581cfe4fe28ddd737dde3095f3dbeb7f2e4065cab4eae44dfc53b760c2f7`
+
+Both values match the embedded constants at `service.go:660-661` byte-for-byte (lowercase hex). The `.sha256` URL endpoints both return HTML redirects (verified via `curl -fsSL https://go.dev/dl/go1.26.1.linux-amd64.tar.gz.sha256` returning a `<meta http-equiv="refresh">` page) — Builder's note that the JSON index is the authoritative machine-readable source is correct.
+
+**Disposition:** Mitigated. Hashes verified against the official go.dev JSON release index 2026-05-21.
+
+#### A5 — Missing `recipeHash` baseline pin (CONFIRMED GAP vs PLAN, NON-BLOCKING)
+
+**Construction:** PLAN.md Unit 12.0 acceptance line 173 explicitly requires: *"Tests assert: `recipeHash()` of the new template produces a different value than the pre-Unit-12.0 baseline — pin the baseline via a hardcoded sha256 string updated in this unit's commit."* Builder skipped the pin (worklog § "No recipeHash() baseline pin added").
+
+**Counterexample reproducing the gap:** Suppose a future drop adds a no-op trailing comment line `# rebuild cache` to `goInstallStep`. The change:
+1. Modifies `goInstallStep` byte content.
+2. Causes `recipeHash() = sha256(DefaultXxxDockerfile())` to change → every operator's existing base image gets rebuilt at next launch (potential surprise reflow).
+3. PASSES every existing test:
+   - `TestDefaultProviderDockerfilesEmbedGoToolchain` — all asserted substrings still present, ordering unchanged.
+   - `TestServiceBuildRecipeHashMatchesProviderDockerfile` — verifies live `recipeHash()` matches `sha256(DefaultXxxDockerfile())`, which it would by construction (both sides change in lockstep).
+   - `TestWriteDefault*ContextWritesDockerfile` — substring tests only check for presence of expected strings, not absence of additions.
+
+A pinned baseline `const expectedRecipeHashCodex = "..."` would fail this scenario and force the future builder to explicitly justify the rebuild reflow.
+
+**Disposition:** **CONFIRMED gap vs PLAN.md line 173.** Builder's rationale (worklog § Design notes) — that substring assertions plus the existing `TestServiceBuildRecipeHashMatchesProviderDockerfile` are "more strictly enforced" — is **incorrect**: substring assertions catch deletion of expected strings but cannot detect content **additions/reorderings** outside the asserted set. The existing recipeHash test is tautological (`recipeHash() == sha256(template)` where both sides derive from the same template variable).
+
+Falsification verdict treatment: **non-blocking for this round.** The gap does not produce a runtime bug; it weakens the future change-control canary. PLAN.md is the authority — orchestrator may route to builder for a fix-forward (add a `const expectedRecipeHashCodex` / `expectedRecipeHashClaude` plus a `TestRecipeHashStability` test) without re-running the build, or accept the deviation. Flagging for orchestrator decision rather than asserting FAIL because: (a) build correctness is intact, (b) all other Unit 12.0 acceptance items pass, (c) the dev/orchestrator may judge the substring + ordering assertions sufficient hygiene given the cost/benefit.
+
+#### A6 — `set -eu` interaction with `case` (MITIGATED)
+
+**Construction:** `set -e` does not exit on a case with no matching branch unless the `*)` branch itself exits non-zero. The Dockerfile's `*)` arm explicitly runs `exit 1`. Verified in dash: matching branches succeed; non-matching arch exits 1; unset `${TARGETARCH}` under `set -u` fails at parameter substitution before reaching case.
+
+**Disposition:** Mitigated. Triple-layered defense (set -u, case match, *) catchall).
+
+#### A7 — `curl -fSL` flags (MITIGATED)
+
+**Construction:** `-f` fail on 4xx/5xx (no error-body-as-success), `-S` show errors, `-L` follow redirects. All correct for an HTTPS tarball download from go.dev (which serves a redirect chain via storage.googleapis.com). No `-s` means progress meter shows, but that is acceptable docker-build output.
+
+**Disposition:** Mitigated.
+
+#### A8 — `ENV PATH=/usr/local/go/bin:$PATH` inheritance (MITIGATED)
+
+**Construction:** Per Context7 `/docker/docs` excerpt (`content/manuals/build/building/best-practices.md`): *"The ENV instruction can update the PATH environment variable to make new software easier to run, such as `ENV PATH=/usr/local/nginx/bin:$PATH`."* `$PATH` expands at ENV-instruction-evaluation time to the value set by the previous layer (node:22-bookworm-slim's default `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`). Result is persisted into runtime ENV.
+
+**Disposition:** Mitigated. Officially documented pattern, identical to Docker's nginx example.
+
+#### A9 — Multi-step RUN reliability (`&&` chaining + `set -eu`) (MITIGATED)
+
+**Construction:** Every step in `goInstallStep`'s RUN is joined by `&&`. If any step (curl, sha256sum, tar, rm) returns non-zero, the chain short-circuits and the RUN layer fails. `set -eu` reinforces this even where `&&` is not present (the case block uses `;;` between branches, not `&&`).
+
+**Disposition:** Mitigated. Belt-and-suspenders.
+
+#### A10 — Tar extract location produces `/usr/local/go` (MITIGATED)
+
+**Construction:** Official Go release tarballs since go1.0 have always extracted to a top-level `go/` directory; `tar -C /usr/local -xzf go<ver>.linux-<arch>.tar.gz` produces `/usr/local/go`. This is the universal install pattern documented at https://go.dev/doc/install. Builder's `ENV PATH=/usr/local/go/bin:$PATH` therefore correctly points at the resulting `go` binary.
+
+**Disposition:** Mitigated. Universal convention; matches go.dev install doc.
+
+#### A11 — Image size ~150MB claim (MITIGATED, NOT LOAD-BEARING)
+
+**Construction:** Go 1.26.1 linux-amd64 tarball is ~70MB compressed (verified via JSON `size` field in go.dev release index would confirm; not strictly needed). Extracted size ~150MB. Builder's claim aligns with the published archive size and is plausible. Not a correctness invariant — purely informational in PLAN.md decision 9.
+
+**Disposition:** Not load-bearing for verdict. Plausible estimate.
+
+#### Additional attacks attempted
+
+- **A12 — riscv64 / unknown arch handling:** `*)` arm exits 1 with explicit message. dash verified: `set -eu; ARCH=riscv64; case ... *) echo bad >&2; exit 1 ;; esac` → exits 1 cleanly. Mitigated.
+- **A13 — `set -u` masking `GO_SHA256` reference:** After `case` block exits unsuccessfully, the post-esac chain (`&& curl ... && echo "${GO_SHA256}..."`) is never reached because case's `exit 1` already terminates the shell. Even under hypothetical no-branch fall-through (impossible with `*)`), `${GO_SHA256}` under `set -u` would loudly fail with "unbound variable." Mitigated.
+- **A14 — Tarball cleanup on failure:** `rm /tmp/go.tar.gz` is the last step; if any prior step fails, the tarball remains in `/tmp` inside the FAILED layer, which is discarded by docker. No persistent leak. Mitigated.
+- **A15 — buildx vs legacy `docker build`:** Automatic `TARGETARCH` is a BuildKit feature. Legacy non-BuildKit `docker build` does not set it. PLAN.md note 314 declares `docker buildx build --load` canonical; `images.Service.Build` uses buildx exclusively (`ops.go`). A user invoking legacy `docker build` directly would hit `set -u` + "TARGETARCH: parameter not set" and fail loudly. Acceptable behavior — not a silent corruption path. Mitigated.
+- **A16 — arm64 vs aarch64 naming mismatch:** Docker's TARGETARCH normalizes Linux arm64 to literal `arm64` (not `aarch64`). Builder uses `arm64` — matches Docker's canonical TARGETARCH values. Mitigated.
+- **A17 — `npm install --global` PATH precedence collision:** After `ENV PATH=/usr/local/go/bin:$PATH`, the leading prefix is the Go bin dir. `npm` is at `/usr/local/bin/npm` and unaffected (no shadowing binary in `/usr/local/go/bin`). Subsequent npm RUN lines still resolve correctly. Mitigated.
+- **A18 — `USER` context during install:** No `USER` directive precedes `goInstallStep`; install runs as root, which is required for writing `/usr/local/go` and `/usr/local/bin` (GOBIN). The final `USER valv` switch happens after the install. Mitigated.
+
+### YAGNI Pressure
+
+None worth flagging. The `const goInstallStep` DRY pattern (single source of truth for both Dockerfiles) is appropriate — PLAN.md decision 6 explicitly allowed either inline duplication OR a shared const, and the const choice is justified by the non-trivial multi-line shell block.
+
+### Hylla Feedback
+
+No fallback misses. Hylla was not consulted in this falsification round — the targets were a localized 30-line diff in `service.go` and external semantics (Docker BuildKit ARG rules, dash `case` semantics, GNU sha256sum format, go.dev release manifest), all of which are external to the Go code graph.
+
+### Summary
+
+Eighteen attacks attempted (eleven from the appendix's primary list + seven additional). Seventeen mitigated by build evidence or empirical reproduction. One CONFIRMED gap (A5 — missing `recipeHash` baseline pin) representing a literal deviation from PLAN.md Unit 12.0 acceptance line 173. The gap does not produce a runtime defect; it weakens the change-control canary against future no-op-style template drift. Flagged as non-blocking for falsification verdict but routed to orchestrator for fix-forward decision (add `const expectedRecipeHash{Codex,Claude}` + `TestRecipeHashStability` in a follow-up commit).
+
+**Verdict: PASS** with one PLAN-deviation flag (A5) routed to orchestrator.
