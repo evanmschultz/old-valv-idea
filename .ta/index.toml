@@ -1,0 +1,55 @@
+format_version = 3
+
+[ta-closeout]
+created = 2026-05-21T06:30:00.490811Z
+db_name = 'claude_agents'
+type = 'agent'
+updated = 2026-05-21T06:30:00.490811Z
+
+[ta-fe-builder]
+created = 2026-05-21T06:30:00.537525Z
+db_name = 'claude_agents'
+type = 'agent'
+updated = 2026-05-21T06:30:00.537525Z
+
+[ta-fe-planning]
+created = 2026-05-21T06:30:00.547533Z
+db_name = 'claude_agents'
+type = 'agent'
+updated = 2026-05-21T06:30:00.547533Z
+
+[ta-fe-qa-falsification]
+created = 2026-05-21T06:30:00.567559Z
+db_name = 'claude_agents'
+type = 'agent'
+updated = 2026-05-21T06:30:00.567559Z
+
+[ta-fe-qa-proof]
+created = 2026-05-21T06:30:00.557816Z
+db_name = 'claude_agents'
+type = 'agent'
+updated = 2026-05-21T06:30:00.557816Z
+
+[ta-go-builder]
+created = 2026-05-21T06:30:00.499621Z
+db_name = 'claude_agents'
+type = 'agent'
+updated = 2026-05-21T06:30:00.499621Z
+
+[ta-go-planning]
+created = 2026-05-21T06:30:00.509527Z
+db_name = 'claude_agents'
+type = 'agent'
+updated = 2026-05-21T06:30:00.509527Z
+
+[ta-go-qa-falsification]
+created = 2026-05-21T06:30:00.528527Z
+db_name = 'claude_agents'
+type = 'agent'
+updated = 2026-05-21T06:30:00.528527Z
+
+[ta-go-qa-proof]
+created = 2026-05-21T06:30:00.518585Z
+db_name = 'claude_agents'
+type = 'agent'
+updated = 2026-05-21T06:30:00.518585Z
