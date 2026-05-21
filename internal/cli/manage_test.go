@@ -660,7 +660,8 @@ func runManageExpectError(t *testing.T, paths config.Paths, args []string) strin
 }
 
 // TestAccountSwitchWithProviderFlagSucceeds verifies that --provider codex
-// combined with an account name resolves and binds that account.
+// combined with an account name resolves the account and performs a host-global
+// switch (symlinks ~/.codex to the managed account home).
 func TestAccountSwitchWithProviderFlagSucceeds(t *testing.T) {
 	t.Parallel()
 
@@ -677,7 +678,7 @@ func TestAccountSwitchWithProviderFlagSucceeds(t *testing.T) {
 		"--skip-login",
 		"--project", projectRoot,
 	})
-	for _, want := range []string{"Project binding updated", "provider=codex", "account=work"} {
+	for _, want := range []string{"Global account switched", "provider=codex", "account=work"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("switch --provider codex work: output %q missing %q", out, want)
 		}
@@ -716,7 +717,7 @@ func TestAccountSwitchTwoArgBackcompat(t *testing.T) {
 		"--skip-login",
 		"--project", projectRoot,
 	})
-	for _, want := range []string{"Project binding updated", "provider=codex", "account=hylla"} {
+	for _, want := range []string{"Global account switched", "provider=codex", "account=hylla"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("two-arg switch: output %q missing %q", out, want)
 		}
@@ -742,7 +743,7 @@ func TestAccountSwitchNameUniqueAcrossProviders(t *testing.T) {
 		"--skip-login",
 		"--project", projectRoot,
 	})
-	for _, want := range []string{"Project binding updated", "provider=codex", "account=solo"} {
+	for _, want := range []string{"Global account switched", "provider=codex", "account=solo"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("unique-match switch: output %q missing %q", out, want)
 		}
@@ -781,6 +782,57 @@ func TestAccountSwitchNameNotFoundErrors(t *testing.T) {
 	})
 	if !strings.Contains(errMsg, "does-not-exist") {
 		t.Fatalf("not-found error %q missing account name", errMsg)
+	}
+}
+
+// TestAccountSwitchCreatesGlobalSymlink is the regression guard for the
+// out-of-drop hotfix that rewires `valv account switch` from runManageBind to
+// runGlobalSwitch. Before the fix, `valv account switch <name> --provider claude`
+// only updated the project-binding row in SQLite — ~/.claude was never
+// symlinked, so the host claude CLI kept using the old account. After the fix,
+// the same invocation creates the host-global symlink (the behavior
+// QUICKSTART_CROSS_PROVIDER.md documents).
+//
+// Sister hotfixes: 98cc135 (DeleteProfile dir removal),
+// 75f115e (worktree gitdir mount).
+//
+// Non-parallel: writes to paths.HomeDir/.claude and paths.StateDir, both
+// scoped under t.TempDir() so cross-test contention is impossible, but
+// keeping it sequential keeps the contract explicit.
+func TestAccountSwitchCreatesGlobalSymlink(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	testCreateAccount(t, paths, domain.ProviderClaude, "hylla")
+
+	out := runManage(t, paths, []string{
+		"account", "switch", "hylla",
+		"--provider", "claude",
+		"--skip-login",
+	})
+	if !strings.Contains(out, "Global account switched") {
+		t.Fatalf("expected output to contain %q; got %q", "Global account switched", out)
+	}
+
+	target := filepath.Join(paths.HomeDir, ".claude")
+	linkTarget, err := os.Readlink(target)
+	if err != nil {
+		t.Fatalf("Readlink(%q) error = %v (symlink not created — fix did not land)", target, err)
+	}
+	// macOS canonicalizes /var/folders → /private/var/folders, so the symlink
+	// target may differ literally from the constructed paths.ProviderRoot
+	// expectation even when they point to the same directory. Compare via
+	// EvalSymlinks so the test is robust against that.
+	wantHome, err := filepath.EvalSymlinks(filepath.Join(paths.ProviderRoot, string(domain.ProviderClaude), "profiles", "hylla"))
+	if err != nil {
+		t.Fatalf("EvalSymlinks(expected) error = %v", err)
+	}
+	gotHome, err := filepath.EvalSymlinks(linkTarget)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q) error = %v", linkTarget, err)
+	}
+	if gotHome != wantHome {
+		t.Fatalf("symlink %q resolves to %q, want %q", target, gotHome, wantHome)
 	}
 }
 

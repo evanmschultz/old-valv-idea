@@ -165,7 +165,19 @@ func TestManageAccountListShowsEmptyState(t *testing.T) {
 	}
 }
 
-func TestManageAccountSwitchRebindsCurrentProject(t *testing.T) {
+// TestManageAccountSwitchPerformsGlobalSymlinkAndLeavesBindingAlone pins the
+// post-hotfix contract for `valv account switch`: it performs a host-global
+// symlink switch (the behavior QUICKSTART_CROSS_PROVIDER.md documents) and
+// does NOT mutate the project binding row. Use `valv account bind` to change
+// the project binding; use `valv account switch` to change the host-global
+// symlink.
+//
+// Prior to the hotfix, `valv account switch` incorrectly delegated to
+// runManageBind and would have updated the binding without creating the
+// symlink. The current contract reverses that: switch creates the symlink,
+// bind updates the binding row, and the two commands are intentionally
+// independent.
+func TestManageAccountSwitchPerformsGlobalSymlinkAndLeavesBindingAlone(t *testing.T) {
 	t.Parallel()
 
 	paths := testCodexPaths(t)
@@ -181,13 +193,34 @@ func TestManageAccountSwitchRebindsCurrentProject(t *testing.T) {
 	runManage(t, paths, []string{"bind", "codex", "alpha", "--project", projectRoot})
 
 	output := runManage(t, paths, []string{"account", "switch", "beta", "--project", projectRoot})
-	if !strings.Contains(output, "account=beta") {
-		t.Fatalf("unexpected account switch output: %q", output)
+	for _, want := range []string{"Global account switched", "provider=codex", "account=beta"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("unexpected account switch output: %q missing %q", output, want)
+		}
 	}
 
+	// Symlink: ~/.codex (under paths.HomeDir) must point at beta's home.
+	target := filepath.Join(paths.HomeDir, ".codex")
+	linkTarget, err := os.Readlink(target)
+	if err != nil {
+		t.Fatalf("Readlink(%q) error = %v (global symlink not created)", target, err)
+	}
+	wantHome, err := filepath.EvalSymlinks(betaHome)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q) error = %v", betaHome, err)
+	}
+	gotHome, err := filepath.EvalSymlinks(linkTarget)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q) error = %v", linkTarget, err)
+	}
+	if gotHome != wantHome {
+		t.Fatalf("symlink %q resolves to %q, want %q", target, gotHome, wantHome)
+	}
+
+	// Project binding is unchanged: still alpha.
 	status := runManage(t, paths, []string{"status", "--project", projectRoot})
-	if !strings.Contains(status, "account=beta") {
-		t.Fatalf("unexpected status after account switch: %q", status)
+	if !strings.Contains(status, "account=alpha") {
+		t.Fatalf("project binding should be unchanged (still alpha) after switch; status: %q", status)
 	}
 }
 

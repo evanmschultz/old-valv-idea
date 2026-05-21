@@ -702,7 +702,14 @@ func runManageAccountSwitch(cmd *cobra.Command, paths config.Paths, opts *rootOp
 	if err := ensureManagedAccountReady(cmd, provider, account, accountAuthOptions{SkipLogin: skipLogin, Paths: paths}); err != nil {
 		return fmt.Errorf("manage account switch: %w", err)
 	}
-	return runManageBind(cmd, paths, opts, provider, profileName, projectPath)
+	// Delegate to the host-global switch path so the user-facing behavior
+	// matches what `valv account switch` advertises: the managed account home
+	// is symlinked into ~/.claude or ~/.codex on the host. Previously this
+	// path called runManageBind, which only updated the project binding row
+	// in SQLite and never created the symlink — see hotfix following
+	// 75f115e (worktree gitdir mount) and 98cc135 (DeleteProfile dir
+	// removal).
+	return runGlobalSwitch(cmd, paths, opts, provider, profileName)
 }
 
 func runManageAccountLogin(cmd *cobra.Command, paths config.Paths, opts *rootOptions, args []string, projectPath, providerFlag string) error {
