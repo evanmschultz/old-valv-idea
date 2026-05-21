@@ -6,15 +6,20 @@ This file lives in the **`main/` worktree** at `/Users/evanschultz/Documents/Cod
 
 ## Product Direction
 
-`valv` is a macOS-first control plane for running AI CLIs inside Valv-managed Docker runtimes.
+`valv` is a macOS-first control plane for per-account isolated containerized agentic-dev workloads. AI CLI launching (Codex + Claude Code) is the first-class case shipping today; a generic `valv run --account <name> <command>` primitive backs the provider-specific launchers (planned DROP_13).
 
 Current product direction:
 
-- Two providers ship today: Codex (first primary target) and Claude Code.
-- `valv codex` and `valv claude` are pass-through containerized launchers.
-- **Cross-provider in-container routing**: when `valv claude` runs in a project, the claude image contains the `codex` CLI AND the project's pinned Codex profile is cross-mounted at `/home/valv/.codex` with `CODEX_HOME` set; mirror for `valv codex`. Per-project binding required for both providers.
+- Two provider launchers ship today: `valv codex` (first primary target) and `valv claude`. Both are pass-through containerized launchers.
+- **Cross-provider in-container routing**: when `valv claude` runs in a project, the claude image contains the `codex` CLI AND the project's pinned Codex profile is cross-mounted at `/home/valv/.codex` with `CODEX_HOME` set; mirror for `valv codex`. Per-project binding required.
+- **Provider launchers will become thin adapters** over the generic per-account run primitive (planned DROP_13). The same isolation model (per-account credential homes + cross-mount + per-project binding) underlies every workload.
+- **Declarative per-project toolchain** (`.valv/tools.toml`) determines what's available inside the container (planned DROP_11). Per-project images compose the base provider image with a tools overlay layer (planned DROP_12).
+- **Per-account env var maps** thread into container launch alongside existing CLAUDE_CONFIG_DIR/CODEX_HOME (planned DROP_14). Same env-var name allowed across accounts with different values.
+- **Closed-by-default outbound network with per-project allowlist** (planned DROP_15).
+- **Sibling-path-aware mounts** for git worktrees and other cross-repo cases are shipped.
+- Per-account credential isolation, multi-identity per project, and Docker-runtime sandbox are the core differentiators. Survey of devcontainer.json / mise / asdf / nix / Codespaces / Gitpod / ddev / claudebox (2026-05-20) found no project simultaneously offers (a) closed-network + allowlist, (b) declarative per-project toolchain in a container, (c) multi-identity isolation, AND (d) sibling-path-aware mounts. That intersection is Valv's niche.
 - Valv management flows live outside the direct pass-through path.
-- Global account switching is optional convenience functionality, not the core runtime model.
+- Global account switching remains optional convenience, not the core runtime model.
 
 Follow `main/PLAN.md` as the active drop tree.
 
