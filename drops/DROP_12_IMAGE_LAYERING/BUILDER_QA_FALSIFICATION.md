@@ -117,3 +117,99 @@ No fallback misses. Hylla was not consulted in this falsification round — the 
 Eighteen attacks attempted (eleven from the appendix's primary list + seven additional). Seventeen mitigated by build evidence or empirical reproduction. One CONFIRMED gap (A5 — missing `recipeHash` baseline pin) representing a literal deviation from PLAN.md Unit 12.0 acceptance line 173. The gap does not produce a runtime defect; it weakens the change-control canary against future no-op-style template drift. Flagged as non-blocking for falsification verdict but routed to orchestrator for fix-forward decision (add `const expectedRecipeHash{Codex,Claude}` + `TestRecipeHashStability` in a follow-up commit).
 
 **Verdict: PASS** with one PLAN-deviation flag (A5) routed to orchestrator.
+
+## Unit 12.1 — Round 1
+
+**Verdict:** PASS (no unmitigated blocker; required full package mage target could not be confirmed in this sandbox because an unrelated existing `httptest.NewServer` test cannot bind a local port)
+
+**Mage targets run:** `mage testPkg ./internal/services/images/` → FAIL in sandbox: `TestCodexVersionResolverReadsLatestRelease` panicked at `httptest: failed to listen on a port: listen tcp6 [::1]:0: bind: operation not permitted`. Scoped Unit 12.1 verification `go test -count=1 -race -run 'Test(OverlayHash|ShortOverlayHash|CanonicalManifest)' -coverprofile /private/tmp/valv-overlay-cover.out ./internal/services/images/` → PASS. Temporary falsification repro `TestFalsificationOverlayHashEdgeCases` with `GOCACHE=/private/tmp/valv-go-cache` → PASS, then removed.
+
+### Attacks attempted
+
+#### A1 — Hash determinism for nil/empty manifests
+
+- **Hypothesis:** Nil `Tools` map and empty `Tools` map could hash differently (`null` vs `[]`), causing semantically identical "no tools" manifests to diverge.
+- **Evidence:** `overlay.go:29-31` returns `[]canonicalTool{}` when `len(manifest.Tools) == 0`; `overlay_test.go:10-33` asserts nil-map and empty-map hashes match.
+- **Outcome:** mitigated.
+- **Detail:** `OverlayHash` always hashes canonical JSON for an empty slice, not a nil slice.
+
+#### A2 — Hash collision / semantic drift in tool records
+
+- **Hypothesis:** Two semantically distinct manifests could collapse to one canonical record, or two equivalent declaration orders could diverge.
+- **Evidence:** `canonicalTool` includes `Name`, `Version`, `Source`, and `Install` (`overlay.go:14-20`), and `canonicalManifest` sorts by `Name` (`overlay.go:41-43`). `overlay_test.go:77-104` asserts out-of-order three-tool manifests hash identically; `overlay_test.go:55-75` asserts object-form and string-form examples differ. Context7 `/websites/pkg_go_dev_go1_25_3` and local `go doc` confirm `json.MarshalIndent` formats deterministic JSON for a supplied value; local `go doc crypto/sha256.Sum256` confirms SHA256 over the payload.
+- **Outcome:** mitigated.
+- **Detail:** The only intentional equivalence class is leading/trailing whitespace normalization of `Source`/`Install`. Cryptographic SHA256 collision resistance is assumed; no constructed collision exists.
+
+#### A3 — Unicode and multiline TrimSpace asymmetry
+
+- **Hypothesis:** Tabs/newlines or multi-byte whitespace such as NBSP could behave differently from ASCII spaces, diverging hashes unexpectedly.
+- **Evidence:** Local `go doc strings.TrimSpace` says leading/trailing whitespace is removed as defined by Unicode. The temporary repro verified `"\u00a0github.com/x/y\u00a0"` and `"\n\tgo install\r\n"` hash identically to clean values.
+- **Outcome:** mitigated.
+- **Detail:** Unicode leading/trailing whitespace normalizes; internal whitespace is intentionally preserved and tested in `overlay_test.go:187-196`.
+
+#### A4 — JSON escaping edge cases
+
+- **Hypothesis:** Quotes, backslashes, or control-like characters in `Source`/`Install` could create ambiguous canonical JSON or round-trip incorrectly.
+- **Evidence:** The temporary repro compared `Source: github.com/x/"y"` against `Source: github.com/x/\"y\"`, confirmed different hashes, then unmarshaled the `json.MarshalIndent(canonicalManifest(...), "", "")` payload back into `[]canonicalTool` without data loss.
+- **Outcome:** mitigated.
+- **Detail:** JSON escaping is byte-stable for the canonical struct slice; distinct source strings remain distinct before hashing.
+
+#### A5 — Sort stability, duplicate names, and empty names
+
+- **Hypothesis:** `sort.Slice` is unstable, duplicate names could reorder nondeterministically, and an empty tool name could sort first and produce a surprising hash.
+- **Evidence:** Local `go doc sort.Slice` confirms instability for equal elements. Hylla snapshot 7 and local `tools.ToolManifest` show `Tools map[string]ToolSpec`, so duplicate names cannot coexist in the in-memory manifest. `tools.Validate` rejects empty names via `toolNameRE` (`internal/tools/validate.go:48-50`), though `canonicalManifest` does not revalidate.
+- **Outcome:** accepted as non-blocking.
+- **Detail:** Duplicate-name instability is impossible with the map shape. Empty-name hashing is possible only if a caller bypasses `tools.Validate`; Unit 12.1 acceptance does not require validation inside the hashing helper.
+
+#### A6 — `shortOverlayHash` wrong-argument misuse
+
+- **Hypothesis:** A caller could pass a Go-formatted manifest string or arbitrary short string to `shortOverlayHash`, silently receiving a 12-char prefix that looks tag-like.
+- **Evidence:** LSP references show `shortOverlayHash` is currently referenced only by its declaration and tests. `overlay.go:70-75` accepts any string and truncates if length is at least 12; `overlay_test.go:147-165` explicitly covers truncation and defensive short input.
+- **Outcome:** accepted as non-blocking.
+- **Detail:** This is real API footgun potential, but the helper is unexported and has no production caller until Unit 12.3. Routing note below tells Unit 12.3 to pass only `OverlayHash` output.
+
+#### A7 — Single-trim invariant
+
+- **Hypothesis:** `Source`/`Install` might be consumed before trimming or trimmed twice, breaking the Unit 12.2 contract.
+- **Evidence:** `rg` found `strings.TrimSpace` in `overlay.go` only at the `Source` and `Install` assignments inside `canonicalManifest`; LSP references show `canonicalManifest` is currently consumed by `OverlayHash` and tests only.
+- **Outcome:** mitigated for Unit 12.1.
+- **Detail:** There is one trim point in current code. The future Dockerfile generator must consume `canonicalManifest` rather than re-trimming.
+
+#### A8 — Unreachable JSON error branch returns empty string
+
+- **Hypothesis:** If `json.MarshalIndent` fails, `OverlayHash` returns `""`, which a caller could misread as a valid "empty manifest" hash.
+- **Evidence:** `canonicalTool` contains only strings, so the current payload has no unsupported value such as a channel, function, NaN, or cyclic pointer. Overlay-only coverage showed the only uncovered `overlay.go` block is lines `56-61`, the impossible error branch.
+- **Outcome:** accepted as non-blocking.
+- **Detail:** The branch is defensive and unreachable with current types. The empty string behavior should be treated as "malformed/unexpected" by future callers, not as a valid digest.
+
+#### A9 — Coverage delta hides meaningful behavior
+
+- **Hypothesis:** The reported 80.4% package coverage may hide important untested overlay behavior.
+- **Evidence:** Scoped coverprofile reports `canonicalManifest` 100%, `shortOverlayHash` 100%, and `OverlayHash` 83.3%; raw coverage entries show only `overlay.go:56-61` has count 0.
+- **Outcome:** mitigated.
+- **Detail:** Uncovered overlay behavior is the unreachable `json.MarshalIndent` error return. No meaningful sorting, trimming, empty-map, or truncation path is uncovered.
+
+#### A10 — YAGNI, hidden dependencies, concurrency, and interface misuse
+
+- **Hypothesis:** Unit 12.1 could introduce unnecessary abstractions, shared state, init-time side effects, goroutines, panicking type assertions, or swallowed errors.
+- **Evidence:** `overlay.go` adds one struct and three functions, no interfaces, no package vars, no `init`, no goroutines/channels/context, no type assertions, and no ignored error except the handled `json.MarshalIndent` branch. LSP diagnostics report no issues.
+- **Outcome:** mitigated.
+- **Detail:** The implementation is deterministic pure data transformation plus hashing.
+
+#### A11 — Snapshot fragility
+
+- **Hypothesis:** The pinned hex snapshot could change while no other test fails, or the fixture could be edited accidentally.
+- **Evidence:** `overlay_test.go:130-145` pins both a concrete two-tool fixture and a hardcoded full digest. The test fails on any canonical-form drift. Other behavior tests cover the semantic invariants separately.
+- **Outcome:** mitigated with normal snapshot limitations.
+- **Detail:** If a future builder edits both the fixture and expected hex together, the snapshot cannot prove intent. That is an ordinary review/process limitation, not a Unit 12.1 blocker.
+
+### Non-blocking gaps
+
+- Full `mage testPkg ./internal/services/images/` did not pass in this sandbox because an existing HTTP test cannot bind a localhost port. This is an environment verification gap, not a constructed counterexample against `overlay.go`.
+- `shortOverlayHash` is intentionally unvalidated and unexported; Unit 12.3 must avoid passing arbitrary strings.
+- `canonicalManifest` assumes a validated manifest for name/schema correctness; direct construction can hash invalid tool names, including the empty string.
+
+### Routing
+
+- Unit 12.2 builder: consume `canonicalManifest` directly for Dockerfile emission and do not re-trim `Source` or `Install`.
+- Unit 12.3 builder: compute `toolsHash := OverlayHash(request.Manifest)` once and pass only that full hash to `shortOverlayHash`; treat `""` as unexpected/mismatch, never as a valid hash.

@@ -127,3 +127,38 @@ The commit `6384117` includes a 1-line update to PLAN.md (`+2 -1`). Verified thi
 ### Hylla Feedback
 
 None applicable. The change is fully content-local to two functions and one new const inside one file. The builder's `Read` of `service.go` was the correct evidence path; Hylla queries on `DefaultCodexDockerfile`/`DefaultClaudeDockerfile`/`recipeHash` would only have returned the same lines.
+
+## Unit 12.1 — Round 1
+
+**Verdict:** PASS
+**Reviewer:** ta-go-qa-proof
+**Reviewed at:** 2026-05-21
+**Commit under review:** `b1b196e` (`feat(images): unit 12.1 overlay hash + canonical manifest`)
+
+**Mage targets run:** `mage testPkg ./internal/services/images/` → PASS, **41/41 tests**, **80.4% coverage** (≥60% gate; above the ≥70% per-package floor PLAN.md targets).
+
+### Acceptance proof
+
+| # | Acceptance bullet | Evidence (file:line) | Verdict |
+|---|---|---|---|
+| 1 | `canonicalManifest(manifest tools.ToolManifest) []canonicalTool` — unexported, sorted-by-name, `strings.TrimSpace` applied exactly once to `Source` and `Install` (not `Version`); single trim point feeding `OverlayHash` (and Unit 12.2 downstream). | `overlay.go:28-45` (lowercase `canonicalManifest`, `sort.Slice` lines 41-43, TrimSpace at 37-38 on Source/Install only, Version untouched at 36). Tests: `overlay_test.go:167-197` (`TestCanonicalManifest_TrimAppliedOnce` — verifies both fields trimmed AND internal whitespace survives) + `overlay_test.go:199-221` (`TestCanonicalManifest_SortedByName` — five-tool alpha-sort assertion). | pass |
+| 2 | `OverlayHash(manifest tools.ToolManifest) string` — exported, computes `sha256(json.MarshalIndent(canonicalManifest(manifest), "", ""))`, returns lowercase hex. | `overlay.go:53-64` — exported (capital `O`), calls `canonicalManifest` at 54, `json.MarshalIndent(canonical, "", "")` at 55, `sha256.Sum256(payload)` at 62, `hex.EncodeToString(sum[:])` at 63 (Go stdlib `hex.EncodeToString` emits lowercase). Asserted hex length 64 in `overlay_test.go:17-19,44-46,64-66`. | pass |
+| 3 | `shortOverlayHash(hash string) string` — unexported, takes the hash (not manifest), returns first 12 chars with defensive short-input handling. | `overlay.go:70-75` (lowercase `shortOverlayHash`, parameter is `hash string` not the manifest, `len < 12` short-circuit at 71-73 returns input unchanged, `hash[:12]` at 74). Tests: `overlay_test.go:147-165` — full 64-char input → `"9c3a7b1e8d4f"`, short `"abc"` input → `"abc"` (no panic). | pass |
+| 4 | Table-driven tests cover: empty manifest, single string-form tool, single object-form tool, three tools out-of-order (hash matches reorder), whitespace trim equivalence. | All five cases present as named tests (not literally in one `t.Run` table, but each case is a discrete `Test*` function — equivalent coverage): empty `overlay_test.go:10-33`; string-form `35-53`; object-form `55-75` (also asserts string-form ≠ object-form hashes); out-of-order three-tool `77-104` (asserts `hashA == hashB` across two map-literal declaration orders); whitespace trim `106-123` (asserts `OverlayHash(clean) == OverlayHash(padded)`). | pass |
+| 5 | Hash-stability snapshot pins a hardcoded manifest → hardcoded hex `7471483e6f2f684fa1054cdbb127dd744f1970c9f3c896428c5ca632574571c5`. | `overlay_test.go:130-145` (`TestOverlayHash_StabilitySnapshot`) — manifest at 133-138 (`ta` + `jq`), `const want` at 139 matches the appendix-specified hex exactly, fatal diff on drift at 142-144. Verified the snapshot passes against current implementation via `mage testPkg`. | pass |
+| 6 | No changes to `service.go`; no overlay-Dockerfile generation in this unit. | `git diff b1b196e~1..b1b196e --stat` shows only four files: `BUILDER_WORKLOG.md`, `PLAN.md`, `overlay.go` (new, +75), `overlay_test.go` (new, +221). `git diff b1b196e~1..b1b196e -- internal/services/images/service.go` returns empty. No `BuildOverlayDockerfile` or Dockerfile-template helper present in `overlay.go`. | pass |
+| 7 | `mage testPkg ./internal/services/images/` green; coverage ≥ 60% gate (PLAN.md targets ≥70%). | Reran independently against HEAD: `[PKG PASS] github.com/evanmschultz/valv/internal/services/images (1.29s)`, 41 tests / 41 passed, coverage **80.4%**. Matches builder's reported 41/41 + 80.4% exactly. Materially above both the 60% gate and the 70% target. | pass |
+
+### Notes / deviations
+
+- **`canonicalManifest` empty-input branch returns `[]canonicalTool{}` not `nil`.** `overlay.go:29-31` returns the typed empty slice when `len(manifest.Tools) == 0`. `json.MarshalIndent` of `[]canonicalTool{}` produces `"[]"`, of `nil` would produce `"null"` — choosing the empty slice keeps the empty-manifest hash a stable sha256 of `"[]"`. Confirmed empty-manifest hash is stable across calls and across nil-map / empty-map (`overlay_test.go:21-32`). Acceptable refinement; consistent with PLAN.md acceptance bullet 1's "sorted-by-name slice" wording.
+- **`OverlayHash` error branch returns empty string rather than panicking.** `overlay.go:56-61` — `json.MarshalIndent` cannot fail on a `[]canonicalTool` (all string fields), so the branch is unreachable in practice. Returning `""` keeps the function total; downstream hash-comparison would see a mismatch and force a rebuild (conservative-opposite policy, per PLAN.md decision 5). Not a blocking deviation.
+- **Tests use one `Test*` function per case rather than a single table-driven `t.Run` loop.** The acceptance bullet phrasing "Table-driven test exercises" reads as one test with sub-cases. The builder instead used per-case named functions. Coverage of the required five cases is complete and each function uses table-equivalent setup. Mechanically equivalent; arguably more diagnostic (named-test failures point straight at the broken case). Accepting as functionally identical.
+- **Coverage delta vs. ≥70% target.** 80.4% — comfortably above. New `overlay.go` adds well-tested code; the +0.7% delta over the pre-unit 79.7% (Unit 12.0) reflects the high test density of the new helpers.
+- **Builder ran the test-first-pin pattern for the stability snapshot** (placeholder constant → run → capture hex → edit). Documented in BUILDER_WORKLOG.md design notes. Acceptable per PLAN.md decision 5 spirit (do not transcribe sha256 by hand).
+- **PLAN.md unit-state flip from `in_progress` → `done` is included in the commit.** Per WORKFLOW.md round semantics; not scope creep.
+- **No `service.go` overlay-Dockerfile changes.** Unit 12.2 is the next unit per PLAN.md line 209; the `canonicalManifest` exported-shape contract is preserved so 12.2 can consume it without re-trimming. Single-trim-point invariant is now testably enforced.
+
+### Hylla Feedback
+
+None. BUILDER_WORKLOG.md `## Hylla Feedback` for Unit 12.1 Round 2 records no fallback miss — the targeted `Read` of `service.go` (style/imports) and `tools.go` (`ToolManifest`/`ToolSpec` shape) was the fastest path for small known files. Confirmed during QA: no Hylla query was needed to verify the change set either.
