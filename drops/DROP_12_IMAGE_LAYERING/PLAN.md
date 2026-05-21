@@ -185,7 +185,7 @@ Extend `internal/services/images` to compose a per-project layered Docker image 
 
 #### Unit 12.1 — Overlay hash + canonical manifest
 
-**State:** todo
+**State:** done
 
 **Paths:**
 - `internal/services/images/overlay.go` (new — hashing helpers + types)

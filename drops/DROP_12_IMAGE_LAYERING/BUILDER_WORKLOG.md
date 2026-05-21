@@ -47,3 +47,38 @@ None. The Hylla `node_full` lookups for `DefaultCodexDockerfile` / `DefaultClaud
 - The new base image will be ~150MB larger because of the embedded Go toolchain. Acceptable per PLAN.md decision 9. Real rebuild fires on next `valv claude` / `valv codex` launch via the existing `EnsureLatest` flow — no extra wiring required.
 - `mage testPkg` exercises template-content assertions only; it does NOT exercise a real Docker build of the new Dockerfile. The first end-to-end build will happen during drop-end Phase 6 (`mage integration`) or when the dev next launches a containerized provider.
 
+## Unit 12.1 — Round 2
+
+**Round 1 disposition:** Round 1 (haiku) was wasted on Bash-vs-Write tool-discipline failure — 25+ denied Bash file-creation calls before hallucinating "implementation complete in code form" with no files on disk. Discarded.
+
+**Goal:** Implement `canonicalManifest` + `OverlayHash` + `shortOverlayHash` for per-project image overlay hashing. Single trim point (`strings.TrimSpace` applied exactly once inside `canonicalManifest`) is the load-bearing invariant — both the hash now and the Dockerfile emitter in Unit 12.2 consume the same trimmed slice.
+
+### Files touched
+
+- `internal/services/images/overlay.go` (new) — contains the unexported `canonicalTool` struct, the unexported `canonicalManifest` helper, the exported `OverlayHash` function, and the unexported `shortOverlayHash` truncator.
+- `internal/services/images/overlay_test.go` (new) — eight test functions covering all six acceptance bullets: empty manifest, single string-form tool, single object-form tool, declaration-order independence (three tools out of order), whitespace trim singleton, hash-stability snapshot, `shortOverlayHash` truncation, plus a dedicated `canonicalManifest` test asserting trim-once + sorted-by-name behaviour.
+- `main/drops/DROP_12_IMAGE_LAYERING/PLAN.md` — Unit 12.1 state flipped from `in_progress` to `done`.
+
+### Mage commands run
+
+- `mage testPkg ./internal/services/images/` (first run, pre-snapshot-pin) → 1 fail (stability snapshot placeholder), 40/41 tests passing, **80.4%** coverage. Captured actual hex from the failure output: `7471483e6f2f684fa1054cdbb127dd744f1970c9f3c896428c5ca632574571c5`.
+- `mage testPkg ./internal/services/images/` (second run, with pinned hex) → **PASS**, 41/41 tests, **80.4%** coverage (≥60% gate, materially above the ≥70% per-package floor that DROP_12 acceptance bullet 8 targets).
+
+### Design notes
+
+- **`canonicalTool` struct shape.** Mirrors the four-field record PLAN.md decision 2 prescribes: `Name`, `Version`, `Source`, `Install`. All fields are strings with explicit `json:"..."` tags so the marshaled output is stable across Go map iteration order — `sort.Slice` on `.Name` guarantees deterministic ordering, and the explicit json tags pin the field names against accidental renames.
+- **TrimSpace single-point.** `strings.TrimSpace` lives only inside `canonicalManifest` and is applied to `Source` and `Install`. `Version` is intentionally NOT trimmed because PLAN.md acceptance bullet 1 calls out Source/Install specifically (and the canonical manifest is the contract surface for both Unit 12.1 hashing AND Unit 12.2 Dockerfile emission). If a future drop discovers that `Version` also needs trimming for cosmetic-whitespace tolerance, the change is one line here and the existing tests prove no other call site re-trims.
+- **`json.MarshalIndent(canonical, "", "")` rationale.** PLAN.md decision 2 mandates this exact call. With empty prefix + empty indent, `json.MarshalIndent` still inserts a newline between top-level array elements (the deterministic compact-but-newline-delimited form). Field order inside each element is fixed by struct declaration order, not by map iteration, so the digest is fully stable.
+- **`OverlayHash` total function.** `json.MarshalIndent` of a `[]canonicalTool` (only string fields) cannot fail — there is no non-marshalable type in the input. The error branch returns empty string rather than panicking; callers comparing hashes treat empty as a mismatch and force a rebuild. This matches the conservative-opposite policy spelled out in PLAN.md decision 5 for the cache-label read path.
+- **`shortOverlayHash` unexported.** PLAN.md Round 2 YAGNI decision: only the tag-construction site inside Unit 12.3 calls it. The signature takes the already-computed full hash (not the manifest) so the caller cannot accidentally double-hash. Defensive `len < 12` short-circuit avoids a panic if a caller passes a malformed value during testing.
+- **Hash-stability snapshot test-first-pin pattern.** Wrote the snapshot test with a placeholder `"REPLACE_ME_AFTER_FIRST_RUN"` constant, ran `mage testPkg`, captured the actual hex from the failure output, then `Edit`-pinned the value. This is intentional — pre-computing the hex by hand would require either running the canonical-manifest logic mentally or piping JSON through a separate `sha256sum`, both of which carry transcription risk. The test-first-pin loop guarantees the snapshot reflects the real implementation.
+- **Out-of-order vs in-order test covers BOTH declarations and BOTH iteration orders.** Go map iteration is already non-deterministic in the runtime; the `sort.Slice` call inside `canonicalManifest` is what makes the hash deterministic. The test compares the hash of two map-literal manifests with the same tools in different *source-code* order, which is the only stable thing the test author can control. If `sort.Slice` ever regresses, this test catches it.
+
+### Hylla Feedback
+
+None. The required reads were `service.go` (style + import grouping reference) and `tools.go` (`ToolManifest`/`ToolSpec` field shape) — both targeted reads of small files, faster via `Read` than via Hylla node lookup. No `hylla_search` calls were required and no fallback miss occurred.
+
+### Unknowns
+
+- Unit 12.2 (next) will add `BuildOverlayDockerfile` that consumes `canonicalManifest` to emit the per-tool `RUN [...]` lines. The single-trim-point invariant is now enforced — Unit 12.2 must call `canonicalManifest` rather than re-trimming `Source`/`Install` itself. Any future builder that ignores this contract would re-introduce the double-trim hazard that PLAN.md decision 3 explicitly fences off.
+
