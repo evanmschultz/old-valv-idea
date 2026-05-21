@@ -155,3 +155,213 @@ Not used in this review. The implementation is brand-new uncommitted code
 that Hylla will only see at drop-end reingest. `Read` of the current files,
 the worklog, and the live mage runs provided complete coverage. No Hylla
 fallback miss to record.
+
+## Unit 11.2 — Round 1
+
+**Verdict:** pass
+**Reviewer:** ta-go-qa-proof
+**Reviewed at:** 2026-05-21 UTC
+
+### Acceptance Criteria Verification
+
+#### AC1 — `Validate(m ToolManifest) error` exported
+
+**Verdict:** pass
+
+`internal/tools/validate.go:43` exports
+`func Validate(m ToolManifest) error`. Doc comment starts with the
+identifier name (`Validate checks...`, lines 34-42) per project rule. Returns
+`nil` for a valid manifest (line 57); returns wrapped `fmt.Errorf` for each
+violation (lines 45, 50, 74, 77, 80, 88).
+
+#### AC2 — Tool name regex
+
+**Verdict:** pass
+
+`internal/tools/validate.go:32`:
+
+```go
+var toolNameRE = regexp.MustCompile(`^[a-zA-Z0-9]+$|^[a-zA-Z0-9][a-zA-Z0-9._/-]*[a-zA-Z0-9]$`)
+```
+
+- Package-level `var` — compiled once at init, reused across all `Validate`
+  calls. Confirmed not lazily compiled inside the function.
+- Pattern matches the PLAN.md pin character-for-character.
+- RE2-compatible (alternation + character class only; no lookahead).
+- Used via `toolNameRE.MatchString(name)` at `validate.go:49`.
+
+#### AC3 — Accept-by-design names all pass `Validate`
+
+**Verdict:** pass
+
+`internal/tools/validate_test.go:19-29` (`TestValidate_ToolName`) declares the
+following accept cases — every PLAN-pinned name plus structurally similar
+extras — all with `wantErr: false`:
+
+- `mage` (line 19) — simple word.
+- `m` (line 21) — single-char alphanumeric.
+- `github.com/foo/bar` (line 23) — path-like name.
+- `go-1.22` (line 24) — version suffix.
+- `a.b.c` (line 25) — namespaced.
+- `a..b` (line 26) — double dot, accepted by design.
+- `a//b` (line 27) — double slash, accepted by design.
+- `a---b` (line 28) — multiple dashes, accepted by design.
+
+All eight PLAN-pinned accept-by-design names are present, each in a
+named-subtest row, each spec-wrapped in `ToolSpec{Version: "latest"}` so the
+name check is exercised in isolation. Live run: all 48 tests pass.
+
+#### AC4 — Reject-by-design names all fail `Validate`
+
+**Verdict:** pass
+
+`internal/tools/validate_test.go:32-43` declares every PLAN-pinned reject
+case with `wantErr: true`:
+
+- `""` (line 32) — empty string.
+- `with space` (line 33) — embedded space.
+- `-bad` (line 34) — leading dash.
+- `_underscore` (line 36) — leading underscore.
+- `bad-name-` (line 35) — trailing dash.
+- `name.` (line 37) — trailing dot.
+- `name/` (line 38) — trailing slash.
+- `bad!char` (line 39) — `!` outside permitted set.
+- ` name` (line 40) — leading whitespace.
+
+All nine PLAN-pinned reject-by-design names are present. Each test asserts
+the error message contains `"invalid tool name"` (line 65) and (for
+non-empty cases) mentions the offending name (line 69). Two bonus reject
+cases (`trailing_whitespace`, `at_disallowed`, `non_ascii`) tighten the net
+further. Live run: all reject cases produce errors as expected.
+
+#### AC5 — Object-form rules
+
+**Verdict:** pass
+
+`internal/tools/validate_test.go:81-166` (`TestValidate_SpecShape`) covers
+the object-form quadrant:
+
+- `{Source: "github.com/evanmschultz/ta@main", Install: "go install"}` —
+  valid (lines 101-105, `object_form_valid`, `wantErr: false`).
+- `{Source: "github.com/evanmschultz/ta@main"}` (missing install) — invalid
+  (lines 106-110, `errContains: "missing install"`).
+- `{Install: "go install"}` (missing source) — invalid (lines 112-116,
+  `errContains: "missing source"`).
+- `{Version: "1.0", Source: ..., Install: ...}` (mixed) — invalid (lines
+  118-122, `errContains: "version alongside source/install"`).
+
+Implementation at `validate.go:65-90` matches: the `hasSource || hasInstall`
+guard at line 71 enters the object-form branch first; missing-source check
+at line 73, missing-install at line 76, mixed-version check at line 79.
+
+#### AC6 — String-form rules
+
+**Verdict:** pass
+
+- `{Version: "latest"}` valid — `validate_test.go:91-95` (`string_form_valid`,
+  `wantErr: false`).
+- `{Version: "1.22"}` valid — `validate_test.go:96-100`
+  (`string_form_pinned_version`).
+- `{}` (all-empty) invalid — `validate_test.go:130-134` (`all_empty`,
+  `errContains: "empty spec"`).
+
+Implementation at `validate.go:83-89`: string-form falls through the switch
+to the `hasVersion` case (line 83), then the `default` (line 86) catches
+all-empty with `"empty spec"`. The `default` matches the AC: when both
+`Source`/`Install` and `Version` are empty, the manifest entry is invalid.
+
+#### AC7 — Max count (50 valid, 51 invalid)
+
+**Verdict:** pass
+
+`internal/tools/validate_test.go:179-220` (`TestValidate_ToolCount`):
+
+- `count_50_boundary` (line 189) — 50 tools named `tool0`..`tool49`, all
+  alphanumeric and regex-valid, `wantErr: false`.
+- `count_51_over_boundary` (line 190) — 51 tools, `wantErr: true`,
+  `errContains: "exceeds max"`.
+
+Implementation at `validate.go:44-46`: `if len(m.Tools) > maxToolCount`
+(where `maxToolCount = 50` per line 13) returns
+`"validate tools: tool count %d exceeds max of %d"`. The count check runs
+BEFORE the per-tool iteration loop, so an over-limit manifest fails on the
+count check even if every name is valid — confirmed by the test where all
+51 names match the regex.
+
+#### AC8 — First violation only, single `fmt.Errorf`
+
+**Verdict:** pass
+
+`Validate` returns from the first violation it encounters:
+
+- `validate.go:45` — count-exceeded return.
+- `validate.go:50` — invalid-name return.
+- `validate.go:52-54` — propagates first error from `validateSpec` (which
+  itself returns at first violation: lines 74, 77, 80, 88).
+
+No `errors.Join`, no slice accumulation, no multi-error. Every error is a
+single `fmt.Errorf("validate tools: ...", ...)` call. Tests acknowledge
+non-deterministic map iteration order and assert only the SHAPE of the
+error (substring match), never which of two intentionally-invalid entries
+comes first — see `validate_test.go:42` notes in worklog Round 1.
+
+#### AC9 — `testdata/invalid_object_missing_install.toml` round-trip
+
+**Verdict:** pass
+
+Fixture `internal/tools/testdata/invalid_object_missing_install.toml`:
+
+```toml
+[tools]
+ta = { source = "github.com/evanmschultz/ta@main" }
+```
+
+Test `TestValidate_LoadedFixtureMissingInstall`
+(`validate_test.go:222-253`):
+
+- Line 226: `m, err := Load(path)` — loads via the real `Load` function,
+  proving `Load` accepts the partial-object form (validation belongs to
+  `Validate`, not `Load`).
+- Lines 231-241: sanity-checks parsed shape — `Tools["ta"].Source` set,
+  `Tools["ta"].Install` empty.
+- Lines 243-246: `Validate(m)` returns a non-nil error.
+- Lines 247-252: error message contains both `"missing install"` and
+  `"ta"`.
+
+This is the `Load`-then-`Validate` boundary the PLAN explicitly demands.
+
+#### AC10 — `mage testPkg ./internal/tools/` passes with reported counts
+
+**Verdict:** pass
+
+Live reproduction during this review:
+
+```
+[INFO] Started go test -json (-count=1 -race -cover ./internal/tools/)
+[PKG PASS] github.com/evanmschultz/valv/internal/tools (1.29s)
+  tests: 48
+  passed: 48
+  failed: 0
+  ...
+  github.com/evanmschultz/valv/internal/tools | 93.1%
+```
+
+48 tests / 93.1% coverage match worklog Round 1 exactly. Both are well
+above the active 60% gate and the future 70% gate (Unit 11.5). `-race`
+and `-cover` are on per the mage target.
+
+### Findings
+
+None. All ten acceptance criteria pass with file:line evidence and a
+reproduced mage run. The implementation matches the PLAN-pinned regex,
+spec-shape rules, count boundary, error format (first-violation
+`fmt.Errorf`), and round-trip fixture path. Tests are table-driven,
+parallelized, and assert error-message shape via substring (correctly
+avoiding ordering assumptions over Go map iteration).
+
+### Hylla Feedback
+
+Not used in this review. Unit 11.2 is brand-new uncommitted code that
+Hylla will only see at drop-end reingest; `Read` of the source, tests,
+fixture, and worklog plus the live mage run provided complete coverage.
+No Hylla fallback miss to record.

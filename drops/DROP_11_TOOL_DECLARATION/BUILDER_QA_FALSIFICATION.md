@@ -86,3 +86,97 @@ No Hylla queries needed — the package is brand-new and the test suite is small
 - **Scratch verification overhead:** 14 attack tests added + run via `mage testPkg`, then deleted. Pristine tree confirmed via post-cleanup `mage testPkg` returning to 8 tests / 89.2%.
 
 Verdict: **pass**.
+
+## Unit 11.2 — Round 1
+
+**Verdict:** pass
+**Reviewer:** ta-go-qa-falsification
+**Reviewed at:** 2026-05-21T00:00:00Z
+
+Reviewed against `main/drops/DROP_11_TOOL_DECLARATION/PLAN.md` Unit 11.2 acceptance and the falsification appendix's 6 attack groups. Twenty-five additional scratch test cases (`internal/tools/falsification_scratch_test.go`, deleted before this report) ran cleanly under `mage testPkg ./internal/tools/`. Pre-scratch baseline: 48 tests / 93.1%. Mid-scratch: 75 tests / 93.1%. Post-cleanup: 48 tests / 93.1% — tree pristine.
+
+### Counterexamples / Attacks
+
+#### Attack 1 — Regex correctness
+
+Seventeen sub-attacks; all **mitigated**.
+
+- **Single-character alnum:** `"a"`, `"Z"`, `"0"` all accepted via Branch 1 of the alternation. PASS.
+- **Two-character alnum:** `"aa"` accepted via Branch 1. PASS.
+- **Trailing dash:** `"ab-"` rejected (Branch 2 requires alnum end). PASS.
+- **Leading dash:** `"-a"` rejected. PASS.
+- **Trailing dot length 2:** `"a."` rejected (Branch 2 length-2 requires both ends alnum). PASS.
+- **Only dots:** `".."` rejected. PASS.
+- **Non-ASCII (`"日本語"`):** rejected — confirmed RE2 `[a-zA-Z0-9]` is ASCII-only. PASS.
+- **Uppercase / digit boundaries (`"A"`, `"Z"`, `"0"`, `"9"`):** all accepted. PASS.
+- **Embedded newline (`"a\nb"`):** rejected. RE2 `^`/`$` default to text-start/text-end (NOT multiline) so the whole string must match the alternation, and `\n` is not in `[a-zA-Z0-9._/-]`. PASS.
+- **Leading / trailing newline:** rejected. PASS.
+- **Only newline (`"\n"`):** rejected. PASS.
+- **Embedded tab:** rejected. PASS.
+- **Plus / colon / backslash characters:** all rejected (outside the permitted set). PASS.
+- **Anchoring sanity check:** wrapped in `defer recover()` — no panic on newline input; regex match returns false cleanly. PASS.
+
+The `regexp.MustCompile` call at package init has been exercised by the live test suite (45+ runs); no compile panic. The RE2 anchoring semantics are confirmed empirically — embedded newlines do NOT slip through.
+
+#### Attack 2 — Object-form vs string-form dispatch
+
+Three sub-attacks; all **mitigated**.
+
+- **Mixed form `{Version: "1.0", Source: "x", Install: "y"}`:** rejected with `"version alongside source/install"`. The dispatch in `validateSpec` checks `hasSource || hasInstall` first, then explicitly errors when `hasVersion` is also true. PASS.
+- **Whitespace-only Version (`" "`):** ACCEPTED. Per PLAN.md Schema Decisions, "any non-empty string is valid at declaration time." `" "` is non-empty by Go's `s != ""` check. This is **accepted by design** — DROP_12 owns install-time semantics; DROP_11 stores the version verbatim. The PLAN's "any non-empty string" pin is honored.
+- **Embedded newline in Version (`"v1.0\n"`):** ACCEPTED for the same reason. Validate only checks emptiness on Version; install-time parsing in DROP_12 will reject malformed strings. Accepted by design — same rationale.
+
+These two "accepted" cases are within the planner's stated contract. If the dev wants tighter Version validation, that becomes a follow-on unit or a future drop. Not a falsification blocker.
+
+#### Attack 3 — Max count boundary
+
+Four sub-attacks; all **mitigated**.
+
+- **Exactly 50:** accepted. `len > maxToolCount` is strictly greater; 50 passes. PASS.
+- **Exactly 51:** rejected with `"exceeds max"`. PASS.
+- **Zero tools:** accepted (`len(nil)==0` and `len(empty)==0` both ≤ 50). PASS.
+- **Nil Tools map:** accepted. `len(nil)==0` is safe; the `for name, spec := range nil` loop is a no-op. No panic. PASS.
+
+#### Attack 4 — First-violation semantics
+
+**Mitigated.**
+
+- Two intentionally-invalid entries (`"-bad"` with valid spec, `"goodone"` with empty spec) construction. `Validate` returns a non-nil error matching one of the two expected shapes (`"invalid tool name"` OR `"empty spec"`). The test does not assert which one is returned — Go map iteration is non-deterministic, and the implementation correctly does not rely on iteration order. No infinite loop, no panic, no silent pass. PASS.
+
+#### Attack 5 — Validate interaction with Load
+
+Two sub-attacks; both **mitigated**.
+
+- **Load accepts partial object-form, Validate rejects.** The committed test `TestValidate_LoadedFixtureMissingInstall` already exercises this exact round-trip with `testdata/invalid_object_missing_install.toml`: `Load` returns `ToolSpec{Source: "github.com/evanmschultz/ta@main"}` (no error); `Validate` then errors with `"missing install"` mentioning `"ta"`. PASS.
+- **Object-form with both empty (Source = "", Install = ""):** because both are empty AND Version is empty, the spec falls to the `default` arm of the switch and yields `"empty spec"`. The dispatch does NOT mistakenly enter the object-form branch when both Source and Install are empty (the switch guard is `hasSource || hasInstall`). PASS.
+
+#### Attack 6 — Test coverage gap analysis
+
+**Mitigated with one accepted miss.**
+
+- Current coverage: **93.1%** (up from 89.2% post-11.1, a +3.9 point gain consistent with adding `validate.go` + thorough tests).
+- The unreached ~7% is consistent with the unreachable error-return arms of the two `meta.PrimitiveDecode` calls inside `tools.go` (lines 115 + 119), inherited from Unit 11.1's coverage gap. `validate.go` itself appears fully covered — every branch in `validateSpec` (`hasSource || hasInstall` → `!hasSource`/`!hasInstall`/`hasVersion`/return-nil; the `hasVersion`-only path; the all-empty default) has at least one test case.
+- Accepted miss; not a falsification-blocking gap.
+
+#### Bonus Attack — Regex applied to map key
+
+**Mitigated.** Verified that `Validate` ranges `for name, spec := range m.Tools` and applies `toolNameRE.MatchString(name)` to the map KEY (since `ToolSpec` has no `Name` field). Confirmed empirically: `runValidate(t, "bad!", ToolSpec{Version: "latest"})` errors with `"invalid tool name"` containing `"bad!"`. The error message uses `%q` formatting so the offending name is displayed quoted. PASS.
+
+### YAGNI Pressure
+
+None. `Validate` is a single 16-line function plus an 18-line `validateSpec` helper. The regex is one package-level `MustCompile`. No interfaces, no premature multi-error collection, no validation-rule registry, no Validator type. Minimal surface and direct logic. The first-violation-only semantics is the right choice for v1 — multi-error reporting can come later if dev tooling actually needs it. No surplus surface.
+
+### Hylla Feedback
+
+No Hylla queries were needed. The validation logic is brand-new, has no prior repo pattern to grep, and PLAN.md fully specifies the rules. Direct `Read` of `validate.go` + `validate_test.go` + `tools.go` was sufficient.
+
+### Falsification Summary
+
+- **Confirmed counterexamples blocking PASS: 0.**
+- **Accepted-by-design behaviours noted for future drops:**
+  - Whitespace-only Version (`" "`) is accepted — planner pinned "any non-empty string."
+  - Embedded newline in Version is accepted — same pin.
+  - Both should be flagged if/when the dev wants tighter Version validation. Out of scope for DROP_11.
+- **Scratch verification overhead:** 25 attack cases added to `internal/tools/falsification_scratch_test.go`, all passed under `mage testPkg`, file deleted before report. Post-cleanup baseline restored verbatim: 48 tests / 93.1% coverage.
+
+Verdict: **pass**.
