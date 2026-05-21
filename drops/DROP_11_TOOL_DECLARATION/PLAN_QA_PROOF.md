@@ -1,134 +1,99 @@
-# DROP_11 Plan QA Proof — Round 3
+# DROP_11 Plan QA Proof — Round 4
 
 **Verdict:** pass
-**Reviewer:** general-purpose acting as go-qa-proof-agent
-**Reviewed at:** 2026-05-21T05:45:00Z
+**Reviewer:** ta-go-qa-proof
+**Reviewed at:** 2026-05-21T06:44:44Z
 
-## Round 2 Delta Verification
+## Round 3 Delta Verification
 
-### C1 (HIGH) — Reorder Unit 11.0 → Unit 11.5 (last)
+### NEW C2 [SHOWSTOPPER] — `toml.Primitive` requires explicit `PrimitiveDecode`
 
-**Pass.**
+**Status:** PASS
 
-- PLAN.md § Units presents the chain `Unit 11.1` (line 90) → `Unit 11.2` (line 126) → `Unit 11.3` (line 153) → `Unit 11.4` (line 174) → `Unit 11.5` (line 207). No `Unit 11.0` heading remains.
-- Unit 11.1 `Blocked by: nothing (first coding unit)` at line 122.
-- Unit 11.2 `Blocked by: Unit 11.1` at line 149.
-- Unit 11.3 `Blocked by: Unit 11.2` at line 170.
-- Unit 11.4 `Blocked by: Unit 11.3` at line 203.
-- Unit 11.5 `Blocked by: Unit 11.4` at line 222.
-- Drop-level AC7 at line 82 enforces the 70% per-package coverage gate at Unit 11.4 completion. Drop-level AC8 at line 83 enforces `coverageThreshold = 70.0` + clean `mage test` at Unit 11.5. The 70% gate now lands at Unit 11.5 as the final gate (per the deltas listed in the spawn appendix), with Unit 11.4 enforcing the per-package coverage and Unit 11.5 enforcing the global magefile bump — split correctly across the two final units.
-- § Notes For Builder Agents line 249 explicitly states `Unit ordering: 11.1 (schema+parser) → 11.2 (validation) → 11.3 (resolver) → 11.4 (CLI surface + 70% gate) → 11.5 (global coverage bump)`.
+Schema Decisions block has been fully reversed and now embeds the empirical evidence inline:
 
-### C2 (MEDIUM) — TOML bare-key quoting
+- Plan lines 51-54 (Schema Decisions code-block annotation): explicitly states "DROP_11 captures them as toml.Primitive fields and calls meta.PrimitiveDecode on each to mark them as decoded (the decoded value is discarded — DROP_11 takes no action on the contents)."
+- Plan lines 71-78 (Schema Decisions narrative): states "`ToolManifest` declares `Allowlist toml.Primitive` and `Env toml.Primitive`. After `toml.DecodeFile`, the parser **explicitly calls `meta.PrimitiveDecode` on each `toml.Primitive` field**...". Empirical output is embedded directly:
+  ```
+  undecoded BEFORE PrimitiveDecode: [allowlist.hosts env.GOPRIVATE]
+  undecoded AFTER  PrimitiveDecode: []
+  ```
+- Plan line 78 explicitly reverses the Round 2/3 claim: "The Round 2/3 Context7-inferred claim that `toml.Primitive` declaration alone marked the section as decoded was wrong; this Round 4 revision reverses it."
+- Unit 11.1 acceptance (plan line 123): "uses `os.Stat` guard..., `toml.DecodeFile`, then — **before the strict `meta.Undecoded()` check** — calls `meta.PrimitiveDecode(m.Allowlist, &discardA)` and `meta.PrimitiveDecode(m.Env, &discardE)`...". The "before the strict `meta.Undecoded()` check" ordering is explicit.
+- Unit 11.1 acceptance (plan line 124): MANDATORY callout with the same empirical sentence. "Builder MUST implement the two calls before the `Undecoded()` check; skipping them will reject valid forward-compat sections as unknown keys."
+- Unit 11.1 acceptance (plan line 127): NEW TestLoad case — "a TOML file containing `[allowlist]` with `hosts = [...]` AND `[env]` with `GOPRIVATE = "..."` decodes cleanly — `meta.Undecoded()` returns the empty slice after the two `PrimitiveDecode` calls."
+- Unit 11.1 acceptance (plan line 129): a dedicated TestLoad case for forward-compat sections, with the smoke-check "Builder verifies this case explicitly fails without the two `PrimitiveDecode` calls (smoke check during dev)."
+- Notes For Builder Agents (plan line 247): full mandatory paragraph with the same empirical output and explicit Round 2/3 reversal.
 
-**Pass.**
+All five required surfaces (Schema Decisions, Unit 11.1 acceptance, new TestLoad case, Notes For Builder Agents, reversal of prior claim) carry the empirical evidence inline. Round 3 SHOWSTOPPER fully resolved.
 
-- § Schema Decisions line 70 contains the dedicated **TOML bare-key quoting** bullet: explains bare-key restriction, requires quoting for dotted/slashed names, calls out that decoded result lands as `manifest.Tools["github.com/foo/bar"]` not as a nested table.
-- Unit 11.1 Paths line 99 lists `internal/tools/testdata/valid_quoted_names.toml` with a description of the fixture content.
-- Unit 11.1 Acceptance line 116 specifies the TestLoad assertion: exactly one entry under `manifest.Tools` with key `"github.com/foo/bar"`.
-- Unit 11.1 Notes line 120 reiterates the quoting requirement.
-- § Notes For Builder Agents line 229 has a `TOML bare-key quoting` bullet covering the same.
+### NEW C1 [MINOR] — Unit 11.5 escalation distinction
 
-### C3 (MEDIUM) — Unit 11.4 test gaps filled
+**Status:** PASS
 
-**Pass.**
+Plan lines 234-236 distinguish the two failure classes:
 
-- Unit 11.4 Acceptance lines 191-198 enumerate seven explicit `TestToolsValidate` cases, including:
-  - Case 5 (line 196): zero-byte file using committed `testdata/zero_byte.toml`.
-  - Case 6 (line 197): permission-denied using `t.TempDir()` + `chmod 000`.
-  - Case 7 (line 198): directory-at-path using `t.TempDir()` + mkdir.
-- Unit 11.4 Paths line 199 adds `internal/tools/testdata/zero_byte.toml` to the testdata fixtures.
-- § Notes For Builder Agents line 237 explicitly states zero-byte uses committed fixture; permission-denied + directory-at-path use `t.TempDir()` (states don't survive `git add`).
+- "**New-package failure (`internal/tools/`):** the builder for THIS drop owns it. Route back to Unit 11.4 (which is the unit that finishes the package by exercising the CLI integration). The Unit 11.4 builder is responsible for raising `internal/tools/` coverage to ≥ 70% with additional tests before Unit 11.5 re-runs. Tightly scoped fix, same drop."
+- "**Legacy-package failure (e.g. `internal/adapters/docker` — the known candidate from the pre-existing TODO in `magefile.go`):** out of scope for this drop's code units. Route to dev for triage. Dev decides between (a) raising that package's coverage as a new follow-on unit inside DROP_11 (e.g. Unit 11.6), or (b) rolling back the threshold bump and opening a separate coverage-cleanup drop."
 
-### C4 (LOW) — Tool name regex + invalid case additions
+Both branches are concrete and actionable. Round 3 finding resolved.
 
-**Pass.**
+### NEW C3 [MINOR] — directory-at-path test wording
 
-- § Schema Decisions line 64 declares the regex `^[a-zA-Z0-9]+$|^[a-zA-Z0-9][a-zA-Z0-9._/-]*[a-zA-Z0-9]$` with the explicit rationale "Rejects trailing punctuation (`bad-name-`, `name.`, `name/`)." Notes RE2-compatible (alternation + character classes only; no lookahead).
-- Unit 11.2 Acceptance line 140 references the regex; line 145 lists invalid cases including `"bad-name-"`, `"name."`, `"name/"`.
-- Unit 11.2 Acceptance line 146 requires the builder to verify the three trailing-punctuation cases are rejected.
-- § Notes For Builder Agents line 234 repeats the regex and reiterates RE2 compatibility + trailing-punctuation rejection requirement.
+**Status:** PASS
 
-**Regex correctness check (mental trace):** Branch 1 `^[a-zA-Z0-9]+$` matches strings of one or more alphanumeric chars. Branch 2 `^[a-zA-Z0-9][a-zA-Z0-9._/-]*[a-zA-Z0-9]$` requires alphanumeric anchors at both ends. Trace cases:
-- `bad-name-` → branch 1 fails (`-`); branch 2 fails (trailing `-` not in `[a-zA-Z0-9]`). Rejected.
-- `name.` → branch 2 trailing `.` rejected.
-- `name/` → branch 2 trailing `/` rejected.
-- `github.com/foo/bar` → branch 2: `g`...`r` with middle `[a-zA-Z0-9._/-]`. Accepted.
-- `mage`, `m`, `go` → branch 1 accepts.
-- `-bad` → branch 2 leading `-` rejected.
-- `bad!char` → both branches fail (`!` not in class).
-- empty → both branches fail.
+Plan line 213 (Unit 11.4 case 7): "The acceptance assertion is `errors.Is(err, syscall.EISDIR)` OR the error string contains `"is a directory"`."
 
-RE2-compatible: no lookaround, only character classes + alternation + anchors. Will compile cleanly via `regexp.MustCompile`.
+Empirical evidence is embedded inline ("Empirical evidence (planner Round 4 scratch run on macOS Darwin against the Go stdlib): `os.Open(dir)` returns `nil` error; `io.ReadAll(f)` returns `"read <path>: is a directory"` with `errors.Is(err, syscall.EISDIR) == true`."). No "not a regular file" wording survives. Round 3 finding resolved.
 
-### C5 (MEDIUM) — Unit 11.4 uses `project.Detect()` from `internal/project/`
+### NEW C4 [MINOR] — regex edge cases pinned
 
-**Pass.**
+**Status:** PASS
 
-- Unit 11.4 Packages line 183 includes `internal/project/` as read-only dependency.
-- Unit 11.4 Acceptance line 187 specifies `project.Detect()` (signature `func Detect() (project.Result, error)`, source `internal/project/project.go:19`), then `result.Root` passed to `tools.Resolve`. Explicitly forbids raw `os.Getwd()`.
-- § Notes For Builder Agents line 235 reiterates the binding with line cite.
+Plan line 67 (Schema Decisions, accept-by-design): "multiple consecutive `.`, `/`, or `-` characters within the name (e.g. `a..b`, `a//b`, `a---b`). Path-like names (`github.com/foo/bar`) and namespaced names (`org.tool.subname`) are valid."
 
-**Source-of-truth verification:** I read `/Users/evanschultz/Documents/Code/hylla/valv/main/internal/project/project.go` lines 1-40 directly:
-- Line 12-16: `type Result struct { Root string; GitMarker string; HasGitMarker bool }`.
-- Line 19: `func Detect() (Result, error)` (no parameters; calls `os.Getwd()` internally; delegates to `DetectFrom`).
+Plan line 68 (Schema Decisions, reject-by-design): "empty string; trailing punctuation (`bad-name-`, `name.`, `name/`); leading dash; leading `_` (must start alphanumeric — chosen for clarity, `_` would suggest internal/private semantics inappropriate for a public tool list); whitespace anywhere; `!` and other non-permitted characters; non-ASCII names".
 
-Plan claim matches source exactly.
+Unit 11.2 test cases updated (plan lines 159-160):
+- Valid (new): `"a..b"`, `"a---b"`, `"a/b/c"`.
+- Invalid (new): `"_underscore"` "(rejected by design — must start alphanumeric)".
 
-### C6 (VERY LOW) — `len(m.Tools) == 0` named explicitly
+Plan line 161 reinforces: "The doubled-separator accept cases (`"a..b"`, `"a---b"`) and the leading-underscore reject case are the planner-pinned edge cases — they explicitly test that the design choice in the Schema Decisions block is honored by the implementation."
 
-**Pass.**
+Round 3 finding resolved.
 
-- § Schema Decisions line 69 declares the empty-manifest predicate `len(m.Tools) == 0` with explicit rationale: presence of `[allowlist]` or `[env]` sections does NOT make the manifest non-empty.
-- Drop-level Acceptance Criterion 6 line 81 names `len(m.Tools) == 0` for the `"no tools declared"` branch.
-- Unit 11.4 Acceptance line 188 names `len(m.Tools) == 0` for both empty-file and missing-file cases (and that `[allowlist]`/`[env]` presence does not change the predicate).
-- § Notes For Builder Agents line 236 has a dedicated **Empty-manifest predicate (Unit 11.4)** bullet.
+### F1 [LOAD-BEARING] — root.go integration
 
-## Re-verification of Y2 (`toml.Primitive` claim)
+**Status:** PASS (survives Round 4 unchanged)
 
-**Pass.**
+Plan line 205 (Unit 11.4 acceptance): full F1 spec is intact. "inside `newRootCommandWithPaths`, add `toolsCmd := newToolsCommand()` and `toolsCmd.GroupID = "runtime"`. Include `toolsCmd` in the existing `cmd.AddCommand(pathsCmd, versionCmd, statusCmd, codexCmd, claudeCmd, accountCmd, globalCmd, imageCmd)` call — add `toolsCmd` to that variadic list. Evidence: `root.go` line 137 is the single `cmd.AddCommand(...)` call; the local variable is `cmd` (line 47), not `rootCmd`. Groups confirmed: `"inspect"`, `"runtime"`, `"account"` declared at lines 108-112; `codexCmd` and `claudeCmd` use `GroupID = "runtime"`."
 
-- § Schema Decisions line 67 declares `Allowlist toml.Primitive` and `Env toml.Primitive` as `ToolManifest` fields. States that during initial `toml.DecodeFile`, these fields receive raw TOML values and are marked decoded — `meta.Undecoded()` returns empty (strict check satisfied). States that a top-level section whose name is NOT `tools`, `allowlist`, or `env` still triggers the undecoded-key error.
-- Unit 11.1 Acceptance lines 110-111 declare both fields with toml struct tags.
-- Unit 11.1 Acceptance line 115: `Load` accepts files with `[allowlist]` and `[env]` sections without error (they decode into `toml.Primitive` fields — not undecoded).
-- Unit 11.1 Paths line 100 adds `invalid_unknown_key.toml` (unknown top-level key, e.g. `[network]` section) as a negative-test fixture.
-- Unit 11.1 Acceptance line 114: `Load` returns error for `invalid_unknown_key.toml` (undecoded key triggers strict check).
-- § Notes For Builder Agents line 230 reiterates the typed claim and that DROP_11 does NOT call `meta.PrimitiveDecode`.
+Spot-verified against current `internal/cli/root.go`:
+- Line 137 is the single `cmd.AddCommand(pathsCmd, versionCmd, statusCmd, codexCmd, claudeCmd, accountCmd, globalCmd, imageCmd)` call — exact match.
+- Lines 108-112 declare the three groups (`inspect`, `runtime`, `account`) — exact match.
+- Variable name is `cmd`, not `rootCmd` — confirmed.
+- `codexCmd.GroupID = "runtime"` (line 127), `claudeCmd.GroupID = "runtime"` (line 129) — confirmed.
 
-**Context7 evidence re-check:** queried `/burntsushi/toml` for "toml.Primitive field unmarshaling and meta.Undecoded interaction". Returned the **"Delayed TOML Decoding with Primitive Values in Go"** canonical example showing `Config { Mode string; DevConfig toml.Primitive; ProdConfig toml.Primitive }` with both `[dev_config]` and `[prod_config]` sections decoded via `toml.Decode` — the typed `toml.Primitive` fields capture the raw section payloads, which is the documented usage pattern Round 2 falsification already accepted as evidence. Round 2's empirical test (separate fixture run) corroborates this. Claim survives Round 3 unchanged and remains evidence-grounded.
+F1 anchor is still correct against HEAD. No drift.
 
-## Re-verification of F1 (root.go integration)
+## New Findings (Round 4)
 
-**Pass.**
+### N1 [MINOR] — `PrimitiveDecode` safety on zero-value `toml.Primitive` not explicitly pinned
 
-- Unit 11.4 Acceptance line 190 specifies: inside `newRootCommandWithPaths`, add `toolsCmd := newToolsCommand()` + `toolsCmd.GroupID = "runtime"`, append `toolsCmd` to the existing variadic `cmd.AddCommand(...)` call at line 137. Cites `cmd` as local var name (line 47).
-- **Source-of-truth verification:** I read `/Users/evanschultz/Documents/Code/hylla/valv/main/internal/cli/root.go`:
-  - Line 47: `cmd := &cobra.Command{...}` — local variable is `cmd`, not `rootCmd`. Match.
-  - Lines 108-112: `cmd.AddGroup(...)` declares groups `"inspect"`, `"runtime"`, `"account"`. Match.
-  - Line 127: `codexCmd.GroupID = "runtime"`. Line 129: `claudeCmd.GroupID = "runtime"`. Match — runtime is the correct group for `tools`.
-  - Line 137: `cmd.AddCommand(pathsCmd, versionCmd, statusCmd, codexCmd, claudeCmd, accountCmd, globalCmd, imageCmd)` — single variadic call. Match.
+**Severity:** minor (not a blocker)
 
-Plan claim matches source exactly.
+Unit 11.1's acceptance (plan line 123) requires unconditional calls to `meta.PrimitiveDecode(m.Allowlist, &discardA)` and `meta.PrimitiveDecode(m.Env, &discardE)` regardless of whether the input TOML actually contains `[allowlist]` or `[env]` sections. When neither section is present, `m.Allowlist` and `m.Env` are zero-value `toml.Primitive` values.
 
-## New Findings (Round 3)
+The plan's embedded empirical evidence (lines 73-76) only covers the WITH-sections case (`undecoded BEFORE: [allowlist.hosts env.GOPRIVATE]` → `undecoded AFTER: []`). The WITHOUT-sections path through `PrimitiveDecode` (where the field is zero-valued) is NOT empirically pinned, and Unit 11.1 acceptance does not explicitly state "PrimitiveDecode is a safe no-op on zero-value Primitive."
 
-### N1 (LOW) — Round 3 produced clean, no unmitigated new issues
+In practice this is expected to be a safe no-op — a zero-value `toml.Primitive` has empty `undecoded` and nil context, so `PrimitiveDecode` iterates over nothing and returns nil — but the plan does not pin this.
 
-After full re-read of PLAN.md and audit against the five new-issue checks in the spawn appendix:
+**Why this is not a blocker:** Unit 11.1 paths list `testdata/valid_simple.toml` (a "simple string-value tools fixture" — implicitly without `[allowlist]` / `[env]`). If `PrimitiveDecode` on a zero-value `toml.Primitive` were to error, the unconditional calls in `Load` would fail every test that uses `valid_simple.toml`, which would surface immediately during Unit 11.1 build. The bug-trap is real even though the pinning is implicit.
 
-- **Unit 11.5 acceptance routes failures to dev (not silently fix)?** Confirmed. Lines 219: "If any package reports < 70% coverage, the builder does NOT silently fix it. Instead: list every failing package with its coverage percentage in the worklog, set unit state to `blocked`, and return to the orchestrator. The orchestrator routes to dev: either raise that package's coverage in a follow-on unit, or roll back the bump and open a coverage-only drop." Plan handles this correctly.
-- **Coverage gate timing across Units 11.1-11.4?** Consistent. Unit 11.1 Acceptance line 117: "Coverage gate for `internal/tools/` not yet enforced — that is enforced after Unit 11.4 completes the package." Unit 11.2 Acceptance line 147: "Coverage gate not yet enforced (enforced after Unit 11.4)." Unit 11.3 Acceptance line 167: "Coverage gate not yet enforced at this unit — 70% gate is enforced at Unit 11.4 which completes the package with CLI-side integration." Unit 11.4 Acceptance line 200: "≥ 70% coverage across the whole package (this unit completes the package by exercising the full `Resolve` → `Validate` path via CLI tests — 70% gate enforced here)." Note: the global `magefile.go coverageThreshold` constant stays at 60.0 throughout Units 11.1-11.4, then bumps to 70.0 at Unit 11.5. Plan handles the dual-gate distinction (per-package enforcement vs. global magefile constant) cleanly.
-- **Regex compiles in Go RE2?** Yes — see C4 trace above; no lookaround, only character classes + alternation + anchors.
-- **Stale Round 1/2 text?** Audited: no `Unit 11.0`, no `AllowlistConfig` claim (only explicit "NOT `AllowlistConfig`" callouts), no `valv tools list` claim (only "is cut" callouts), no `os.IsNotExist` fork (only "do NOT use" callouts). All historical anti-patterns are framed as explicit prohibitions.
+**Recommended (optional) revision:** add to Unit 11.1 acceptance a one-line note: "`PrimitiveDecode` calls are unconditional and safe — a zero-value `toml.Primitive` (absent section) is a no-op. The TestLoad case using `valid_simple.toml` (no `[allowlist]` / `[env]` sections) confirms this path."
 
-### N2 (VERY LOW — informational, not blocking) — Fixture content presentation ambiguity in Unit 11.1
-
-**Observation:** Unit 11.1 Paths line 99 describes `valid_quoted_names.toml` content as `"github.com/foo/bar" = { source = "github.com/foo/bar@main", install = "go install" }` without explicitly showing a parent `[tools]` table header. The TestLoad assertion at line 116 asserts the entry lands inside `manifest.Tools`, which requires the fixture entry to be under a `[tools]` table. A careful builder will infer the required structure from the test assertion, but the fixture description could be tightened to remove the inference burden.
-
-**Why not blocking:** The acceptance criterion at line 116 is unambiguous about the assertion ("`manifest.Tools` has exactly one entry with key `"github.com/foo/bar"`"). The builder must produce a fixture that satisfies that assertion — meaning the quoted key must live under a `[tools]` parent. The plan is constructively correct; the prose could just be clearer. Falsification did not flag this in Round 2, and it does not introduce ambiguity at the acceptance level.
-
-**Recommendation (optional, not a fail):** if the planner revises, consider rewriting line 99 to read "fixture with a quoted-key entry under `[tools]`, e.g. `[tools]\n\"github.com/foo/bar\" = { source = ..., install = ... }`". Round 3 verdict is **pass** without this revision.
+If the planner does not want to revise further, this finding can be accepted as-is — the empirical trap via `valid_simple.toml` will catch any divergence at Unit 11.1 build time.
 
 ## Hylla Feedback
 
-No Hylla MCP calls were required for this proof review — verification used direct `Read` of `internal/cli/root.go` and `internal/project/project.go` (both visible, non-search-dependent file inspection of specific known files), and Context7 query for `toml.Primitive` semantics. The plan cites specific files + line numbers that are stable visible artifacts, so Hylla search was not the right tool. No misses to report.
+No Hylla queries were required for this Round 4 proof — all verification was against the in-tree `PLAN.md` and a single `Read` of `internal/cli/root.go` to spot-check the F1 anchor. Context7 was queried once for `BurntSushi/toml` `PrimitiveDecode` semantics on zero-value `Primitive` (relevant to N1) — Context7 returned the canonical `PrimitiveDecode` example which only covers the section-present case, leaving the zero-value-Primitive behavior implicit.

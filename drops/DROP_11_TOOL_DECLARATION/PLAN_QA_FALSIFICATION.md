@@ -1,279 +1,250 @@
-# DROP_11 Plan QA Falsification — Round 3
+# DROP_11 Plan QA Falsification — Round 4
 
-**Verdict:** fail
-**Reviewer:** general-purpose acting as go-qa-falsification-agent
-**Reviewed at:** 2026-05-21T05:49:10Z
+**Verdict:** pass
+**Reviewer:** ta-go-qa-falsification
+**Reviewed at:** 2026-05-21T00:00:00Z
 
-Summary up front: one empirical SHOWSTOPPER (NEW C2) directly contradicts a load-bearing claim the planner inherited and amplified in Round 3. Three smaller new counterexamples; two Round 2 mitigations confirmed effective; one Round 2 mitigation partially incorrect; one YAGNI re-pressure item.
-
----
-
-## Round 2 Attack Re-verification
-
-### R2-C1 — Unit ordering paradox (coverage bump last)
-
-**Status:** MITIGATED.
-
-Round 3 renamed Unit 11.0 → Unit 11.5 and made it the final unit. The Notes (line 246) explicitly call out: *"Bumping the global gate before all packages pass is a build-break risk."* The fix is correct.
-
-**Residual sub-attack — new package failing the new gate (covered as NEW C1 below):** the acceptance criteria for Unit 11.5 do not distinguish "the known candidate `internal/adapters/docker` is below 70%" from "the newly created `internal/tools/` package is below 70%". Both surface the same way through `renderCoverage` (verified at `main/magefile.go:552-590` — `belowThreshold` accumulates all failing packages in one slice and the error message lists them all). Promoted to NEW C1.
-
-### R2-C2 — TOML quoted-key handling
-
-**Status:** PARTIALLY MITIGATED. Plan documents the requirement; one empirical claim in the plan is wrong.
-
-Empirical test via `BurntSushi/toml@v1.6.0`:
-
-| Input | Decode result |
-|---|---|
-| `"github.com/foo/bar" = { source = "...", install = "..." }` | single flat key `"github.com/foo/bar"` in `manifest.Tools`. No nested tables. |
-| `github.com/foo/bar = { source = "...", install = "..." }` (unquoted) | **parse error**: `toml: line 2 (last key "tools"): expected '.' or '=', but got '/' instead` |
-
-The plan's Note (Unit 11.1, line 120) says an unquoted dotted name *"would create nested TOML tables ... and NOT produce the expected flat map key — it would trigger the unknown-key error."* This is empirically half-wrong: with `/` in the name (as in the planner's own example `github.com/foo/bar`), it errors at PARSE time with a syntax error — not at the undecoded-key strict check. Pure dotted names (`foo.bar`) WOULD nest. The plan conflates two different failure modes.
-
-**Severity:** minor (the fixture exercises the correct quoted form; the note's wording just mis-describes the failure path for the unquoted counterexample). Builder will see this immediately if they try the unquoted form. Worth fixing in the note, not blocking.
-
-### R2-C3 — Unit 11.4 filesystem-edge test cases
-
-**Status:** EMPIRICALLY VERIFIED on macOS — plan acceptance correct in outcome, but acceptance wording for the directory case is loose.
-
-Tested locally:
-
-- **chmod-000**: `os.ReadFile` returns `"open .../tools.toml: permission denied"`. `os.Stat` SUCCEEDS (returns valid FileInfo) — Stat is not a permission gate. If `Load` mirrors `internal/config/Load` (`os.Stat` then `toml.DecodeFile`), the Stat succeeds, then `toml.DecodeFile`'s internal `os.Open` returns the permission error. Bubbles up wrapped. Acceptance satisfiable.
-- **directory-at-path**: `os.Stat` succeeds and returns `IsDir() = true`, `IsRegular() = false`. If `Load` does not pre-check `IsRegular()`, `toml.DecodeFile` will call `os.Open` (succeeds for a directory) and the subsequent `Read` returns `"read .../tools.toml: is a directory"`. Acceptance #7 of Unit 11.4 says the error must *"indicate path is not a regular file"*. The actual bubbled error reads *"is a directory"* — adjacent but not identical wording. **Plan should either** (a) specify that `Load` pre-checks `info.Mode().IsRegular()` and returns a Valv-authored error, or (b) loosen the acceptance to "error indicates the path is not a usable file (directory / permission / etc.)".
-
-**Severity:** minor — promoted to NEW C3.
-
-CI-runner concern: macOS host-builder verification confirms chmod-000 produces a real permission-denied error here. Linux CI runners running as root (e.g. some GitHub Actions container images) ignore chmod 000 — `os.ReadFile` succeeds anyway. Valv CI on `ubuntu-latest` runs as a non-root user by default, so this is fine in normal CI. Flagging as a residual risk: if Valv CI ever moves to a root-in-container test runner, this test silently regresses. Worth a one-line comment in the test file.
-
-### R2-C4 — Regex edge cases
-
-**Status:** MITIGATED for documented cases; UNDEFINED behavior worth pinning down.
-
-Empirical test (`regexp.MustCompile(`^[a-zA-Z0-9]+$|^[a-zA-Z0-9][a-zA-Z0-9._/-]*[a-zA-Z0-9]$`).MatchString(...)`):
-
-| Input | Match | Plan expectation |
-|---|---|---|
-| `a` | true | accept (implicit) |
-| `github.com/foo/bar` | true | accept (Unit 11.2) |
-| `go-1.22` | true | accept (Unit 11.2) |
-| `a..b` | **true** | UNDEFINED — Round 2 raised this; plan still does not state |
-| `a//b` | **true** | UNDEFINED — Round 2 raised this; plan still does not state |
-| `a---b` | **true** | UNDEFINED — Round 2 raised this; plan still does not state |
-| `_underscore` | **false** | UNDEFINED — leading `_` is rejected (because anchor class excludes `_`) |
-| `日本語` | false | implicit (non-ASCII rejected) |
-| `bad-name-` | false | reject (Unit 11.2 acceptance) |
-| `name.` | false | reject (Unit 11.2 acceptance) |
-| `name/` | false | reject (Unit 11.2 acceptance) |
-| `-bad` | false | reject (Unit 11.2 acceptance) |
-| `bad!char` | false | reject (Unit 11.2 acceptance) |
-| `1go` | true | not stated — accepted because anchor class includes `0-9` |
-| `a-` | false | reject — implicit in trailing-punct rule |
-| `a` (single char) | true | accept — first alternation handles single char |
-
-**Three previously-flagged edge cases (`a..b`, `a//b`, `a---b`) all MATCH the regex.** The plan accepts them by silence. No Unit 11.2 test case asserts behavior for double-dot / double-slash / repeated-dash. If accepted-by-silence is intentional, plan should say so. If unintentional, regex needs tightening (e.g., disallow consecutive punctuation), which RE2 can do with `[a-zA-Z0-9](?:[._/-]?[a-zA-Z0-9])*` style. Promoted to NEW C4.
-
-**Leading-underscore `_underscore` is rejected** because the anchor class `[a-zA-Z0-9]` excludes `_`. Plan never says whether names starting with `_` should be allowed. Some Go-style names use underscores (`go_module`); the regex permits `_` mid-name but not as the first character. Worth one acceptance bullet pinning this down.
-
-### R2-C5 — `project.Detect()` signature + non-project CWD
-
-**Status:** MITIGATED — verified empirically at `main/internal/project/project.go:19-58`.
-
-- Signature: `func Detect() (Result, error)`. Matches plan line 235.
-- `Result.Root` is **never empty** when called from a valid CWD. If no `.git` marker is found walking up to `/`, `Result.Root = fallback = normalized start = CWD`. So `result.Root` for `valv tools validate` run from `/tmp` is `/tmp`, and `tools.Resolve("/tmp")` will look for `/tmp/.valv/tools.toml` (absent → `ToolManifest{}, nil`).
-- `Result.HasGitMarker = false` when not inside a git tree. **Unit 11.4 acceptance does not consult `HasGitMarker`** — it always proceeds to `tools.Resolve(result.Root)`. The "no tools declared" output will fire for any CWD outside a project. That's the correct behavior (graceful empty state), but the plan should clarify: running `valv tools validate` from a non-project directory prints `"no tools declared"` and exits 0, NOT an error about "not in a project". Worth pinning in Unit 11.4's acceptance #3 wording.
-
-### R2-C6 — `len(m.Tools) == 0` predicate ambiguity (nil vs empty map)
-
-**Status:** EMPIRICALLY MITIGATED.
-
-Tested both decode paths:
-
-- TOML with no `[tools]` key at all → `m.Tools` is **nil**, `len(nil) == 0` is `true`. Go spec: `len` of a nil map returns 0. Predicate safe.
-- TOML with `[tools]` declared but empty (`[tools]\n`) → `m.Tools` is **non-nil empty map**, `len() == 0`. Predicate safe.
-
-Both paths print `"no tools declared"` and exit 0 in Unit 11.4. No bug.
+Round 4 closes all four Round 3 counterexamples (1 SHOWSTOPPER + 3 minor) with empirical grounding. Re-attacked each fix with a fresh scratch Go program built against `BurntSushi/toml v1.6.0` plus the schema in PLAN.md. All Round 4 claims survive. Three small new wording-tightening suggestions flagged below; none rise to blocker level. One YAGNI re-pressure item dismissed.
 
 ---
 
-## New Counterexamples (Round 3)
+## Round 3 Attack Re-verification
 
-### NEW C1 — Unit 11.5 acceptance cannot distinguish "new package failing new gate" from "legacy docker failing new gate"
+### NEW C1 (Unit 11.5 escalation distinction) — RESOLVED
 
-**Severity:** medium — plan-level wording gap, not a code bug.
+Round 4 lines 235-237 split routing:
 
-**Evidence:** `main/magefile.go:552-590` — `renderCoverage` accumulates ALL packages below threshold into `belowThreshold` slice and returns one error: `fmt.Errorf("coverage below %.1f%% for: %s", threshold, strings.Join(belowThreshold, ", "))`.
+- **New-pkg failure** (`internal/tools/`) → route back to Unit 11.4 (which owns the per-package gate). Same drop, tightly scoped fix.
+- **Legacy-pkg failure** (e.g. `internal/adapters/docker`) → route to dev for triage. Dev decides either follow-on unit inside DROP_11 or rollback the bump.
 
-**Counterexample trace:** Suppose at Unit 11.5 the post-bump `mage test` reports:
-- `internal/adapters/docker` = 47.0% (pre-existing low)
-- `internal/tools` = 64.0% (new package, just below 70%)
+Unambiguous. The two failure classes have distinct owners. PASS.
 
-Unit 11.5's acceptance (line 219) says: *"If any package reports < 70% coverage, the builder does NOT silently fix it. Instead: list every failing package with its coverage percentage in the worklog, set unit state to `blocked`, and return to the orchestrator."*
+Residual minor: the line 219 phrasing in older drafts ("does NOT silently fix it") survived into Round 4 line 234 verbatim — fine; just noting the wording is consistent across the unit.
 
-This handles both packages identically. But Unit 11.4's acceptance (line 200) says: *"≥ 70% coverage across the whole package (this unit completes the package by exercising the full `Resolve` → `Validate` path via CLI tests — 70% gate enforced here)."*
+### NEW C2 (SHOWSTOPPER — `PrimitiveDecode` mandatory) — RESOLVED, EMPIRICALLY CONFIRMED
 
-If Unit 11.4 passed its per-package coverage gate cleanly via `mage testPkg ./internal/tools/`, but Unit 11.5's global `mage test` reports `internal/tools` < 70%, **something is wrong** — `mage testPkg` and `mage test` should report identical per-package coverage for the same package. Either:
+Round 4 reverses the Round 2/3 claim. Plan now requires:
 
-(a) `mage testPkg` and `mage test` use different `-cover` flags / package selectors, OR  
-(b) Unit 11.4's "70% gate enforced here" was satisfied by some package-local coverage measurement that doesn't match the global one.
+- `ToolManifest.Allowlist` and `ToolManifest.Env` are `toml.Primitive` (PLAN.md line 71).
+- `Load` calls `meta.PrimitiveDecode` on each, with a `map[string]any` discard target, **before** the `meta.Undecoded()` strict check (PLAN.md line 123-124).
+- The empirical evidence panel at line 73-76 reproduces what falsification reported in Round 3.
+- The Notes-for-builder block at line 247 elevates this from "recommendation" to "MANDATORY" and explicitly reverses the prior wrong claim.
 
-Plan should either prove `mage testPkg ./internal/tools/` coverage = `mage test`'s `internal/tools` row coverage, or accept that Unit 11.5 may legitimately reveal a coverage regression and add a "this means Unit 11.4's gate was lying" diagnostic to the worklog template.
+Empirical re-run (scratch program against `BurntSushi/toml v1.6.0`, manifest schema from PLAN.md, then deleted):
 
-**Mitigation path:** Add to Unit 11.5 acceptance: *"If `internal/tools` itself is listed below 70%, route back to Unit 11.4 as a failed-gate finding — do not treat as a legacy-package coverage issue. Only `internal/adapters/docker` and other pre-existing packages are treated as known low-coverage candidates."*
-
-### NEW C2 — SHOWSTOPPER: `toml.Primitive` does NOT auto-satisfy `meta.Undecoded()` strict check
-
-**Severity:** SHOWSTOPPER — drop-level acceptance #2 is unsatisfiable as written.
-
-**Evidence:** empirical test against `github.com/BurntSushi/toml v1.6.0` (the version Valv uses):
-
-```go
-type Manifest struct {
-    Tools     map[string]ToolSpec `toml:"tools"`
-    Allowlist toml.Primitive      `toml:"allowlist"`
-    Env       toml.Primitive      `toml:"env"`
-}
-
-// Input:
-//   [tools]
-//   mage = "latest"
-//
-//   [allowlist]
-//   hosts = ["github.com"]
-//
-//   [env]
-//   GOPRIVATE = "foo"
-
-// Result:
-//   undecoded BEFORE PrimitiveDecode: [allowlist.hosts env.GOPRIVATE]
-//   undecoded AFTER PrimitiveDecode: []
+```
+undecoded BEFORE PrimitiveDecode: [allowlist.hosts env.GOPRIVATE]
+undecoded AFTER  PrimitiveDecode: []
 ```
 
-**The Round 3 plan claims (line 67, repeated line 230):** *"During initial `toml.DecodeFile`, these fields receive their raw TOML values and are marked as decoded — `meta.Undecoded()` returns empty (strict check satisfied)."* And: *"DROP_11 does not call `PrimitiveDecode` at all."*
+Matches the plan's quoted evidence verbatim. PASS.
 
-**This is empirically FALSE.** Only the top-level keys `allowlist` and `env` are decoded; their CHILD KEYS (`allowlist.hosts`, `env.GOPRIVATE`) remain in `meta.Undecoded()` until `PrimitiveDecode` is called on them. Without `PrimitiveDecode`, the strict undecoded check will fire on every valid file that uses `[allowlist]` or `[env]`.
+**Sub-attacks I tried against the Round 4 fix:**
 
-**Consequences:**
+| Probe | Result | Verdict |
+|---|---|---|
+| Discard target = `map[string]any` (plan's choice) | undecoded → `[]`; values stored in discard map | PASS |
+| Discard target = `interface{}` | undecoded → `[]`; same result | PASS (alternative works) |
+| Discard target = `toml.Primitive` (re-Primitive) | undecoded **STILL** `[allowlist.hosts]` — does NOT clear strict check | **FOOTGUN** — but plan picked `map[string]any`, so doesn't bite |
+| Discard target = empty struct `struct{}` | undecoded → `[]`; no error | PASS (alternative works) |
+| Zero-valued `toml.Primitive` (no `[allowlist]` in file) | `PrimitiveDecode` succeeds, no panic, discard map is empty | PASS — Load can unconditionally call PrimitiveDecode |
+| `[allowlist]` with no fields inside | `PrimitiveDecode` succeeds; undecoded already empty pre-call | PASS |
+| Malformed section (`hosts = "string"` instead of array) | `PrimitiveDecode` to `map[string]any` SILENTLY succeeds with `{hosts: "string"}` — DROP_14 will reject when it adds its typed target | PASS — DROP_11 correctly defers typed validation |
+| Idempotence: call `PrimitiveDecode` once with discard, then again with typed `AllowlistConfig` target | Both calls succeed; typed target gets the real value; undecoded stays empty | PASS — DROP_14 CAN re-call after DROP_11's discard call |
 
-1. **Drop-level acceptance #2 fails:** *"`Load(path)` returns a correctly-typed `ToolManifest` for a well-formed `.valv/tools.toml` covering string-value tools, object-value tools, `[allowlist]`, and `[env]` sections."* — with the plan's current `Load` flow, this errors on any file containing `[allowlist]` or `[env]` content.
-2. **Unit 11.1 test `testdata/valid_objects.toml` (which is documented as containing both sections per line 98) will FAIL the strict undecoded check.**
-3. **Acceptance line 116** says: *"`Load` accepts files with `[allowlist]` and `[env]` sections without error (they decode into `toml.Primitive` fields — not undecoded)."* — empirically wrong.
-4. The plan's Context7 citation *"Delayed TOML Decoding example confirms `toml.Primitive` fields satisfy the undecoded check"* is being misread. The Context7 example shows how to USE `PrimitiveDecode` to defer interpretation. It does not claim `Primitive` fields are auto-decoded for strict-check purposes — and empirically they are not.
+**Critical idempotence finding:** DROP_14/DROP_15 can re-call `meta.PrimitiveDecode` with a typed target after DROP_11's discard call. Empirically verified. The plan implies this at line 71 but does not state the idempotence guarantee explicitly — see "New Counterexamples (Round 4) → R4-1" below for a minor wording suggestion.
 
-**Three possible fixes, all of which the planner must pick from in Round 4:**
+### NEW C3 (directory-at-path) — RESOLVED, EMPIRICALLY CONFIRMED
 
-(a) **Call `PrimitiveDecode` in `Load` itself**, but discard the result (or decode into a discard struct). This satisfies the strict check while still leaving DROP_14/DROP_15 to redefine the semantics later. Trivial to implement; trivially documented.
+Round 4 line 213 accepts `errors.Is(err, syscall.EISDIR)` OR string contains `"is a directory"`.
 
-(b) **Filter the undecoded check** to ignore keys under `allowlist.*` and `env.*` prefixes. More fragile, hand-rolls a special case, makes the code harder to read.
+Empirical (macOS Darwin 25.3.0, Go 1.26.3):
 
-(c) **Drop the strict undecoded check entirely** for DROP_11 and add it back in DROP_14/DROP_15 once those drops own the typed decode. Permissive — loses the schema-explicitness benefit. Plan's whole point about catching `[network]` as an unknown-key error (line 67) would regress.
+| Call | Result |
+|---|---|
+| `os.Open(dir)` | returns valid `*File`, `err == nil` (NOT an error) |
+| `io.ReadAll(file)` on dir | error: `"read <path>: is a directory"`, `errors.Is(err, syscall.EISDIR) == true` |
+| `os.ReadFile(dir)` | same: `"read <path>: is a directory"`, `EISDIR == true` |
+| `toml.DecodeFile(dir, &m)` | same: `"read <path>: is a directory"`, `EISDIR == true` |
 
-(d) **Defer `[allowlist]` and `[env]` to DROP_14/DROP_15** — don't declare them in `ToolManifest` at all in DROP_11. Files containing them will fail Load with "undecoded key allowlist". Loses forward-compat ergonomics; users can't put those sections in until DROP_14 lands.
+The plan's claim at line 213 is accurate: `toml.DecodeFile` opens then reads, surfacing `EISDIR`. The acceptance disjunction (`errors.Is(err, syscall.EISDIR)` OR string `"is a directory"`) is permissive enough that any of the three implementation paths (use `os.Open + ReadAll`, `os.ReadFile`, or `toml.DecodeFile` directly) all satisfy it. PASS.
 
-**My recommendation:** (a). One line added to `Load`. Documented in Notes. Preserves the strict-check semantics the plan correctly wants.
+### NEW C4 (regex edge cases pinned) — RESOLVED, EMPIRICALLY CONFIRMED
 
-**Required plan changes:**
+Round 4 line 67 adds:
 
-- Rewrite line 67's bullet on `[allowlist]` and `[env]`.
-- Rewrite line 230's Notes-for-builder.
-- Add to Unit 11.1 acceptance: *"`Load` calls `meta.PrimitiveDecode(manifest.Allowlist, &discard)` and `meta.PrimitiveDecode(manifest.Env, &discard)` where `discard` is a local `map[string]interface{}` — this marks the contents as decoded for the strict-check sweep without binding their schema. Errors from `PrimitiveDecode` are wrapped and returned. The plan's claim that 'DROP_11 does not call PrimitiveDecode' is reversed."*
+- **Accept by design:** multiple consecutive `.`, `/`, or `-` (`a..b`, `a//b`, `a---b`); path-like names; namespaced names.
+- **Reject by design:** empty string; trailing punctuation; leading dash; leading `_`; whitespace; `!`; non-ASCII.
 
-### NEW C3 — Unit 11.4 directory-at-path acceptance wording vs. actual error
+Empirical regex run against the planner's pinned pattern `^[a-zA-Z0-9]+$|^[a-zA-Z0-9][a-zA-Z0-9._/-]*[a-zA-Z0-9]$`:
 
-**Severity:** minor.
+| Input | Matches | Plan expectation | Verdict |
+|---|---|---|---|
+| `mage`, `go`, `a`, `github.com/foo/bar`, `go-1.22` | true | accept | PASS |
+| `a..b` | true | accept-by-design | PASS |
+| `a//b` | true | accept-by-design | PASS |
+| `a---b` | true | accept-by-design | PASS |
+| `mage.` (single trailing dot) | false | reject (per the second alternative — fails trailing-alphanumeric anchor) | PASS |
+| `..mage` (leading two dots) | false | reject (branch 1 fails: has `.`; branch 2 fails: leading `.` not in start class) | PASS |
+| `m.` (length 2, trailing dot) | false | reject (branch 1 fails: has `.`; branch 2 needs alphanumeric trailing — `.` is not) | PASS |
+| `_underscore` | false | reject-by-design (leading `_` not in start class) | PASS |
+| `bad-name-`, `name.`, `name/`, `-bad`, `bad!char`, `""` | false | reject (each per the plan) | PASS |
 
-**Evidence:** empirical macOS test. With a directory at `.valv/tools.toml`, `os.Stat` succeeds and `info.IsDir() == true`. If `Load` does not pre-check `IsRegular()`, the bubbled error is `"read .../tools.toml: is a directory"` from the lower-level `Read` syscall, wrapped by `toml.DecodeFile`.
+All Round 4 pins match RE2 behavior exactly. PASS.
 
-**Counterexample to Unit 11.4 acceptance #7** (line 198): *"exits 1, error message indicates path is not a regular file"*. The actual error says "is a directory", not "not a regular file". Both convey the same idea, but the acceptance wording prescribes a phrasing the implementation does not produce.
+Minor coverage gap: `a//b` is in the accept-by-design list (PLAN.md line 67) but Unit 11.2's TestValidate cases at line 159 list only `a..b` and `a---b`. If the planner wants the test to lock all three accept-by-design forms, adding `a//b` to the test cases would close that gap — but the acceptance is satisfied without it because the regex behavior is fully constrained by the pinned pattern. Minor wording-only suggestion; not a counterexample.
 
-**Two mitigation paths:**
+---
 
-(a) Plan specifies `Load` calls `info.Mode().IsRegular()` after `os.Stat` and returns `fmt.Errorf("%s: not a regular file: %w", path, domain.ErrSomething)` — Valv-authored wording matches the acceptance.
+## New Counterexamples (Round 4)
 
-(b) Plan loosens the acceptance to *"error message indicates the path is not a usable regular file (directory or otherwise non-file)"*.
+Three small wording-tightening suggestions. None are blockers; collectively they would tighten the plan's empirical grounding.
 
-Either is fine; planner should pick.
+### R4-1 (MINOR) — `PrimitiveDecode` idempotence is empirically guaranteed but not stated
 
-### NEW C4 — Regex accepts undocumented edge cases (`a..b`, `a//b`, `a---b`)
+**Severity:** minor — a subtle DROP_14/DROP_15 reader could miss this.
 
-**Severity:** minor.
+**Evidence:** scratch Go program against `BurntSushi/toml v1.6.0`. First call: `meta.PrimitiveDecode(m.Allowlist, &discardA)` where `discardA` is `map[string]any` — succeeds, undecoded sweeps to `[]`. Second call (simulating DROP_14): `meta.PrimitiveDecode(m.Allowlist, &typed)` where `typed` is a typed `AllowlistConfig` struct — succeeds, `typed.Hosts` is populated with the real `[]string{"github.com"}`, undecoded stays empty.
 
-**Evidence:** empirical regex test. All three forms MATCH. No Unit 11.2 test case asserts behavior for double-punctuation. The plan documents `bad-name-`, `name.`, `name/` as REJECT cases but says nothing about `a..b` / `a//b` / `a---b`.
+**Why it matters:** the plan promises DROP_14 will "re-call `meta.PrimitiveDecode` with typed targets" (line 71). A reader could reasonably worry that the discard call consumes the Primitive (one-shot). Empirically it does NOT — `toml.Primitive` carries its raw value across multiple decodes against the SAME `MetaData`. The plan would benefit from one sentence stating this:
 
-**Why this matters for falsification:** acceptance-by-silence is a counterexample seed for build-QA Round K. A future build-QA reviewer can reasonably ask *"why is `foo..bar` accepted?"* and the answer must already be in the plan. If the plan is silent, the builder will guess and either:
-- write a test case asserting acceptance (lock in current behavior), or
-- tighten the regex (drift from the plan).
+> `toml.Primitive` is re-decodable: DROP_14/DROP_15 can call `meta.PrimitiveDecode` again with their typed targets after DROP_11's discard call has already run. Empirically verified against `BurntSushi/toml v1.6.0`.
 
-**Mitigation:** Plan should add one of these to Unit 11.2 acceptance:
+**Severity rationale:** the absence of this sentence does not break DROP_11 — DROP_11's behavior is correct as written. The risk is forward-looking ergonomics for DROP_14.
 
-(a) *"Names with consecutive punctuation (`a..b`, `a//b`, `a---b`) are accepted as a side-effect of the simple regex. Acceptable for v1 because no installer in DROP_12 will produce such names."*
+**Mitigation path:** one sentence added to PLAN.md line 71 or to the Notes-for-builder block (line 247).
 
-(b) *"Tighten the regex to `^[a-zA-Z0-9](?:[._/-]?[a-zA-Z0-9])+$|^[a-zA-Z0-9]$` to forbid consecutive punctuation. RE2-compatible."* This also rejects `_underscore` cleanly because the start anchor still excludes `_`.
+### R4-2 (MINOR) — Discard target shape is "map[string]any (or any throwaway target)" — too permissive
 
-Either is fine; planner picks.
+**Severity:** minor — wording could mislead a builder.
 
-Also: plan does not state behavior for **leading underscore** (`_module`). Currently rejected. Worth one explicit bullet.
+**Evidence:** PLAN.md line 123-124 says:
+
+> "calls `meta.PrimitiveDecode(m.Allowlist, &discardA)` and `meta.PrimitiveDecode(m.Env, &discardE)` where `discardA` and `discardE` are local `map[string]any` (or any throwaway target)"
+
+The parenthetical "(or any throwaway target)" is too permissive. My empirical test (Test 6 in the scratch run) showed:
+
+| Discard target type | Undecoded after call |
+|---|---|
+| `map[string]any` | `[]` — correct |
+| `interface{}` | `[]` — correct |
+| empty `struct{}` | `[]` — correct |
+| `toml.Primitive` (re-Primitive) | **`[allowlist.hosts]`** — DOES NOT clear the strict check |
+
+A builder reading "any throwaway target" might pick `toml.Primitive` as a "neutral" pass-through — which would silently break the strict-check sweep. The fix is one-line tightening: explicitly say `map[string]any` (or some other concrete decodable shape) and explicitly forbid `toml.Primitive` as the discard target.
+
+**Mitigation path:** PLAN.md line 123 — replace "(or any throwaway target)" with "(use `map[string]any` specifically; do NOT use `toml.Primitive` as the discard target — empirically it leaves the inner keys undecoded)".
+
+### R4-3 (MINOR) — Malformed-section pass-through is silent
+
+**Severity:** minor — flagged for build-QA reviewer awareness, not a plan-breaker.
+
+**Evidence:** scratch test 4 — a `.valv/tools.toml` with `[allowlist]\nhosts = "string-not-array"` (wrong type for the future field) decodes successfully through DROP_11's `Load`. `PrimitiveDecode` with `map[string]any` target accepts ANY shape and stores `{hosts: "string-not-array"}` in the discard map. The strict-check sweep is satisfied. DROP_11 returns no error.
+
+This is **correct** for DROP_11 (the plan defers typed validation to DROP_14/DROP_15), but the plan doesn't explicitly call out the pass-through behavior. A user with a malformed forward-compat section gets no DROP_11 error and may be surprised when DROP_14 lands and starts rejecting it.
+
+**Mitigation path:** PLAN.md Notes section (line 247) — add: "DROP_11's `map[string]any` discard target accepts any shape under `[allowlist]` / `[env]` (e.g. `hosts = "string"` instead of `hosts = ["array"]`). Typed-shape validation lands in DROP_14/DROP_15. DROP_11's contract is structural ('the section exists and is named correctly'), not semantic."
+
+**Why this is small:** the alternative ("DROP_11 must validate `[allowlist]` / `[env]` shapes") would require typed structs that DROP_11 explicitly defers. The pass-through IS the right design — it just deserves one explicit sentence.
 
 ---
 
 ## YAGNI Re-pressure
 
-### YAGNI-1 — Unit 11.5 as its own atomic unit
+### YAGNI-1 — `valid_quoted_names.toml` fixture after regex test cases
 
-**Counter-pressure:** the unit is "edit one constant on line 24 + run `mage test` + report results". Phase 6 of `main/drops/WORKFLOW.md` already runs `mage test` from `main/` as the drop-end verification gate. Why not fold the edit into Phase 6 itself, or into Unit 11.4 (which is the last "real" unit)?
+**Dismissed.** The regex tests (Unit 11.2) verify Valv's *name-validation* policy against strings. The fixture (Unit 11.1) verifies BurntSushi/toml's *quoted-key decode behavior* — that the string `"github.com/foo/bar"` under `[tools]` lands as a single flat key in the resulting `map[string]ToolSpec`. These two things are independent contracts:
 
-**Arguments for keeping it as 11.5:**
+- Regex test: "if you give Validate a string, does it accept or reject?" (Valv-owned regex)
+- Fixture test: "if you give BurntSushi/toml a quoted dotted key, does it produce one map entry or nested tables?" (external library contract)
 
-1. **Atomicity of failure routing.** If the bump fails, the failure has a single owner (Unit 11.5) and a single rollback target. Folding it into 11.4 or Phase 6 muddies the rollback story.
-2. **QA gate per unit.** WORKFLOW.md Phase 5 requires per-unit build-QA. A bump that surfaces a coverage regression on `internal/tools` is a genuine code-quality finding that benefits from QA-Proof + QA-Falsification review independent from Unit 11.4's review.
-3. **Memory `feedback_interface_change_runs_full_mage_test.md`** says interface-method additions can break sibling-package mocks that `mage testPkg` misses. Unit 11.4 only runs `mage testPkg ./internal/tools/` and `mage testPkg ./internal/cli/`. Unit 11.5 is the FIRST time the full `mage test` runs post-DROP_11. That's a load-bearing gate even if it's mechanically trivial.
+Without the fixture, a future `BurntSushi/toml` upgrade that changed quoted-key handling would silently regress. The fixture is the regression gate. The regex tests do NOT exercise this path.
 
-**Verdict:** keep Unit 11.5. The triviality of the edit is the POINT — it isolates one cross-package risk into one unit.
+**Verdict:** keep both. Plan correctly retains the fixture.
 
-But: **the plan should explicitly cite reason (3)** in Unit 11.5's Notes. As-written, it only justifies the unit by appealing to coverage-bump risk on `internal/adapters/docker`. The broader cross-package-mock risk is the real reason it stands alone.
+### YAGNI-2 — `meta.PrimitiveDecode(field, &discard interface{})` vs. typed-nil-pointer
 
-### YAGNI-2 — `valv tools validate` CLI command vs. `mage test`
+**Dismissed.** The planner picked `map[string]any` as the discard target. Empirical test confirms it works correctly. A "typed nil pointer" alternative (`var discard *AllowlistConfig; PrimitiveDecode(field, &discard)`) would still decode the value INTO the pointed-to struct (after allocating it), which is more work than necessary and ALSO commits DROP_11 to knowing the typed shape — which is exactly what DROP_11 is trying NOT to do.
 
-**Counter-pressure:** the dev runs `mage test` regularly, which already exercises the `internal/tools/` package. A standalone `valv tools validate` adds a separate CLI surface (~50 lines) for a use case (`"my .valv/tools.toml is broken"`) that `mage test` does not address — but neither does `valv tools validate` for a non-Valv-dev user.
+The plan's choice of `map[string]any` is the minimal-commitment shape. **Verdict:** correct as-is. (R4-2 above suggests tightening the *prose* but not changing the *choice*.)
 
-**Counter-counter:** `valv tools validate` runs in a project's CWD against the project's own `.valv/tools.toml`. `mage test` runs against fixtures inside `internal/tools/testdata/`. They are NOT redundant. `valv tools validate` is the user-facing diagnostic for a user who has authored their own `.valv/tools.toml` and wants to check it. That's a real, non-substitutable use case.
+---
 
-Memory `feedback_manual_workflow_is_the_decision.md` does not apply here — the dev hasn't proposed a manual workflow. The CLI command is the canonical UX.
+## Cross-Reference Memory Audit
 
-**Verdict:** keep.
+### `feedback_interface_change_runs_full_mage_test.md`
 
-### YAGNI-3 — `valid_quoted_names.toml` fixture
+DROP_11 adds `domain.ErrToolsNotFound` to `internal/domain/errors.go`. This is a **new sentinel variable**, not a new interface method. New sentinels are purely additive — they do not break sibling-package mocks because mocks satisfy interfaces, not sentinel-error switches.
 
-**Counter-pressure:** the doc bullet (Unit 11.1 line 120, Notes line 229) documents the requirement that dotted/slashed tool names MUST be quoted. Is a separate testdata fixture necessary if the doc already says it?
+Audit of services packages that reference `domain.Err*`:
 
-**Counter-counter:** the fixture EXECUTES the test. Documentation alone is not a regression gate. Without the fixture, a future BurntSushi/toml upgrade that changed quoted-key handling would silently regress and only surface when a user filed a bug. The fixture is small (one file, three lines), runs in <1ms, and locks behavior.
+- `internal/services/manage/`, `internal/services/codex/`, `internal/services/claude/`, `internal/services/images/` — all reference `domain.ErrConfigNotFound` or `domain.ErrUnboundProject` but none exhaustive-switch over the `Err*` set. Adding a new sentinel is additive.
 
-Plus: NEW C2 shows that empirical behavior of BurntSushi/toml does not always match plan claims. The fixture is exactly the kind of guardrail needed.
+**Verdict:** no risk. Unit 11.5's full `mage test` will catch any unforeseen breakage anyway; the memory's specific concern (interface-method addition) does not apply.
 
-**Verdict:** keep.
+### `feedback_check_official_docs_and_working_projects_first.md`
+
+This memory is directly relevant. Round 4 reversed the Round 2/3 Context7-grounded claim about `toml.Primitive` because empirical Go behavior contradicted the docs reading. The plan now correctly grounds in empirical scratch-program output (line 73-76).
+
+**Audit of other plan claims that rely solely on Context7 / docs without empirical verification:**
+
+| Claim | Source | Empirically verified? |
+|---|---|---|
+| `toml.Primitive` requires `PrimitiveDecode` (PLAN.md line 71) | Round 4 scratch program | YES |
+| `os.Stat` succeeds for chmod-000 (Unit 11.4 case 6) | Round 3 macOS test | YES |
+| `os.Open(dir)` returns no error; `Read` returns EISDIR (Unit 11.4 case 7) | Round 4 (this review) | YES |
+| `project.Detect()` signature + behavior (Unit 11.4) | Direct file Read of `internal/project/project.go:19` | YES |
+| `root.go cmd.AddCommand` variadic site at line 137 (Unit 11.4) | Direct file Read of `internal/cli/root.go:137` | YES |
+| Regex behavior on `a..b`, `mage.`, `_underscore` (Unit 11.2) | Round 3 + Round 4 regex test | YES |
+| `len(nil-map) == 0` (Unit 11.4 / Schema Decisions) | Go spec (well-established) | spec-grounded |
+| `BurntSushi/toml` mixed-value decode via `UnmarshalTOML` (Unit 11.1) | Context7 reference + would need empirical check at build time | partially verified — Context7 docs the API but the actual `UnmarshalTOML` integration is Unit 11.1 builder's job |
+
+**Residual claim with partial empirical coverage:** the mixed-value `[tools]` decode (string-vs-inline-table) via `(t *ToolSpec) UnmarshalTOML` — this is the planner-cited critical mechanism from Unit 11.1, but my Round 4 scratch program only exercised `map[string]any` discard targets and didn't fully exercise the heterogeneous-value path. The Round 2 falsification documented this empirically against `BurntSushi/toml v1.6.0` and it's been the load-bearing assumption since Round 1. The plan documents the requirement clearly (line 245). **No new counterexample**, but flagging as a residual area where build-time `TestLoad` against `valid_objects.toml` is the actual gate.
+
+### Other memories checked
+
+- `feedback_drop_ceremony_trim.md`: Not applicable to plan QA.
+- `feedback_trimmed_cascade_for_mechanical_drops.md`: DROP_11 is novel-logic (new package + parser semantics + forward-compat fields) — full cascade is appropriate. Not applicable.
+- `feedback_manual_workflow_is_the_decision.md`: Not applicable — dev has not proposed a manual workflow for this drop.
 
 ---
 
 ## Hylla Feedback
 
-Hylla was not consulted in this review — every empirical attack was answered via `Read`, local Go test programs against the project's `BurntSushi/toml` version, or direct file inspection. No Hylla miss to report.
+No Hylla calls were required for this review. All Round 4 attacks were answerable via:
+
+- direct `Read` of `main/drops/DROP_11_TOOL_DECLARATION/PLAN.md` (the plan under attack)
+- direct `Read` of `main/drops/DROP_11_TOOL_DECLARATION/PLAN_QA_FALSIFICATION.md` (Round 3 to verify what changed)
+- scratch Go program against `BurntSushi/toml v1.6.0` (for `PrimitiveDecode` semantics, regex behavior, directory-at-path error chain)
+- `rg` for sentinel/mock cross-references in `internal/services/`
+- direct `Read` of `magefile.go` for `coverageThreshold` line context
+
+The plan cites specific file paths and line numbers, all of which are stable visible artifacts. Hylla vector/keyword search wasn't the right tool for empirically verifying TOML library behavior — scratch Go programs are the canonical evidence path there.
+
+**Hylla miss to report:** none.
 
 ---
 
 ## Verdict Rationale
 
-**fail.** NEW C2 alone is sufficient: drop-level acceptance #2 (Load handles `[allowlist]` and `[env]` cleanly) is empirically unsatisfiable as the plan currently specifies. The fix is small (one `PrimitiveDecode` call per Primitive field in `Load`) but the plan must be revised to reflect it, and the Notes-for-builder (line 230) must be reversed.
+**pass.** Round 4 closes:
 
-NEW C1, C3, C4 are smaller plan-wording issues that would not by themselves fail the plan, but compound the picture: the plan has accumulated several places where prescriptive claims about empirical behavior have drifted from what the libraries actually do. Round 4 should sweep all four together.
+- **R3 NEW C2** (the SHOWSTOPPER): plan now mandates `PrimitiveDecode` on each `toml.Primitive` field with empirical evidence cited. Re-verified via scratch program — claim survives.
+- **R3 NEW C1** (Unit 11.5 routing): split into new-pkg-vs-legacy-pkg routes. Unambiguous.
+- **R3 NEW C3** (directory-at-path): acceptance loosened to `errors.Is(err, syscall.EISDIR) OR string contains "is a directory"` — empirically validated against `toml.DecodeFile` path on macOS.
+- **R3 NEW C4** (regex edge cases): explicit accept-by-design and reject-by-design pins added at line 67. All planner-pinned cases confirmed empirically.
 
-Round 2's six counterexamples are otherwise well-handled in Round 3 — the ordering paradox, regex documentation, `project.Detect` signature, and `len(m.Tools)` predicate are all solidly resolved.
+Three minor wording suggestions (R4-1, R4-2, R4-3) flagged but **not blocking**. The plan is implementable, the builder has unambiguous acceptance criteria, and the empirical evidence base survives independent re-verification.
+
+The drop is ready to enter Phase 4 (build).
 
 ---
 
 ## Summary for Orchestrator
 
-- **Verdict:** fail
-- **New counterexamples:** 4 (C1 medium, C2 SHOWSTOPPER, C3 minor, C4 minor)
-- **YAGNI items raised:** 3 — all dismissed in favor of keeping the current unit/fixture/CLI shape; one yields a wording suggestion for Unit 11.5 Notes
-- **Round 2 attacks:** 6 re-verified — 4 fully mitigated (C1, C5, C6, mostly C3), 2 partially mitigated with wording gaps (C2, C3, C4)
-- **Recommendation:** route C2 to planner Round 4 with explicit instruction to revise Unit 11.1 acceptance + Notes line 230 + line 67. Bundle C1/C3/C4 wording fixes in the same round.
+- **Verdict:** pass
+- **New counterexamples:** 3 minor (R4-1 idempotence wording, R4-2 discard-target wording, R4-3 malformed-section pass-through wording) — none blocking; all are one-line clarifications the planner can fold in or accept as build-QA reviewer awareness items
+- **YAGNI items raised:** 2 — both dismissed (keep `valid_quoted_names.toml` fixture; keep `map[string]any` discard target)
+- **Round 3 attacks:** 4 re-verified — all 4 fully mitigated (the SHOWSTOPPER NEW C2 fix is empirically grounded)
+- **Hylla feedback:** none — scratch Go program against `BurntSushi/toml v1.6.0` was the right evidence path
+- **Recommendation:** plan passes. Three minor wording suggestions can be folded in pre-build at planner discretion or left for build-QA to surface as worklog comments — no blocker either way.
