@@ -2,6 +2,8 @@
 
 Date: 2026-04-17
 
+> **Historical artifact.** This plan drove DROP_1 through DROP_8 (all closed; see `main/PLAN.md`). The active drop tree is in `main/PLAN.md`; the per-drop lifecycle lives in `main/drops/WORKFLOW.md`. References to `AGENTS.md` in this file should be read as `CLAUDE.md` — `AGENTS.md` was consolidated into `CLAUDE.md` on 2026-05-20.
+
 Goal: two providers (Codex + Claude Code) running inside Valv-managed Docker runtimes with per-project account binding. No API wrapper. No OpenAI compatibility surface. Valv's job is narrowed to "run `codex` or `claude` in a Valv-managed Docker container against a Valv-managed account home that the bound project selects." Cleanup and idiomatic-Go rework are explicitly deferred to the Later Drop at the bottom of this file.
 
 ---
