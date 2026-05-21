@@ -188,7 +188,7 @@ GOPRIVATE = "github.com/evanmschultz/*"
 
 #### Unit 11.4 — CLI surface
 
-**State:** todo
+**State:** done
 
 **Paths:**
 - `internal/cli/tools.go` (new — `newToolsCommand`, `newToolsValidateCommand`)
