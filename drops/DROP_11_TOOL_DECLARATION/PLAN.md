@@ -167,7 +167,7 @@ GOPRIVATE = "github.com/evanmschultz/*"
 
 #### Unit 11.3 — Per-project resolver
 
-**State:** todo
+**State:** done
 
 **Paths:**
 - `internal/tools/resolve.go` (new — `Resolve` function + `ToolsFilePath` constant)
