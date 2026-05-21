@@ -44,3 +44,6 @@ cover.out
 # Project-shared .claude/ files (CLAUDE.md, agents, etc.) DO get tracked.
 *.local.json
 .claude/settings.local.json
+# Ephemeral per-session lock written by Claude Code's scheduled-task /
+# ScheduleWakeup mechanism. Session-PID-bound; never commit.
+.claude/scheduled_tasks.lock

@@ -91,8 +91,8 @@ GOPRIVATE = "github.com/evanmschultz/*"
 5. `Validate(m ToolManifest)` returns nil for a valid manifest; returns a descriptive error for each invalid shape.
 6. `valv tools validate` exits 0 and prints `"tools.toml is valid"` on success; exits 1 with a human-readable error on parse or validation failure; exits 0 and prints `"no tools declared"` when manifest is empty (`len(m.Tools) == 0`).
 7. `mage testPkg ./internal/tools/` reports ≥ 70% coverage for the package (enforced at Unit 11.4 completion).
-8. `magefile.go` `coverageThreshold` constant is `70.0` with TODO removed. `mage test` passes clean across all packages (enforced at Unit 11.5, the final unit).
-9. `mage test` passes clean across all packages after all units are done.
+8. **Deferred 2026-05-21 (dev call).** The global `coverageThreshold` bump from 60→70 is removed from DROP_11 and rolled into DROP_17_CLEANUP_BACKLOG. Pre-existing legacy packages (`internal/cli/` at 67.6%, `internal/adapters/docker/` at 64.7%) are out of DROP_11's sandbox-cascade scope. The per-package 70% target on the new `internal/tools/` package (AC7) is still met via local coverage (95.5% verified at Unit 11.4).
+9. `mage test` passes clean across all packages after all units are done (at the current 60% gate; the 70% gate is deferred to the cleanup drop per AC8).
 
 ### Units
 
@@ -219,24 +219,15 @@ GOPRIVATE = "github.com/evanmschultz/*"
 
 ---
 
-#### Unit 11.5 — Coverage threshold bump (drop-end verify gate)
+#### Unit 11.5 — Coverage threshold bump (DEFERRED 2026-05-21)
 
-**State:** todo
+**State:** deferred to DROP_17_CLEANUP_BACKLOG
 
-**Paths:**
-- `magefile.go` (existing — change `coverageThreshold = 60.0` to `70.0`, remove TODO comment)
+Per dev call 2026-05-21 after Unit 11.4 build-QA green: the legacy-package failure path triggered on the planned `coverageThreshold = 60 → 70` bump (`internal/cli/` at 67.6%, `internal/adapters/docker/` at 64.7%). Both were already below 70% before DROP_11 started. Raising legacy coverage in-drop would have paused the sandbox cascade (DROP_11 → DROP_15) for grunt-test work on packages unrelated to the new sandbox surface. The dev chose path (B) from the escalation: defer the bump entirely and open a separate coverage-cleanup drop after the sandbox cascade ships. DROP_17_CLEANUP_BACKLOG now carries that responsibility.
 
-**Packages:** none (magefile, not a Go import package)
+The 70% standard remains in `CLAUDE.md § Delivery Standards` as the aspirational floor; it is enforced de facto on new packages (the new `internal/tools/` shipped at 95.5%) and will be enforced globally once DROP_17 raises the legacy packages.
 
-**Acceptance:**
-- `magefile.go` lines 22-24: constant is `coverageThreshold = 70.0`. The `// TODO: restore to 70.0 after raising internal/adapters/docker coverage (see main/REFINEMENTS.md).` comment is removed.
-- Builder runs `mage test` from `main/` immediately after the edit and reports the result verbatim in `BUILDER_WORKLOG.md`.
-- If any package reports < 70% coverage, the builder does NOT silently fix it. Instead: list every failing package with its coverage percentage in the worklog, set unit state to `blocked`, and return to the orchestrator. The orchestrator then routes by failure class:
-  - **New-package failure (`internal/tools/`):** the builder for THIS drop owns it. Route back to Unit 11.4 (which is the unit that finishes the package by exercising the CLI integration). The Unit 11.4 builder is responsible for raising `internal/tools/` coverage to ≥ 70% with additional tests before Unit 11.5 re-runs. Tightly scoped fix, same drop.
-  - **Legacy-package failure (e.g. `internal/adapters/docker` — the known candidate from the pre-existing TODO in `magefile.go`):** out of scope for this drop's code units. Route to dev for triage. Dev decides between (a) raising that package's coverage as a new follow-on unit inside DROP_11 (e.g. Unit 11.6), or (b) rolling back the threshold bump and opening a separate coverage-cleanup drop. Either decision is recorded as a comment update in this PLAN.md.
-- If `mage test` passes clean at 70%, unit is done and the drop is ready for Phase 6 close.
-
-**Blocked by:** Unit 11.4
+DROP_11 now closes at 4 units (11.1 → 11.2 → 11.3 → 11.4) with `mage test` green at the current 60% gate.
 
 ---
 
@@ -253,14 +244,14 @@ GOPRIVATE = "github.com/evanmschultz/*"
 - **Empty-manifest predicate (Unit 11.4):** `len(m.Tools) == 0`. The presence of `[allowlist]` or `[env]` sections does NOT constitute a non-empty manifest for DROP_11's purposes.
 - **Unit 11.4 test filesystem cases:** zero-byte file uses committed `testdata/zero_byte.toml` (zero-byte files survive `git add`). Permission-denied and directory-at-path cases use `t.TempDir()` — those states do not survive `git add` cleanly and must be created in-test.
 - **CLI output style:** use `laslig` or `internal/output` patterns. Check `internal/cli/claude.go` and `internal/cli/global.go` for the output helper pattern. The `validate` command prints to stdout on success; errors go to stderr via cobra's error return.
-- **Unit 11.5 risk:** `magefile.go` currently has `coverageThreshold = 60.0` with a TODO noting `internal/adapters/docker` is the known low-coverage package. Unit 11.5 is intentionally last — ALL coding units complete before this bump runs. If `mage test` fails after the bump, the builder surfaces the failure to the orchestrator and does not fix it inline — coverage work on an existing package is a separate concern.
+- **Unit 11.5 deferred** (see the deferred-unit note above). The global `coverageThreshold` bump is no longer part of DROP_11. The new package's local 70% target is met (`internal/tools/` at 95.5%) — that's the meaningful coverage signal for sandbox work.
 
 ## Notes
 
 - Survey output is the evidence base for schema design. Schema is grounded in devcontainer.json + mise.toml patterns (cited above).
 - This drop is intentionally narrow: parser + per-project resolution + `valv tools validate` CLI only. No image-build changes (DROP_12), no `valv run` adapter (DROP_13), no env-var injection (DROP_14), no network policy enforcement (DROP_15). `[allowlist]` and `[env]` sections are captured as `toml.Primitive` fields — parser accepts them and calls `meta.PrimitiveDecode` (discarding the decoded value) to satisfy the strict undecoded check. DROP_11 takes no further action on their contents.
 - The 70% per-package coverage gate applies to the new `internal/tools/` package from day one (enforced at Unit 11.4 completion, which closes the package's test coverage after the CLI integration).
-- The global `coverageThreshold` bump from 60% to 70% is intentionally deferred to Unit 11.5 (last unit). Bumping the global gate before all packages pass is a build-break risk.
+- The global `coverageThreshold` bump from 60% to 70% was originally planned as Unit 11.5 but deferred to DROP_17_CLEANUP_BACKLOG on 2026-05-21 per dev call (see deferred-unit note above). Pre-existing legacy packages would have failed the bump; sandbox cascade momentum prioritized.
 - `valv tools list` is cut (dev decision, Y3). Only `valv tools validate` ships in DROP_11.
 - `path:` local-source overrides and `"latest"` resolution semantics are deferred to DROP_12 (U1, U3). DROP_11 stores any version string verbatim.
-- Unit ordering: 11.1 (schema+parser) → 11.2 (validation) → 11.3 (resolver) → 11.4 (CLI surface + 70% gate) → 11.5 (global coverage bump). Units 11.1–11.3 are unblocked by the magefile change. Unit 11.4 unblocked by 11.3. Unit 11.5 unblocked by 11.4.
+- Unit ordering (final, post-deferral): 11.1 (schema+parser) → 11.2 (validation) → 11.3 (resolver) → 11.4 (CLI surface + new-package 70% local target). Unit 11.5 deferred to DROP_17. Four units shipped in DROP_11.
