@@ -642,6 +642,31 @@ func WriteDefaultCodexContext(root string) (string, error) {
 	return dockerfilePath, nil
 }
 
+// goInstallStep is the shared Go 1.26.1 install snippet embedded into both
+// DefaultCodexDockerfile and DefaultClaudeDockerfile so DROP_12 overlay layers
+// can run `go install <source>` against a tools.toml manifest. Shell-form RUN
+// is used because the multi-step pipeline (per-arch case dispatch + curl +
+// sha256 verify + tar extract + cleanup) requires shell control flow and
+// ${TARGETARCH} variable expansion. Per Docker BuildKit docs the automatic
+// platform ARG TARGETARCH lives in global scope only and is NOT auto-injected
+// into build stages — the explicit `ARG TARGETARCH` redeclaration immediately
+// before this RUN is mandatory. The literal sha256 hex values for amd64 and
+// arm64 are fetched from https://go.dev/dl/?mode=json and verified at build
+// time via `sha256sum -c`; see drops/DROP_12_IMAGE_LAYERING/BUILDER_WORKLOG.md
+// § "Go Tarball Hashes" for the source of truth.
+const goInstallStep = `ARG TARGETARCH
+RUN set -eu \
+    && case "${TARGETARCH}" in \
+        amd64) GO_SHA256=031f088e5d955bab8657ede27ad4e3bc5b7c1ba281f05f245bcc304f327c987a ;; \
+        arm64) GO_SHA256=a290581cfe4fe28ddd737dde3095f3dbeb7f2e4065cab4eae44dfc53b760c2f7 ;; \
+        *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+    && curl -fSL "https://go.dev/dl/go1.26.1.linux-${TARGETARCH}.tar.gz" -o /tmp/go.tar.gz \
+    && echo "${GO_SHA256}  /tmp/go.tar.gz" | sha256sum -c - \
+    && tar -C /usr/local -xzf /tmp/go.tar.gz \
+    && rm /tmp/go.tar.gz
+ENV PATH=/usr/local/go/bin:$PATH`
+
 func DefaultCodexDockerfile() string {
 	return strings.TrimSpace(`
 FROM node:22-bookworm-slim
@@ -650,8 +675,10 @@ ARG VALV_UID=1000
 ARG VALV_GID=1000
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends bubblewrap ca-certificates git ncurses-term \
+    && apt-get install -y --no-install-recommends bubblewrap ca-certificates curl git ncurses-term \
     && rm -rf /var/lib/apt/lists/*
+
+`+goInstallStep+`
 
 RUN getent group "${VALV_GID}" >/dev/null || groupadd -g "${VALV_GID}" valv \
     && useradd -o -m -u "${VALV_UID}" -g "${VALV_GID}" -s /bin/sh valv \
@@ -712,8 +739,10 @@ ARG VALV_UID=1000
 ARG VALV_GID=1000
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends bubblewrap ca-certificates git ncurses-term \
+    && apt-get install -y --no-install-recommends bubblewrap ca-certificates curl git ncurses-term \
     && rm -rf /var/lib/apt/lists/*
+
+`+goInstallStep+`
 
 RUN getent group "${VALV_GID}" >/dev/null || groupadd -g "${VALV_GID}" valv \
     && useradd -o -m -u "${VALV_UID}" -g "${VALV_GID}" -s /bin/sh valv \

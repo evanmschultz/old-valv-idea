@@ -398,7 +398,7 @@ func TestWriteDefaultCodexContextWritesDockerfile(t *testing.T) {
 		"NPM_CONFIG_AUDIT=false",
 		`ARG VALV_UID=1000`,
 		`ARG VALV_GID=1000`,
-		`apt-get install -y --no-install-recommends bubblewrap ca-certificates git ncurses-term`,
+		`apt-get install -y --no-install-recommends bubblewrap ca-certificates curl git ncurses-term`,
 		`getent group "${VALV_GID}" >/dev/null || groupadd -g "${VALV_GID}" valv`,
 		`useradd -o -m -u "${VALV_UID}" -g "${VALV_GID}" -s /bin/sh valv`,
 		`chown -R "${VALV_UID}:${VALV_GID}" /home/valv /workspace`,
@@ -578,7 +578,7 @@ func TestWriteDefaultClaudeContextWritesDockerfile(t *testing.T) {
 		"NPM_CONFIG_AUDIT=false",
 		`ARG VALV_UID=1000`,
 		`ARG VALV_GID=1000`,
-		`apt-get install -y --no-install-recommends bubblewrap ca-certificates git ncurses-term`,
+		`apt-get install -y --no-install-recommends bubblewrap ca-certificates curl git ncurses-term`,
 		`getent group "${VALV_GID}" >/dev/null || groupadd -g "${VALV_GID}" valv`,
 		`useradd -o -m -u "${VALV_UID}" -g "${VALV_GID}" -s /bin/sh valv`,
 		`chown -R "${VALV_UID}:${VALV_GID}" /home/valv /workspace`,
@@ -595,6 +595,66 @@ func TestWriteDefaultClaudeContextWritesDockerfile(t *testing.T) {
 // testClaudeCLIVersion is a fixed version string used in tests that need a
 // concrete Claude CLI version but do not depend on any pinned-constant export.
 const testClaudeCLIVersion = "2.1.143"
+
+// TestDefaultProviderDockerfilesEmbedGoToolchain asserts the literal substrings
+// required by DROP_12 Unit 12.0 acceptance: both default Dockerfiles must add
+// `curl` to apt, declare `ARG TARGETARCH` inside the build stage, embed the
+// go1.26.1 tarball URL with the in-stage ${TARGETARCH} expansion, verify it
+// via `sha256sum -c`, extract into /usr/local/go and expose /usr/local/go/bin
+// on PATH, and cover both amd64 and arm64 in the per-arch case dispatch. The
+// literal sha256 hex values for both architectures are also asserted so a
+// version bump cannot accidentally land with stale hashes.
+func TestDefaultProviderDockerfilesEmbedGoToolchain(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{name: "codex", body: DefaultCodexDockerfile()},
+		{name: "claude", body: DefaultClaudeDockerfile()},
+	}
+
+	wantSubstrings := []string{
+		"ARG TARGETARCH",
+		"go1.26.1.linux-${TARGETARCH}.tar.gz",
+		"sha256sum -c",
+		"/usr/local/go/bin",
+		"amd64",
+		"arm64",
+		"bubblewrap ca-certificates curl git ncurses-term",
+		// Literal sha256 hex values from https://go.dev/dl/?mode=json for
+		// go1.26.1 linux-amd64 and linux-arm64. See
+		// drops/DROP_12_IMAGE_LAYERING/BUILDER_WORKLOG.md § Go Tarball Hashes.
+		"031f088e5d955bab8657ede27ad4e3bc5b7c1ba281f05f245bcc304f327c987a",
+		"a290581cfe4fe28ddd737dde3095f3dbeb7f2e4065cab4eae44dfc53b760c2f7",
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, want := range wantSubstrings {
+				if !strings.Contains(tc.body, want) {
+					t.Errorf("Dockerfile missing %q", want)
+				}
+			}
+
+			// ARG TARGETARCH must be declared inside the build stage and
+			// positioned BEFORE the go install RUN line. We approximate
+			// "build stage" as "anywhere after the FROM line" since both
+			// Dockerfiles are single-stage.
+			fromIdx := strings.Index(tc.body, "FROM ")
+			argIdx := strings.Index(tc.body, "ARG TARGETARCH")
+			tarballIdx := strings.Index(tc.body, "go1.26.1.linux-${TARGETARCH}.tar.gz")
+			if fromIdx < 0 || argIdx < 0 || tarballIdx < 0 {
+				t.Fatalf("Dockerfile missing required markers (FROM=%d ARG=%d tarball=%d)", fromIdx, argIdx, tarballIdx)
+			}
+			if argIdx < fromIdx {
+				t.Errorf("ARG TARGETARCH positioned before FROM (arg=%d, from=%d)", argIdx, fromIdx)
+			}
+			if argIdx > tarballIdx {
+				t.Errorf("ARG TARGETARCH must precede the go tarball RUN (arg=%d, tarball=%d)", argIdx, tarballIdx)
+			}
+		})
+	}
+}
 
 func TestServiceBuildRecipeHashMatchesProviderDockerfile(t *testing.T) {
 	cases := []struct {

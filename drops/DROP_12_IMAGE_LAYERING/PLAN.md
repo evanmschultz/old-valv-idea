@@ -146,7 +146,7 @@ Extend `internal/services/images` to compose a per-project layered Docker image 
 
 #### Unit 12.0 — Go toolchain in base Dockerfiles
 
-**State:** todo
+**State:** done
 
 **Paths:**
 - `internal/services/images/service.go` (extend — modify `DefaultCodexDockerfile()` and `DefaultClaudeDockerfile()` only)
