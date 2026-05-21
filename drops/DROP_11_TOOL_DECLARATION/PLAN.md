@@ -138,7 +138,7 @@ GOPRIVATE = "github.com/evanmschultz/*"
 
 #### Unit 11.2 — Validation logic
 
-**State:** todo
+**State:** done
 
 **Paths:**
 - `internal/tools/validate.go` (new — `Validate` function + validation rules)

@@ -1,0 +1,2 @@
+[tools]
+ta = { source = "github.com/evanmschultz/ta@main" }
