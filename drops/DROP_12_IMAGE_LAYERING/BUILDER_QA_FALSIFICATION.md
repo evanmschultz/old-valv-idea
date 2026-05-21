@@ -213,3 +213,95 @@ Eighteen attacks attempted (eleven from the appendix's primary list + seven addi
 
 - Unit 12.2 builder: consume `canonicalManifest` directly for Dockerfile emission and do not re-trim `Source` or `Install`.
 - Unit 12.3 builder: compute `toolsHash := OverlayHash(request.Manifest)` once and pass only that full hash to `shortOverlayHash`; treat `""` as unexpected/mismatch, never as a valid hash.
+
+## Unit 12.2 — Round 1
+
+**Verdict:** PASS (no unmitigated blocker; full package mage target could not be confirmed in this sandbox because an unrelated existing `httptest.NewServer` test cannot bind a local port)
+
+**Mage targets run:** `mage testPkg ./internal/services/images/` → FAIL in sandbox: `TestCodexVersionResolverReadsLatestRelease` panicked at `httptest: failed to listen on a port: listen tcp6 [::1]:0: bind: operation not permitted`. Scoped overlay verification `GOCACHE=/private/tmp/valv-go-build-cache go test ./internal/services/images -run 'TestBuildOverlayDockerfile|TestCanonicalManifest|TestOverlayHash|TestShortOverlayHash' -count=1` → PASS. Temporary falsification repro `TestFalsificationJSONActiveSourceStaysSingleArg` with JSON-active characters in `Source` → PASS, then removed.
+
+### Attacks attempted
+
+#### A1 — JSON-active source injection
+- **Hypothesis:** A `Source` containing quotes, backslashes, control bytes, embedded newline/tab, `$`, or backticks could break the Dockerfile JSON array or split into multiple argv elements.
+- **Evidence:** `BuildOverlayDockerfile` constructs `argv []string` and emits `RUN %s` from `json.Marshal(argv)` (`overlay.go:124-141`). Local `go doc encoding/json.Marshal` confirms strings are encoded as JSON strings with escaping. The committed injection test parses the generated RUN payload back with `json.Unmarshal` and asserts the semicolon source survives as one argv element (`overlay_test.go:384-432`). The temporary repro used `github.com/x/"quoted"\path\n\t$HOME` + control byte and round-tripped it as one argv element.
+- **Outcome:** mitigated.
+- **Detail:** No counterexample found. JSON-active and shell-active characters stay inside one JSON string; downstream `go install` receives one literal argument.
+
+#### A2 — Docker exec-form RUN parse and shell bypass
+- **Hypothesis:** Docker might still invoke a shell for `RUN ["go","install","..."]`, allowing `$HOME`, backticks, semicolons, or command substitution to execute.
+- **Evidence:** Context7 `/docker/docs` for Dockerfile reference says exec-form `RUN` is parsed as a JSON array, requires double quotes, and does not automatically invoke a command shell unless one is explicitly executed. The generator never emits `["sh","-c",...]`; it emits `["go","install",source]` or `["npm","install","-g",source]` (`overlay.go:125-129`).
+- **Outcome:** mitigated.
+- **Detail:** `$HOME` and backticks in `Source` remain literal argv content. This attack fails unless a future change wraps commands in `sh -c`.
+
+#### A3 — Sorting determinism and semantically equivalent names
+- **Hypothesis:** Two manifests with equivalent tools could produce nondeterministic RUN order, or two name variants could sort unexpectedly.
+- **Evidence:** `canonicalManifest` iterates the `map[string]tools.ToolSpec`, appends every entry, and sorts by `Name` (`overlay.go:35-51`). `TestBuildOverlayDockerfile_SortingDeterminism` asserts same output for two declaration orders (`overlay_test.go:267-295`). Local `go doc sort.Slice` confirms instability only matters for equal keys; duplicate keys cannot coexist in a Go map.
+- **Outcome:** mitigated for declared acceptance; accepted for semantic aliases.
+- **Detail:** If two different tool names are "semantically equivalent" to a human, they are still distinct map keys and intentionally produce distinct layers/order by bytewise name sort. No nondeterministic duplicate-name counterexample exists.
+
+#### A4 — Error message coverage and wrapping
+- **Hypothesis:** Error paths could swallow cause details or use `%v` where `%w` is needed for sentinel checks.
+- **Evidence:** Validation-style errors for unsupported string-form, empty source/install, and unsupported install verb are direct `fmt.Errorf` messages (`overlay.go:114-131`); there is no underlying sentinel error in these branches. The only real underlying error is `json.Marshal(argv)`, and it is wrapped with `%w` (`overlay.go:137-139`). Tests assert key message details for string-form, unsupported verb, empty source, and empty install (`overlay_test.go:298-381`).
+- **Outcome:** mitigated.
+- **Detail:** There is no lost sentinel for `errors.Is/As` in the expected validation branches. The only wrapped lower-level error uses `%w`.
+
+#### A5 — canonicalManifest re-call and full iteration
+- **Hypothesis:** `BuildOverlayDockerfile` might skip a tool due to short-circuiting, re-trimming, or using only a subset of the manifest.
+- **Evidence:** The function calls `canonicalManifest(manifest)` once (`overlay.go:95-96`) and ranges over every `tool := range canonical` (`overlay.go:109`). LSP references show `canonicalManifest` is used by `OverlayHash`, `BuildOverlayDockerfile`, and tests. The byte-for-byte test verifies two tools are both emitted (`overlay_test.go:247-260`).
+- **Outcome:** mitigated.
+- **Detail:** A malformed earlier-sorted tool can stop generation with an error before later tools are emitted, but that is the correct all-or-error behavior for an invalid manifest.
+
+#### A6 — String-form and zero-value shape detection
+- **Hypothesis:** `Source=="" && Install==""` may misclassify all-three-empty specs as string-form, or `Version==""` alone may need different treatment.
+- **Evidence:** DROP_11 `validateSpec` defines string-form as only `Version` set, object-form as only `Source + Install` set, and rejects all three empty (`validate.go:65-89`). `BuildOverlayDockerfile` only receives a manifest value and chooses the more specific unsupported-string-form error when source/install are both empty (`overlay.go:110-116`), matching Unit 12.2 acceptance line 223. `TestBuildOverlayDockerfile_StringFormRejected` covers the valid string-form case (`overlay_test.go:298-315`).
+- **Outcome:** accepted as non-blocking.
+- **Detail:** A direct unit caller can construct `ToolSpec{}` and get the string-form error rather than "empty spec." That is imprecise wording for an invalid bypassed-Validate manifest, not a runtime blocker under the DROP_11 call contract.
+
+#### A7 — USER root to USER valv bracket
+- **Hypothesis:** The overlay Dockerfile could leave the final image running as root, or a failed tool RUN could persist root state.
+- **Evidence:** The generator writes `USER root`, then ENV, then all RUN lines, then a final `USER valv` (`overlay.go:101-145`). The byte-for-byte test pins this exact order (`overlay_test.go:247-260`). Base provider Dockerfiles end with `USER valv` after installing CLIs (`service.go:701` and analogous Claude path), and PLAN decision 6 requires the bracket.
+- **Outcome:** mitigated.
+- **Detail:** If a tool RUN fails, Docker build fails and no successful final overlay image is produced. There is no "retained root state" image from a failed build.
+
+#### A8 — ENV ordering and first RUN visibility
+- **Hypothesis:** `GOBIN=/usr/local/bin` might only affect RUN lines after the first tool RUN, not the first one.
+- **Evidence:** The emitted order is `ENV ... GOBIN=/usr/local/bin`, blank line, then RUN lines (`overlay.go:103-141`). Context7 `/docker/docs` confirms ENV values persist into subsequent instructions/layers. The byte-for-byte test pins ENV before the first RUN (`overlay_test.go:247-257`).
+- **Outcome:** mitigated.
+- **Detail:** The first `go install` RUN is subsequent to the ENV instruction and receives `GOBIN`.
+
+#### A9 — Empty manifest behavior
+- **Hypothesis:** An empty manifest might emit an invalid Dockerfile or an unexpected error.
+- **Evidence:** `canonicalManifest` returns an empty slice for nil/empty tools (`overlay.go:35-38`). The RUN loop then emits zero RUN lines and still writes the final `USER valv` (`overlay.go:109-145`). PLAN Unit 12.2 does not mandate an error for empty manifests; the dispatch notes expect Unit 12.3 to short-circuit empty manifests before calling this function.
+- **Outcome:** accepted as non-blocking.
+- **Detail:** Zero-RUN output is syntactically valid and harmless but may be unnecessary work. Unit 12.3 should avoid calling it for empty manifests if that remains the intended control flow.
+
+#### A10 — npm install prefix vs GOBIN
+- **Hypothesis:** `GOBIN=/usr/local/bin` fixes Go installs but does nothing for `npm install -g`, so npm tools could land somewhere outside PATH unless `NPM_CONFIG_PREFIX` is also set.
+- **Evidence:** Context7 `/npm/cli` says npm global installs use the `prefix` configuration, defaulting on Unix to the Node installation location such as `/usr/local`; npm config can be set via `NPM_CONFIG_*`. The base image is `node:22-bookworm-slim` (`service.go:672`/`736`), and the existing base Dockerfiles already use `npm install --global` without setting `NPM_CONFIG_PREFIX` (`service.go:695-699`). The overlay sets npm noninteractive/audit envs but not prefix (`overlay.go:103-106`).
+- **Outcome:** accepted as non-blocking.
+- **Detail:** `GOBIN` does not affect npm, but this is consistent with existing provider Dockerfile behavior and npm's default global prefix. If future runtime evidence shows global npm binaries are not on PATH, add `NPM_CONFIG_PREFIX=/usr/local`; no current counterexample was constructed.
+
+#### A11 — Base image reference validity
+- **Hypothesis:** `baseImage.String()` could return an empty string, yielding `FROM ` and an invalid Dockerfile.
+- **Evidence:** `docker.ImageRef.String` returns `""` when `Repository == ""` (`types.go:22-25`). `BuildOverlayDockerfile` does not validate `baseImage` (`overlay.go:98-99`).
+- **Outcome:** accepted as non-blocking.
+- **Detail:** This is a direct-call footgun but outside Unit 12.2 acceptance; callers should pass a validated base image ref. It is worth keeping in mind for Unit 12.3 wiring.
+
+#### A12 — Concurrency, interfaces, hidden state, and YAGNI
+- **Hypothesis:** The unit could introduce goroutine leaks, interface traps, package state, init side effects, or premature abstractions.
+- **Evidence:** `overlay.go` adds constants and a pure string-rendering function; no goroutines, channels, contexts, mutexes, type assertions, interfaces, `init`, package vars, or ignored errors. LSP references show `BuildOverlayDockerfile` has no production caller yet beyond tests.
+- **Outcome:** mitigated.
+- **Detail:** No concurrency or hidden-dependency counterexample exists in this unit.
+
+### Non-blocking gaps
+
+- Full `mage testPkg ./internal/services/images/` could not pass in this sandbox because an existing HTTP test cannot bind `[::1]:0`; scoped overlay tests passed.
+- Empty manifest handling returns a valid zero-RUN overlay Dockerfile. Unit 12.3 should short-circuit empty manifests if the orchestrator wants to avoid unnecessary builds.
+- `BuildOverlayDockerfile` does not validate `baseImage.Repository`; Unit 12.3 should pass a validated non-empty `docker.ImageRef`.
+- `NPM_CONFIG_PREFIX` is not set. Current evidence says npm defaults are acceptable for the Node base image, but this should be revisited if an end-to-end overlay npm install lands binaries outside PATH.
+
+### Routing
+
+- Unit 12.3 builder: short-circuit empty tool manifests before calling `BuildOverlayDockerfile`, and pass only a validated non-empty base image ref.
+- Drop-end verifier: run the full `mage testPkg ./internal/services/images/` outside the network-restricted sandbox to confirm the existing `httptest` case.
