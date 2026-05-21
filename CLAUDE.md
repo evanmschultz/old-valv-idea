@@ -93,13 +93,14 @@ The parent Claude Code session launched by the dev from this directory is always
 
 | Role | Agent | Edits Go? |
 |---|---|---|
-| Builder | `go-builder-agent` | **Yes** (only role that does) |
-| QA Proof | `go-qa-proof-agent` | No |
-| QA Falsification | `go-qa-falsification-agent` | No |
-| Planning | `go-planning-agent` | No |
+| Builder | `ta-go-builder` | **Yes** (only role that does) |
+| QA Proof | `ta-go-qa-proof` | No |
+| QA Falsification | `ta-go-qa-falsification` | No |
+| Planning | `ta-go-planning` | No |
+| Closeout | `ta-go-closeout` | No |
 | Research | Claude's built-in `Explore` subagent | No |
 
-The agents are **global** (`~/.claude/agents/`) and reference Tillsyn tooling that Valv does not use. Every spawn carries the override preamble from `main/drops/WORKFLOW.md` § "Agent Spawn Contract" — single canonical source, do not duplicate it here. Per-role appendix fields (drop's PLAN.md path, unit ID, target output file, round number, working dir) are listed in WORKFLOW.md § "Per-Role Spawn Appendices".
+The agents live in **project-local** `.claude/agents/` (not global `~/.claude/agents/`) and reference Tillsyn tooling that Valv does not use. Every spawn carries the override preamble from `main/drops/WORKFLOW.md` § "Agent Spawn Contract" — single canonical source, do not duplicate it here. Per-role appendix fields (drop's PLAN.md path, unit ID, target output file, round number, working dir) are listed in WORKFLOW.md § "Per-Role Spawn Appendices".
 
 ## Build-QA-Commit Loop
 
