@@ -1,0 +1,10 @@
+[tools]
+mage = "latest"
+gh = "latest"
+ta = { source = "github.com/evanmschultz/ta@main", install = "go install" }
+
+[allowlist]
+hosts = ["github.com", "proxy.golang.org"]
+
+[env]
+GOPRIVATE = "github.com/evanmschultz/*"

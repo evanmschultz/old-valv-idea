@@ -100,7 +100,7 @@ GOPRIVATE = "github.com/evanmschultz/*"
 
 #### Unit 11.1 — Schema types, parser, and ErrToolsNotFound sentinel
 
-**State:** todo
+**State:** done
 
 **Paths:**
 - `internal/tools/tools.go` (new — package declaration, exported types, `Load` function)

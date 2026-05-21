@@ -1,0 +1,4 @@
+[tools]
+mage = "latest"
+gh = "latest"
+go = "1.22"

@@ -4,6 +4,7 @@ import "errors"
 
 var (
 	ErrConfigNotFound  = errors.New("config file not found")
+	ErrToolsNotFound   = errors.New("tools file not found")
 	ErrUnsupportedOS   = errors.New("unsupported operating system")
 	ErrUnboundProject  = errors.New("project is not bound")
 	ErrInvalidOutput   = errors.New("invalid output configuration")

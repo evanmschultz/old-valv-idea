@@ -1,0 +1,5 @@
+[tools]
+mage = "latest"
+
+[network]
+proxy = "http://example.com"

@@ -1,0 +1,2 @@
+[tools]
+"github.com/foo/bar" = { source = "github.com/foo/bar@main", install = "go install" }
