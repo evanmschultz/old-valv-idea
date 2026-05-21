@@ -375,3 +375,81 @@ provided complete coverage. No fallback miss to record.
   coverage — matches Unit 11.3 worklog exactly.
 
 Verdict: **pass**.
+
+## Unit 11.4 — Round 1
+
+**Verdict:** pass
+**Reviewer:** ta-go-qa-falsification
+**Reviewed at:** 2026-05-21T18:16:43Z
+
+Reviewed against `main/drops/DROP_11_TOOL_DECLARATION/PLAN.md` Unit 11.4 acceptance and the falsification appendix's 6 attack groups. Empirical verification ran the existing `mage testPkg ./internal/cli/` (228 tests / 67.6% coverage / PASS) — no scratch test files were added or deleted. The 10 new tests already cover the attacks at the right grain; no additional counterexample reproducers were needed.
+
+### Counterexamples / Attacks
+
+#### Attack 1 — Cobra registration
+
+Three sub-attacks; all **mitigated**.
+
+- **`toolsCmd` registered in `root.go`.** Lines 136–139 of `internal/cli/root.go`: `toolsCmd := newToolsCommand(); toolsCmd.GroupID = "runtime"`; `toolsCmd` appears in the `cmd.AddCommand(pathsCmd, versionCmd, statusCmd, codexCmd, claudeCmd, accountCmd, globalCmd, imageCmd, toolsCmd)` variadic on line 139. **Confirmed.**
+- **`GroupID: "runtime"` set on the right group.** Root command declares groups `inspect`, `runtime`, `account` on lines 108–112 of `root.go`. `runtime` is valid. `TestToolsValidate_RegisteredOnRoot` asserts `child.GroupID == "runtime"` empirically. **Confirmed.**
+- **`valv tools` (no subcommand) prints help, not error.** `newToolsCommand` line 34 sets `RunE: func(...) error { return cmd.Help() }`. `cobra.Command.Help()` writes the help text to OutOrStdout and returns nil. No panic, no error, exit 0. The `Args: cobra.NoArgs` guard also blocks unexpected positional args. **Mitigated.**
+
+#### Attack 2 — `project.Detect()` integration
+
+Three sub-attacks; all **mitigated**.
+
+- **No `.git/` marker anywhere up the tree.** Read of `internal/project/project.go` lines 35–55: `DetectFrom` walks parents until `filepath.Dir(current) == current` (filesystem root) and returns `Result{Root: fallback, HasGitMarker: false}` with nil error. The CLI then runs `tools.Resolve(result.Root)` against that fallback root — typically a project parent or the filesystem root — and `tools.Resolve` handles absent `.valv/tools.toml` via the sentinel-only `errors.Is(err, domain.ErrToolsNotFound)` check (line 33 of `resolve.go`) returning `ToolManifest{}, nil`. So the no-marker path bubbles to `"no tools declared"` cleanly, not a panic or error. **Mitigated.**
+- **Detect error wrapping.** `runToolsValidate` (`tools.go:77`) wraps any non-nil Detect error as `fmt.Errorf("tools validate: detect project: %w", err)` — `%w` preserves the chain for `errors.Is`. **Mitigated.**
+- **`result.Root` empty / panic on nil result.** `Result` is a value type, never nil. Even when `Detect` errors, `result.Root` is the zero value `""`. The CLI returns immediately on the err branch before using `result.Root`. No nil-deref path. **Mitigated.**
+
+#### Attack 3 — Output behavior precision
+
+Four sub-attacks; all **mitigated**.
+
+- **`Fprintln` vs `WriteRecord` divergence from `internal/output` patterns.** Builder used direct `fmt.Fprintln(cmd.OutOrStdout(), ...)` — divergence from `WriteRecord`. Builder worklog (Unit 11.4 Notes line 80) justifies this explicitly: a one-line status with no fields does not need a JSON envelope; if a future drop adds `--format json` for `tools validate` it can swap to `WriteRecord` cleanly. PLAN.md text is "laslig-style or internal/output patterns" — `fmt.Fprintln(cmd.OutOrStdout(), ...)` is a thin wrapper consistent with cobra idioms and not in conflict with PLAN intent. Acceptable design call by builder. **Mitigated.**
+- **Success exit codes.** `TestToolsValidate_ValidManifest` asserts no error returned by `cmd.Execute()` — cobra exits 0. `TestToolsValidate_NoValvDir` and `TestToolsValidate_EmptyToolsTable` and `TestToolsValidate_ZeroByteFile` all assert nil error. All three "no tools declared" cases yield exit 0. **Confirmed empirically.**
+- **Error exit code 1.** Implementation uses `return fmt.Errorf(...)` from `RunE` rather than `os.Exit(1)`. Cobra translates non-nil RunE errors to exit code 1. `SilenceUsage: true` on the validate command (line 64) prevents the usage block from drowning the error message. All four error-path tests (`TestToolsValidate_InvalidToml`, `TestToolsValidate_InvalidToml_UnknownKeys`, `TestToolsValidate_ValidationFailure`, `TestToolsValidate_PermissionDenied`, `TestToolsValidate_DirectoryAtPath`) assert non-nil err. **Confirmed.**
+- **`fmt.Fprintln` write-error branches uncovered.** Lines 87–89 and 93–95 wrap `Fprintln` errors. These are defensive — `bytes.Buffer` never errors on write, so tests can't reach them. Acceptable: pattern is `return fmt.Errorf` consistent with the rest of the function; the branches are not silently dropped. **Accepted (low-risk uncovered defensive code).**
+
+#### Attack 4 — Test fixtures and edge cases
+
+Three sub-attacks; all **mitigated**.
+
+- **Zero-byte file survives `git add`.** Empirical: `git show HEAD:internal/cli/testdata/zero_byte.toml | wc -c` returns `0`. The file is tracked at zero bytes. Git blob format `blob 0\0` is valid. `wc -c internal/cli/testdata/zero_byte.toml` on disk also returns 0. The test resolves the absolute path BEFORE `chdirToProjectRoot` (line 168 vs line 180) — chdir doesn't invalidate the captured abs path. Test also asserts `len(contents) != 0` would fail, guarding against an editor accidentally appending a newline. **Mitigated.**
+- **Permission-denied test on non-root non-Windows.** The two skip guards on lines 202–207 are `runtime.GOOS == "windows"` and `os.Geteuid() == 0`. On macOS dev (UID != 0), Linux CI runners (typically UID != 0), the test runs. The test restores `0o644` permissions in `t.Cleanup` (line 224–226) BEFORE TempDir cleanup, so the temp tree removes cleanly. **Mitigated.**
+- **Directory-at-path EISDIR wrapping.** `os.MkdirAll(filepath.Join(root, ".valv", "tools.toml"), 0o755)` creates the dir. Path resolves to `<root>/.valv/tools.toml` directory. `tools.Resolve` calls `Load` which calls `os.Stat` (succeeds, returns dir info), then `toml.DecodeFile` calls `os.Open` (succeeds on a dir on macOS) then `bufio.Read`/`io.ReadAll` (fails with EISDIR). Error wraps up through Load (`decode tools %q: %w`) → Resolve (`resolve tools %q: %w`) → CLI (`tools validate: %w`). Test accepts EITHER `errors.Is(err, syscall.EISDIR)` OR substring `"is a directory"` — defensive against macOS-vs-Linux error-text variance. Empirically passes on macOS dev. **Mitigated.**
+
+#### Attack 5 — Coverage gap and gate timing
+
+Three sub-attacks; all **mitigated**.
+
+- **Legacy gap correctly classified.** Pre-Unit-11.4 baseline was 67.4% (per prompt brief). Post-Unit-11.4 is 67.6%. The new unit RAISED package coverage by 0.2pp, not lowered it. The 60% gate is currently met; the 70% gate is Unit 11.5's concern. Builder's classification (legacy-package failure, route to dev) matches the Unit 11.5 escalation table. **Mitigated.**
+- **New-code local coverage above 70%.** `tools.go` is 97 lines including comments and the heredoc-style Long strings; executable statements in `runToolsValidate` are ~10. Tests exercise: valid manifest, no-valv-dir, empty `[tools]` table, malformed TOML, unknown top-level key, invalid tool name, zero-byte file, permission-denied, directory-at-path. The two uncovered branches are `fmt.Fprintln` write-error returns (unreachable through `bytes.Buffer`). Local new-code coverage ~80%, well above the 70% gate. The package gap is legacy. **Mitigated.**
+- **`tools.go` LOC vs `tools_test.go` LOC ratio.** Source 97 / tests 290 ≈ 3:1 test-to-source ratio. Tests cover the 7 PLAN cases + registration guard + double `Invalid TOML` shape (malformed syntax + unknown keys). Ratio is healthy. **Mitigated.**
+
+#### Attack 6 — Cross-package interaction
+
+Two sub-attacks; all **mitigated**.
+
+- **Minimal imports / no `internal/domain` dep.** `internal/cli/tools.go` imports `fmt`, `strings`, `github.com/spf13/cobra`, `internal/project`, `internal/tools`. No `internal/domain`. This is CORRECT — `tools.Resolve` translates `domain.ErrToolsNotFound` to a nil-error empty manifest INSIDE Resolve, so the CLI never needs to inspect the sentinel. Clean encapsulation. **Mitigated.**
+- **No new circular-import risk.** `internal/cli` already depends on `internal/project` (via codex/claude commands) and `internal/tools` is a new leaf package that depends only on `internal/domain` + `BurntSushi/toml`. The DAG `cli → project | tools → domain` is acyclic. **Mitigated.**
+
+#### Attack 7 — Double `installBranchHelpCommands` call
+
+One sub-attack; **mitigated**.
+
+- `newToolsCommand` calls `installBranchHelpCommands(cmd)` on line 39 of `tools.go`. `newRootCommandWithPaths` then calls `installBranchHelpCommands(cmd)` on line 140 of `root.go`, which recurses into all children including `toolsCmd`. The `hasHelpSubcommand` guard (`root.go:230`) returns early when `toolsCmd` already has a `help` subcommand. No duplicate registration. **Mitigated.**
+
+### YAGNI Pressure
+
+None. Implementation is minimal: one branch command, one leaf command, one handler. No premature abstraction. No JSON envelope for a one-line status (justified in worklog). No `--format` flag for validate yet — explicitly deferred to a future drop if needed. PLAN explicitly cut `list` per dev decision Y3. Surface stays tight.
+
+### Hylla Feedback
+
+None. Unit 11.4 builder used `Read` fallback for `tools.Resolve`, `ToolsFilePath`, `domain.ErrToolsNotFound`, and `project.Detect` — all are uncommitted-since-last-ingest, so Hylla would miss them by design. No miss to report.
+
+### Summary
+
+All 7 attack groups mitigated. The implementation matches PLAN.md acceptance: `valv tools validate` is a registered cobra subcommand under the `runtime` group; it resolves the project root via `project.Detect`; it calls `tools.Resolve`; it prints `"tools.toml is valid"` or `"no tools declared"` on success (exit 0) and a wrapped error on failure (exit 1). All 7 PLAN cases plus the registration guard are tested. Coverage stayed above the current 60% gate at 67.6%. The legacy 70% gap is a separate Unit 11.5 concern.
+
+**Verdict: PASS.**

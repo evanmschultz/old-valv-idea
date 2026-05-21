@@ -427,3 +427,75 @@ None. Implementation is tight: the composition is minimal (load → sentinel →
 ### Hylla Feedback
 
 Hylla was not queried this round. Resolve, Load, Validate, and the new `domain.ErrToolsNotFound` sentinel are all uncommitted-since-last-ingest at the time of this review (resolve.go landed in commit `257d8ac`, after the most recent Hylla baseline). Source `Read` plus PLAN.md + worklog cross-check provided full coverage. No fallback miss to feed back.
+
+## Unit 11.4 — Round 1
+
+**Verdict:** pass
+**Reviewer:** ta-go-qa-proof
+**Reviewed at:** 2026-05-21T00:00:00Z
+
+### Acceptance Criteria Verification
+
+#### AC-1: New files exist
+
+PASS. `ls -la` confirmed:
+- `internal/cli/tools.go` — 3.6 KB
+- `internal/cli/tools_test.go` — 8.7 KB
+- `internal/cli/testdata/zero_byte.toml` — 0 B (`wc -c` returns 0)
+
+#### AC-2: `root.go` edit — `toolsCmd` registered with `GroupID = "runtime"`
+
+PASS. `internal/cli/root.go`:
+- Lines 136–137: `toolsCmd := newToolsCommand(); toolsCmd.GroupID = "runtime"` — GroupID is `"runtime"`, NOT `"account"`.
+- Line 139: `cmd.AddCommand(pathsCmd, versionCmd, statusCmd, codexCmd, claudeCmd, accountCmd, globalCmd, imageCmd, toolsCmd)` — `toolsCmd` is the last entry in the variadic.
+
+#### AC-3: `project.Detect()` integration — no raw `os.Getwd()` in `tools.go`
+
+PASS. `internal/cli/tools.go:76`: `result, err := project.Detect()`. Line 81: `manifest, err := tools.Resolve(result.Root)`. No `os.Getwd` appears anywhere in `tools.go` (verified by full file Read).
+
+#### AC-4: Output behavior
+
+PASS. `tools.go` `runToolsValidate`:
+- Line 86–90: `if len(manifest.Tools) == 0 { fmt.Fprintln(cmd.OutOrStdout(), "no tools declared"); return nil }` — empty → exit 0, "no tools declared".
+- Line 93: `fmt.Fprintln(cmd.OutOrStdout(), "tools.toml is valid"); return nil` — non-empty → exit 0, "tools.toml is valid".
+- Lines 78, 83, 88, 94: parse/validate errors return `fmt.Errorf("tools validate: ...: %w", err)` — wrapped, cobra exits 1.
+
+#### AC-5: 7 test cases present in `tools_test.go`
+
+PASS. All 7 cases confirmed by Read:
+- Case 1 (valid manifest with tools): `TestToolsValidate_ValidManifest` — lines 68–83.
+- Case 2 (no `.valv/` dir): `TestToolsValidate_NoValvDir` — lines 85–96.
+- Case 3 (invalid TOML / parse error): `TestToolsValidate_InvalidToml` lines 112–124 + bonus `TestToolsValidate_InvalidToml_UnknownKeys` lines 126–143.
+- Case 4 (Load passes but Validate fails): `TestToolsValidate_ValidationFailure` lines 145–159 — `_underscore = "latest"` triggers `invalid tool name`.
+- Case 5 (zero-byte): `TestToolsValidate_ZeroByteFile` lines 161–196 — copies committed `testdata/zero_byte.toml` after asserting `len(contents) != 0` guard.
+- Case 6 (chmod-000 permission denied with `t.TempDir()`): `TestToolsValidate_PermissionDenied` lines 198–235 — `os.Chmod(path, 0o000)`; accepts `errors.Is(err, syscall.EACCES)` OR `"permission denied"` substring; skips Windows/root.
+- Case 7 (directory-at-path with `t.TempDir()`): `TestToolsValidate_DirectoryAtPath` lines 237–256 — `os.MkdirAll(...tools.toml...)`; accepts `errors.Is(err, syscall.EISDIR)` OR `"is a directory"` substring per PLAN Round 4.
+
+Bonus registration guard: `TestToolsValidate_RegisteredOnRoot` lines 261–290 — asserts `tools.GroupID == "runtime"` and `validate` subcommand presence.
+
+#### AC-6: 228 tests / 67.6% coverage on `internal/cli/`
+
+PASS. Re-ran `mage testPkg ./internal/cli/`:
+- `tests: 228, passed: 228, failed: 0`
+- coverage: `github.com/evanmschultz/valv/internal/cli | 67.6%`
+- Matches builder claim exactly.
+
+#### AC-7: `mage testPkg ./internal/tools/` still passes (no regressions)
+
+PASS. Re-ran `mage testPkg ./internal/tools/`:
+- `tests: 56, passed: 56, failed: 0`
+- coverage: `github.com/evanmschultz/valv/internal/tools | 95.5%`
+- Matches Unit 11.3 closing state — no regression from CLI integration.
+
+### Findings
+
+None blocking.
+
+Observations (non-blocking):
+- `internal/cli/` coverage at 67.6% is below the 70% gate Unit 11.5 will enforce. Builder correctly flagged this in `BUILDER_WORKLOG.md` § "Unknown — `internal/cli/` coverage below 70%" and classified it as a legacy-package failure per Unit 11.5's escalation table. This is Unit 11.5's concern, not Unit 11.4's — AC-6 only required passing the current 60% gate, which it does (67.6% ≥ 60%).
+- `runToolsValidate` uses direct `fmt.Fprintln` rather than `output.WriteRecord` / laslig helpers. Builder explains the rationale (one-line literal, no fields, would force an empty JSON envelope). This is a deliberate departure from "`laslig`-style output consistent with rest of `internal/cli/`" in PLAN AC, justified in the worklog. The tests assert substrings on `cmd.OutOrStdout()`, which pass. Not blocking.
+- `--format` / `--style` flags are inherited from the root persistent flags but ignored by `tools validate` (output is unconditional plain text). Acceptable for this drop; future structured-output work can wire them in.
+
+### Hylla Feedback
+
+None. Per builder worklog, Hylla was not queried this round because Unit 11.1–11.3 symbols are uncommitted-since-last-ingest and the prompt directed `Read` fallback for `tools.Resolve`, `ToolsFilePath`, `domain.ErrToolsNotFound`, and `project.Detect`/`Result.Root`. Read provided full coverage. QA reviewer did not need Hylla either — all evidence was reachable via Read + mage runs.
