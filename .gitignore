@@ -24,7 +24,8 @@ Thumbs.db
 
 # Build outputs
 valv
-bin/
+bin/*
+!bin/agent-dispatch.sh
 dist/
 build/
 out/
