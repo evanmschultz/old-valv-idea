@@ -48,12 +48,14 @@ Extend `internal/services/images` to compose a per-project layered Docker image 
 
 3. **Single trim point (Caveat 1).** `canonicalManifest(manifest)` applies `strings.TrimSpace` to each tool's `Source` and `Install` field exactly once, before either hashing OR Dockerfile emission. Both code paths (hash computation in Unit 12.1, RUN-line generation in Unit 12.2) consume the same already-trimmed strings via `canonicalManifest`. This guarantees a manifest with `source = " github.com/x/y "` hashes identically to `source = "github.com/x/y"` AND produces the same RUN line.
 
+   **Internal whitespace pass-through (Falsification 2.4 acknowledged).** `strings.TrimSpace` strips leading/trailing whitespace only — internal whitespace (e.g. `source = "github.com/x/y\tbar"`) survives both the trim and the exec-form RUN emission as a single argv element. DROP_11's `validate.go` regex validates only the tool map key, not `Source`/`Install` values, so an internally-whitespaced source reaches the overlay generator unchanged. Downstream behavior: `go install` (or `npm install -g`) receives the malformed path as one argv entry and rejects it at the binary layer with an explicit module-path error visible in `docker build` output. DROP_12 deliberately does NOT add stricter validation here — surfacing the tool-binary error to the operator is acceptable v1 behavior. If operator confusion becomes a real signal, a follow-up drop can extend `internal/tools/validate.go` to reject internal whitespace in `Source`/`Install` values.
+
 4. **Cache invalidation chain (F1 fix).** Five labels persisted on the per-project image:
    - `io.valv.recipe_hash` — sha256 of overlay Dockerfile template content (forces rebuild if the overlay generator output changes).
    - `io.valv.base_recipe_hash` — **verbatim copy** of the base image's `io.valv.recipe_hash` label value, captured at build-time via `docker image inspect`. **Stored as-is** — the label is already a sha256 hex string at `service.go:609`; double-hashing it would obscure the relationship to the base. Name mirrors the parent label for clarity. Forces rebuild when the base image is rebuilt.
    - `io.valv.tools_hash` — full (not truncated) sha256 of the canonical manifest from decision 2. Forces rebuild when manifest content changes.
    - `io.valv.managed=true` — **required for `valv image cleanup` reachability** (Attack 2 fix). Matches the existing label filter at `manage.go:1685-1689`.
-   - `io.valv.scope=project-overlay` — disambiguates per-project overlays from base/version images so future cleanup logic can target them specifically.
+   - `io.valv.scope=project-overlay` — disambiguates per-project overlays from base/version images so future cleanup logic can target them specifically. **Existing `io.valv.scope` values in the codebase (confirmed via grep 2026-05-21):** `image` (base build artifact, `internal/services/images/service.go:336`), `info` (one-shot info container, `internal/cli/claude.go:150` + `internal/cli/codex.go:158`), `interactive` (running provider container, `internal/services/claude/service.go:316` + `internal/services/codex/service.go:320`). `project-overlay` is lexically distinct from all three; no closed-set parser anywhere — the label is only used for filtered listing, not strict enumeration.
 
    On launch, `EnsureProjectImage` reads `recipe_hash`, `base_recipe_hash`, and `tools_hash` from the existing per-project image; any mismatch triggers a rebuild.
 
@@ -94,7 +96,11 @@ Extend `internal/services/images` to compose a per-project layered Docker image 
 
 8. **EnsureProjectRequest shape (F3 fix).** `EnsureProjectRequest{Manifest tools.ToolManifest; BaseImage docker.ImageRef; NoCache bool}`. **`Pull` field removed** — base images are locally built, never pulled from a registry; a `Pull` flag is misleading. `NoCache` remains for force-rebuild scenarios.
 
-9. **Go toolchain in base image (U1 dev-confirmed, Unit 12.0).** Both `DefaultCodexDockerfile` and `DefaultClaudeDockerfile` gain a Go 1.26.1 install step. **Method:** download official binary tarball from `https://go.dev/dl/go1.26.1.linux-${TARGETARCH}.tar.gz`, extract into `/usr/local/go`, append `/usr/local/go/bin` to PATH. Aligns container Go version with `go.mod`'s `go 1.26.1`. Adds ~150MB to base image. The base's `recipeHash()` (computed from Dockerfile content per `service.go:537-549`) automatically invalidates, so any user running `valv claude` / `valv codex` after upgrade gets a rebuilt base on first launch through the existing `EnsureLatest` flow.
+9. **Go toolchain in base image (U1 dev-confirmed, Unit 12.0).** Both `DefaultCodexDockerfile` and `DefaultClaudeDockerfile` gain a Go 1.26.1 install step. **Method:** download official binary tarball from `https://go.dev/dl/go1.26.1.linux-${TARGETARCH}.tar.gz`, verify sha256 against the per-arch published hash, extract into `/usr/local/go`, append `/usr/local/go/bin` to PATH. Aligns container Go version with `go.mod`'s `go 1.26.1`. Adds ~150MB to base image. The base's `recipeHash()` (computed from Dockerfile content per `service.go:537-549`) automatically invalidates, so any user running `valv claude` / `valv codex` after upgrade gets a rebuilt base on first launch through the existing `EnsureLatest` flow.
+
+   **`ARG TARGETARCH` required inside stage (F5 fix).** Per Docker BuildKit docs, automatic platform ARGs (`TARGETARCH`, `TARGETOS`, etc.) live in **global scope only** and are NOT auto-injected into build stages or RUN commands. Both `DefaultCodexDockerfile` and `DefaultClaudeDockerfile` MUST redeclare `ARG TARGETARCH` (no default value) inside the stage immediately before the Go install RUN line. Without this redeclaration, `${TARGETARCH}` renders empty → `go.dev/dl/go1.26.1.linux-.tar.gz` → 404 → base image build fails at first launch.
+
+   **sha256 pin (Falsification 2.2 fix).** Tarball integrity is verified via `sha256sum -c` before extraction. The Dockerfile uses a shell-form `case ${TARGETARCH}` block (or equivalent shell conditional) to select the right hash for amd64 vs arm64, then pipes the expected hash + tarball path into `sha256sum -c -`. Build fails loudly on hash mismatch. **Literal hash values are fetched by the Unit 12.0 builder at implementation time** from `https://go.dev/dl/go1.26.1.linux-amd64.tar.gz.sha256` and `https://go.dev/dl/go1.26.1.linux-arm64.tar.gz.sha256`, embedded inline in the Dockerfile, and recorded in `BUILDER_WORKLOG.md` under a `## Go Tarball Hashes` heading so future readers can audit.
 
 10. **Build trigger timing (U2 dev-confirmed).** Auto-build on `valv claude` / `valv codex` launch, mirroring the existing `EnsureLatest` behavior at `ensureClaudeImageCurrent`/`ensureCodexImageCurrent` (`claude.go:189-206`, `codex.go:227-244`). New function `ensureProjectImage(...)` runs AFTER `ensureClaude/CodexImageCurrent` in both launchers. Falls back to base ref when manifest is empty. No explicit `valv image build` command in this drop.
 
@@ -107,7 +113,13 @@ Extend `internal/services/images` to compose a per-project layered Docker image 
 ### Acceptance Criteria (drop-level)
 
 1. `internal/services/images/` compiles with zero vet warnings after `mage testPkg ./internal/services/images/`.
-2. Base `DefaultCodexDockerfile` and `DefaultClaudeDockerfile` (`service.go:645-742`) contain a Go 1.26.1 install step via tarball download into `/usr/local/go` with `/usr/local/go/bin` on PATH. Both Dockerfiles include `curl` in their apt install list to support the tarball download.
+2. Base `DefaultCodexDockerfile` and `DefaultClaudeDockerfile` (`service.go:645-742`) each contain ALL of the following, asserted by tests as literal substrings of the returned Dockerfile string:
+   - The literal `ARG TARGETARCH` line (no default value) declared inside the build stage, positioned immediately before the Go install RUN line.
+   - The literal substring `go1.26.1.linux-${TARGETARCH}.tar.gz` (catches accidental version drift and confirms the buildx ARG is consumed).
+   - A `case ${TARGETARCH}` (or equivalent shell conditional) block selecting the per-arch sha256, followed by `sha256sum -c` verification before tar extraction.
+   - Extraction into `/usr/local/go` with `/usr/local/go/bin` placed on `PATH` via `ENV PATH=/usr/local/go/bin:$PATH`.
+   - `curl` added to the existing apt install list.
+   The literal sha256 hex strings for amd64 + arm64 are fetched by the Unit 12.0 builder from `https://go.dev/dl/go1.26.1.linux-{amd64,arm64}.tar.gz.sha256` at implementation time, recorded in `BUILDER_WORKLOG.md` under a `## Go Tarball Hashes` heading.
 3. New helper `OverlayHash(manifest tools.ToolManifest) string` returns a deterministic sha256 hex string for the canonical manifest; two manifests with semantically identical `[tools]` content (different declaration order, whitespace variations in source/install after single-point `strings.TrimSpace`) produce identical hashes.
 4. New helper `BuildOverlayDockerfile(manifest, baseImage) (string, error)` produces a Dockerfile whose:
    - `FROM` line references `baseImage.String()`.
@@ -144,10 +156,22 @@ Extend `internal/services/images` to compose a per-project layered Docker image 
 
 **Acceptance:**
 - Both `DefaultCodexDockerfile` and `DefaultClaudeDockerfile` add `curl` to the existing apt install line (`bubblewrap ca-certificates curl git ncurses-term`).
-- Both Dockerfiles include a Go 1.26.1 install step inserted AFTER the apt install block and BEFORE the `useradd` block, written exactly once per Dockerfile. The step downloads `https://go.dev/dl/go1.26.1.linux-${TARGETARCH}.tar.gz`, extracts cleanly into `/usr/local/go`, removes the tarball, and emits the resulting `go` binary on PATH via `ENV PATH=/usr/local/go/bin:$PATH`. Use `${TARGETARCH}` so amd64 + arm64 hosts both work (buildx auto-injects this).
-- Tests assert: the returned Dockerfile string contains the literal substring `go1.26.1.linux` (catches accidental version drift) and contains `/usr/local/go/bin` on PATH.
+- Both Dockerfiles declare the literal line `ARG TARGETARCH` (no default value) inside the build stage, positioned immediately before the Go install RUN line. Per Docker BuildKit docs, automatic platform ARGs are NOT auto-injected into stages — the redeclaration is mandatory. Without it, `${TARGETARCH}` renders empty and the tarball download 404s.
+- Both Dockerfiles include a Go 1.26.1 install step inserted AFTER the apt install block + the `ARG TARGETARCH` line and BEFORE the `useradd` block, written exactly once per Dockerfile. The step:
+   1. Selects the per-arch sha256 hash via a shell `case ${TARGETARCH}` block (or equivalent shell conditional) — one branch for `amd64`, one for `arm64`, exit non-zero on any unknown arch.
+   2. Downloads `https://go.dev/dl/go1.26.1.linux-${TARGETARCH}.tar.gz` to a temp path.
+   3. Verifies the tarball with `echo "<expected-hash>  <path>" | sha256sum -c -` (or equivalent). Build fails loudly on mismatch.
+   4. Extracts cleanly into `/usr/local/go`, removes the tarball.
+   5. Emits the resulting `go` binary on PATH via `ENV PATH=/usr/local/go/bin:$PATH`.
+- **Literal sha256 hex values are fetched at implementation time** from `https://go.dev/dl/go1.26.1.linux-amd64.tar.gz.sha256` and `https://go.dev/dl/go1.26.1.linux-arm64.tar.gz.sha256`, embedded inline in the Dockerfile string constants, and recorded in `BUILDER_WORKLOG.md` under a `## Go Tarball Hashes` heading so future readers (and security audit) can cross-check.
+- Tests assert ALL of these as literal substrings of the returned Dockerfile string for BOTH `DefaultCodexDockerfile()` and `DefaultClaudeDockerfile()`:
+   - The literal `ARG TARGETARCH` line.
+   - The literal substring `go1.26.1.linux-${TARGETARCH}.tar.gz`.
+   - The literal substring `sha256sum -c`.
+   - The literal substring `/usr/local/go/bin`.
+   - Both arch identifiers `amd64` and `arm64` appear (confirms the case block is populated).
 - Tests assert: `recipeHash()` of the new template produces a different value than the pre-Unit-12.0 baseline — pin the baseline via a hardcoded sha256 string updated in this unit's commit.
-- No new symbols, no new files. Both Dockerfiles share the same Go install snippet — DRY via a shared `const goInstallStep = "..."` if it improves readability, otherwise inline-duplicated is acceptable for this size.
+- No new exported symbols, no new files. Both Dockerfiles share the same Go install snippet — DRY via a shared `const goInstallStep = "..."` (unexported) if it improves readability, otherwise inline-duplicated is acceptable for this size.
 - `mage testPkg ./internal/services/images/` green.
 
 **Blocked by:** —
@@ -171,8 +195,8 @@ Extend `internal/services/images` to compose a per-project layered Docker image 
 
 **Acceptance:**
 - Add helper `canonicalManifest(manifest tools.ToolManifest) []canonicalTool` (unexported) that returns a sorted-by-name slice of `{Name, Version, Source, Install}` records with `strings.TrimSpace` applied **once** to `Source` and `Install`. Single trim point — both hashing and Dockerfile emission consume this slice.
-- Add helper `OverlayHash(manifest tools.ToolManifest) string` that returns `sha256(json.MarshalIndent(canonicalManifest(manifest), "", ""))` as a full lowercase hex string.
-- Add helper `ShortOverlayHash(manifest) string` returning the first 12 hex chars (used in the tag).
+- Add helper `OverlayHash(manifest tools.ToolManifest) string` (exported — consumed externally by Unit 12.3 callers and future per-project image inspection paths) that returns `sha256(json.MarshalIndent(canonicalManifest(manifest), "", ""))` as a full lowercase hex string.
+- Add helper `shortOverlayHash(hash string) string` (**unexported**, YAGNI per Round 2) returning the first 12 hex chars of an already-computed full hash, used internally by `s.projectImageRef`. Takes a string (not the manifest) so callers do not re-hash. Not exported — only the tag-construction site inside Unit 12.3 calls it.
 - Table-driven test exercises: empty manifest, single string-form tool, single object-form tool, three tools declared out of order (hash matches re-ordered input), whitespace in source/install (trim applied → identical hash).
 - Hash-stability snapshot: hardcoded manifest → hardcoded expected hex. Pins the canonical form against accidental future drift.
 - No changes to `service.go`, no overlay-Dockerfile generation in this unit.
@@ -221,11 +245,11 @@ Extend `internal/services/images` to compose a per-project layered Docker image 
 
 **Acceptance:**
 - New constants: `tagPrefixProjectOverlay = "proj-"`, `toolsHashLabel = "io.valv.tools_hash"`, `baseRecipeHashLabel = "io.valv.base_recipe_hash"`, `managedLabel = "io.valv.managed"`, `scopeLabel = "io.valv.scope"`, `scopeValueProjectOverlay = "project-overlay"`.
-- New request/result types `EnsureProjectRequest{Manifest tools.ToolManifest; BaseImage docker.ImageRef; NoCache bool}` and `EnsureProjectResult{Image docker.ImageRef; Action EnsureAction; ToolsHash string; BaseRecipeHash string}`. **No `Pull` field** (F3).
+- New request/result types `EnsureProjectRequest{Manifest tools.ToolManifest; BaseImage docker.ImageRef; NoCache bool}` and `EnsureProjectResult{Image docker.ImageRef; Action EnsureAction; ToolsHash string}`. **No `Pull` field** (F3). **`BaseRecipeHash` field dropped (Round 2 YAGNI):** the base-recipe-hash is consumed only inside `EnsureProjectImage` for cache comparison; no Unit 12.4 caller reads it. If a future debug-logging or telemetry consumer needs it, add the field at that drop. `ToolsHash` is retained because Unit 12.4's caller can log the resolved overlay tag and `ToolsHash` provides the unambiguous unprefixed value for that log line.
 - New `Service.EnsureProjectImage(ctx, request)` method that:
   1. Returns `{Image: request.BaseImage, Action: EnsureActionUsingExistingImage}` when `len(request.Manifest.Tools) == 0`.
   2. Computes `toolsHash := OverlayHash(request.Manifest)` and `baseRecipeHash := s.inspectLabel(ctx, request.BaseImage, recipeHashLabel)` (verbatim — no double-hash, F1).
-  3. Constructs target tag via `s.projectImageRef(toolsHash)` returning `<repo>:proj-<short-hash>`.
+  3. Constructs target tag via `s.projectImageRef(toolsHash)` returning `<repo>:proj-<short-hash>`. Internally `projectImageRef` calls the unexported `shortOverlayHash(toolsHash)` from Unit 12.1 to truncate to 12 hex chars.
   4. Inspects target tag for `recipeHashLabel`, `baseRecipeHashLabel`, `toolsHashLabel`. On ANY read failure (typecast OR non-missing inspect error), treats as mismatch and rebuilds (F2).
   5. Rebuild path: generates overlay via `BuildOverlayDockerfile`, writes to ephemeral `os.MkdirTemp` (cleanup deferred), calls existing `docker.BuildImageArgs` flow with the five labels (`recipe_hash`, `base_recipe_hash`, `tools_hash`, `managed=true`, `scope=project-overlay`).
 - New unexported helper `s.inspectLabel(ctx, ref, label string) (string, error)` reuses the existing `outputRunner` typecast pattern from `imageRecipeMatches` (`service.go:597-610`) but returns the trimmed raw value (not a match-bool). Typecast failure returns a sentinel `errLabelUnreadable` so the caller can treat it as mismatch.
@@ -259,15 +283,24 @@ Extend `internal/services/images` to compose a per-project layered Docker image 
 **Packages:** `internal/cli/`
 
 **Acceptance:**
-- `resolveProjectImage`:
-  - calls `tools.Resolve(workingDir)`; on `len(manifest.Tools) == 0` returns base ref + nil error.
-  - if `VALV_<PROVIDER>_IMAGE` env var is set AND manifest is non-empty: emits `"warning: VALV_<PROVIDER>_IMAGE override active; .valv/tools.toml overlay skipped"` to stderr via `fmt.Fprintln(cmd.ErrOrStderr(), ...)`, returns base ref (the env-var override is applied upstream in the existing path).
+- `resolveProjectImage(cmd, paths, provider, workingDir, baseRef) (docker.ImageRef, error)`:
+  - calls `tools.Resolve(workingDir)`; on `len(manifest.Tools) == 0` returns `baseRef` + nil error.
+  - if `VALV_<PROVIDER>_IMAGE` env var is set AND manifest is non-empty: emits `"warning: VALV_<PROVIDER>_IMAGE override active; .valv/tools.toml overlay skipped"` to stderr via `fmt.Fprintln(cmd.ErrOrStderr(), ...)`, returns `baseRef` (the env-var override is applied upstream in the existing path).
   - otherwise opens images service for `provider`, calls `EnsureProjectImage`, returns the result's `Image`.
   - any `tools.Resolve` error other than empty-manifest is wrapped and returned.
-- `runClaudeCommand` calls `resolveProjectImage` AFTER `ensureClaudeImageCurrent`, passes the resolved ref into `claudeservice.New(Options{Image: projectImage, ...})`.
-- Mirror for `runCodexCommand`.
-- `runClaudeImageOnlyCommand` and `runCodexImageOnlyCommand` UNCHANGED — they keep using base ref since they don't need project context.
-- Tests: stub `tools.Resolve` via testdata dir, install `installFakeDocker(t)` fixture, exercise: empty manifest → base ref used + no stderr warning; manifest with one tool → overlay-build invocation in fake docker calls + no stderr warning; manifest with one tool + `VALV_CLAUDE_IMAGE` set → overlay skipped + stderr warning printed exactly once.
+- **Constructor reorder (Falsification 2.3, BLOCKING).** Live code at `internal/cli/claude.go:103-123` currently constructs `claudeservice.New(claudeservice.Options{ Image: claudeImageRef(), ... })` (line 103) **BEFORE** `ensureClaudeImageCurrent(cmd, paths)` (line 121). To pass the resolved per-project ref into `Options.Image`, the builder MUST reorder `runClaudeCommand` so the sequence becomes:
+   1. `openStore` (unchanged)
+   2. `ensureClaudeImageCurrent(cmd, paths)` — moved up; must succeed before any per-project resolution.
+   3. `projectImage, err := resolveProjectImage(cmd, paths, "claude", workingDir, claudeImageRef())` — new call.
+   4. `claudeservice.New(claudeservice.Options{ Image: projectImage, ... })` — moved down; `Image:` field now consumes `projectImage`, not `claudeImageRef()`.
+   5. `service.Run(...)` (unchanged).
+- **Mirror for `runCodexCommand`** at `internal/cli/codex.go:110-...`: same five-step reorder. `ensureCodexImageCurrent` moves up, `resolveProjectImage(cmd, paths, "codex", workingDir, codexImageRef())` inserted, `codexservice.New(...)` moves down with `Image: projectImage`.
+- `runClaudeImageOnlyCommand` and `runCodexImageOnlyCommand` UNCHANGED — they keep using base ref since they don't need project context. The reorder applies ONLY to the binding-aware runCommand paths.
+- Tests cover BOTH paths via per-launcher tables:
+   - empty manifest → `projectImage == baseRef` → no overlay-build invocation in fake docker calls → no stderr warning. Confirm `claudeservice.New`/`codexservice.New` receives `claudeImageRef()`/`codexImageRef()`.
+   - non-empty manifest, no env override → `EnsureProjectImage` invoked → fake docker records a `buildx build` call with the project-overlay labels → no stderr warning. Confirm constructor receives the resolved per-project ref.
+   - non-empty manifest + `VALV_CLAUDE_IMAGE` (or `VALV_CODEX_IMAGE`) set → overlay build skipped → stderr warning printed exactly once → constructor receives `baseRef`.
+- Test fixtures: `installFakeDocker(t)` for the docker calls; `tools.Resolve` exercised against a real testdata dir containing `.valv/tools.toml` (and an empty case directory for the no-manifest path).
 - `mage testPkg ./internal/cli/` green; coverage does not regress below 67.6%.
 
 **Blocked by:** Unit 12.3
@@ -283,7 +316,9 @@ Extend `internal/services/images` to compose a per-project layered Docker image 
 - **CLI fixture pattern:** `installFakeDocker(t)` (cited in `manage_test.go:594-600`) installs a fake docker binary that exits 0 — use for Unit 12.4 CLI tests.
 - **Exec-form RUN required (Unit 12.2):** Use `json.Marshal` on the argv slice to emit `RUN ["go", "install", "<source>"]`. This bypasses `/bin/sh -c` entirely — no shell expansion, no injection from a malicious `Source`. Shell-form `RUN go install <source>` is FORBIDDEN in the overlay.
 - **`ENV GOBIN=/usr/local/bin` placement (Unit 12.2):** Set GOBIN once at the top of the overlay (alongside NPM_CONFIG_*), NOT as a per-RUN prefix. Exec-form RUN skips shell var expansion, so `RUN ["GOBIN=...", "go", ...]` would try to exec a binary literally named `GOBIN=...`.
-- **Go install in base (Unit 12.0):** `go1.26.1.linux-${TARGETARCH}.tar.gz` from `https://go.dev/dl/`. `${TARGETARCH}` is auto-supplied by buildx for amd64/arm64. Add `curl` to the apt list (existing apt line: `bubblewrap ca-certificates git ncurses-term` — extend to include `curl`). Extract into `/usr/local/go`; ENV `PATH=/usr/local/go/bin:$PATH`.
+- **Go install in base (Unit 12.0) — shell-form RUN, requires `ARG TARGETARCH` redeclaration:** `go1.26.1.linux-${TARGETARCH}.tar.gz` from `https://go.dev/dl/`. **`TARGETARCH` is NOT auto-injected into build stages** per Docker BuildKit docs — both `DefaultCodexDockerfile` and `DefaultClaudeDockerfile` MUST redeclare `ARG TARGETARCH` (no default value) inside the stage immediately before the Go install RUN line, or `${TARGETARCH}` renders empty and the tarball URL 404s. Add `curl` to the apt list (existing apt line: `bubblewrap ca-certificates git ncurses-term` — extend to include `curl`). Verify sha256 via `case ${TARGETARCH}` selecting per-arch hash → `sha256sum -c` before extraction. Extract into `/usr/local/go`; ENV `PATH=/usr/local/go/bin:$PATH`. **Fetch the literal amd64 + arm64 sha256 hex values** at implementation time from `https://go.dev/dl/go1.26.1.linux-amd64.tar.gz.sha256` and `https://go.dev/dl/go1.26.1.linux-arm64.tar.gz.sha256`; record them in `BUILDER_WORKLOG.md` under a `## Go Tarball Hashes` heading.
+- **RUN-form distinction across units (F6 clarification):** Unit 12.0 (base Dockerfile) uses **shell-form** `RUN <cmd>` because the Go install step is intrinsically multi-step (case dispatch + curl + sha256 verify + tar extract + cleanup) and shell control flow + variable expansion (`${TARGETARCH}`) are required. Unit 12.2 (overlay Dockerfile generator) uses **exec-form** `RUN ["..."]` (JSON array) per Decision 6 for injection safety. The exec-form rule applies ONLY to the overlay generator's per-tool install lines, NOT to Unit 12.0's base-image Go install. Builders MUST NOT "fix" Unit 12.0 to exec-form — exec-form would require splitting the install into many separate RUN layers with no shell variable support.
+- **Internal whitespace in `Source`/`Install` is pass-through (Falsification 2.4 acknowledged):** DROP_11's `validate.go` regex validates only tool map keys, not Source/Install values; `canonicalManifest`'s `TrimSpace` strips leading/trailing only. An internally-whitespaced `source = "github.com/x/y\tbar"` reaches the exec-form RUN as a single argv element and is rejected by `go install`/`npm install -g` at the binary layer with a visible error in `docker build` output. DROP_12 does NOT add stricter validation; the tool-binary error is acceptable v1 behavior.
 - **Cleanup-filter requirement (Attack 2):** Per-project images MUST carry `io.valv.managed=true` or `valv image cleanup` cannot reach them (`manage.go:1685-1689`). Unit 12.3's label set covers this.
 - **Symbol-deletion / interface-change mage-integration rule:** No interface changes in DROP_12 (the `Service` struct gains methods but no existing interface changes). Drop-end Phase 6 `mage integration` step catches hidden compile-breaks in `//go:build integration` files.
 - **Per-unit ordering:** Strict linear (12.0 → 12.1 → 12.2 → 12.3 → 12.4). No parallel-eligible units. Unit 12.0 must land first because Unit 12.2's `go install` RUN lines fail at build-time without Go in the base image.
