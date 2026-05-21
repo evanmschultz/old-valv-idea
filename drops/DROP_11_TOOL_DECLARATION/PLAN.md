@@ -1,13 +1,13 @@
 # DROP_11 — TOOL_DECLARATION
 
-**State:** building
+**State:** done
 **Blocked by:** DROP_10 (done)
 **Paths (expected):** new package `main/internal/tools/` for `.valv/tools.toml` parsing + validation; `main/internal/cli/tools.go` for the `valv tools` subcommand surface; testdata fixtures for parser coverage
 **Packages (expected):** `internal/tools/` (new), `internal/cli/`, possibly `cmd/valv/`
 **PLAN.md ref:** main/PLAN.md → DROP_11_TOOL_DECLARATION row
 **Workflow:** main/drops/WORKFLOW.md
 **Started:** 2026-05-20
-**Closed:** —
+**Closed:** 2026-05-21
 
 ## Scope
 
