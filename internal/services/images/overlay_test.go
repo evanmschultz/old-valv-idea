@@ -1,9 +1,11 @@
 package images
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
+	"github.com/evanmschultz/valv/internal/adapters/docker"
 	"github.com/evanmschultz/valv/internal/tools"
 )
 
@@ -217,5 +219,214 @@ func TestCanonicalManifest_SortedByName(t *testing.T) {
 		if got[i].Name != name {
 			t.Fatalf("position %d: got %q, want %q", i, got[i].Name, name)
 		}
+	}
+}
+
+// TestBuildOverlayDockerfile_ByteForByte pins the exact Dockerfile output for
+// a representative two-tool manifest (one go install, one npm install -g).
+// Any change to the overlay generator's output structure must be intentional
+// and re-pinned here. Re-pin via the test-first-failure pattern: change the
+// generator, run mage, capture the actual output from the failure diff, Edit-
+// pin the want string below.
+func TestBuildOverlayDockerfile_ByteForByte(t *testing.T) {
+	t.Parallel()
+
+	manifest := tools.ToolManifest{
+		Tools: map[string]tools.ToolSpec{
+			"ta": {Source: "github.com/evanmschultz/ta@latest", Install: "go install"},
+			"cc": {Source: "@anthropic-ai/claude-code@1.0.0", Install: "npm install -g"},
+		},
+	}
+	base := docker.NewImageRef("valv-claude", "dev")
+
+	got, err := BuildOverlayDockerfile(manifest, base)
+	if err != nil {
+		t.Fatalf("BuildOverlayDockerfile returned error: %v", err)
+	}
+
+	const want = `FROM valv-claude:dev
+
+USER root
+
+ENV NPM_CONFIG_UPDATE_NOTIFIER=false \
+    NPM_CONFIG_FUND=false \
+    NPM_CONFIG_AUDIT=false \
+    GOBIN=/usr/local/bin
+
+RUN ["npm","install","-g","@anthropic-ai/claude-code@1.0.0"]
+RUN ["go","install","github.com/evanmschultz/ta@latest"]
+
+USER valv
+`
+
+	if got != want {
+		t.Fatalf("BuildOverlayDockerfile byte-for-byte mismatch:\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+func TestBuildOverlayDockerfile_SortingDeterminism(t *testing.T) {
+	t.Parallel()
+
+	base := docker.NewImageRef("valv-claude", "dev")
+
+	a := tools.ToolManifest{
+		Tools: map[string]tools.ToolSpec{
+			"ta": {Source: "github.com/evanmschultz/ta@latest", Install: "go install"},
+			"cc": {Source: "@anthropic-ai/claude-code@1.0.0", Install: "npm install -g"},
+		},
+	}
+	b := tools.ToolManifest{
+		Tools: map[string]tools.ToolSpec{
+			"cc": {Source: "@anthropic-ai/claude-code@1.0.0", Install: "npm install -g"},
+			"ta": {Source: "github.com/evanmschultz/ta@latest", Install: "go install"},
+		},
+	}
+
+	gotA, err := BuildOverlayDockerfile(a, base)
+	if err != nil {
+		t.Fatalf("BuildOverlayDockerfile(a) error: %v", err)
+	}
+	gotB, err := BuildOverlayDockerfile(b, base)
+	if err != nil {
+		t.Fatalf("BuildOverlayDockerfile(b) error: %v", err)
+	}
+	if gotA != gotB {
+		t.Fatalf("BuildOverlayDockerfile not deterministic across declaration orders:\n--- a ---\n%s\n--- b ---\n%s", gotA, gotB)
+	}
+}
+
+func TestBuildOverlayDockerfile_StringFormRejected(t *testing.T) {
+	t.Parallel()
+
+	manifest := tools.ToolManifest{
+		Tools: map[string]tools.ToolSpec{
+			"jq": {Version: "1.7"},
+		},
+	}
+	base := docker.NewImageRef("valv-claude", "dev")
+
+	_, err := BuildOverlayDockerfile(manifest, base)
+	if err == nil {
+		t.Fatalf("BuildOverlayDockerfile accepted string-form tool; want error")
+	}
+	const wantPrefix = "build overlay dockerfile: tool \"jq\" uses unsupported string-form spec"
+	if !strings.Contains(err.Error(), wantPrefix) {
+		t.Fatalf("error message missing wrapped prefix: got %q, want substring %q", err.Error(), wantPrefix)
+	}
+}
+
+func TestBuildOverlayDockerfile_UnsupportedInstallVerb(t *testing.T) {
+	t.Parallel()
+
+	manifest := tools.ToolManifest{
+		Tools: map[string]tools.ToolSpec{
+			"x": {Source: "github.com/x/y", Install: "cargo install"},
+		},
+	}
+	base := docker.NewImageRef("valv-claude", "dev")
+
+	_, err := BuildOverlayDockerfile(manifest, base)
+	if err == nil {
+		t.Fatalf("BuildOverlayDockerfile accepted unsupported install verb; want error")
+	}
+	const wantSubstr = "unsupported install verb"
+	if !strings.Contains(err.Error(), wantSubstr) {
+		t.Fatalf("error missing %q: got %q", wantSubstr, err.Error())
+	}
+	if !strings.Contains(err.Error(), "\"cargo install\"") {
+		t.Fatalf("error missing literal verb: got %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "\"x\"") {
+		t.Fatalf("error missing tool name: got %q", err.Error())
+	}
+}
+
+func TestBuildOverlayDockerfile_EmptySource(t *testing.T) {
+	t.Parallel()
+
+	manifest := tools.ToolManifest{
+		Tools: map[string]tools.ToolSpec{
+			"x": {Source: "   ", Install: "go install"},
+		},
+	}
+	base := docker.NewImageRef("valv-claude", "dev")
+
+	_, err := BuildOverlayDockerfile(manifest, base)
+	if err == nil {
+		t.Fatalf("BuildOverlayDockerfile accepted empty source; want error")
+	}
+	const wantSubstr = "has empty source"
+	if !strings.Contains(err.Error(), wantSubstr) {
+		t.Fatalf("error missing %q: got %q", wantSubstr, err.Error())
+	}
+}
+
+func TestBuildOverlayDockerfile_EmptyInstall(t *testing.T) {
+	t.Parallel()
+
+	manifest := tools.ToolManifest{
+		Tools: map[string]tools.ToolSpec{
+			"x": {Source: "github.com/x/y", Install: "  "},
+		},
+	}
+	base := docker.NewImageRef("valv-claude", "dev")
+
+	_, err := BuildOverlayDockerfile(manifest, base)
+	if err == nil {
+		t.Fatalf("BuildOverlayDockerfile accepted empty install; want error")
+	}
+	const wantSubstr = "has empty install"
+	if !strings.Contains(err.Error(), wantSubstr) {
+		t.Fatalf("error missing %q: got %q", wantSubstr, err.Error())
+	}
+}
+
+// TestBuildOverlayDockerfile_InjectionSafety verifies that a malicious Source
+// containing shell metacharacters is emitted as a single literal JSON array
+// element. Docker's exec-form RUN treats the array as argv directly — no
+// /bin/sh -c, no shell expansion, no command substitution. The downstream
+// `go install` binary will reject the malformed module path at the tool layer.
+func TestBuildOverlayDockerfile_InjectionSafety(t *testing.T) {
+	t.Parallel()
+
+	const evilSource = "github.com/x/y; rm -rf /"
+	manifest := tools.ToolManifest{
+		Tools: map[string]tools.ToolSpec{
+			"x": {Source: evilSource, Install: "go install"},
+		},
+	}
+	base := docker.NewImageRef("valv-claude", "dev")
+
+	got, err := BuildOverlayDockerfile(manifest, base)
+	if err != nil {
+		t.Fatalf("BuildOverlayDockerfile error: %v", err)
+	}
+
+	// Find the RUN line and parse the JSON array back. If the literal evil
+	// source is one argv element, json.Unmarshal will recover it as a single
+	// string with no splitting on `;` or whitespace.
+	var runLine string
+	for _, line := range strings.Split(got, "\n") {
+		if strings.HasPrefix(line, "RUN ") {
+			runLine = strings.TrimPrefix(line, "RUN ")
+			break
+		}
+	}
+	if runLine == "" {
+		t.Fatalf("no RUN line found in output:\n%s", got)
+	}
+
+	var argv []string
+	if err := json.Unmarshal([]byte(runLine), &argv); err != nil {
+		t.Fatalf("RUN payload not valid JSON array: %v\npayload: %q", err, runLine)
+	}
+	if len(argv) != 3 {
+		t.Fatalf("expected argv len 3 (go install <source>), got %d: %#v", len(argv), argv)
+	}
+	if argv[0] != "go" || argv[1] != "install" {
+		t.Fatalf("argv prefix wrong: got %#v, want [go install ...]", argv)
+	}
+	if argv[2] != evilSource {
+		t.Fatalf("source was split or transformed: got %q, want %q", argv[2], evilSource)
 	}
 }

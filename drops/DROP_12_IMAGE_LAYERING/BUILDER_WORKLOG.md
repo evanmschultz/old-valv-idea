@@ -82,3 +82,36 @@ None. The required reads were `service.go` (style + import grouping reference) a
 
 - Unit 12.2 (next) will add `BuildOverlayDockerfile` that consumes `canonicalManifest` to emit the per-tool `RUN [...]` lines. The single-trim-point invariant is now enforced — Unit 12.2 must call `canonicalManifest` rather than re-trimming `Source`/`Install` itself. Any future builder that ignores this contract would re-introduce the double-trim hazard that PLAN.md decision 3 explicitly fences off.
 
+## Unit 12.2 — Round 1
+
+**Goal:** Add `BuildOverlayDockerfile(manifest, baseImage) (string, error)` to `internal/services/images/overlay.go`. Consume `canonicalManifest(manifest)` directly (no re-trim) and emit one **exec-form** RUN per tool, JSON-array argv via `json.Marshal` so a malicious `Source` containing `;` or `&&` cannot escape into `/bin/sh -c`. Wrap the generated RUN block in `USER root` → `ENV NPM_CONFIG_* + GOBIN` → tools → `USER valv` per PLAN.md decision 6.
+
+### Files touched
+
+- `internal/services/images/overlay.go` — added two unexported install-verb constants (`installGoInstall = "go install"`, `installNpmInstall = "npm install -g"`) plus the exported `BuildOverlayDockerfile` function. Imports gained `fmt` + `github.com/evanmschultz/valv/internal/adapters/docker`. Existing `canonicalManifest` / `OverlayHash` / `shortOverlayHash` untouched.
+- `internal/services/images/overlay_test.go` — appended seven new tests: byte-for-byte snapshot, sorting determinism, string-form rejection, unsupported install verb, empty source, empty install, injection safety (parses the RUN payload back through `json.Unmarshal` and asserts the evil `Source` survives as a single argv element). Imports gained `encoding/json` + `docker` adapter.
+- `main/drops/DROP_12_IMAGE_LAYERING/PLAN.md` — Unit 12.2 state flipped `todo` → `in_progress` at start, → `done` at close.
+
+### Mage commands run
+
+- `mage testPkg ./internal/services/images/` → **PASS**, 48/48 tests, **81.9%** coverage (≥60% gate; materially above the ≥70% DROP_12 acceptance floor). Byte-for-byte snapshot test passed on first run — the format authored against the PLAN.md decision 6 spec matched exactly with no test-first-failure re-pin required.
+
+### Design notes
+
+- **Consumes `canonicalManifest(manifest)` directly — no re-trim.** The function iterates the returned `[]canonicalTool` slice as-is. `tool.Source` and `tool.Install` are already trimmed once by `canonicalManifest`. Calling `strings.TrimSpace` again here would violate the single-trim invariant `TestCanonicalManifest_TrimAppliedOnce` enforces and the PLAN.md decision 3 contract. The QA falsification feedback from Unit 12.1 routed this requirement explicitly — re-trimming would re-introduce the double-trim hazard.
+- **`json.Marshal(argv)` for exec-form RUN.** Per PLAN.md decision 6 + the injection-safety acceptance bullet, the RUN array is rendered by marshaling a `[]string{...}` slice rather than hand-constructing the JSON string. `json.Marshal` does the quote escaping for us: an entry like `"github.com/x/y; rm -rf /"` is encoded as the literal three-element array `["go","install","github.com/x/y; rm -rf /"]`, which Docker treats as direct argv with zero `/bin/sh -c` interpolation. The `TestBuildOverlayDockerfile_InjectionSafety` test rolls back through `json.Unmarshal` and asserts the evil source survives as a single argv element — proves the encoding round-trip, not just substring presence.
+- **Install verb switch via named constants.** `installGoInstall` and `installNpmInstall` package-level consts replace bare strings in the switch. Future v2 verbs (e.g. `pip install --user`, `cargo install`) add a const + case + tests. The unsupported-verb error message embeds the actual verb (`"unsupported install verb %q"`) so an operator sees exactly which string we did not recognize.
+- **String-form detection.** Per PLAN.md decision 7 the detection rule is `Source=="" AND Install==""` (regardless of `Version`). After `canonicalManifest` trim, both fields are normalized; a Version-only spec hits the string-form branch with the more specific error pointing the operator at object-form. Order of error checks: string-form → empty-source → empty-install → install-verb switch. Once we get past the string-form check, an empty Source or empty Install means object-form was *intended* but malformed, which warrants the more specific empty-field error.
+- **`USER root` → tools → `USER valv` bracket.** Required because both `DefaultCodexDockerfile` and `DefaultClaudeDockerfile` end at `USER valv` (`service.go:674` / `service.go:738`) and `valv` has no write access to `/usr/local/bin` where `GOBIN` points. The closing `USER valv` restores the non-root identity for the runtime container — every `valv codex` / `valv claude` launch lands as `valv`, not root. PLAN.md decision 6 paragraph 3 makes this explicit.
+- **`GOBIN=/usr/local/bin` via ENV not RUN env prefix.** Exec-form RUN bypasses `/bin/sh -c`, so `RUN ["GOBIN=/usr/local/bin", "go", "install", ...]` would try to exec a binary literally named `GOBIN=/usr/local/bin`. The single `ENV GOBIN=/usr/local/bin` line at the overlay top inherits into every subsequent RUN cleanly. NPM env vars (`NPM_CONFIG_UPDATE_NOTIFIER=false`, `NPM_CONFIG_FUND=false`, `NPM_CONFIG_AUDIT=false`) follow the same pattern via the same multi-line `ENV ... \` block. The four ENV values land in one Dockerfile instruction so they share a layer — minor cache locality win, matches the PLAN.md decision 6 literal output.
+- **Byte-for-byte snapshot first-pin pattern unused this time.** The authoring strategy was: read PLAN.md decision 6 literal output (lines 64-87), reproduce the exact bytes in the `want` constant, run `mage testPkg`. First run was green — no re-pin needed. If the format ever drifts (e.g. a future contributor changes `\n` line ordering, swaps tool order in the bracket, or adds an extra blank line), this test fails fast with a diff that points at the exact byte position.
+
+### Hylla Feedback
+
+None. The required lookups were `docker.ImageRef` (single struct + `String()` method in `internal/adapters/docker/types.go`, found via direct `Read`) and the existing overlay.go (read once at the start of the round). The Hylla `node_full` route would have added round-trips with no information gain — both files are small and already in scope. No fallback miss to report.
+
+### Unknowns
+
+- Unit 12.3 (next) will consume `OverlayHash` + `BuildOverlayDockerfile` from this unit to build the per-project image via `docker buildx build --load` with the five labels (`recipe_hash`, `base_recipe_hash`, `tools_hash`, `managed=true`, `scope=project-overlay`) per PLAN.md decision 4. The `EnsureProjectImage` method also needs the typecast-failure / `docker image inspect` error policy from decision 5 (conservative-opposite of `imageRecipeMatches`: any read failure forces rebuild).
+- The exec-form RUN format means each tool gets its own Docker layer. For a manifest with 8 tools that produces 8 layers on top of the base — fine for v1 but could be combined into one RUN if layer count ever becomes a real cost. Deferred: PLAN.md is silent on this; one-RUN-per-tool is the deterministic-per-tool-cache choice the planner locked in.
+
