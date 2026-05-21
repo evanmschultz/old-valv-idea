@@ -113,6 +113,12 @@ Planning chain order is **cheap-first escalation**: codex gpt-5.5 effort=low →
 
 The personas live in **project-local** `.claude/agents/` (not global `~/.claude/agents/`) and reference Tillsyn tooling that Valv does not use. Every spawn carries the override preamble from `main/drops/WORKFLOW.md` § "Agent Spawn Contract" — single canonical source, do not duplicate it here. Per-role appendix fields (drop's PLAN.md path, unit ID, target output file, round number, working dir) are listed in WORKFLOW.md § "Per-Role Spawn Appendices".
 
+### Dispatched Agent Discipline (once `bin/agent-dispatch.sh` lands in valv)
+
+- **Hylla artifact_ref**: spawn prompts that invoke `mcp__hylla__*` for valv's own code MUST pass `github.com/evanmschultz/valv@main` — pinned to branch, no float. Verify ingest currency via `mcp__hylla__hylla_artifact_metadata` before dispatching when Hylla evidence is critical.
+- **Inline `--prompt` or stdin only — NEVER `--prompt-file`**: the dispatcher accepts the prompt directly. Temp files obscure the call site and don't reproduce. `--prompt-file` exists only as a last-resort fallback for pathological shell quoting and should not appear in normal use.
+- **Tool-call audit after every dispatch**: open the dispatch output and verify each agent claim against the actual stream — codex `mcp: <server>/<tool> (completed)` lines plus claude-native/ollama JSON envelope `tool_use` events. Self-reported "verdict: pass" or "tool X succeeded" is not authoritative; if the stream doesn't show the required tool calls (record updates, file edits, tests), the work didn't happen — re-dispatch or finish orchestrator-direct. Flag out-of-scope tool calls (anything outside the persona's `tools:` allowlist) as a discipline violation.
+
 ## Build-QA-Commit Loop
 
 Per-drop lifecycle is canonical in `main/drops/WORKFLOW.md` (Phases 1–7: plan, plan-QA, discuss + cleanup, build, build-QA, verify, close). This file does not duplicate the phase steps.

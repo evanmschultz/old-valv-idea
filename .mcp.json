@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "ta": {
+      "command": "ta",
+      "args": ["--project", "/Users/evanschultz/Documents/Code/hylla/valv/main"]
+    },
+    "hylla": {
+      "command": "/Users/evanschultz/go/bin/hylla",
+      "args": ["mcp"]
+    }
+  }
+}
