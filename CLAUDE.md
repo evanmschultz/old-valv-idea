@@ -94,22 +94,22 @@ The parent Claude Code session launched by the dev from this directory is always
 Each role has a tier chain. Tiers route to backends via two dispatch mechanisms:
 
 - **Anthropic-backed tiers** (opus, sonnet, haiku) → Claude built-in `Agent` tool with `subagent_type=<persona>`. Reads `.claude/agents/<persona>.md`. Runs against the Anthropic subscription.
-- **Codex-exec tier** (gpt-5.5 via `~/.codex/config.toml`) and **ollama-local tier** (qwen2.5-coder:7b) → `bin/agent-dispatch.sh --role <persona> --cwd "$(pwd)" --prompt "<short pointer>"`. Reads `.claude/agent-chains.sh` for tier definitions. Runs against the ChatGPT subscription (codex) or local Ollama daemon (zero Anthropic tokens).
+- **Codex-exec tier** (gpt-5.5 via `~/.codex/config.toml`) and **ollama-local tier** (qwen3-coder:30b) → `bin/agent-dispatch.sh --role <persona> --cwd "$(pwd)" --prompt "<short pointer>"`. Reads `.claude/agent-chains.sh` for tier definitions. Runs against the ChatGPT subscription (codex) or local Ollama daemon (zero Anthropic tokens).
 
 This mirrors ta's routing model documented in `/Users/evanschultz/Documents/Code/hylla/ta/main/docs/agent-backend-routing.md`. **`bin/agent-dispatch.sh` and `.claude/agent-chains.sh` are not yet installed in valv** (planned addition — copy from ta and adapt). Until then, every role spawns via the `Agent` tool (Anthropic-only) and falls back transparently to the persona's primary Anthropic tier from the table below.
 
 ### Agent Bindings
 
-| Role | Persona file | Anthropic tier(s) (via `Agent` tool) | Codex / Ollama tier(s) (via `bin/agent-dispatch.sh`) | Edits Go? |
+| Role | Persona file | Anthropic tier(s) (via `Agent` tool) | Codex tier(s) (via `bin/agent-dispatch.sh`) | Edits Go? |
 |---|---|---|---|---|
-| Builder | `ta-go-builder` | haiku (fallback) | ollama qwen2.5-coder:7b (primary), codex gpt-5.5 effort=low | **Yes** (only role that does) |
-| QA Proof | `ta-go-qa-proof` | opus (primary), sonnet (fallback) | codex gpt-5.5 effort=medium | No |
-| QA Falsification | `ta-go-qa-falsification` | opus, sonnet (fallbacks) | codex gpt-5.5 effort=xhigh / high / medium | No |
+| Builder | `ta-go-builder` | haiku (primary), sonnet (fallback) | n/a — claude-native primary | **Yes** (only role that does) |
+| QA Proof | `ta-go-qa-proof` | opus (primary) | codex gpt-5.5 effort=medium (fallback) | No |
+| QA Falsification | `ta-go-qa-falsification` | opus (fallback) | codex gpt-5.5 effort=medium (primary), effort=high (escalation) | No |
 | Planning | `ta-go-planning` | sonnet, opus (fallbacks) | codex gpt-5.5 effort=low (primary), effort=medium | No |
-| Closeout | `ta-closeout` | opus (primary), sonnet (fallback) | codex gpt-5.5 effort=medium | No |
+| Closeout | `ta-closeout` | opus (primary) | codex gpt-5.5 effort=medium (fallback) | No |
 | Research | Claude's built-in `Explore` subagent | n/a | n/a | No |
 
-Planning chain order is **cheap-first escalation**: codex gpt-5.5 effort=low → effort=medium → claude sonnet → claude opus. Same cheap-first pattern applies to QA-proof and closeout (start with the cheapest viable tier). QA-falsification keeps deepest reasoning at tier 1 (effort=xhigh) since adversarial review benefits most from more compute.
+Chain principle: **cheap-first → escalate ON FAILURE**. Tier 1 = cheapest tier that clears the role's quality floor. Higher tiers are backend redundancy when tier 1 is unavailable, NOT graceful degradation. Builder swapped from ollama-30B to claude-native haiku 2026-05-21 — speed + predictable concurrency over free local compute that bottlenecked on VRAM/thermal. QA-falsification single chain serves both plan-QA (where medium may need escalation to high) and build-QA (where medium is sufficient because the plan was already vetted) — the orchestrator's tool-call audit determines when escalation is warranted.
 
 The personas live in **project-local** `.claude/agents/` (not global `~/.claude/agents/`) and reference Tillsyn tooling that Valv does not use. Every spawn carries the override preamble from `main/drops/WORKFLOW.md` § "Agent Spawn Contract" — single canonical source, do not duplicate it here. Per-role appendix fields (drop's PLAN.md path, unit ID, target output file, round number, working dir) are listed in WORKFLOW.md § "Per-Role Spawn Appendices".
 
