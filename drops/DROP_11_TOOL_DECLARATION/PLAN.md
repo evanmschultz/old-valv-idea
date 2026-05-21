@@ -2,7 +2,7 @@
 
 **State:** planning
 **Blocked by:** DROP_10 (done)
-**Paths (expected):** new package `main/internal/tools/` for `.valv/tools.toml` parsing + validation; possibly `main/internal/cli/tools.go` for a `valv tools` subcommand surface; testdata fixtures for parser coverage
+**Paths (expected):** new package `main/internal/tools/` for `.valv/tools.toml` parsing + validation; `main/internal/cli/tools.go` for the `valv tools` subcommand surface; testdata fixtures for parser coverage
 **Packages (expected):** `internal/tools/` (new), `internal/cli/`, possibly `cmd/valv/`
 **PLAN.md ref:** main/PLAN.md → DROP_11_TOOL_DECLARATION row
 **Workflow:** main/drops/WORKFLOW.md
@@ -49,7 +49,9 @@ ta = { source = "github.com/evanmschultz/ta@main", install = "go install" }
 # "github.com/foo/bar" — not a nested table.
 
 # DROP_14/DROP_15 own the typed decode of these sections.
-# DROP_11 captures them as toml.Primitive fields — no action taken on contents.
+# DROP_11 captures them as toml.Primitive fields and calls meta.PrimitiveDecode
+# on each to mark them as decoded (the decoded value is discarded — DROP_11
+# takes no action on the contents).
 [allowlist]
 hosts = ["github.com", "proxy.golang.org"]
 
@@ -61,10 +63,19 @@ GOPRIVATE = "github.com/evanmschultz/*"
 - **`[tools]` map value type:** either a plain string (version shorthand) or an inline table `{ source = "...", install = "..." }` for custom tools not in a well-known registry. Requires a custom `UnmarshalTOML` or two-pass decode because BurntSushi/toml cannot natively decode a `map[string]T` where values are heterogeneous (string vs. hash).
 - **Version spec format:** any non-empty string is valid at declaration time (`"latest"`, `"1.22"`, `"stable"`, git shas). DROP_12 enforces install-time resolution semantics. `"latest"` and `path:`-style local overrides deferred to DROP_12 — DROP_11 stores any version string verbatim.
 - **Custom install support (v1):** YES — `{ source = "github.com/evanmschultz/ta@main", install = "go install" }` is valid in v1. Both `source` and `install` are required when using object form; validation errors if only one is present.
-- **Tool name validation:** regex `^[a-zA-Z0-9]+$|^[a-zA-Z0-9][a-zA-Z0-9._/-]*[a-zA-Z0-9]$` — single-char alphanumeric, OR starts-and-ends alphanumeric with permitted chars (`.`, `_`, `/`, `-`) in between. Permits `github.com/foo/bar`-style names. Rejects trailing punctuation (`bad-name-`, `name.`, `name/`). Empty string, names starting with `-`, names containing whitespace or `!`, and names ending with `.`/`-`/`/` are all invalid. RE2-compatible (alternation + character classes only; no lookahead).
+- **Tool name validation:** regex `^[a-zA-Z0-9]+$|^[a-zA-Z0-9][a-zA-Z0-9._/-]*[a-zA-Z0-9]$` — single-char alphanumeric, OR starts-and-ends alphanumeric with permitted chars (`.`, `_`, `/`, `-`) in between. Permits `github.com/foo/bar`-style names. RE2-compatible (alternation + character classes only; no lookahead).
+  - **Accept by design (planner pin):** multiple consecutive `.`, `/`, or `-` characters within the name (e.g. `a..b`, `a//b`, `a---b`). Path-like names (`github.com/foo/bar`) and namespaced names (`org.tool.subname`) are valid. The regex is intentionally permissive about run-length of separator characters because doubling those characters is uncommon and not worth a more complex regex to catch.
+  - **Reject by design (planner pin):** empty string; trailing punctuation (`bad-name-`, `name.`, `name/`); leading dash; leading `_` (must start alphanumeric — chosen for clarity, `_` would suggest internal/private semantics inappropriate for a public tool list); whitespace anywhere; `!` and other non-permitted characters; non-ASCII names (RE2 `[a-zA-Z0-9]` is ASCII-only by design; full Unicode tool names require explicit support — YAGNI for v1).
 - **Reserved tool names:** none in v1. DROP_12 decides what it can install.
 - **Max tool count:** 50. Validation returns a clear error if exceeded.
-- **`[allowlist]` and `[env]` blocks:** captured as `toml.Primitive` fields. `ToolManifest` declares `Allowlist toml.Primitive \`toml:"allowlist"\`` and `Env toml.Primitive \`toml:"env"\``. During initial `toml.DecodeFile`, these fields receive their raw TOML values and are marked as decoded — `meta.Undecoded()` returns empty (strict check satisfied). DROP_11 takes no action on their contents. DROP_14/DROP_15 call `meta.PrimitiveDecode` to interpret them when those drops land. A file with a top-level section whose name is NOT `tools`, `allowlist`, or `env` still triggers the undecoded-key error (intentional — schema is explicit). Evidence: Context7 `/burntsushi/toml` "Delayed TOML Decoding" example confirms `toml.Primitive` fields satisfy the undecoded check.
+- **`[allowlist]` and `[env]` blocks:** captured as `toml.Primitive` fields. `ToolManifest` declares `Allowlist toml.Primitive \`toml:"allowlist"\`` and `Env toml.Primitive \`toml:"env"\``. After `toml.DecodeFile`, the parser **explicitly calls `meta.PrimitiveDecode` on each `toml.Primitive` field** (with a discarded target — DROP_11 takes no action on contents). This is required because declaring `toml.Primitive` fields alone is **NOT** enough — empirical testing against `BurntSushi/toml v1.6.0` (planner-run scratch program against the schema in this drop) confirms `meta.Undecoded()` still flags the inline keys (`allowlist.hosts`, `env.GOPRIVATE`) until `PrimitiveDecode` is called:
+
+  ```
+  undecoded BEFORE PrimitiveDecode: [allowlist.hosts env.GOPRIVATE]
+  undecoded AFTER  PrimitiveDecode: []
+  ```
+
+  The Round 2/3 Context7-inferred claim that `toml.Primitive` declaration alone marked the section as decoded was wrong; this Round 4 revision reverses it. DROP_14/DROP_15 will re-call `meta.PrimitiveDecode` with typed targets when they implement those sections. A file with a top-level section whose name is NOT `tools`, `allowlist`, or `env` still triggers the undecoded-key error (intentional — schema is explicit).
 - **File absent:** `Resolve` returns `ToolManifest{}, nil`. A project without `.valv/tools.toml` is valid — it declares no tools.
 - **Empty manifest predicate:** `len(m.Tools) == 0`. The presence of `[allowlist]` or `[env]` sections does NOT make the manifest non-empty for DROP_11's purposes — "empty" means no tools declared, regardless of forward-compat sections.
 - **TOML bare-key quoting:** TOML bare keys permit only `[A-Za-z0-9_-]`. Any tool name containing `.`, `/`, or other non-bare characters MUST be quoted in `.valv/tools.toml` (e.g. `"github.com/foo/bar" = { ... }`). After `toml.DecodeFile`, the key in `manifest.Tools` is the unquoted string `github.com/foo/bar` — not a nested table. Builders and users must be aware: an unquoted `github.com/foo/bar = ...` in TOML creates nested tables, not a single map entry, and will trigger an unknown-key error.
@@ -109,11 +120,13 @@ GOPRIVATE = "github.com/evanmschultz/*"
   - `Tools map[string]ToolSpec \`toml:"tools"\``
   - `Allowlist toml.Primitive \`toml:"allowlist"\``
   - `Env toml.Primitive \`toml:"env"\``
-- `Load(path string) (ToolManifest, error)` (new): uses `os.Stat` guard (returns `fmt.Errorf("...: %w", domain.ErrToolsNotFound)` when file absent), `toml.DecodeFile`, `meta.Undecoded()` strict check (error if any key is undecoded), `fmt.Errorf("...: %w", err)` wrapping at each boundary. Mirrors `internal/config/Load` — use Hylla node `github.com/evanmschultz/valv/internal/config/Load` as the canonical pattern.
-- `Load` handles both string-value and inline-table-value entries under `[tools]` via `(t *ToolSpec) UnmarshalTOML(fn func(interface{}) error) error` implementing `toml.Unmarshaler`. Confirmed by `TestLoad` passing `testdata/valid_objects.toml`.
+- `Load(path string) (ToolManifest, error)` (new): uses `os.Stat` guard (returns `fmt.Errorf("...: %w", domain.ErrToolsNotFound)` when file absent), `toml.DecodeFile`, then — **before the strict `meta.Undecoded()` check** — calls `meta.PrimitiveDecode(m.Allowlist, &discardA)` and `meta.PrimitiveDecode(m.Env, &discardE)` where `discardA` and `discardE` are local `map[string]any` (or any throwaway target). The decoded values are intentionally discarded; DROP_11 takes no action on their contents. After both `PrimitiveDecode` calls, `meta.Undecoded()` is the strict-check oracle — error if any key remains undecoded. `fmt.Errorf("...: %w", err)` wrapping at each boundary. Mirrors `internal/config/Load` — use Hylla node `github.com/evanmschultz/valv/internal/config/Load` as the canonical pattern.
+- **`PrimitiveDecode` is mandatory.** Empirical run against `BurntSushi/toml v1.6.0` (planner Round 4 scratch program) confirmed that declaring `toml.Primitive` fields alone is NOT enough — `meta.Undecoded()` still returns `[allowlist.hosts env.GOPRIVATE]` for the canonical schema example until both `PrimitiveDecode` calls run. Builder MUST implement the two calls before the `Undecoded()` check; skipping them will reject valid forward-compat sections as unknown keys.
+- `Load` handles both string-value and inline-table-value entries under `[tools]` via `(t *ToolSpec) UnmarshalTOML(v interface{}) error` implementing `toml.Unmarshaler`. Confirmed by `TestLoad` passing `testdata/valid_objects.toml`.
 - `Load` returns error for `testdata/invalid_unknown_key.toml` (undecoded key triggers strict check).
-- `Load` accepts files with `[allowlist]` and `[env]` sections without error (they decode into `toml.Primitive` fields — not undecoded).
+- `Load` accepts files with `[allowlist]` and `[env]` sections without error after the two `PrimitiveDecode` calls run. Specifically: a TOML file containing `[allowlist]` with `hosts = [...]` AND `[env]` with `GOPRIVATE = "..."` decodes cleanly — `meta.Undecoded()` returns the empty slice after the two `PrimitiveDecode` calls.
 - `TestLoad` table cases include `testdata/valid_quoted_names.toml`: the fixture contains `"github.com/foo/bar" = { source = "github.com/foo/bar@main", install = "go install" }`. The test asserts that `manifest.Tools` has exactly one entry with key `"github.com/foo/bar"` (the unquoted string). This proves TOML quoted-key handling is correct — the key is not split into nested tables.
+- `TestLoad` table cases include a dedicated case for forward-compat sections — fixture `testdata/valid_objects.toml` (which already includes `[allowlist]` + `[env]` sections per its description) loads without error and `len(manifest.Tools)` matches its declared tool count. Builder verifies this case explicitly fails without the two `PrimitiveDecode` calls (smoke check during dev).
 - `mage testPkg ./internal/tools/` passes. `mage testPkg ./internal/domain/` passes (new sentinel is additive; existing tests unaffected). Coverage gate for `internal/tools/` not yet enforced — that is enforced after Unit 11.4 completes the package.
 
 **Notes:**
@@ -137,13 +150,15 @@ GOPRIVATE = "github.com/evanmschultz/*"
 **Acceptance:**
 - `Validate(m ToolManifest) error` (new, not yet in tree) exported from `internal/tools/`. Returns nil for a valid manifest.
 - Validation rules enforced:
-  - Tool name matches `^[a-zA-Z0-9]+$|^[a-zA-Z0-9][a-zA-Z0-9._/-]*[a-zA-Z0-9]$` — single-char alphanumeric, OR starts-and-ends alphanumeric with permitted chars in between. Invalid: empty string, trailing punctuation, leading dash, whitespace, `!`.
+  - Tool name matches `^[a-zA-Z0-9]+$|^[a-zA-Z0-9][a-zA-Z0-9._/-]*[a-zA-Z0-9]$` — single-char alphanumeric, OR starts-and-ends alphanumeric with permitted chars in between. See Schema Decisions block above for the full accept/reject pin.
   - Object-form tool: both `Source` and `Install` non-empty; `Version` must be empty (implicit in `source` ref).
   - String-form tool: `Version` non-empty; `Source` and `Install` must be empty.
   - Total tool count ≤ 50.
 - Returns first violation as a descriptive `fmt.Errorf(...)` — not a multi-error (consistent with `internal/config` approach).
-- `TestValidate` table cases: valid manifest with string-form tools, valid manifest with object-form tools, empty tools map (valid), missing `install` field, name with embedded space `"with space"`, leading-dash name `"-bad"`, name with `!` character `"bad!char"`, count = 51, count = 0 (valid), valid github-style name `"github.com/foo/bar"`, valid go version name `"go-1.22"`, trailing-dash name `"bad-name-"` (invalid — ends with `-`), trailing-dot name `"name."` (invalid — ends with `.`), trailing-slash name `"name/"` (invalid — ends with `/`).
-- The regex is `regexp.MustCompile(`^[a-zA-Z0-9]+$|^[a-zA-Z0-9][a-zA-Z0-9._/-]*[a-zA-Z0-9]$`)`. Builder must verify it compiles and that the three trailing-punctuation cases are rejected.
+- `TestValidate` table cases:
+  - **Valid:** string-form tools (`"mage" = "latest"`); object-form tools; empty tools map; `"github.com/foo/bar"` (path-like name); `"go-1.22"`; `"a..b"` (double dot — accepted by design); `"a---b"` (multiple consecutive dashes — accepted by design); `"a/b/c"` (multi-segment path); count = 0; count = 50 (boundary).
+  - **Invalid:** missing `install` field on object-form; embedded space `"with space"`; leading dash `"-bad"`; `!` character `"bad!char"`; trailing dash `"bad-name-"`; trailing dot `"name."`; trailing slash `"name/"`; leading underscore `"_underscore"` (rejected by design — must start alphanumeric); count = 51 (boundary).
+- The regex is `regexp.MustCompile(`^[a-zA-Z0-9]+$|^[a-zA-Z0-9][a-zA-Z0-9._/-]*[a-zA-Z0-9]$`)`. Builder must verify it compiles and that ALL of the above valid/invalid cases match the expected verdict. The doubled-separator accept cases (`"a..b"`, `"a---b"`) and the leading-underscore reject case are the planner-pinned edge cases — they explicitly test that the design choice in the Schema Decisions block is honored by the implementation.
 - `mage testPkg ./internal/tools/` passes. Coverage gate not yet enforced (enforced after Unit 11.4).
 
 **Blocked by:** Unit 11.1
@@ -195,7 +210,7 @@ GOPRIVATE = "github.com/evanmschultz/*"
   4. Invalid manifest (fails validation) — exits 1, error message contains failure detail.
   5. Zero-byte file (`.valv/tools.toml` exists, 0 bytes) — exits 0, prints `"no tools declared"`. Use `testdata/zero_byte.toml` (a zero-byte committed file) for this case.
   6. Permission-denied (`.valv/tools.toml` exists, `chmod 000`) — exits 1, error message contains wrapped permission error. Use `t.TempDir()` for this case (permission state does not survive `git add`).
-  7. Directory-at-path (`.valv/tools.toml` is a directory, not a file) — exits 1, error message indicates path is not a regular file. Use `t.TempDir()` for this case.
+  7. Directory-at-path (`.valv/tools.toml` is a directory, not a file) — exits 1 with a wrapped error originating from `os.Open` / read. The acceptance assertion is `errors.Is(err, syscall.EISDIR)` OR the error string contains `"is a directory"`. Empirical evidence (planner Round 4 scratch run on macOS Darwin against the Go stdlib): `os.Open(dir)` returns `nil` error; `io.ReadAll(f)` returns `"read <path>: is a directory"` with `errors.Is(err, syscall.EISDIR) == true`. `toml.DecodeFile` calls `os.Open` then reads, so it surfaces the same `EISDIR` error. The plan does NOT require `Load` to pre-check `info.IsDir()` — letting the underlying syscall produce the error is more idiomatic Go and the wrapped form is informative. Use `t.TempDir()` for this case (mkdir at the target path; permission state and dir-at-path do not survive `git add` cleanly).
 - `internal/tools/testdata/zero_byte.toml` (new, zero-byte file — committed to testdata; zero-byte files survive `git add` cleanly).
 - `mage testPkg ./internal/tools/` passes with ≥ 70% coverage across the whole package (this unit completes the package by exercising the full `Resolve` → `Validate` path via CLI tests — 70% gate enforced here).
 - `mage testPkg ./internal/cli/` passes.
@@ -216,7 +231,9 @@ GOPRIVATE = "github.com/evanmschultz/*"
 **Acceptance:**
 - `magefile.go` lines 22-24: constant is `coverageThreshold = 70.0`. The `// TODO: restore to 70.0 after raising internal/adapters/docker coverage (see main/REFINEMENTS.md).` comment is removed.
 - Builder runs `mage test` from `main/` immediately after the edit and reports the result verbatim in `BUILDER_WORKLOG.md`.
-- If any package reports < 70% coverage, the builder does NOT silently fix it. Instead: list every failing package with its coverage percentage in the worklog, set unit state to `blocked`, and return to the orchestrator. The orchestrator routes to dev: either raise that package's coverage in a follow-on unit, or roll back the bump and open a coverage-only drop. The known candidate for failure is `internal/adapters/docker` (pre-existing TODO in `magefile.go`).
+- If any package reports < 70% coverage, the builder does NOT silently fix it. Instead: list every failing package with its coverage percentage in the worklog, set unit state to `blocked`, and return to the orchestrator. The orchestrator then routes by failure class:
+  - **New-package failure (`internal/tools/`):** the builder for THIS drop owns it. Route back to Unit 11.4 (which is the unit that finishes the package by exercising the CLI integration). The Unit 11.4 builder is responsible for raising `internal/tools/` coverage to ≥ 70% with additional tests before Unit 11.5 re-runs. Tightly scoped fix, same drop.
+  - **Legacy-package failure (e.g. `internal/adapters/docker` — the known candidate from the pre-existing TODO in `magefile.go`):** out of scope for this drop's code units. Route to dev for triage. Dev decides between (a) raising that package's coverage as a new follow-on unit inside DROP_11 (e.g. Unit 11.6), or (b) rolling back the threshold bump and opening a separate coverage-cleanup drop. Either decision is recorded as a comment update in this PLAN.md.
 - If `mage test` passes clean at 70%, unit is done and the drop is ready for Phase 6 close.
 
 **Blocked by:** Unit 11.4
@@ -227,7 +244,7 @@ GOPRIVATE = "github.com/evanmschultz/*"
 
 - **Mixed-type TOML decode:** BurntSushi/toml cannot natively decode a `map[string]ToolSpec` where values are heterogeneous (string vs. hash). The builder for Unit 11.1 must implement `(t *ToolSpec) UnmarshalTOML(fn func(interface{}) error) error` (the `toml.Unmarshaler` interface). See Context7 `/burntsushi/toml` for API reference.
 - **TOML bare-key quoting:** TOML bare keys allow only `[A-Za-z0-9_-]`. Tool names with `.`, `/`, or other non-bare characters MUST be quoted in `.valv/tools.toml` (e.g. `"github.com/foo/bar" = { ... }`). An unquoted dotted name creates TOML nested tables and will fail the undecoded-key strict check. Unit 11.1's `valid_quoted_names.toml` fixture verifies this case explicitly — builder must include a `TestLoad` case for it.
-- **`toml.Primitive` for forward-compat sections:** `ToolManifest.Allowlist` and `ToolManifest.Env` are typed `toml.Primitive`, NOT `AllowlistConfig` or `map[string]string`. During initial `toml.DecodeFile`, both fields receive their raw TOML values and are marked decoded — `meta.Undecoded()` returns empty (strict check satisfied). Context7 `/burntsushi/toml` "Delayed TOML Decoding" example confirms this pattern. DROP_14/DROP_15 will call `meta.PrimitiveDecode` on these fields when they interpret the contents. DROP_11 does not call `PrimitiveDecode` at all.
+- **`toml.Primitive` for forward-compat sections (MANDATORY `PrimitiveDecode`):** `ToolManifest.Allowlist` and `ToolManifest.Env` are typed `toml.Primitive`, NOT `AllowlistConfig` or `map[string]string`. **DROP_11's `Load` MUST call `meta.PrimitiveDecode` on each of these fields after `toml.DecodeFile` returns, BEFORE the `meta.Undecoded()` strict check.** Empirical run against `BurntSushi/toml v1.6.0` (planner Round 4) showed that declaring `toml.Primitive` fields alone does NOT mark the inline keys as decoded — `meta.Undecoded()` still returns `[allowlist.hosts env.GOPRIVATE]` for the canonical schema example until both `PrimitiveDecode` calls run. The decoded targets are discarded throwaway `map[string]any` — DROP_11 takes no action on the contents. DROP_14/DROP_15 will re-call `meta.PrimitiveDecode` with their typed targets when they implement those sections. (The Round 2/3 plan, citing Context7 "Delayed TOML Decoding," claimed the declaration alone was sufficient — that was wrong; this Round 4 revision reverses it.)
 - **`domain.ErrToolsNotFound` is new:** Unit 11.1 adds this to `internal/domain/errors.go`. Unit 11.1's builder must run `mage testPkg ./internal/domain/` after adding it to confirm no breakage.
 - **Sentinel-only absent-file check:** `Resolve` uses `errors.Is(err, domain.ErrToolsNotFound)` exclusively. Do not use `os.IsNotExist` as an alternative path.
 - **Evidence pattern for `internal/config/Load`:** Hylla node `github.com/evanmschultz/valv/internal/config/Load` at `internal/config/config.go` — the exact function body is the canonical template for `Load` in Unit 11.1.
@@ -241,7 +258,7 @@ GOPRIVATE = "github.com/evanmschultz/*"
 ## Notes
 
 - Survey output is the evidence base for schema design. Schema is grounded in devcontainer.json + mise.toml patterns (cited above).
-- This drop is intentionally narrow: parser + per-project resolution + `valv tools validate` CLI only. No image-build changes (DROP_12), no `valv run` adapter (DROP_13), no env-var injection (DROP_14), no network policy enforcement (DROP_15). `[allowlist]` and `[env]` sections are captured as `toml.Primitive` fields — parser accepts them, DROP_11 takes no action on their contents.
+- This drop is intentionally narrow: parser + per-project resolution + `valv tools validate` CLI only. No image-build changes (DROP_12), no `valv run` adapter (DROP_13), no env-var injection (DROP_14), no network policy enforcement (DROP_15). `[allowlist]` and `[env]` sections are captured as `toml.Primitive` fields — parser accepts them and calls `meta.PrimitiveDecode` (discarding the decoded value) to satisfy the strict undecoded check. DROP_11 takes no further action on their contents.
 - The 70% per-package coverage gate applies to the new `internal/tools/` package from day one (enforced at Unit 11.4 completion, which closes the package's test coverage after the CLI integration).
 - The global `coverageThreshold` bump from 60% to 70% is intentionally deferred to Unit 11.5 (last unit). Bumping the global gate before all packages pass is a build-break risk.
 - `valv tools list` is cut (dev decision, Y3). Only `valv tools validate` ships in DROP_11.
