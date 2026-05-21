@@ -85,22 +85,33 @@ Full lifecycle in `main/drops/WORKFLOW.md`. Drop tree in `main/PLAN.md`.
 
 ## Orchestrator-as-Hub
 
-The parent Claude Code session launched by the dev from this directory is always **the orchestrator**. Every other role (builder, qa-proof, qa-falsification, planning, research) is a subagent spawned via the `Agent` tool.
+The parent Claude Code session launched by the dev from this directory is always **the orchestrator**. Every other role (builder, qa-proof, qa-falsification, planning, research) is a subagent dispatched via role-appropriate backend routing (see "Backend Routing" below).
 
-**CRITICAL: The orchestrator NEVER writes Go code.** The parent session must not use `Edit`, `Write`, or any other tool to modify `.go` source, test, or `magefile.go` files. Every code change — every single one — goes through a `go-builder-agent` subagent. Orchestrator reads code for planning/research; edits markdown only (this file, `PLAN.md`, drop dir mds, `README.md`, agent `.md` files).
+**CRITICAL: The orchestrator NEVER writes Go code.** The parent session must not use `Edit`, `Write`, or any other tool to modify `.go` source, test, or `magefile.go` files. Every code change — every single one — goes through a `ta-go-builder` subagent. Orchestrator reads code for planning/research; edits markdown only (this file, `PLAN.md`, drop dir mds, `README.md`, agent `.md` files).
+
+### Backend Routing — Hybrid Model
+
+Each role has a tier chain. Tiers route to backends via two dispatch mechanisms:
+
+- **Anthropic-backed tiers** (opus, sonnet, haiku) → Claude built-in `Agent` tool with `subagent_type=<persona>`. Reads `.claude/agents/<persona>.md`. Runs against the Anthropic subscription.
+- **Codex-exec tier** (gpt-5.5 via `~/.codex/config.toml`) and **ollama-local tier** (qwen2.5-coder:7b) → `bin/agent-dispatch.sh --role <persona> --cwd "$(pwd)" --prompt "<short pointer>"`. Reads `.claude/agent-chains.sh` for tier definitions. Runs against the ChatGPT subscription (codex) or local Ollama daemon (zero Anthropic tokens).
+
+This mirrors ta's routing model documented in `/Users/evanschultz/Documents/Code/hylla/ta/main/docs/agent-backend-routing.md`. **`bin/agent-dispatch.sh` and `.claude/agent-chains.sh` are not yet installed in valv** (planned addition — copy from ta and adapt). Until then, every role spawns via the `Agent` tool (Anthropic-only) and falls back transparently to the persona's primary Anthropic tier from the table below.
 
 ### Agent Bindings
 
-| Role | Agent | Edits Go? |
-|---|---|---|
-| Builder | `ta-go-builder` | **Yes** (only role that does) |
-| QA Proof | `ta-go-qa-proof` | No |
-| QA Falsification | `ta-go-qa-falsification` | No |
-| Planning | `ta-go-planning` | No |
-| Closeout | `ta-go-closeout` | No |
-| Research | Claude's built-in `Explore` subagent | No |
+| Role | Persona file | Anthropic tier(s) (via `Agent` tool) | Codex / Ollama tier(s) (via `bin/agent-dispatch.sh`) | Edits Go? |
+|---|---|---|---|---|
+| Builder | `ta-go-builder` | haiku (fallback) | ollama qwen2.5-coder:7b (primary), codex gpt-5.5 effort=low | **Yes** (only role that does) |
+| QA Proof | `ta-go-qa-proof` | opus (primary), sonnet (fallback) | codex gpt-5.5 effort=medium | No |
+| QA Falsification | `ta-go-qa-falsification` | opus, sonnet (fallbacks) | codex gpt-5.5 effort=xhigh / high / medium | No |
+| Planning | `ta-go-planning` | sonnet, opus (fallbacks) | codex gpt-5.5 effort=low (primary), effort=medium | No |
+| Closeout | `ta-closeout` | opus (primary), sonnet (fallback) | codex gpt-5.5 effort=medium | No |
+| Research | Claude's built-in `Explore` subagent | n/a | n/a | No |
 
-The agents live in **project-local** `.claude/agents/` (not global `~/.claude/agents/`) and reference Tillsyn tooling that Valv does not use. Every spawn carries the override preamble from `main/drops/WORKFLOW.md` § "Agent Spawn Contract" — single canonical source, do not duplicate it here. Per-role appendix fields (drop's PLAN.md path, unit ID, target output file, round number, working dir) are listed in WORKFLOW.md § "Per-Role Spawn Appendices".
+Planning chain order is **cheap-first escalation**: codex gpt-5.5 effort=low → effort=medium → claude sonnet → claude opus. Same cheap-first pattern applies to QA-proof and closeout (start with the cheapest viable tier). QA-falsification keeps deepest reasoning at tier 1 (effort=xhigh) since adversarial review benefits most from more compute.
+
+The personas live in **project-local** `.claude/agents/` (not global `~/.claude/agents/`) and reference Tillsyn tooling that Valv does not use. Every spawn carries the override preamble from `main/drops/WORKFLOW.md` § "Agent Spawn Contract" — single canonical source, do not duplicate it here. Per-role appendix fields (drop's PLAN.md path, unit ID, target output file, round number, working dir) are listed in WORKFLOW.md § "Per-Role Spawn Appendices".
 
 ## Build-QA-Commit Loop
 
