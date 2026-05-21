@@ -365,3 +365,65 @@ Not used in this review. Unit 11.2 is brand-new uncommitted code that
 Hylla will only see at drop-end reingest; `Read` of the source, tests,
 fixture, and worklog plus the live mage run provided complete coverage.
 No Hylla fallback miss to record.
+
+## Unit 11.3 — Round 1
+
+**Verdict:** pass
+**Reviewer:** ta-go-qa-proof
+**Reviewed at:** 2026-05-21T17:47:31Z
+
+### Acceptance Criteria Verification
+
+#### AC1 — `ToolsFilePath = ".valv/tools.toml"` constant exported
+
+PASS. `internal/tools/resolve.go:14` declares `const ToolsFilePath = ".valv/tools.toml"`. Literal value verified. Sanity-pinned by `TestResolve_ToolsFilePathConstant` (`internal/tools/resolve_test.go:162-170`).
+
+#### AC2 — `Resolve(projectDir string) (ToolManifest, error)` signature + composition
+
+PASS. `internal/tools/resolve.go:28` declares the exact signature. Body composes: `filepath.Join(projectDir, ToolsFilePath)` at line 29, `Load(path)` at line 31, `Validate(m)` at line 39. Order matches PLAN.
+
+#### AC3 — Absent-file binding is sentinel-only (no `os.IsNotExist` fallback)
+
+PASS. `internal/tools/resolve.go:33` checks `errors.Is(err, domain.ErrToolsNotFound)` and returns `ToolManifest{}, nil`. No `os.IsNotExist` anywhere in `resolve.go`. Load (tools.go:94) is the layer that converts raw `os.ErrNotExist` into the sentinel, keeping Resolve clean. Domain sentinel verified at `internal/domain/errors.go:7` (`ErrToolsNotFound = errors.New("tools file not found")`).
+
+#### AC4 — Other Load errors wrap with `%w` and propagate
+
+PASS. `internal/tools/resolve.go:36`: `fmt.Errorf("resolve tools %q: %w", projectDir, err)`. Verified by `TestResolve_LoadParseError` (resolve_test.go:102-117) asserting the substring `"resolve tools"`, and `TestResolve_LoadUnknownKeyError` (119-138) asserting both wrapping and the inner `"unknown keys"` chain preservation.
+
+#### AC5 — Validate failures wrap and propagate
+
+PASS. `internal/tools/resolve.go:40`: same `fmt.Errorf("resolve tools %q: %w", projectDir, err)` pattern. `TestResolve_ValidateError` (resolve_test.go:140-160) writes `_underscore = "latest"` (Load-accepted, Validate-rejected), asserts both `"resolve tools"` wrapping and inner `"invalid tool name"` + `"_underscore"` chain preservation.
+
+#### AC6 — Required test scenarios present in `resolve_test.go`
+
+PASS. All planned scenarios covered:
+
+- No `.valv/` dir → empty manifest, nil error: `TestResolve_AbsentFile` (lines 10-23).
+- `.valv/` dir present but `tools.toml` absent → empty manifest, nil error: `TestResolve_AbsentFile_DotValvDirExistsButNoToml` (25-42). Bonus coverage of the sentinel-only binding.
+- Valid `.valv/tools.toml` → parsed manifest: `TestResolve_ValidManifest` (44-67) checks 3 string-form tools.
+- Invalid TOML (parse error) → wrapped error: `TestResolve_LoadParseError` (102-117).
+- Valid Load but invalid manifest → wrapped Validate error: `TestResolve_ValidateError` (140-160).
+- Forward-compat sections decode through Resolve (regression-guards the SHOWSTOPPER fix): `TestResolve_ValidManifest_WithForwardCompatSections` (69-100) writes a fixture mirroring `testdata/valid_objects.toml` (mixed string+object tools + `[allowlist]` + `[env]`) and asserts both top-level tools and object-form fields decode.
+- Bonus: `TestResolve_LoadUnknownKeyError` (119-138) and `TestResolve_ToolsFilePathConstant` (162-170).
+
+#### AC7 — Tests use `t.TempDir()`, no mocks
+
+PASS. Every test acquires `dir := t.TempDir()` (lines 14, 30, 47, 74, 107, 123, 145). The `writeFixture` helper (172-185) writes via `os.MkdirAll` + `os.WriteFile` against the temp dir — real filesystem. No mock filesystem, no afero, no in-memory shim. Matches `main/CLAUDE.md` § "Tests" "real filesystem state" requirement.
+
+#### AC8 — `mage testPkg ./internal/tools/` passes; worklog claim verified
+
+PASS. QA-side run produced:
+- 56 tests, 0 failed, 0 skipped.
+- Coverage: 95.5% (well above the 70% drop-level gate and the current 60% magefile floor).
+- gofumpt check clean (mage testPkg runs gofumpt first).
+- `-race -cover -count=1` flags applied unconditionally.
+
+Worklog claim (56 tests, 95.5% coverage) matches QA-side run exactly.
+
+### Findings
+
+None. Implementation is tight: the composition is minimal (load → sentinel → validate → wrap), the sentinel-only binding is honored, error wrapping preserves `errors.Is` chains, and the forward-compat regression guard is in place. The two "absent file" tests (no `.valv/` dir vs. `.valv/` dir but no toml) cover the natural boundary cleanly. The constant-stability test future-proofs `ToolsFilePath` against accidental rename in Unit 11.4 / DROP_12.
+
+### Hylla Feedback
+
+Hylla was not queried this round. Resolve, Load, Validate, and the new `domain.ErrToolsNotFound` sentinel are all uncommitted-since-last-ingest at the time of this review (resolve.go landed in commit `257d8ac`, after the most recent Hylla baseline). Source `Read` plus PLAN.md + worklog cross-check provided full coverage. No fallback miss to feed back.

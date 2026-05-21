@@ -180,3 +180,198 @@ No Hylla queries were needed. The validation logic is brand-new, has no prior re
 - **Scratch verification overhead:** 25 attack cases added to `internal/tools/falsification_scratch_test.go`, all passed under `mage testPkg`, file deleted before report. Post-cleanup baseline restored verbatim: 48 tests / 93.1% coverage.
 
 Verdict: **pass**.
+
+## Unit 11.3 — Round 1
+
+**Verdict:** pass
+**Reviewer:** ta-go-qa-falsification
+**Reviewed at:** 2026-05-21T00:00:00Z
+
+Reviewed against `main/drops/DROP_11_TOOL_DECLARATION/PLAN.md` Unit 11.3
+acceptance and the falsification appendix's six attack surfaces. Nine
+additional scratch test cases (`internal/tools/falsification_scratch_test.go`,
+deleted before this report) ran cleanly under `mage testPkg ./internal/tools/`.
+Pre-scratch baseline: 56 tests / 95.5%. Mid-scratch: 65 tests / 97.0%.
+Post-cleanup: 56 tests / 95.5% — tree pristine.
+
+### Counterexamples / Attacks
+
+#### Attack 1 — Sentinel-only absent-file binding
+
+Three sub-attacks; all **mitigated**.
+
+- **Live source verified.** `internal/tools/resolve.go:33` is exactly
+  `if errors.Is(err, domain.ErrToolsNotFound)`. No `os.IsNotExist` fallback
+  anywhere in the package. PASS.
+- **Parent dir missing.** Scratch test `TestFalsification_ParentDirMissing`
+  passed `Resolve("/tmp/definitely-does-not-exist-xyz-12345/subdir")`. Result:
+  `nil` error + empty manifest. Trace: `os.Stat` on a path through a
+  nonexistent parent returns an error wrapping `os.ErrNotExist` (Go stdlib
+  documents stat as path-traversal error); `Load` matches at `tools.go:94`
+  and wraps as `ErrToolsNotFound`; `Resolve` matches at line 33 and returns
+  nil. The sentinel chain holds end-to-end. PASS.
+- **Permission denied (file exists, chmod 000).** Scratch test
+  `TestFalsification_PermissionDenied` wrote a 0o000 `tools.toml`, called
+  `Resolve`, and asserted (a) err is NON-nil, (b) `errors.Is(err,
+  domain.ErrToolsNotFound) == false`, (c) error string contains
+  `"resolve tools"`. All three passed. Trace: `os.Stat` succeeds on a 0o000
+  file (stat reads the dir entry, not the file contents); `toml.DecodeFile`
+  then fails to open the file; `Load` wraps with `decode tools %q: %w`;
+  `Resolve` wraps again with `resolve tools %q: %w`. Permission-denied is
+  correctly NOT treated as absent. PASS.
+
+#### Attack 2 — `filepath.Join` edge cases
+
+Five sub-attacks; all **mitigated**.
+
+- **Empty `projectDir`.** Scratch test `TestFalsification_EmptyProjectDir`
+  chdirs into an empty temp dir and calls `Resolve("")`. Result: nil error,
+  empty manifest. Trace: `filepath.Join("", ".valv/tools.toml")` returns
+  `".valv/tools.toml"` (relative); `os.Stat` returns `os.ErrNotExist`
+  resolved against CWD; sentinel branch fires. This is intentionally
+  CWD-dependent per worklog note; the test confirms the behaviour is
+  observable. PASS.
+- **Trailing slash.** Scratch test `TestFalsification_TrailingSlash` passed
+  `Resolve(tmpdir + "/")`. `filepath.Join` collapses the duplicate
+  separator; manifest loaded correctly. PASS.
+- **`..` segments.** Scratch test `TestFalsification_DotDotSegments` passed
+  `Resolve(base + "/subdir/..")`. `filepath.Join` calls `filepath.Clean`
+  internally — `base/subdir/../.valv/tools.toml` cleans to
+  `base/.valv/tools.toml`. Manifest loaded. PASS.
+- **`projectDir` is a directory through a regular file.** Scratch test
+  `TestFalsification_ParentDirIsFile` wrote a regular file at `dir/.valv`
+  (where the dir would go) and called `Resolve(dir)`. `os.Stat` on
+  `dir/.valv/tools.toml` returns a "not a directory" error — NOT
+  `ErrNotExist`. Per the live `Load` impl this falls through to the
+  generic stat-error branch (`stat tools ... : %w`), wrapped by `Resolve`
+  as `resolve tools ... : %w`. The error is observable to the caller and
+  is NOT collapsed into the absent-file sentinel — correct by design (a
+  malformed `.valv` directory tree should surface as an error, not be
+  silently treated as "no manifest"). PASS.
+- **Symlink projectDir.** Not explicitly tested in this round; `os.Stat`
+  follows symlinks by default (vs. `os.Lstat`), so a symlinked
+  `projectDir` resolves transparently. Inherited mitigation from Unit 11.1
+  Attack 6 ("symlink to nonexistent file") which already confirmed
+  symlink-following behaviour. PASS.
+
+#### Attack 3 — Load-then-Validate sequence
+
+Four sub-attacks; all **mitigated**.
+
+- **Absent → empty manifest.** Two committed tests
+  (`TestResolve_AbsentFile`, `TestResolve_AbsentFile_DotValvDirExistsButNoToml`)
+  cover the "no `.valv/` dir" and "`.valv/` dir present, `tools.toml`
+  missing" cases. Both flow through the sentinel branch. PASS.
+- **Load parse error → wrapped Load error, Validate never called.**
+  Committed `TestResolve_LoadParseError` writes malformed TOML and asserts
+  the wrapped error. Implementation at `resolve.go:32-37` returns
+  immediately on non-sentinel Load errors, before reaching Validate. PASS.
+- **51-tool manifest → Validate "exceeds max", wrapped through Resolve.**
+  Scratch test `TestFalsification_OversizedManifest` wrote 51 entries
+  (`tool0..tool50`) and asserted the returned error contains both
+  `"resolve tools"` (Resolve's wrap) AND `"exceeds max"` (Validate's
+  message). Both substrings present. PASS.
+- **Partial-object form (Source set, Install empty) round-trip.** Committed
+  `TestResolve_ValidateError` covers a similar Validate-failure path
+  (`_underscore` name rejected). Additionally, Unit 11.2's committed
+  `TestValidate_LoadedFixtureMissingInstall` already exercises the
+  Load-accepts → Validate-rejects boundary at the Load+Validate seam;
+  Resolve composes those same two calls in the same order. The "missing
+  install" substring would flow through `Resolve`'s `%w` wrap identically
+  to the `_underscore` case verified by `TestResolve_ValidateError`. PASS.
+
+#### Attack 4 — Forward-compat sections
+
+Two sub-attacks; both **mitigated**.
+
+- **`[allowlist]` + `[env]` with no `[tools]` section.** Scratch test
+  `TestFalsification_OnlyAllowlist` wrote a file with only `[allowlist]`
+  and `[env]` sections. `Resolve` returned `(ToolManifest{}, nil)` — empty
+  `Tools` map, no error. This matches PLAN.md § "Empty manifest predicate":
+  presence of forward-compat sections does NOT make the manifest
+  non-empty, and Load's `PrimitiveDecode` calls succeed on a
+  `[tools]`-less file because the zero-value `toml.Primitive` is safe to
+  `PrimitiveDecode`. PASS.
+- **`[tools]` + `[allowlist]` + `[env]` + unknown `[ports]` section.**
+  Inherited from Unit 11.1 Attack 5 + the committed
+  `TestResolve_LoadUnknownKeyError` test (which uses `[network]` as the
+  unknown section). `Resolve` wraps the strict-undecoded error from Load
+  with `"resolve tools"` and the inner `"unknown keys"` substring is
+  preserved. PASS.
+
+#### Attack 5 — Error chain integrity
+
+Three sub-attacks; all **mitigated**.
+
+- **Resolve does NOT bubble `ErrToolsNotFound` to callers.** Scratch test
+  `TestFalsification_ErrIsBubbleThrough` confirms: absent-file `Resolve`
+  call returns `(ToolManifest{}, nil)`, so `errors.Is(err,
+  domain.ErrToolsNotFound)` on the returned err is trivially false (err
+  IS nil). This is correct by design — Resolve's contract is "absent IS
+  empty manifest," collapsing the distinction at the API boundary.
+  PASS.
+- **Internal `errors.Is` chain through Load's wrap.** Live source at
+  `resolve.go:33` does `errors.Is(err, domain.ErrToolsNotFound)` against
+  Load's err. Load wraps with `%w` at `tools.go:91` and `tools.go:95`, so
+  the sentinel is reachable through the chain. Two committed tests
+  (`TestResolve_AbsentFile`, `TestResolve_AbsentFile_DotValvDirExistsButNoToml`)
+  verify this end-to-end. PASS.
+- **Caller cannot distinguish "absent file" from "file present, no
+  tools."** By design — both return `(ToolManifest{}, nil)`. PLAN.md §
+  "File absent" + § "Empty manifest predicate" pin this exact behaviour.
+  Unit 11.4 (CLI) explicitly relies on this: `valv tools validate` prints
+  `"no tools declared"` for both cases. Acknowledged accepted-by-design.
+  PASS.
+
+#### Attack 6 — Test coverage gap analysis
+
+**Mitigated with one accepted miss.**
+
+- Current coverage: **95.5%** (up from 93.1% post-11.2, a +2.4 point gain
+  consistent with adding `resolve.go` + eight scenario tests).
+- The unreached ~4.5% is consistent with the inherited unreachable
+  error-return arms of the two `meta.PrimitiveDecode` calls in
+  `tools.go:114, 118` (same gap noted in Unit 11.1 and 11.2 falsification).
+  `resolve.go` itself appears fully covered — every branch (sentinel
+  match, non-sentinel Load error wrap, Validate error wrap, happy path)
+  has at least one test case via the eight committed tests + reaffirmed
+  by the scratch attacks.
+- Accepted miss; not a falsification-blocking gap. Unit 11.4 will close
+  this further by exercising `Resolve` through the CLI integration.
+
+### YAGNI Pressure
+
+None. `Resolve` is a 16-line function plus a 14-character constant. No
+interfaces, no Resolver type, no options struct, no abstraction layer over
+`filepath.Join`. The sentinel-only check binds to ONE sentinel via ONE
+`errors.Is` call. No premature multi-path absent detection (no
+`os.IsNotExist` fallback, no symlink-aware variants, no per-OS branches).
+The implementation is the smallest concrete shape that satisfies the AC.
+No surplus surface.
+
+### Hylla Feedback
+
+No Hylla queries needed. The package is uncommitted-since-last-ingest
+(Units 11.1, 11.2, 11.3 all post-date the last `hylla_ingest`), so Hylla
+would miss `Load`, `Validate`, `ToolSpec`, `ToolManifest`,
+`domain.ErrToolsNotFound`, and `Resolve` itself. `Read` of `resolve.go`,
+`resolve_test.go`, `tools.go`, `validate.go`, and the drop artifacts
+provided complete coverage. No fallback miss to record.
+
+### Falsification Summary
+
+- **Confirmed counterexamples blocking PASS: 0.**
+- **Accepted-by-design behaviours surfaced:**
+  - Empty `projectDir` → CWD-relative resolve (intentional, worklog-noted).
+  - Caller cannot distinguish absent file from empty `[tools]` map — PLAN
+    explicitly collapses these. Unit 11.4 depends on the collapse.
+  - File-at-`.valv` (regular file where a directory should be) surfaces as
+    a wrapped non-sentinel error rather than absent. Correct: malformed
+    `.valv` tree should error loudly, not silently mean "no manifest."
+- **Scratch verification overhead:** 9 attack cases added to
+  `internal/tools/falsification_scratch_test.go`, all passed under
+  `mage testPkg` (65 tests / 97.0% mid-scratch). File deleted before this
+  report. Post-cleanup baseline restored verbatim: 56 tests / 95.5%
+  coverage — matches Unit 11.3 worklog exactly.
+
+Verdict: **pass**.
