@@ -1,6 +1,6 @@
 # DROP_12 — IMAGE_LAYERING
 
-**State:** planning
+**State:** building
 **Blocked by:** DROP_11 (done)
 **Paths (expected):** `internal/services/images/` (extend), `internal/cli/` (wire per-project image into `valv claude` / `valv codex` launch path), possibly `internal/adapters/docker/` (build composition helpers)
 **Packages (expected):** `internal/services/images/`, `internal/cli/`, possibly `internal/adapters/docker/`
