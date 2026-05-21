@@ -260,7 +260,6 @@ func (Dev) Run(args string) error {
 
 func verifyBootstrap() error {
 	required := []string{
-		"AGENTS.md",
 		"CONTRIBUTING.md",
 		"README.md",
 		"go.mod",
