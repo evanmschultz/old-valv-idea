@@ -141,6 +141,10 @@ func PrepareRuntime(ctx context.Context, request PrepareRequest) (PreparedRuntim
 		env["CODEX_HOME"] = "/home/valv/.codex"
 	}
 
+	if gitdir, err := pathutil.ResolveWorktreeGitDir(projectRoot); err == nil && gitdir != "" {
+		mounts = append(mounts, dockeradapter.NewMountSpec(gitdir, gitdir, false))
+	}
+
 	envPassthrough := TerminalEnvPassthrough()
 
 	cleanup := func() error {
@@ -172,8 +176,6 @@ func PrepareRuntime(ctx context.Context, request PrepareRequest) (PreparedRuntim
 		"env_passthrough", envPassthrough,
 		"mount_count", len(mounts),
 	)
-
-	_ = projectRoot // used for future project-config support; not translated in v1
 
 	return PreparedRuntime{
 		ContainerHome:  ContainerHomeDir,

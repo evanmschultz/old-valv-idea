@@ -111,6 +111,9 @@ func PrepareRuntime(ctx context.Context, request PrepareRequest) (PreparedRuntim
 	mounts := []dockeradapter.MountSpec{
 		dockeradapter.NewMountSpec(runtimeCodexHome, ContainerCodexDir, false),
 	}
+	if gitdir, err := pathutil.ResolveWorktreeGitDir(projectRoot); err == nil && gitdir != "" {
+		mounts = append(mounts, dockeradapter.NewMountSpec(gitdir, gitdir, false))
+	}
 	env := map[string]string{
 		"CODEX_HOME": ContainerCodexDir,
 		"HOME":       ContainerHomeDir,

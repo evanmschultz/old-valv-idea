@@ -505,6 +505,105 @@ func TestPrepareRuntimeMountsClaudeHomeWhenProvided(t *testing.T) {
 	}
 }
 
+func TestPrepareRuntimeMountsWorktreeGitDir(t *testing.T) {
+	t.Parallel()
+
+	// Layout:
+	//   <tmp>/bare/             ← bare repo (common git dir)
+	//   <tmp>/worktrees/main/   ← worktree gitdir
+	//   <tmp>/project/.git      ← linkfile -> <tmp>/worktrees/main
+	root := t.TempDir()
+	bareDir := filepath.Join(root, "bare")
+	worktreeGitDir := filepath.Join(root, "worktrees", "main")
+	projectDir := filepath.Join(root, "project")
+	profileHome := filepath.Join(root, "profile")
+	tempRoot := filepath.Join(root, "tmp")
+
+	for _, d := range []string{bareDir, worktreeGitDir, projectDir, profileHome} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", d, err)
+		}
+	}
+
+	linkContent := "gitdir: " + worktreeGitDir + "\n"
+	if err := os.WriteFile(filepath.Join(projectDir, ".git"), []byte(linkContent), 0o644); err != nil {
+		t.Fatalf("WriteFile(.git linkfile) error = %v", err)
+	}
+	rel, err := filepath.Rel(worktreeGitDir, bareDir)
+	if err != nil {
+		t.Fatalf("Rel() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktreeGitDir, "commondir"), []byte(rel+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(commondir) error = %v", err)
+	}
+
+	prepared, err := PrepareRuntime(context.Background(), PrepareRequest{
+		ProfileHome: profileHome,
+		ProjectRoot: projectDir,
+		TempRoot:    tempRoot,
+	})
+	if err != nil {
+		t.Fatalf("PrepareRuntime() error = %v", err)
+	}
+	defer func() {
+		if err := prepared.Close(); err != nil {
+			t.Fatalf("prepared.Close() error = %v", err)
+		}
+	}()
+
+	// The bare repo dir must appear as a mount with source == target == bareDir.
+	found := false
+	for _, m := range prepared.Mounts {
+		if m.Source == bareDir {
+			found = true
+			if m.Target != bareDir {
+				t.Fatalf("worktree mount Target = %q, want %q (path-transparent)", m.Target, bareDir)
+			}
+			if m.ReadOnly {
+				t.Fatalf("worktree mount ReadOnly = true, want false")
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("mounts = %+v; missing bind mount for bare repo dir %q", prepared.Mounts, bareDir)
+	}
+}
+
+func TestPrepareRuntimeSkipsWorktreeMountForRegularRepo(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	profileHome := filepath.Join(root, "profile")
+	projectDir := filepath.Join(root, "project")
+	gitDir := filepath.Join(projectDir, ".git")
+	tempRoot := filepath.Join(root, "tmp")
+
+	for _, d := range []string{profileHome, gitDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", d, err)
+		}
+	}
+
+	prepared, err := PrepareRuntime(context.Background(), PrepareRequest{
+		ProfileHome: profileHome,
+		ProjectRoot: projectDir,
+		TempRoot:    tempRoot,
+	})
+	if err != nil {
+		t.Fatalf("PrepareRuntime() error = %v", err)
+	}
+	defer func() {
+		if err := prepared.Close(); err != nil {
+			t.Fatalf("prepared.Close() error = %v", err)
+		}
+	}()
+
+	// No extra mount should be added; only the codex dir mount (1 mount).
+	if len(prepared.Mounts) != 1 {
+		t.Fatalf("mount count = %d, want 1 (only codex dir, no worktree mount)", len(prepared.Mounts))
+	}
+}
+
 func mustReadFile(t *testing.T, path string) []byte {
 	t.Helper()
 	content, err := os.ReadFile(path)
