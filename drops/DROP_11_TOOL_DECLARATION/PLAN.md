@@ -1,6 +1,6 @@
 # DROP_11 — TOOL_DECLARATION
 
-**State:** planning
+**State:** building
 **Blocked by:** DROP_10 (done)
 **Paths (expected):** new package `main/internal/tools/` for `.valv/tools.toml` parsing + validation; `main/internal/cli/tools.go` for the `valv tools` subcommand surface; testdata fixtures for parser coverage
 **Packages (expected):** `internal/tools/` (new), `internal/cli/`, possibly `cmd/valv/`
@@ -120,7 +120,7 @@ GOPRIVATE = "github.com/evanmschultz/*"
   - `Tools map[string]ToolSpec \`toml:"tools"\``
   - `Allowlist toml.Primitive \`toml:"allowlist"\``
   - `Env toml.Primitive \`toml:"env"\``
-- `Load(path string) (ToolManifest, error)` (new): uses `os.Stat` guard (returns `fmt.Errorf("...: %w", domain.ErrToolsNotFound)` when file absent), `toml.DecodeFile`, then — **before the strict `meta.Undecoded()` check** — calls `meta.PrimitiveDecode(m.Allowlist, &discardA)` and `meta.PrimitiveDecode(m.Env, &discardE)` where `discardA` and `discardE` are local `map[string]any` (or any throwaway target). The decoded values are intentionally discarded; DROP_11 takes no action on their contents. After both `PrimitiveDecode` calls, `meta.Undecoded()` is the strict-check oracle — error if any key remains undecoded. `fmt.Errorf("...: %w", err)` wrapping at each boundary. Mirrors `internal/config/Load` — use Hylla node `github.com/evanmschultz/valv/internal/config/Load` as the canonical pattern.
+- `Load(path string) (ToolManifest, error)` (new): uses `os.Stat` guard (returns `fmt.Errorf("...: %w", domain.ErrToolsNotFound)` when file absent), `toml.DecodeFile`, then — **before the strict `meta.Undecoded()` check** — calls `meta.PrimitiveDecode(m.Allowlist, &discardA)` and `meta.PrimitiveDecode(m.Env, &discardE)` where `discardA` and `discardE` are local `map[string]any`. **Do NOT use `toml.Primitive` itself as the discard target** — empirical testing confirmed this leaves the inline keys flagged undecoded (defeating the purpose). The decoded `map[string]any` values are intentionally discarded; DROP_11 takes no action on their contents. After both `PrimitiveDecode` calls, `meta.Undecoded()` is the strict-check oracle — error if any key remains undecoded. `fmt.Errorf("...: %w", err)` wrapping at each boundary. Mirrors `internal/config/Load` — use Hylla node `github.com/evanmschultz/valv/internal/config/Load` as the canonical pattern.
 - **`PrimitiveDecode` is mandatory.** Empirical run against `BurntSushi/toml v1.6.0` (planner Round 4 scratch program) confirmed that declaring `toml.Primitive` fields alone is NOT enough — `meta.Undecoded()` still returns `[allowlist.hosts env.GOPRIVATE]` for the canonical schema example until both `PrimitiveDecode` calls run. Builder MUST implement the two calls before the `Undecoded()` check; skipping them will reject valid forward-compat sections as unknown keys.
 - `Load` handles both string-value and inline-table-value entries under `[tools]` via `(t *ToolSpec) UnmarshalTOML(v interface{}) error` implementing `toml.Unmarshaler`. Confirmed by `TestLoad` passing `testdata/valid_objects.toml`.
 - `Load` returns error for `testdata/invalid_unknown_key.toml` (undecoded key triggers strict check).
