@@ -1,13 +1,13 @@
 # DROP_12 — IMAGE_LAYERING
 
-**State:** building
+**State:** done
 **Blocked by:** DROP_11 (done)
 **Paths (expected):** `internal/services/images/` (extend), `internal/cli/` (wire per-project image into `valv claude` / `valv codex` launch path), possibly `internal/adapters/docker/` (build composition helpers)
 **Packages (expected):** `internal/services/images/`, `internal/cli/`, possibly `internal/adapters/docker/`
 **PLAN.md ref:** main/PLAN.md → DROP_12_IMAGE_LAYERING row
 **Workflow:** main/drops/WORKFLOW.md
 **Started:** 2026-05-21
-**Closed:** —
+**Closed:** 2026-05-22 (CI run 26314248720 green; close commit follows)
 
 ## Scope
 
