@@ -409,3 +409,54 @@ Eighteen attacks attempted (eleven from the appendix's primary list + seven addi
 - Do not wire CLI callers onto `EnsureProjectImage` until Unit 12.3 is fixed or the planner explicitly relaxes decision 5.
 - Fix path: change the base-label error branch so non-missing inspect failures are treated as rebuild-triggering unreadable labels, then add a regression test covering "base inspect generic error still rebuilds".
 - Optional follow-up coverage: add an explicit overlay fallback test that records both `buildx` and legacy build args and reasserts the full five-label set on the fallback call.
+
+## Unit 12.3 — Round 2
+
+**Verdict:** PASS
+
+**Mage targets run:** `mage testPkg ./internal/services/images/` → FAIL in this sandbox because unrelated existing `TestCodexVersionResolverReadsLatestRelease` panics on `httptest: failed to listen on a port: listen tcp6 [::1]:0: bind: operation not permitted`. Scoped Unit 12.3 verification `go test -count=1 -run 'TestEnsureProjectImage_|TestProjectImageRef_TagFormat' ./internal/services/images` → PASS (14 passed).
+
+### Round 1 blocker resolution audit
+
+- Original blocker: generic base-inspect errors aborted instead of rebuilding.
+- Fix applied at: `internal/services/images/service.go:745-762`
+- Regression test: `internal/services/images/service_test.go:1672-1740`
+- Verdict on Round 1 blocker: RESOLVED
+
+### Round 2 attacks attempted
+
+#### A1 — Generic base-inspect error still bubbles
+- Hypothesis: the Round 2 change may still abort on a generic non-missing BASE inspect error instead of rebuilding.
+- Evidence: `EnsureProjectImage` now treats every non-missing `baseErr` the same after the `dockerImageMissingError` guard and sets `baseRecipeHash = ""` before continuing (`internal/services/images/service.go:756-762`). `TestEnsureProjectImage_GenericBaseInspectErrorFallsThroughToRebuild` drives a `"permission denied"` BASE inspect error, confirms `Action == EnsureActionUpdated`, and asserts the build args include `--label io.valv.base_recipe_hash=` (`internal/services/images/service_test.go:1679-1740`).
+- Outcome: mitigated.
+- Detail: I could not reproduce the Round 1 counterexample on the live code path.
+
+#### A2 — BASE missing fatal branch accidentally softened
+- Hypothesis: broadening the fallback might also swallow `dockerImageMissingError` for the BASE image.
+- Evidence: the explicit fatal guard remains first in the branch and still returns `ensure project image: base image %q missing` (`internal/services/images/service.go:757-760`). `TestEnsureProjectImage_BaseImageMissingReturnsError` still asserts that a `"no such image"` BASE inspect result returns an error with `"base image"` context (`internal/services/images/service_test.go:1595-1618`).
+- Outcome: mitigated.
+- Detail: the fatal/non-fatal split now matches PLAN decision 5 at `drops/DROP_12_IMAGE_LAYERING/PLAN.md:62`.
+
+#### A3 — Empty `base_recipe_hash` label gets filtered out
+- Hypothesis: the rebuild path may compute `baseRecipeHash = ""`, but the Docker arg builder could drop empty-value labels and leave the built image unlabeled.
+- Evidence: `EnsureProjectImage` always inserts `baseRecipeHashLabel: baseRecipeHash` into the label map (`internal/services/images/service.go:799-810`). `docker.BuildImageArgs` emits every label key as `--label key=value` without filtering empty strings (`internal/adapters/docker/ops.go:89-97`). The Round 2 regression test and the existing target-missing test both inspect recorded CLI args directly; the new test specifically looks for `io.valv.base_recipe_hash=` (`internal/services/images/service_test.go:1728-1739`), and the older build test still checks the full five-label set (`internal/services/images/service_test.go:1296-1324`).
+- Outcome: mitigated.
+- Detail: repo evidence proves the empty label is sent to Docker. I did not find any repo code path that would collapse empty and absent before the CLI boundary.
+
+#### A4 — Old tests depended on the removed error-out path
+- Hypothesis: some existing test may have been asserting the old `"inspect base recipe hash"` failure and now passes only because the assertion was removed.
+- Evidence: the Unit 12.3 test cluster still contains the fatal BASE-missing test, the generic target-inspect rebuild test, and the typecast-failure rebuild test, but no existing test asserts generic BASE inspect errors should abort (`internal/services/images/service_test.go:1464-1618`). The only new coverage added for this surface is the Round 2 regression at `internal/services/images/service_test.go:1672-1740`.
+- Outcome: mitigated.
+- Detail: I found no displaced test oracle tied to the removed carve-out. Test count increased from 61 to 62 because coverage was added, not rewritten around the old behavior.
+
+#### A5 — Broader tolerance creates a fruitless rebuild loop or useless log spam
+- Hypothesis: with `baseRecipeHash = ""`, launches could keep rebuilding forever, or the new debug log could be too noisy to diagnose recovery.
+- Evidence: if the target image is readable and already carries `base_recipe_hash=""`, `projectImageNeedsBuild` will return false once `recipe_hash` and `tools_hash` match; the method does not self-loop (`internal/services/images/service.go:771-777`, `841-870`). Repeated rebuilds remain possible only when target-label probes themselves keep failing, which was already the Step 4 policy before Round 2 (`internal/services/images/service.go:850-868`; `internal/services/images/service_test.go:1504-1533`). The added log line is debug-only and includes both the base ref and the underlying error (`internal/services/images/service.go:761`).
+- Outcome: accepted.
+- Detail: I found no new hung-loop counterexample attributable to the Round 2 fix. Persistent target-inspect failures would still cause repeated rebuilds, but that behavior pre-dates this change.
+
+### Non-blocking gaps
+
+- Full `mage testPkg ./internal/services/images/` is not reproducible in this sandbox because an unrelated existing HTTP test cannot bind `[::1]:0`; the scoped Unit 12.3 tests pass.
+- Overlay-specific legacy fallback still has no direct recorded-args test, though the code reuses the same label map when switching builders.
+- I verified the empty label reaches the Docker CLI arguments, not Docker’s persisted on-image behavior; that distinction would need an environment with a working daemon to observe directly.
