@@ -271,7 +271,7 @@ Extend `internal/services/images` to compose a per-project layered Docker image 
 
 #### Unit 12.4 — CLI launch wiring (claude + codex) + override warning
 
-**State:** todo
+**State:** done
 
 **Paths:**
 - `internal/cli/claude.go` (extend — add `ensureClaudeProjectImage`; call it in `runClaudeCommand` after `ensureClaudeImageCurrent`)

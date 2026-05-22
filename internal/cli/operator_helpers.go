@@ -21,6 +21,7 @@ import (
 	globalswitchservice "github.com/evanmschultz/valv/internal/services/globalswitch"
 	imagesservice "github.com/evanmschultz/valv/internal/services/images"
 	manageservice "github.com/evanmschultz/valv/internal/services/manage"
+	"github.com/evanmschultz/valv/internal/tools"
 	managetui "github.com/evanmschultz/valv/internal/tui/manage"
 )
 
@@ -400,4 +401,70 @@ func parseOptionalProvider(args []string, fallback domain.Provider) (domain.Prov
 
 func requireProjectPath(value string) string {
 	return strings.TrimSpace(value)
+}
+
+// projectImageOverrideEnvName returns the VALV_<PROVIDER>_IMAGE environment
+// variable name used by the existing image-ref resolver for the given
+// provider. Returns "" for an unsupported provider; callers treat that as
+// "no override applies" and proceed with the EnsureProjectImage path.
+func projectImageOverrideEnvName(provider domain.Provider) string {
+	switch provider {
+	case domain.ProviderClaude:
+		return "VALV_CLAUDE_IMAGE"
+	case domain.ProviderCodex:
+		return "VALV_CODEX_IMAGE"
+	default:
+		return ""
+	}
+}
+
+// resolveProjectImage returns the image reference the binding-aware launch
+// path should use for the given provider in the given working directory.
+//
+// Behavior follows DROP_12 Unit 12.4 (PLAN.md decisions 12 + 13):
+//
+//   - When tools.Resolve reports an empty manifest (no `.valv/tools.toml`, or
+//     a file with no [tools] entries), returns baseRef unchanged. No docker
+//     calls, no overlay build.
+//   - When the manifest is non-empty AND VALV_<PROVIDER>_IMAGE is set, the
+//     env-var override wins: the function emits a single stderr warning and
+//     returns baseRef (which the upstream claudeImageRef/codexImageRef has
+//     already resolved to the override value). The overlay is skipped to
+//     keep the override path semantically identical to its pre-DROP_12
+//     behavior.
+//   - Otherwise, opens the images service for the provider, calls
+//     EnsureProjectImage with the resolved manifest and baseRef, and returns
+//     the per-project tag from the result. Any tools.Resolve error other
+//     than the absent-file case (already handled by tools.Resolve itself
+//     returning {Manifest:{}, nil}) is wrapped and returned.
+func resolveProjectImage(cmd *cobra.Command, paths config.Paths, provider domain.Provider, workingDir string, baseRef dockeradapter.ImageRef) (dockeradapter.ImageRef, error) {
+	manifest, err := tools.Resolve(workingDir)
+	if err != nil {
+		return dockeradapter.ImageRef{}, fmt.Errorf("resolve project image: %w", err)
+	}
+	if len(manifest.Tools) == 0 {
+		return baseRef, nil
+	}
+
+	if envName := projectImageOverrideEnvName(provider); envName != "" {
+		if strings.TrimSpace(os.Getenv(envName)) != "" {
+			fmt.Fprintln(cmd.ErrOrStderr(), "warning: "+envName+" override active; .valv/tools.toml overlay skipped")
+			return baseRef, nil
+		}
+	}
+
+	service, closeImages, err := openImagesService(cmd, paths, provider)
+	if err != nil {
+		return dockeradapter.ImageRef{}, fmt.Errorf("resolve project image: %w", err)
+	}
+	defer closeImages()
+
+	result, err := service.EnsureProjectImage(cmd.Context(), imagesservice.EnsureProjectRequest{
+		Manifest:  manifest,
+		BaseImage: baseRef,
+	})
+	if err != nil {
+		return dockeradapter.ImageRef{}, fmt.Errorf("resolve project image: %w", err)
+	}
+	return result.Image, nil
 }

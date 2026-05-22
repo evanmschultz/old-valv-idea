@@ -100,10 +100,27 @@ func runClaudeCommand(cmd *cobra.Command, paths config.Paths, args []string) err
 	}
 	defer store.Close()
 
+	// Image check before launch. ValidateBinding is skipped — ensureClaudeBindingReady
+	// already resolved (and if needed, wrote) the binding.
+	//
+	// DROP_12 Unit 12.4 reorder: ensureClaudeImageCurrent moved BEFORE
+	// claudeservice.New so the resolved per-project ref (from
+	// resolveProjectImage) can flow into Options.Image. Constructing the
+	// service first and overwriting the field afterward is not an option —
+	// claudeservice.New is the only path that validates the Image field.
+	if err := ensureClaudeImageCurrent(cmd, paths); err != nil {
+		return fmt.Errorf("run claude command: %w", err)
+	}
+
+	projectImage, err := resolveProjectImage(cmd, paths, domain.ProviderClaude, workingDir, claudeImageRef())
+	if err != nil {
+		return fmt.Errorf("run claude command: %w", err)
+	}
+
 	service, err := claudeservice.New(claudeservice.Options{
 		Store:           store,
 		Executor:        dockeradapter.NewExecutor(dockeradapter.NewSystemRunner("docker", cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr())),
-		Image:           claudeImageRef(),
+		Image:           projectImage,
 		User:            currentContainerUser(),
 		TTY:             stdinTTY && stdoutTTY,
 		Stdin:           stdinTTY,
@@ -115,11 +132,6 @@ func runClaudeCommand(cmd *cobra.Command, paths config.Paths, args []string) err
 	})
 	if err != nil {
 		return fmt.Errorf("run claude command: initialize launcher: %w", err)
-	}
-	// Image check before launch. ValidateBinding is skipped — ensureClaudeBindingReady
-	// already resolved (and if needed, wrote) the binding.
-	if err := ensureClaudeImageCurrent(cmd, paths); err != nil {
-		return fmt.Errorf("run claude command: %w", err)
 	}
 
 	if err := service.Run(cmd.Context(), workingDir, args); err != nil {

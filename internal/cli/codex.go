@@ -107,10 +107,25 @@ func runCodexCommand(cmd *cobra.Command, paths config.Paths, args []string) erro
 	}
 	defer store.Close()
 
+	// DROP_12 Unit 12.4 reorder: ensureCodexImageCurrent moved BEFORE
+	// codexservice.New so the resolved per-project ref (from
+	// resolveProjectImage) can flow into Options.Image. ValidateBinding is
+	// skipped — ensureCodexAccountReadyForLaunch already resolved (and if
+	// needed, wrote) the binding. OverrideProfile is always set so the
+	// service uses the resolved profile directly.
+	if err := ensureCodexImageCurrent(cmd, paths); err != nil {
+		return fmt.Errorf("run codex command: %w", err)
+	}
+
+	projectImage, err := resolveProjectImage(cmd, paths, domain.ProviderCodex, workingDir, codexImageRef())
+	if err != nil {
+		return fmt.Errorf("run codex command: %w", err)
+	}
+
 	service, err := codexservice.New(codexservice.Options{
 		Store:           store,
 		Executor:        dockeradapter.NewExecutor(dockeradapter.NewSystemRunner("docker", cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr())),
-		Image:           codexImageRef(),
+		Image:           projectImage,
 		User:            currentContainerUser(),
 		TTY:             stdinTTY && stdoutTTY,
 		Stdin:           stdinTTY,
@@ -123,12 +138,6 @@ func runCodexCommand(cmd *cobra.Command, paths config.Paths, args []string) erro
 	if err != nil {
 		return fmt.Errorf("run codex command: initialize launcher: %w", err)
 	}
-	if err := ensureCodexImageCurrent(cmd, paths); err != nil {
-		return fmt.Errorf("run codex command: %w", err)
-	}
-	// ValidateBinding is skipped — ensureCodexAccountReadyForLaunch already
-	// resolved (and if needed, wrote) the binding. OverrideProfile is always
-	// set so the service uses the resolved profile directly.
 
 	if err := service.Run(cmd.Context(), workingDir, args); err != nil {
 		return fmt.Errorf("run codex command: %w", err)

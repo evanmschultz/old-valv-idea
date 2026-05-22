@@ -215,3 +215,54 @@ None. Round 2 required only a localized edit to `service.go` (one function body 
 
 None. Unit 12.4 remains the next blocked-by handoff; nothing new surfaced in Round 2.
 
+## Unit 12.4 — Round 1
+
+**Goal:** Wire `Service.EnsureProjectImage` (delivered in Unit 12.3 at c4bb49b) into both binding-aware launch paths via a new `resolveProjectImage` helper in `internal/cli/operator_helpers.go`. Apply the BLOCKING constructor reorder called out in PLAN.md Falsification 2.3: `ensureXImageCurrent` must run BEFORE `claudeservice.New` / `codexservice.New` so the resolved per-project ref can flow into `Options.Image`. Per-launcher test tables cover the three decision-12/13 paths (empty manifest, overlay build, env-override warning).
+
+### Files touched
+
+- `internal/cli/operator_helpers.go` — added the `internal/tools` import, plus two new helpers below `requireProjectPath`:
+  - `projectImageOverrideEnvName(provider domain.Provider) string` returning the `VALV_<PROVIDER>_IMAGE` env var name (case dispatch on `domain.ProviderClaude` / `domain.ProviderCodex`, `""` fallback for unknown).
+  - `resolveProjectImage(cmd, paths, provider, workingDir, baseRef) (dockeradapter.ImageRef, error)` implementing the four branches: tools.Resolve error → wrapped; empty manifest → baseRef + nil; non-empty + env-override → stderr warning + baseRef + nil; non-empty + no override → openImagesService → EnsureProjectImage → result.Image.
+- `internal/cli/claude.go` — applied the 5-step PLAN.md L291-296 reorder inside `runClaudeCommand`: openStore (unchanged) → ensureClaudeImageCurrent (moved up) → resolveProjectImage (new) → claudeservice.New (moved down, `Image: projectImage`) → service.Run (unchanged). Added a code comment explaining the reorder rationale at the new ensureClaudeImageCurrent site.
+- `internal/cli/codex.go` — mirror reorder inside `runCodexCommand`: openStore → ensureCodexImageCurrent (moved up, comment block consolidated from the old post-construction location) → resolveProjectImage (new) → codexservice.New (moved down, `Image: projectImage`) → service.Run.
+- `internal/cli/claude_project_image_test.go` (new) — three table-driven tests covering empty manifest, overlay-build invocation, and `VALV_CLAUDE_IMAGE` override warning. Shared helper `writeClaudeToolsManifest` writes a minimal object-form `.valv/tools.toml` to a fresh temp dir.
+- `internal/cli/codex_project_image_test.go` (new) — mirror three tests for codex via `writeCodexToolsManifest` and `VALV_CODEX_IMAGE`. Per-provider files (not a shared table) match the per-launcher fixture pattern used elsewhere in the package.
+
+### Mage commands run
+
+- `mage testPkg ./internal/cli/` → **PASS**, 234/234 tests, **67.6%** coverage. Pre-existing baseline (PLAN.md acceptance bullet 9) is "does not regress below 67.6%" — coverage is exactly at floor, which matches the DROP_17 deferral expectation.
+
+### Design notes
+
+- **Why `resolveProjectImage` lives in `operator_helpers.go`, not `claude.go` / `codex.go`.** The helper is provider-parametric: claude and codex consume it identically via the `domain.Provider` argument. Putting it in `operator_helpers.go` alongside the existing `openImagesService` (which it composes) avoids duplication and matches the existing per-launcher pattern of pulling shared image-construction logic into the shared file. The PLAN.md "Paths" section explicitly enumerates `operator_helpers.go` as the helper's home.
+- **`domain.Provider` over `string` for the provider parameter.** PLAN.md L286 left the provider type unpinned ("provider"). Using `domain.Provider` directly (a) matches `openImagesService`'s third arg so the call site is one-to-one, (b) lets the env-name lookup use a typed `switch` instead of a string compare, and (c) catches typos at compile time. The cost is a single `domain.ProviderClaude` / `domain.ProviderCodex` literal at each callsite — already free since `claude.go` / `codex.go` import `domain` for other reasons.
+- **Reorder mechanics for claude.** Original flow (claude.go:97-127):
+  1. openStore
+  2. claudeservice.New (with `Image: claudeImageRef()`)
+  3. ensureClaudeImageCurrent
+  4. service.Run
+  After reorder:
+  1. openStore (unchanged, still the resource that owns the deferred Close)
+  2. ensureClaudeImageCurrent (moved up — must succeed first because EnsureProjectImage's base-image inspect step reads the recipe-hash label that ensureClaudeImageCurrent guarantees is fresh)
+  3. resolveProjectImage (new — runs EnsureProjectImage which expects the base image to exist and carry recipe_hash)
+  4. claudeservice.New (moved down with `Image: projectImage`)
+  5. service.Run (unchanged)
+  The `defer store.Close()` keeps its position immediately after openStore so a failure in any of ensureClaudeImageCurrent / resolveProjectImage / claudeservice.New still releases the SQLite handle. Coverage of this defer is exercised indirectly by the existing `TestRunCodexCommandReturnsEnsureError`-style error tests on the codex side.
+- **Reorder mechanics for codex.** The original codex.go also had the constructor BEFORE `ensureCodexImageCurrent` (lines 110-128 pre-reorder); the same 5-step transform applies symmetrically. The comment block that previously sat at the OLD ensureCodexImageCurrent site ("ValidateBinding is skipped — ...") moved up to the new location so the explanation stays adjacent to the auth-related step rather than orphaning between unrelated steps.
+- **Why empty-manifest short-circuit BEFORE the env-var check.** PLAN.md decision 13 only fires the override warning "when VALV_<PROVIDER>_IMAGE is set AND .valv/tools.toml exists with len(Tools) > 0". Reversing the order would emit a confusing warning for projects that have an override set but no manifest — exactly the pre-DROP_12 norm. The early empty-manifest return preserves that silence.
+- **Why the override path returns `baseRef` and not the env-var value directly.** Upstream, `claudeImageRef()` / `codexImageRef()` already resolve `VALV_*_IMAGE` into the returned ref (see `claude_image.go:13-25`, `codex.go:261-273`). By the time `resolveProjectImage` receives `baseRef`, the override is already baked in. Returning `baseRef` therefore preserves the override semantically — the caller never sees the difference between "no manifest, env override → baseRef" and "manifest + env override → warning + baseRef" at the ref level. Only the stderr surface diverges.
+- **Test fixture choice — real `.valv/tools.toml` on disk.** `tools.Resolve` traverses the filesystem; mocking it via a package var would create a second source of truth and force a test-only hook in production code. Writing a 2-line toml file into a `t.TempDir()` exercises the real loader, the real validator, and the real canonical-manifest path through OverlayHash — all of which the overlay-build assertion downstream relies on. The minimal manifest declares one object-form tool (`ta = { source, install }`) so it passes both Validate AND BuildOverlayDockerfile (Unit 12.2 rejects string-form).
+- **Why the overlay-build test asserts label substrings rather than the full buildx invocation.** `installFakeDocker` logs the full argv joined by space, so `--label io.valv.managed=true` appears as one literal token. Asserting a couple of load-bearing labels (`managed=true`, `scope=project-overlay`, `tools_hash=`) is enough to pin decision 4's five-label contract without coupling the test to the exact ordering of label flags in `docker.BuildImageArgs`'s output. The full label-set test lives in `service_test.go` against the service-level fake.
+- **Why the empty-manifest test only asserts ABSENCE of docker calls.** `installFakeDocker` writes every invocation to `$VALV_DOCKER_LOG`. The empty-manifest path short-circuits inside `resolveProjectImage` before `openImagesService` runs — which means the images service (and therefore `WriteDefaultClaudeContext` / `WriteDefaultCodexContext`) never executes either. The on-disk log either does not exist or is empty. The `os.ReadFile(logPath)` + `len(data) > 0` check covers both states.
+- **Provider-parametric env-name dispatch.** `projectImageOverrideEnvName` returning `""` for unknown providers is defensive — `resolveProjectImage` checks `if envName != ""` before reading the env. A future drop introducing a third provider via `domain.Provider` enum extension would skip the override path until the dispatch is updated, rather than reading the wrong env var.
+
+### Hylla Feedback
+
+None. The unit was a pure CLI-wiring change against fully-documented Unit 12.3 outputs. The relevant call sites (claude.go runCommand, codex.go runCommand, operator_helpers.go openImagesService, tools.Resolve, EnsureProjectImage) were all directly referenced in the appendix or PLAN.md with explicit line numbers, making `Read` + LSP `documentSymbol` the fastest path. No Hylla searches were attempted and no fallback miss occurred.
+
+### Unknowns
+
+- The reorder means `ensureClaudeImageCurrent` / `ensureCodexImageCurrent` errors now surface BEFORE the service constructor. Previously, a launcher initialization failure (e.g. bad `paths.TempCacheDir` permissions) would shadow image-current errors; after reorder, image errors win. This is the intended behavior — image readiness is a precondition for the service — but if any downstream tooling parsed the specific error wrapping order, it would need to adjust. No such consumer was found in the repo.
+- Coverage held at 67.6% (the existing floor). The new helper added two methods (`projectImageOverrideEnvName` + `resolveProjectImage`) totaling ~30 LOC and the three-case test tables cover the empty / build / override branches. Coverage did not rise meaningfully because the reorder shifted lines around without adding new covered statements in the runCommand bodies. DROP_17 still owns the bump from 60%-floor to 70%-floor — Unit 12.4 explicitly did not target a coverage lift.
+
