@@ -305,3 +305,107 @@ Eighteen attacks attempted (eleven from the appendix's primary list + seven addi
 
 - Unit 12.3 builder: short-circuit empty tool manifests before calling `BuildOverlayDockerfile`, and pass only a validated non-empty base image ref.
 - Drop-end verifier: run the full `mage testPkg ./internal/services/images/` outside the network-restricted sandbox to confirm the existing `httptest` case.
+
+## Unit 12.3 — Round 1
+
+**Verdict:** FAIL
+
+**Mage targets run:** `mage testPkg ./internal/services/images/` → FAIL in sandbox: unrelated existing `TestCodexVersionResolverReadsLatestRelease` panicked at `httptest: failed to listen on a port: listen tcp6 [::1]:0: bind: operation not permitted`. Scoped Unit 12.3 verification `go test ./internal/services/images -run 'TestEnsureProjectImage_|TestProjectImageRef_TagFormat' -count=1` → PASS. Temporary falsification repro `env GOCACHE=/private/tmp/valv-go-build-cache go test ./internal/services/images -run TestFalsification_BaseInspectErrorBubblesInsteadOfRebuild -count=1` → PASS, then removed.
+
+### Attacks attempted
+
+#### A1 — `baseRecipeHash` double-hash contract
+- **Hypothesis:** `baseRecipeHash` might be passed through `sha256Hex`, silently re-hashing the already-hashed base label and forcing perpetual rebuilds.
+- **Evidence:** `rg -n 'sha256Hex\\('` found only `service.go:739` (`sha256Hex(dockerfileContent)`) plus test callers. `service.go:749-757` reads `baseRecipeHash` via `inspectLabel` and never hashes it.
+- **Outcome:** mitigated.
+- **Detail:** No caller passes `baseRecipeHash` to `sha256Hex`; the value is copied verbatim into `buildRequest.Labels[baseRecipeHashLabel]` at `service.go:799-805`.
+
+#### A2 — Five-label completeness on actual build args
+- **Hypothesis:** One or more required labels could be missing from the real `docker.BuildImageArgs` call even if the method returns success.
+- **Evidence:** `service.go:799-805` populates all five labels in the `ImageBuildRequest`. `service_test.go:1285-1324` inspects the recorded `buildx build` args and checks for `recipe_hash`, `base_recipe_hash`, `tools_hash`, `managed=true`, and `scope=project-overlay`.
+- **Outcome:** mitigated on the primary buildx path.
+- **Detail:** The test asserts the recorded CLI args, not just return success. Legacy fallback uses the same `buildRequest` object with only `Builder` flipped to `"legacy"` (`service.go:813-821`), so the label set stays identical there too.
+
+#### A3 — Empty-manifest short-circuit
+- **Hypothesis:** Empty manifests might still generate an overlay, inspect docker, or return the wrong action.
+- **Evidence:** `service.go:721-725` returns immediately with `EnsureActionUsingExistingImage`. `service_test.go:1224-1246` asserts zero runner calls.
+- **Outcome:** mitigated.
+- **Detail:** This path neither builds nor inspects anything.
+
+#### A4 — Conservative-opposite policy on base label inspect errors
+- **Hypothesis:** PLAN decision 5 says any non-missing `docker image inspect` label-read failure should be treated as mismatch and force rebuild, but the implementation may instead return an error before rebuilding.
+- **Evidence:** `service.go:749-757` returns `ensure project image: inspect base recipe hash: ...` for any base-label inspect error except `dockerImageMissingError` and `errLabelUnreadable`. A temporary repro test using `runnerRecorder` with `projectInspectKey(baseRef.String(), recipeHashLabel): fmt.Errorf("permission denied")` confirmed `EnsureProjectImage` returns an error after a single base-inspect call and never attempts build. The repro passed under `GOCACHE=/private/tmp/valv-go-build-cache` and was then deleted.
+- **Outcome:** BLOCKER.
+- **Detail:** This is a concrete contract mismatch against PLAN.md decision 5's "ANY non-missing error ... forces a rebuild" rule. The current code only applies conservative rebuild to target-label reads, not to the base-label read.
+
+#### A5 — Target-image missing short-circuit
+- **Hypothesis:** A missing target image could bypass the intended rebuild path or be confused with typecast failure.
+- **Evidence:** `projectImageNeedsBuild` calls `inspectLabel` on `recipe_hash` first (`service.go:845-850`) and returns `true` on any error. `service_test.go:1249-1337` simulates `no such image` on the target tag and confirms a build occurs.
+- **Outcome:** mitigated.
+- **Detail:** Missing target image rebuilds through the freshness-probe path as intended.
+
+#### A6 — Type-assertion failure vs `imageRecipeMatches`
+- **Hypothesis:** The overlay path could accidentally inherit `imageRecipeMatches`'s safe-skip behavior when the runner does not implement `outputRunner`.
+- **Evidence:** `imageRecipeMatches` returns `true, nil` on typecast failure at `service.go:639-641`, while `inspectLabel` returns `errLabelUnreadable` at `service.go:681-684` and `projectImageNeedsBuild` treats any such error as rebuild. `service_test.go:1464-1501` confirms the typecast-failure path rebuilds.
+- **Outcome:** mitigated.
+- **Detail:** The overlay code correctly does the conservative opposite on target freshness probes.
+
+#### A7 — `dockerImageMissingError` sentinel use
+- **Hypothesis:** The missing-image sentinel might be dead code or collapse into the generic unreadable-label path.
+- **Evidence:** Hylla snapshot 7 shows `dockerImageMissingError` is the existing string-match predicate used by `imageAvailable` and `imageRecipeMatches`. Live code uses it in the base inspect path (`service.go:751-752`) and in `inspectLabel` wrapping (`service.go:687-690`).
+- **Outcome:** mitigated.
+- **Detail:** The sentinel still matters: missing base image returns a specific error, while missing target image becomes "rebuild".
+
+#### A8 — Tag charset / length
+- **Hypothesis:** `projectImageRef` could emit an invalid Docker tag, especially if repository length is already large.
+- **Evidence:** `service.go:659-660` emits `proj-` plus `shortOverlayHash(...)`; `overlay.go:77-81` truncates to 12 hex chars. The tag portion is therefore always 17 characters from `[a-z0-9-]`. Context7 Docker docs did not surface a stronger contrary constraint.
+- **Outcome:** mitigated for the tag portion; repository validation remains an inherited assumption.
+- **Detail:** The new code does not worsen repo-name validity. It only appends a short lowercase-hex tag suffix.
+
+#### A9 — Up-front overlay generation before any docker call
+- **Hypothesis:** Generating the overlay before freshness checks could create correctness drift or mask cache hits.
+- **Evidence:** `service.go:734-739` generates the Dockerfile once, hashes it, and reuses the exact bytes for rebuild. NoCache and label-match behavior are decided later at `service.go:766-777`.
+- **Outcome:** accepted as non-blocking.
+- **Detail:** This does extra work on cache hits, but it keeps the compared `recipe_hash` and rebuilt Dockerfile byte-identical.
+
+#### A10 — Legacy buildx fallback label symmetry
+- **Hypothesis:** The legacy fallback path might drop one of the five labels even if buildx carries them.
+- **Evidence:** `service.go:794-821` mutates only `buildRequest.Builder` before regenerating args. Existing base-image fallback coverage (`service_test.go:459-520`) proves the service pattern keeps labels when switching from `buildx build --load` to `build`.
+- **Outcome:** mitigated by code trace, but direct overlay fallback coverage is still missing.
+- **Detail:** I did not find a concrete divergence path because the same `Labels` map is reused unchanged.
+
+#### A11 — `NoCache=true` forcing rebuild
+- **Hypothesis:** Matching labels might still skip rebuild when `NoCache` is true.
+- **Evidence:** `service.go:766-769` seeds `rebuild := request.NoCache`. `service_test.go:1535-1592` confirms a rebuild occurs and `--no-cache` is present in the recorded build args.
+- **Outcome:** mitigated.
+- **Detail:** This path behaves as specified.
+
+#### A12 — `errLabelUnreadable` sentinel usefulness
+- **Hypothesis:** The sentinel could be decoration only, with no caller behavior change.
+- **Evidence:** `service.go:754-757` uses `errors.Is(baseErr, errLabelUnreadable)` to tolerate only that case for the base label read. Target-image freshness reads collapse all errors to rebuild inside `projectImageNeedsBuild`.
+- **Outcome:** accepted, but it is the mechanism that exposes A4.
+- **Detail:** The sentinel is not dead, but its special treatment is asymmetric and currently too narrow for the broader PLAN.md wording.
+
+#### A13 — Shared-service concurrency / same-manifest TOCTOU
+- **Hypothesis:** Two concurrent `EnsureProjectImage` calls for the same manifest could race and corrupt state.
+- **Evidence:** `Service` holds immutable config only (`service.go:91-103`), and `EnsureProjectImage` uses local variables plus a temp dir per call. There is no shared mutable Go state or goroutine spawned by the method.
+- **Outcome:** accepted as non-blocking.
+- **Detail:** Two callers can still both decide to rebuild and race on the same Docker tag, but that is an external Docker-level TOCTOU and not an in-process data race introduced by this unit.
+
+#### A14 — YAGNI helpers
+- **Hypothesis:** `projectImageNeedsBuild` and `sha256Hex` could be premature abstractions.
+- **Evidence:** `projectImageNeedsBuild` centralizes the three-label comparison and rebuild-on-error policy; `sha256Hex` has one production caller and mirrors existing `recipeHash` behavior. Neither introduces indirection beyond the immediate unit.
+- **Outcome:** mitigated.
+- **Detail:** Small helpers are justified here; no extra interface or hidden dependency was introduced.
+
+### Non-blocking gaps
+
+- Full `mage testPkg ./internal/services/images/` could not be confirmed in this sandbox because an unrelated existing resolver test cannot bind `[::1]:0`.
+- Overlay-specific legacy fallback does not have its own recorded-args test, even though the code path reuses the same `buildRequest` label map.
+- Docker repo-name validity still relies on existing `Service` configuration; Unit 12.3 only constrains the tag suffix.
+
+### Routing for Unit 12.4
+
+- Do not wire CLI callers onto `EnsureProjectImage` until Unit 12.3 is fixed or the planner explicitly relaxes decision 5.
+- Fix path: change the base-label error branch so non-missing inspect failures are treated as rebuild-triggering unreadable labels, then add a regression test covering "base inspect generic error still rebuilds".
+- Optional follow-up coverage: add an explicit overlay fallback test that records both `buildx` and legacy build args and reasserts the full five-label set on the fallback call.
