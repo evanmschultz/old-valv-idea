@@ -20,6 +20,7 @@ import (
 
 	"github.com/evanmschultz/valv/internal/adapters/docker"
 	"github.com/evanmschultz/valv/internal/domain"
+	"github.com/evanmschultz/valv/internal/tools"
 )
 
 const (
@@ -28,7 +29,23 @@ const (
 	defaultClaudeLatestURL   = "https://registry.npmjs.org/@anthropic-ai/claude-code/latest"
 	defaultVersionRequestTTL = 10 * time.Second
 	recipeHashLabel          = "io.valv.recipe_hash"
+
+	// DROP_12 per-project overlay image constants.
+	tagPrefixProjectOverlay  = "proj-"
+	toolsHashLabel           = "io.valv.tools_hash"
+	baseRecipeHashLabel      = "io.valv.base_recipe_hash"
+	managedLabel             = "io.valv.managed"
+	scopeLabel               = "io.valv.scope"
+	scopeValueProjectOverlay = "project-overlay"
 )
+
+// errLabelUnreadable is returned by inspectLabel when the underlying runner
+// does not implement outputRunner (label capture impossible without it). Per
+// PLAN.md decision 5 the caller (EnsureProjectImage) treats this as a
+// freshness-label mismatch and forces a rebuild — the conservative-opposite
+// of imageRecipeMatches's safe-skip behavior, because for overlays an
+// unreadable label means we cannot prove freshness.
+var errLabelUnreadable = errors.New("inspect image label: runner does not support output capture")
 
 var (
 	findDockerBinary = exec.LookPath
@@ -127,6 +144,30 @@ type EnsureResult struct {
 	LatestVersion   string
 	PreviousVersion string
 	LatestCheckedAt time.Time
+}
+
+// EnsureProjectRequest is the input to Service.EnsureProjectImage. Manifest
+// drives both the overlay tools-hash and the per-tool RUN lines emitted by
+// BuildOverlayDockerfile. BaseImage is the already-resolved provider image
+// (e.g. valv-codex:dev) that the overlay layers on top of. NoCache forces a
+// rebuild even when freshness labels match. There is intentionally no Pull
+// field — base images are locally built, never pulled from a registry (F3).
+type EnsureProjectRequest struct {
+	Manifest  tools.ToolManifest
+	BaseImage docker.ImageRef
+	NoCache   bool
+}
+
+// EnsureProjectResult is the output of Service.EnsureProjectImage. Image is
+// the resolved per-project tag (or the base image when the manifest has no
+// tools). Action reports whether the overlay was built, found up-to-date, or
+// the base image was used directly. ToolsHash is the full sha256 hex digest
+// from OverlayHash; Unit 12.4's CLI caller can log the unambiguous unprefixed
+// value alongside the resolved tag.
+type EnsureProjectResult struct {
+	Image     docker.ImageRef
+	Action    EnsureAction
+	ToolsHash string
 }
 
 type codexReleasePayload struct {
@@ -607,6 +648,233 @@ func (s Service) imageRecipeMatches(ctx context.Context, image docker.ImageRef) 
 		return false, fmt.Errorf("inspect image %q recipe hash: %w", image.String(), err)
 	}
 	return strings.TrimSpace(output) == s.recipeHash(), nil
+}
+
+// projectImageRef returns the docker.ImageRef for the per-project overlay
+// image keyed by the given full tools hash. The tag is `proj-<short>` where
+// <short> is the first 12 hex chars of the supplied OverlayHash result (the
+// caller is responsible for computing the hash so projectImageRef never
+// re-hashes). The repository segment matches the base image so all of a
+// project's images live under the same `valv-<provider>` repo.
+func (s Service) projectImageRef(toolsHash string) docker.ImageRef {
+	return docker.NewImageRef(s.repository, tagPrefixProjectOverlay+shortOverlayHash(toolsHash))
+}
+
+// inspectLabel reads a single label from a docker image via `docker image
+// inspect --format '{{ index .Config.Labels "<label>" }}'`. It reuses the
+// outputRunner typecast pattern from imageRecipeMatches but returns the raw
+// trimmed label value rather than a match-bool. Three error modes:
+//
+//   - runner does not implement outputRunner: returns errLabelUnreadable. The
+//     caller (EnsureProjectImage) treats this as a freshness mismatch and
+//     rebuilds — PLAN.md decision 5 conservative-opposite policy.
+//   - docker image missing: returns dockerImageMissingError-wrapped error so
+//     the caller can detect missing-image via dockerImageMissingError and
+//     skip straight to build.
+//   - any other inspect error: returned wrapped; the caller treats it as a
+//     mismatch and rebuilds.
+//
+// The empty-output case (label not set on the image) returns the empty string
+// with nil error — the caller compares against the expected value and treats
+// "" != expected as a mismatch.
+func (s Service) inspectLabel(ctx context.Context, ref docker.ImageRef, label string) (string, error) {
+	runner, ok := s.runner.(outputRunner)
+	if !ok {
+		return "", errLabelUnreadable
+	}
+	output, err := runner.Output(ctx, []string{"image", "inspect", "--format", "{{ index .Config.Labels \"" + label + "\" }}", ref.String()})
+	if err != nil {
+		if dockerImageMissingError(err) {
+			return "", fmt.Errorf("inspect image %q label %q: %w", ref.String(), label, err)
+		}
+		return "", fmt.Errorf("inspect image %q label %q: %w", ref.String(), label, err)
+	}
+	return strings.TrimSpace(output), nil
+}
+
+// EnsureProjectImage resolves the per-project overlay image for the supplied
+// tools manifest, building it on top of request.BaseImage when missing or
+// stale. The freshness contract is a three-label set on the per-project
+// image:
+//
+//   - recipeHashLabel       — sha256 of overlay Dockerfile content (forces
+//     rebuild when BuildOverlayDockerfile's output drifts).
+//   - baseRecipeHashLabel   — verbatim copy of the base image's recipe-hash
+//     label, captured at build time. The label value is already a sha256
+//     hex string per PLAN.md decision 4; it is NOT re-hashed.
+//   - toolsHashLabel        — full OverlayHash digest of the canonical
+//     manifest (forces rebuild when manifest content changes).
+//
+// Any mismatch — or any unreadable label (typecast failure / non-missing
+// inspect error) per PLAN.md decision 5 — triggers a rebuild. When
+// request.Manifest has zero tools, EnsureProjectImage returns the base ref
+// untouched with EnsureActionUsingExistingImage and performs zero docker
+// calls.
+//
+// The returned EnsureProjectResult.Image is the resolved tag (either the
+// freshly-built `valv-<provider>:proj-<short>` or, for the empty-manifest
+// case, request.BaseImage). ToolsHash carries the full digest so the CLI
+// caller (Unit 12.4) can log it unambiguously alongside the resolved tag.
+func (s Service) EnsureProjectImage(ctx context.Context, request EnsureProjectRequest) (EnsureProjectResult, error) {
+	// Step 1: empty-manifest short-circuit. No docker calls, no overlay
+	// build, no per-project tag.
+	if len(request.Manifest.Tools) == 0 {
+		return EnsureProjectResult{
+			Image:  request.BaseImage,
+			Action: EnsureActionUsingExistingImage,
+		}, nil
+	}
+
+	// Step 2: compute expected freshness values up front. The overlay
+	// dockerfile content is generated here once so we know (a) the exact
+	// recipe-hash an up-to-date image would carry and (b) we have a byte-
+	// identical payload ready for the rebuild path. Generating the overlay
+	// also surfaces manifest-shape errors (string-form / unsupported verb /
+	// empty source-install) before we touch docker.
+	toolsHash := OverlayHash(request.Manifest)
+	dockerfileContent, err := BuildOverlayDockerfile(request.Manifest, request.BaseImage)
+	if err != nil {
+		return EnsureProjectResult{}, fmt.Errorf("ensure project image: %w", err)
+	}
+	expectedRecipeHash := sha256Hex(dockerfileContent)
+
+	// Step 2b: capture the base image's recipe-hash label VERBATIM (no
+	// re-hashing — the label is already a sha256 hex string per PLAN.md
+	// decision 4 + Notes line 312). If the base image is genuinely missing
+	// we cannot build a sensible overlay on top of it, so surface the error.
+	// errLabelUnreadable is tolerated: the empty value flows into the
+	// rebuild path's label set and the next launch (with a working
+	// outputRunner) sees a mismatch and rebuilds — safe-but-wasteful, the
+	// conservative-opposite of decision 5.
+	baseRecipeHash, baseErr := s.inspectLabel(ctx, request.BaseImage, recipeHashLabel)
+	if baseErr != nil {
+		if dockerImageMissingError(baseErr) {
+			return EnsureProjectResult{}, fmt.Errorf("ensure project image: base image %q missing: %w", request.BaseImage.String(), baseErr)
+		}
+		if !errors.Is(baseErr, errLabelUnreadable) {
+			return EnsureProjectResult{}, fmt.Errorf("ensure project image: inspect base recipe hash: %w", baseErr)
+		}
+		baseRecipeHash = ""
+	}
+
+	// Step 3: construct the target tag from the tools hash.
+	targetRef := s.projectImageRef(toolsHash)
+
+	// Step 4: freshness probe. NoCache forces rebuild even on a perfect
+	// label match. Otherwise compare all three labels; any mismatch or
+	// read failure means rebuild.
+	rebuild := request.NoCache
+	if !rebuild {
+		rebuild = s.projectImageNeedsBuild(ctx, targetRef, expectedRecipeHash, toolsHash, baseRecipeHash)
+	}
+
+	if !rebuild {
+		return EnsureProjectResult{
+			Image:     targetRef,
+			Action:    EnsureActionUpToDate,
+			ToolsHash: toolsHash,
+		}, nil
+	}
+
+	// Step 5: rebuild path. Write the already-generated dockerfile content
+	// to an ephemeral build context (cleaned up on return), invoke
+	// docker.BuildImageArgs with the five labels (three freshness + managed
+	// + scope) per PLAN.md decision 4.
+	tempDir, err := os.MkdirTemp("", "valv-overlay-*")
+	if err != nil {
+		return EnsureProjectResult{}, fmt.Errorf("ensure project image: create build context: %w", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	dockerfilePath := filepath.Join(tempDir, "Dockerfile")
+	if err := os.WriteFile(dockerfilePath, []byte(dockerfileContent), 0o644); err != nil {
+		return EnsureProjectResult{}, fmt.Errorf("ensure project image: write overlay dockerfile: %w", err)
+	}
+
+	buildRequest := docker.ImageBuildRequest{
+		ContextDir: tempDir,
+		Dockerfile: dockerfilePath,
+		Tags:       []docker.ImageRef{targetRef},
+		Builder:    "auto",
+		Labels: map[string]string{
+			recipeHashLabel:     expectedRecipeHash,
+			baseRecipeHashLabel: baseRecipeHash,
+			toolsHashLabel:      toolsHash,
+			managedLabel:        "true",
+			scopeLabel:          scopeValueProjectOverlay,
+		},
+		NoCache: request.NoCache,
+	}
+	args, err := docker.BuildImageArgs(buildRequest)
+	if err != nil {
+		return EnsureProjectResult{}, fmt.Errorf("ensure project image: %w", err)
+	}
+	if err := s.runner.Run(ctx, args); err != nil {
+		if isBuildxUnavailable(err) {
+			s.debug("docker buildx unavailable for project overlay, falling back to legacy build", "tag", targetRef.String())
+			buildRequest.Builder = "legacy"
+			fallbackArgs, fallbackErr := docker.BuildImageArgs(buildRequest)
+			if fallbackErr != nil {
+				return EnsureProjectResult{}, fmt.Errorf("ensure project image fallback: %w", fallbackErr)
+			}
+			if err := s.runner.Run(ctx, fallbackArgs); err != nil {
+				return EnsureProjectResult{}, fmt.Errorf("ensure project image fallback: %w", err)
+			}
+		} else {
+			return EnsureProjectResult{}, fmt.Errorf("ensure project image: %w", err)
+		}
+	}
+
+	s.debug("built project overlay image", "tag", targetRef.String(), "tools_hash", toolsHash, "base_recipe_hash", baseRecipeHash)
+	return EnsureProjectResult{
+		Image:     targetRef,
+		Action:    EnsureActionUpdated,
+		ToolsHash: toolsHash,
+	}, nil
+}
+
+// projectImageNeedsBuild returns true when the per-project image at targetRef
+// is missing, has any freshness label that mismatches the expected values,
+// or has unreadable labels (per PLAN.md decision 5 conservative-opposite
+// policy). It deliberately swallows inspect errors and returns the rebuild
+// decision because the caller cannot meaningfully recover from a freshness
+// probe failure — the only sane response is to rebuild.
+func (s Service) projectImageNeedsBuild(ctx context.Context, targetRef docker.ImageRef, expectedRecipeHash, expectedToolsHash, expectedBaseRecipeHash string) bool {
+	// recipe_hash probe. dockerImageMissing → build; any other read failure
+	// → conservative rebuild.
+	gotRecipe, err := s.inspectLabel(ctx, targetRef, recipeHashLabel)
+	if err != nil {
+		return true
+	}
+	if gotRecipe != expectedRecipeHash {
+		return true
+	}
+
+	gotTools, err := s.inspectLabel(ctx, targetRef, toolsHashLabel)
+	if err != nil {
+		return true
+	}
+	if gotTools != expectedToolsHash {
+		return true
+	}
+
+	gotBase, err := s.inspectLabel(ctx, targetRef, baseRecipeHashLabel)
+	if err != nil {
+		return true
+	}
+	if gotBase != expectedBaseRecipeHash {
+		return true
+	}
+
+	return false
+}
+
+// sha256Hex computes the sha256 hex digest of s — small helper that mirrors
+// recipeHash's existing pattern without exposing crypto/sha256 at the call
+// site.
+func sha256Hex(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
 }
 
 func existingTags(state domain.ProviderImageState, defaultRef docker.ImageRef) []docker.ImageRef {

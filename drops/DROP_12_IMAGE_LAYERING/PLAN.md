@@ -235,7 +235,7 @@ Extend `internal/services/images` to compose a per-project layered Docker image 
 
 #### Unit 12.3 — Service.EnsureProjectImage + project-image cache labels
 
-**State:** todo
+**State:** done
 
 **Paths:**
 - `internal/services/images/service.go` (extend — new method, types, constants)

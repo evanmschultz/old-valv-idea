@@ -17,6 +17,7 @@ import (
 
 	"github.com/evanmschultz/valv/internal/adapters/docker"
 	"github.com/evanmschultz/valv/internal/domain"
+	"github.com/evanmschultz/valv/internal/tools"
 )
 
 type runnerRecorder struct {
@@ -1159,5 +1160,511 @@ func TestEnsureLatestRejectsCacheWithFutureTimestamp(t *testing.T) {
 	}
 	if entry.CheckedAt.After(clockNow.Add(time.Second)) {
 		t.Fatalf("cache claude.checked_at = %v is later than expected current time %v", entry.CheckedAt, clockNow)
+	}
+}
+
+// --- Unit 12.3 — EnsureProjectImage tests ---------------------------------
+//
+// Cache-matrix coverage uses runnerRecorder for both Output (label probes)
+// and Run (buildx build). The freshness probe key format mirrors the live
+// inspectLabel call: `image inspect --format {{ index .Config.Labels "<label>" }} <ref>`.
+// projectInspectKey centralises that string so the table tests stay
+// readable.
+
+// sampleProjectManifest returns a manifest used across the Unit 12.3 tests.
+// Two object-form tools — one go install, one npm install -g — exercise the
+// full overlay generator path.
+func sampleProjectManifest() tools.ToolManifest {
+	return tools.ToolManifest{
+		Tools: map[string]tools.ToolSpec{
+			"ta": {Source: "github.com/evanmschultz/ta@latest", Install: "go install"},
+			"cc": {Source: "@anthropic-ai/claude-code@1.0.0", Install: "npm install -g"},
+		},
+	}
+}
+
+// projectInspectKey returns the joined-arg key the runnerRecorder uses for
+// a label-inspect call against ref. Mirrors inspectLabel's outputRunner call
+// exactly.
+func projectInspectKey(ref, label string) string {
+	return strings.Join([]string{
+		"image", "inspect", "--format",
+		"{{ index .Config.Labels \"" + label + "\" }}",
+		ref,
+	}, " ")
+}
+
+// newProjectImageService wires a Service with the supplied runner. UID/GID
+// are pinned to 1000 so the test does not depend on the host user.
+func newProjectImageService(t *testing.T, runner Runner) Service {
+	t.Helper()
+	svc, err := New(Options{
+		Runner:     runner,
+		Repository: "ghcr.io/valv/codex",
+		ContextDir: t.TempDir(),
+		Dockerfile: "Dockerfile",
+		DefaultTag: "dev",
+		UserID:     1000,
+		GroupID:    1000,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	return svc
+}
+
+// expectedProjectTag computes the per-project tag for the sample manifest
+// against the given base ref. Shares the production logic so a future
+// short-hash-length tweak does not break the tests in a non-load-bearing way.
+func expectedProjectTag(repo string, manifest tools.ToolManifest) string {
+	hash := OverlayHash(manifest)
+	return repo + ":" + tagPrefixProjectOverlay + shortOverlayHash(hash)
+}
+
+func TestEnsureProjectImage_EmptyManifestShortCircuits(t *testing.T) {
+	t.Parallel()
+
+	runner := &runnerRecorder{}
+	svc := newProjectImageService(t, runner)
+	baseRef := docker.NewImageRef("ghcr.io/valv/codex", "dev")
+
+	result, err := svc.EnsureProjectImage(context.Background(), EnsureProjectRequest{
+		Manifest:  tools.ToolManifest{},
+		BaseImage: baseRef,
+	})
+	if err != nil {
+		t.Fatalf("EnsureProjectImage() error = %v", err)
+	}
+	if result.Image != baseRef {
+		t.Fatalf("Image = %q, want base ref %q", result.Image.String(), baseRef.String())
+	}
+	if result.Action != EnsureActionUsingExistingImage {
+		t.Fatalf("Action = %q, want %q", result.Action, EnsureActionUsingExistingImage)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("docker calls = %d, want 0 for empty-manifest short-circuit", len(runner.calls))
+	}
+}
+
+func TestEnsureProjectImage_TargetMissingTriggersBuild(t *testing.T) {
+	t.Parallel()
+
+	manifest := sampleProjectManifest()
+	baseRef := docker.NewImageRef("ghcr.io/valv/codex", "dev")
+	wantTag := expectedProjectTag("ghcr.io/valv/codex", manifest)
+
+	runner := &runnerRecorder{
+		outs: map[string]string{
+			// Base image carries its recipe hash — captured verbatim.
+			projectInspectKey(baseRef.String(), recipeHashLabel): "base-recipe-sha256-hex",
+		},
+		errs: map[string]error{
+			// Target tag is genuinely missing — dockerImageMissingError path.
+			projectInspectKey(wantTag, recipeHashLabel): fmt.Errorf("no such image"),
+		},
+	}
+	svc := newProjectImageService(t, runner)
+
+	result, err := svc.EnsureProjectImage(context.Background(), EnsureProjectRequest{
+		Manifest:  manifest,
+		BaseImage: baseRef,
+	})
+	if err != nil {
+		t.Fatalf("EnsureProjectImage() error = %v", err)
+	}
+	if result.Action != EnsureActionUpdated {
+		t.Fatalf("Action = %q, want %q", result.Action, EnsureActionUpdated)
+	}
+	if result.Image.String() != wantTag {
+		t.Fatalf("Image = %q, want %q", result.Image.String(), wantTag)
+	}
+	if result.ToolsHash == "" || len(result.ToolsHash) != 64 {
+		t.Fatalf("ToolsHash = %q, want 64-char hex", result.ToolsHash)
+	}
+
+	// Find the build invocation among the runner calls.
+	buildCallIdx := -1
+	for i, call := range runner.calls {
+		if len(call) >= 2 && call[0] == "buildx" && call[1] == "build" {
+			buildCallIdx = i
+			break
+		}
+	}
+	if buildCallIdx < 0 {
+		t.Fatalf("no buildx build call recorded: %#v", runner.calls)
+	}
+	// Assert all five labels appear on the build call.
+	args := runner.calls[buildCallIdx]
+	wantLabels := []string{
+		fmt.Sprintf("%s=%s", baseRecipeHashLabel, "base-recipe-sha256-hex"),
+		fmt.Sprintf("%s=%s", managedLabel, "true"),
+		// recipe_hash value is the sha256 of the generated overlay dockerfile;
+		// compute it here to compare without re-hashing the manifest.
+		"", // populated below
+		fmt.Sprintf("%s=%s", scopeLabel, scopeValueProjectOverlay),
+		fmt.Sprintf("%s=%s", toolsHashLabel, OverlayHash(manifest)),
+	}
+	overlayContent, err := BuildOverlayDockerfile(manifest, baseRef)
+	if err != nil {
+		t.Fatalf("BuildOverlayDockerfile error = %v", err)
+	}
+	wantLabels[2] = fmt.Sprintf("%s=%s", recipeHashLabel, sha256Hex(overlayContent))
+
+	for _, want := range wantLabels {
+		found := false
+		for i := 0; i < len(args)-1; i++ {
+			if args[i] == "--label" && args[i+1] == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("build args missing label %q in %#v", want, args)
+		}
+	}
+
+	// Confirm the build call carries the expected target tag.
+	foundTag := false
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == "-t" && args[i+1] == wantTag {
+			foundTag = true
+			break
+		}
+	}
+	if !foundTag {
+		t.Errorf("build args missing -t %s in %#v", wantTag, args)
+	}
+}
+
+func TestEnsureProjectImage_AllLabelsMatchSkipsBuild(t *testing.T) {
+	t.Parallel()
+
+	manifest := sampleProjectManifest()
+	baseRef := docker.NewImageRef("ghcr.io/valv/codex", "dev")
+	wantTag := expectedProjectTag("ghcr.io/valv/codex", manifest)
+
+	overlayContent, err := BuildOverlayDockerfile(manifest, baseRef)
+	if err != nil {
+		t.Fatalf("BuildOverlayDockerfile error = %v", err)
+	}
+	expectedRecipe := sha256Hex(overlayContent)
+	expectedTools := OverlayHash(manifest)
+	const expectedBaseRecipe = "base-recipe-sha256-hex"
+
+	runner := &runnerRecorder{
+		outs: map[string]string{
+			projectInspectKey(baseRef.String(), recipeHashLabel): expectedBaseRecipe,
+			projectInspectKey(wantTag, recipeHashLabel):          expectedRecipe,
+			projectInspectKey(wantTag, toolsHashLabel):           expectedTools,
+			projectInspectKey(wantTag, baseRecipeHashLabel):      expectedBaseRecipe,
+		},
+	}
+	svc := newProjectImageService(t, runner)
+
+	result, err := svc.EnsureProjectImage(context.Background(), EnsureProjectRequest{
+		Manifest:  manifest,
+		BaseImage: baseRef,
+	})
+	if err != nil {
+		t.Fatalf("EnsureProjectImage() error = %v", err)
+	}
+	if result.Action != EnsureActionUpToDate {
+		t.Fatalf("Action = %q, want %q (no rebuild expected when all labels match)", result.Action, EnsureActionUpToDate)
+	}
+	if result.Image.String() != wantTag {
+		t.Fatalf("Image = %q, want %q", result.Image.String(), wantTag)
+	}
+	// No buildx call should have happened.
+	for _, call := range runner.calls {
+		if len(call) >= 2 && call[0] == "buildx" && call[1] == "build" {
+			t.Fatalf("unexpected buildx build call when labels match: %#v", call)
+		}
+	}
+}
+
+func TestEnsureProjectImage_FreshnessMismatchTriggersRebuild(t *testing.T) {
+	t.Parallel()
+
+	manifest := sampleProjectManifest()
+	baseRef := docker.NewImageRef("ghcr.io/valv/codex", "dev")
+	wantTag := expectedProjectTag("ghcr.io/valv/codex", manifest)
+
+	overlayContent, err := BuildOverlayDockerfile(manifest, baseRef)
+	if err != nil {
+		t.Fatalf("BuildOverlayDockerfile error = %v", err)
+	}
+	expectedRecipe := sha256Hex(overlayContent)
+	expectedTools := OverlayHash(manifest)
+	const expectedBaseRecipe = "base-recipe-sha256-hex"
+
+	cases := []struct {
+		name string
+		// label → simulated stale value (replaces the expected match).
+		staleLabel string
+		staleValue string
+	}{
+		{name: "recipe_hash_mismatch", staleLabel: recipeHashLabel, staleValue: "stale-recipe"},
+		{name: "tools_hash_mismatch", staleLabel: toolsHashLabel, staleValue: "stale-tools"},
+		{name: "base_recipe_hash_mismatch", staleLabel: baseRecipeHashLabel, staleValue: "stale-base"},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			outs := map[string]string{
+				projectInspectKey(baseRef.String(), recipeHashLabel): expectedBaseRecipe,
+				projectInspectKey(wantTag, recipeHashLabel):          expectedRecipe,
+				projectInspectKey(wantTag, toolsHashLabel):           expectedTools,
+				projectInspectKey(wantTag, baseRecipeHashLabel):      expectedBaseRecipe,
+			}
+			outs[projectInspectKey(wantTag, tc.staleLabel)] = tc.staleValue
+
+			runner := &runnerRecorder{outs: outs}
+			svc := newProjectImageService(t, runner)
+
+			result, err := svc.EnsureProjectImage(context.Background(), EnsureProjectRequest{
+				Manifest:  manifest,
+				BaseImage: baseRef,
+			})
+			if err != nil {
+				t.Fatalf("EnsureProjectImage() error = %v", err)
+			}
+			if result.Action != EnsureActionUpdated {
+				t.Fatalf("Action = %q, want %q for %s", result.Action, EnsureActionUpdated, tc.name)
+			}
+			// Confirm a buildx build call landed.
+			built := false
+			for _, call := range runner.calls {
+				if len(call) >= 2 && call[0] == "buildx" && call[1] == "build" {
+					built = true
+					break
+				}
+			}
+			if !built {
+				t.Fatalf("no buildx build call for %s: %#v", tc.name, runner.calls)
+			}
+		})
+	}
+}
+
+// nonOutputRunner implements Runner but NOT outputRunner. It exercises the
+// errLabelUnreadable typecast-failure path in inspectLabel and the
+// conservative-rebuild policy of EnsureProjectImage.
+type nonOutputRunner struct {
+	calls [][]string
+}
+
+func (r *nonOutputRunner) Run(_ context.Context, args []string) error {
+	r.calls = append(r.calls, append([]string(nil), args...))
+	return nil
+}
+
+func TestEnsureProjectImage_TypecastFailureForcesRebuild(t *testing.T) {
+	t.Parallel()
+
+	manifest := sampleProjectManifest()
+	baseRef := docker.NewImageRef("ghcr.io/valv/codex", "dev")
+
+	runner := &nonOutputRunner{}
+	svc, err := New(Options{
+		Runner:     runner,
+		Repository: "ghcr.io/valv/codex",
+		ContextDir: t.TempDir(),
+		Dockerfile: "Dockerfile",
+		DefaultTag: "dev",
+		UserID:     1000,
+		GroupID:    1000,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	result, err := svc.EnsureProjectImage(context.Background(), EnsureProjectRequest{
+		Manifest:  manifest,
+		BaseImage: baseRef,
+	})
+	if err != nil {
+		t.Fatalf("EnsureProjectImage() error = %v", err)
+	}
+	if result.Action != EnsureActionUpdated {
+		t.Fatalf("Action = %q, want %q (typecast failure must rebuild)", result.Action, EnsureActionUpdated)
+	}
+	// Exactly one buildx call expected; no Output calls happened (the runner
+	// has no Output method).
+	if len(runner.calls) != 1 {
+		t.Fatalf("runner.calls = %d, want 1 (only buildx build, no label probes)", len(runner.calls))
+	}
+	if runner.calls[0][0] != "buildx" || runner.calls[0][1] != "build" {
+		t.Fatalf("call[0] = %#v, want buildx build", runner.calls[0])
+	}
+}
+
+func TestEnsureProjectImage_InspectErrorForcesRebuild(t *testing.T) {
+	t.Parallel()
+
+	manifest := sampleProjectManifest()
+	baseRef := docker.NewImageRef("ghcr.io/valv/codex", "dev")
+	wantTag := expectedProjectTag("ghcr.io/valv/codex", manifest)
+
+	runner := &runnerRecorder{
+		outs: map[string]string{
+			projectInspectKey(baseRef.String(), recipeHashLabel): "base-recipe-sha256-hex",
+		},
+		errs: map[string]error{
+			// Generic inspect failure (not image-missing) on the target tag.
+			// Policy: rebuild rather than bubble.
+			projectInspectKey(wantTag, recipeHashLabel): fmt.Errorf("dockerd is not responding"),
+		},
+	}
+	svc := newProjectImageService(t, runner)
+
+	result, err := svc.EnsureProjectImage(context.Background(), EnsureProjectRequest{
+		Manifest:  manifest,
+		BaseImage: baseRef,
+	})
+	if err != nil {
+		t.Fatalf("EnsureProjectImage() error = %v", err)
+	}
+	if result.Action != EnsureActionUpdated {
+		t.Fatalf("Action = %q, want %q (non-missing inspect error must rebuild)", result.Action, EnsureActionUpdated)
+	}
+}
+
+func TestEnsureProjectImage_NoCacheForcesRebuild(t *testing.T) {
+	t.Parallel()
+
+	manifest := sampleProjectManifest()
+	baseRef := docker.NewImageRef("ghcr.io/valv/codex", "dev")
+	wantTag := expectedProjectTag("ghcr.io/valv/codex", manifest)
+
+	overlayContent, err := BuildOverlayDockerfile(manifest, baseRef)
+	if err != nil {
+		t.Fatalf("BuildOverlayDockerfile error = %v", err)
+	}
+	expectedRecipe := sha256Hex(overlayContent)
+	expectedTools := OverlayHash(manifest)
+	const expectedBaseRecipe = "base-recipe-sha256-hex"
+
+	// Even though all labels match, NoCache forces rebuild.
+	runner := &runnerRecorder{
+		outs: map[string]string{
+			projectInspectKey(baseRef.String(), recipeHashLabel): expectedBaseRecipe,
+			projectInspectKey(wantTag, recipeHashLabel):          expectedRecipe,
+			projectInspectKey(wantTag, toolsHashLabel):           expectedTools,
+			projectInspectKey(wantTag, baseRecipeHashLabel):      expectedBaseRecipe,
+		},
+	}
+	svc := newProjectImageService(t, runner)
+
+	result, err := svc.EnsureProjectImage(context.Background(), EnsureProjectRequest{
+		Manifest:  manifest,
+		BaseImage: baseRef,
+		NoCache:   true,
+	})
+	if err != nil {
+		t.Fatalf("EnsureProjectImage() error = %v", err)
+	}
+	if result.Action != EnsureActionUpdated {
+		t.Fatalf("Action = %q, want %q (NoCache must rebuild)", result.Action, EnsureActionUpdated)
+	}
+	// Build call must carry --no-cache.
+	var buildCall []string
+	for _, call := range runner.calls {
+		if len(call) >= 2 && call[0] == "buildx" && call[1] == "build" {
+			buildCall = call
+			break
+		}
+	}
+	if buildCall == nil {
+		t.Fatalf("no buildx build call recorded: %#v", runner.calls)
+	}
+	hasNoCache := false
+	for _, arg := range buildCall {
+		if arg == "--no-cache" {
+			hasNoCache = true
+			break
+		}
+	}
+	if !hasNoCache {
+		t.Errorf("buildx build call missing --no-cache: %#v", buildCall)
+	}
+}
+
+func TestEnsureProjectImage_BaseImageMissingReturnsError(t *testing.T) {
+	t.Parallel()
+
+	manifest := sampleProjectManifest()
+	baseRef := docker.NewImageRef("ghcr.io/valv/codex", "dev")
+
+	runner := &runnerRecorder{
+		errs: map[string]error{
+			projectInspectKey(baseRef.String(), recipeHashLabel): fmt.Errorf("no such image: ghcr.io/valv/codex:dev"),
+		},
+	}
+	svc := newProjectImageService(t, runner)
+
+	_, err := svc.EnsureProjectImage(context.Background(), EnsureProjectRequest{
+		Manifest:  manifest,
+		BaseImage: baseRef,
+	})
+	if err == nil {
+		t.Fatal("EnsureProjectImage() error = nil, want base-missing error")
+	}
+	if !strings.Contains(err.Error(), "base image") {
+		t.Errorf("error message missing 'base image' context: %q", err.Error())
+	}
+}
+
+func TestEnsureProjectImage_OverlayGeneratorErrorWraps(t *testing.T) {
+	t.Parallel()
+
+	// String-form spec is rejected by BuildOverlayDockerfile — surface the
+	// wrapped error from EnsureProjectImage without touching docker.
+	manifest := tools.ToolManifest{
+		Tools: map[string]tools.ToolSpec{
+			"jq": {Version: "1.7"},
+		},
+	}
+	baseRef := docker.NewImageRef("ghcr.io/valv/codex", "dev")
+
+	runner := &runnerRecorder{}
+	svc := newProjectImageService(t, runner)
+
+	_, err := svc.EnsureProjectImage(context.Background(), EnsureProjectRequest{
+		Manifest:  manifest,
+		BaseImage: baseRef,
+	})
+	if err == nil {
+		t.Fatal("EnsureProjectImage() error = nil, want overlay-generator error")
+	}
+	if !strings.Contains(err.Error(), "ensure project image:") {
+		t.Errorf("error not wrapped with 'ensure project image:': %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "string-form spec") {
+		t.Errorf("error does not include underlying string-form rejection: %q", err.Error())
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("docker calls = %d, want 0 (overlay gen error must short-circuit)", len(runner.calls))
+	}
+}
+
+func TestProjectImageRef_TagFormat(t *testing.T) {
+	t.Parallel()
+
+	runner := &runnerRecorder{}
+	svc := newProjectImageService(t, runner)
+
+	const hash = "9c3a7b1e8d4f0123456789abcdef0123456789abcdef0123456789abcdef0123"
+	ref := svc.projectImageRef(hash)
+	if ref.Repository != "ghcr.io/valv/codex" {
+		t.Errorf("Repository = %q, want ghcr.io/valv/codex", ref.Repository)
+	}
+	if ref.Tag != "proj-9c3a7b1e8d4f" {
+		t.Errorf("Tag = %q, want proj-9c3a7b1e8d4f", ref.Tag)
+	}
+	if got, want := ref.String(), "ghcr.io/valv/codex:proj-9c3a7b1e8d4f"; got != want {
+		t.Errorf("String() = %q, want %q", got, want)
 	}
 }
