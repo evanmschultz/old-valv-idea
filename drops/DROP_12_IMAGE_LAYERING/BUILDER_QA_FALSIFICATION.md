@@ -460,3 +460,81 @@ Eighteen attacks attempted (eleven from the appendix's primary list + seven addi
 - Full `mage testPkg ./internal/services/images/` is not reproducible in this sandbox because an unrelated existing HTTP test cannot bind `[::1]:0`; the scoped Unit 12.3 tests pass.
 - Overlay-specific legacy fallback still has no direct recorded-args test, though the code reuses the same label map when switching builders.
 - I verified the empty label reaches the Docker CLI arguments, not Docker’s persisted on-image behavior; that distinction would need an environment with a working daemon to observe directly.
+
+## Unit 12.4 — Round 1
+
+**Verdict:** PASS
+
+**Mage targets run:** `mage testPkg ./internal/cli/` → FAIL in this sandbox: 233/234 passed, 1 existing test failed because `internal/adapters/providers/codex/bridge.go` calls `net.Listen("tcp", "0.0.0.0:0")` and this environment rejects the bind (`TestRootDebugFlagIsNotPassedThroughToInteractiveCodexLaunch`). Scoped falsification repro `env GOCACHE=/private/tmp/valv-go-build-cache go test ./internal/cli -run 'TestFalsificationResolveProjectImage' -count=1` → PASS.
+
+### Attacks attempted
+
+#### A1 — Reorder correctness
+- Hypothesis: moving `ensureClaudeImageCurrent` / `ensureCodexImageCurrent` before the service constructors broke the live run path or existing tests only pass because they never exercise the reordered flow.
+- Evidence: the code now performs the reorder exactly once per launcher and threads `projectImage` into `Options.Image` (`internal/cli/claude.go`, `internal/cli/codex.go` in commit `25a5f6c`). The new tests are helper-scoped only (`internal/cli/claude_project_image_test.go:20-154`, `internal/cli/codex_project_image_test.go:19-137`); they do not assert constructor inputs on `runClaudeCommand` / `runCodexCommand`. The full package gate could not be used to prove the reorder because it fails earlier in this sandbox on the existing Codex bridge listener path (`internal/cli/codex_test.go:391-448`, `internal/adapters/providers/codex/runtime.go:134-138`, `internal/adapters/providers/codex/bridge.go:42-48`).
+- Outcome: accepted.
+- Detail: I did not find a source-level regression, but the strongest proof here is still indirect. This is a coverage gap, not a confirmed counterexample.
+
+#### A2 — `resolveProjectImage` malformed-manifest wrapping
+- Hypothesis: a malformed `.valv/tools.toml` could lose the underlying decode context and return an unhelpful top-level error.
+- Evidence: `resolveProjectImage` wraps `tools.Resolve` with `resolve project image:` (`internal/cli/operator_helpers.go:440-444`), `tools.Resolve` wraps with `resolve tools %q:` (`internal/tools/resolve.go:28-40`), and `tools.Load` wraps TOML decode failures with `decode tools %q:` (`internal/tools/tools.go:89-104`). The targeted repro passed and confirmed the error chain includes all three layers plus the manifest path.
+- Outcome: mitigated.
+- Detail: the wrap chain is useful for diagnosis; I did not land a counterexample here.
+
+#### A3 — Whitespace env override semantics
+- Hypothesis: `VALV_<PROVIDER>_IMAGE='  '` could be treated as set and incorrectly skip overlay resolution.
+- Evidence: the helper trims before the override branch (`internal/cli/operator_helpers.go:449-453`). The targeted repro with `VALV_CLAUDE_IMAGE='  '` passed, produced an overlay ref, emitted no warning, and recorded a `buildx build --load` call.
+- Outcome: mitigated.
+- Detail: leading/trailing whitespace is handled correctly.
+
+#### A4 — Env override + empty manifest ordering
+- Hypothesis: a non-empty override env with no `.valv/tools.toml` could still print the overlay-skipped warning or try to open the images service.
+- Evidence: the empty-manifest return happens before the env-var branch (`internal/cli/operator_helpers.go:445-446`, `449-453`). Existing tests already cover the empty-manifest no-warning path for both providers (`internal/cli/claude_project_image_test.go:20-50`, `internal/cli/codex_project_image_test.go:19-46`). The targeted repro with `VALV_CLAUDE_IMAGE=test/claude:override` and no manifest also stayed silent and made zero docker calls.
+- Outcome: mitigated.
+- Detail: the warning is correctly gated on `len(manifest.Tools) > 0`.
+
+#### A5 — `openImagesService` failure propagation
+- Hypothesis: if image-service initialization fails, `resolveProjectImage` may drop either the `resolve project image:` wrapper or the underlying path/setup cause.
+- Evidence: `openStore` wraps path/setup failures with `ensure paths:` / `open store:` (`internal/cli/store.go:11-24`), `openImagesService` returns those errors unchanged, and `resolveProjectImage` re-wraps with `resolve project image:` (`internal/cli/operator_helpers.go:456-468`). The targeted repro using an invalid `DatabaseDir` passed and preserved both the top-level wrapper and the underlying `ensure paths:` cause.
+- Outcome: mitigated.
+- Detail: the error surface is diagnostic enough.
+
+#### A6 — `runClaudeImageOnlyCommand` / `runCodexImageOnlyCommand` unchanged
+- Hypothesis: the launch-path refactor accidentally touched the help/version image-only paths despite PLAN.md marking them unchanged.
+- Evidence: `git diff c4bb49b..HEAD -- internal/cli/claude.go` does not include the `runClaudeImageOnlyCommand` region, and `git diff c4bb49b..HEAD -- internal/cli/codex.go` does not include the `runCodexImageOnlyCommand` region. Comparing the pre-`25a5f6c` blobs to the current file shows those functions are byte-identical.
+- Outcome: mitigated.
+- Detail: I did not find any unintended drift in the image-only paths.
+
+#### A7 — Test fakery and overlay-build assertions
+- Hypothesis: `installFakeDocker` may make the overlay-build tests pass by merely observing “some docker call” instead of proving the overlay labels matter.
+- Evidence: `installFakeDocker` logs the full argv and returns empty `image inspect --format` output, which forces rebuilds (`internal/cli/extended_test.go:856-871`). The new CLI tests assert `buildx build --load` plus specific overlay labels (`io.valv.managed=true`, `io.valv.scope=project-overlay`, `io.valv.tools_hash=`) (`internal/cli/claude_project_image_test.go:96-111`, `internal/cli/codex_project_image_test.go:85-97`). The service-layer tests separately assert the full five-label set on the actual `EnsureProjectImage` build call (`internal/services/images/service_test.go:1285-1324`).
+- Outcome: mitigated.
+- Detail: the CLI tests are partial label checks, but the missing labels are covered one layer down where the label map is assembled.
+
+#### A8 — Stderr capture in tests
+- Hypothesis: the warning path could write directly to `os.Stderr`, making `cmd.SetErr(&stderr)` ineffective and invalidating the tests.
+- Evidence: the helper uses `fmt.Fprintln(cmd.ErrOrStderr(), ...)` (`internal/cli/operator_helpers.go:449-452`). Cobra’s `Command.ErrOrStderr` contract reports that it returns output to stderr, and the tests explicitly set `cmd.SetErr(&stderr)` before invoking the helper (`internal/cli/claude_project_image_test.go:26-31`, `125-130`; `internal/cli/codex_project_image_test.go:25-30`, `110-115`).
+- Outcome: mitigated.
+- Detail: I found no direct `os.Stderr` write in this path.
+
+#### A9 — Provider parameter validity
+- Hypothesis: `resolveProjectImage` could receive another valid `domain.Provider` value, causing `projectImageOverrideEnvName` to return `""` and then fail unexpectedly in `openImagesService`.
+- Evidence: `domain.Provider` currently has only `ProviderCodex` and `ProviderClaude`, and `ParseProvider` accepts only those two (`internal/domain/types.go:8-23`). Unknown values are invalid input today, not a third supported provider.
+- Outcome: mitigated.
+- Detail: passing `""` or another ad hoc value would fail with `unsupported provider`, but no current caller can reach that path through a valid repo-defined provider.
+
+#### A10 — `defer closeImages()` ordering
+- Hypothesis: if `EnsureProjectImage` returns an error, the store cleanup returned by `openImagesService` might be skipped and leak resources.
+- Evidence: the defer is registered immediately after `openImagesService` succeeds and before `EnsureProjectImage` is called (`internal/cli/operator_helpers.go:456-467`).
+- Outcome: accepted.
+- Detail: I did not build a runtime resource-leak counterexample. This remains a language-semantics trust point, not a source-level defect in the current code.
+
+### Non-blocking gaps
+
+- I could not independently reproduce the builder’s claimed `mage testPkg ./internal/cli/` 234/234 in this sandbox; the environment currently fails one existing Codex bridge test before the new reorder coverage question is settled.
+- Unit 12.4’s new tests prove `resolveProjectImage` behavior, but they do not directly assert that `runClaudeCommand` / `runCodexCommand` pass the resolved overlay ref into `claudeservice.New` / `codexservice.New`.
+
+### Routing for drop-end Phase 6
+
+- Re-run `mage testPkg ./internal/cli/` and the broader verification gates in an environment that permits the Codex MCP bridge listener.
+- If stronger proof of the reorder is desired, add a launcher-level test that stubs the run path far enough to observe the `Options.Image` value handed to the service constructor, not just the helper result.
