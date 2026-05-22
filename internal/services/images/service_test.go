@@ -1668,3 +1668,74 @@ func TestProjectImageRef_TagFormat(t *testing.T) {
 		t.Errorf("String() = %q, want %q", got, want)
 	}
 }
+
+// TestEnsureProjectImage_GenericBaseInspectErrorFallsThroughToRebuild
+// covers the Round 2 falsification fix to PLAN.md decision 5: a generic
+// non-missing inspect error on the BASE image (e.g. "permission denied")
+// MUST be treated as a label-read miss, populate baseRecipeHash = "", and
+// fall through to the rebuild path — NOT abort with an error.
+// Pre-fix behavior aborted with `"ensure project image: inspect base recipe
+// hash: ..."`; post-fix behavior is to log and rebuild with the empty value.
+func TestEnsureProjectImage_GenericBaseInspectErrorFallsThroughToRebuild(t *testing.T) {
+	t.Parallel()
+
+	manifest := sampleProjectManifest()
+	baseRef := docker.NewImageRef("ghcr.io/valv/codex", "dev")
+	wantTag := expectedProjectTag("ghcr.io/valv/codex", manifest)
+
+	runner := &runnerRecorder{
+		errs: map[string]error{
+			// Generic, non-missing inspect failure on the BASE image. The
+			// substring "no such image" must NOT appear, otherwise
+			// dockerImageMissingError would (correctly) classify this as
+			// fatal. "permission denied" is the canonical generic case.
+			projectInspectKey(baseRef.String(), recipeHashLabel): fmt.Errorf("permission denied"),
+			// Target tag is genuinely missing so the rebuild path activates
+			// cleanly via the dockerImageMissingError short-circuit in
+			// projectImageNeedsBuild.
+			projectInspectKey(wantTag, recipeHashLabel): fmt.Errorf("no such image"),
+		},
+	}
+	svc := newProjectImageService(t, runner)
+
+	result, err := svc.EnsureProjectImage(context.Background(), EnsureProjectRequest{
+		Manifest:  manifest,
+		BaseImage: baseRef,
+	})
+	if err != nil {
+		t.Fatalf("EnsureProjectImage() error = %v, want nil (generic base-inspect error must fall through, not abort)", err)
+	}
+	if result.Action != EnsureActionUpdated {
+		t.Fatalf("Action = %q, want %q (rebuild path must activate)", result.Action, EnsureActionUpdated)
+	}
+	if result.Image.String() != wantTag {
+		t.Fatalf("Image = %q, want %q", result.Image.String(), wantTag)
+	}
+
+	// Find the build invocation and confirm base_recipe_hash label carries
+	// the empty-string sentinel rather than a stale value.
+	var buildCall []string
+	for _, call := range runner.calls {
+		if len(call) >= 2 && call[0] == "buildx" && call[1] == "build" {
+			buildCall = call
+			break
+		}
+	}
+	if buildCall == nil {
+		t.Fatalf("no buildx build call recorded — rebuild path did not activate: %#v", runner.calls)
+	}
+
+	// Confirm the build args carry base_recipe_hash with an empty value.
+	// Format mirrors the live label-formatter: "<label>=<value>".
+	wantBaseLabel := fmt.Sprintf("%s=", baseRecipeHashLabel)
+	foundBaseLabel := false
+	for i := 0; i < len(buildCall)-1; i++ {
+		if buildCall[i] == "--label" && buildCall[i+1] == wantBaseLabel {
+			foundBaseLabel = true
+			break
+		}
+	}
+	if !foundBaseLabel {
+		t.Errorf("build call missing empty base_recipe_hash label %q in %#v", wantBaseLabel, buildCall)
+	}
+}

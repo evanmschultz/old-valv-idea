@@ -742,18 +742,23 @@ func (s Service) EnsureProjectImage(ctx context.Context, request EnsureProjectRe
 	// re-hashing — the label is already a sha256 hex string per PLAN.md
 	// decision 4 + Notes line 312). If the base image is genuinely missing
 	// we cannot build a sensible overlay on top of it, so surface the error.
-	// errLabelUnreadable is tolerated: the empty value flows into the
-	// rebuild path's label set and the next launch (with a working
-	// outputRunner) sees a mismatch and rebuilds — safe-but-wasteful, the
-	// conservative-opposite of decision 5.
+	// Per PLAN.md decision 5 (clarified Unit 12.3 Round 2): ANY other
+	// base-inspect failure — typecast (errLabelUnreadable) OR a generic
+	// non-missing inspect error (e.g. "permission denied", "dockerd is not
+	// responding") — is treated as a label-read miss. We set
+	// baseRecipeHash = "" and fall through to the rebuild path. The empty
+	// value flows into the rebuild path's label set and the next launch
+	// (with a healthy daemon) sees a hash mismatch and rebuilds — safe-but-
+	// wasteful, the conservative-opposite of imageRecipeMatches's base-image
+	// safe-skip behavior. Only dockerImageMissingError on the BASE image
+	// remains fatal: there is no overlay to build on top of a non-existent
+	// base.
 	baseRecipeHash, baseErr := s.inspectLabel(ctx, request.BaseImage, recipeHashLabel)
 	if baseErr != nil {
 		if dockerImageMissingError(baseErr) {
 			return EnsureProjectResult{}, fmt.Errorf("ensure project image: base image %q missing: %w", request.BaseImage.String(), baseErr)
 		}
-		if !errors.Is(baseErr, errLabelUnreadable) {
-			return EnsureProjectResult{}, fmt.Errorf("ensure project image: inspect base recipe hash: %w", baseErr)
-		}
+		s.debug("base recipe hash unreadable; falling through to rebuild", "base", request.BaseImage.String(), "err", baseErr)
 		baseRecipeHash = ""
 	}
 

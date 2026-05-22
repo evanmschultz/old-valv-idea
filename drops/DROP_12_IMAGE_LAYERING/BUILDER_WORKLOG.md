@@ -177,3 +177,41 @@ None. The required reads were `service.go` (existing `Service` struct + `imageRe
 - Docker layer count under heavy manifests: every overlay-build re-runs `docker buildx build` against the base image. Layer cache hits across rebuilds are subject to BuildKit's normal layer-reuse behavior — if a tools-hash change reorders sorted tools, layers between the changed entry and the end of the manifest will rebuild. Acceptable for v1; PLAN.md is silent on optimizing this.
 - Whether the buildx-unavailable legacy fallback path is actually exercised by `mage integration` is unknown — the existing `TestServiceBuildFallsBackToLegacyBuildWhenBuildxUnavailable` validates the BASE-image fallback path but the per-project overlay fallback shares the same `isBuildxUnavailable` detector + `buildRequest.Builder = "legacy"` flip, so the same coverage transitively applies to the overlay path's logic. If a future debug session needs explicit overlay-fallback coverage, add a per-project mirror of that test.
 
+## Unit 12.3 — Round 2
+
+### Round 1 Disposition
+
+Round 1 build landed at commit `ce259ea` (`feat(images): unit 12.3 ensureProjectImage + 5-label cache`). Build-QA returned a split verdict — QA Proof PASS, QA Falsification FAIL on a single issue: at `service.go:749-758`, generic non-missing base-inspect errors (e.g. `"permission denied"`, `"dockerd is not responding"`) aborted `EnsureProjectImage` with `"ensure project image: inspect base recipe hash: ..."` instead of falling through to the rebuild path. The carve-out only tolerated `errLabelUnreadable` (the typecast sentinel), not generic inspect errors.
+
+PLAN.md decision 5 was clarified by the orchestrator to disambiguate: ANY non-missing base-inspect failure — typecast OR generic — is treated as a label-read miss. Only `dockerImageMissingError` on the base image remains fatal. The updated wording is at PLAN.md L62.
+
+### Goal
+
+Apply the PLAN.md decision 5 clarification: remove the `errors.Is(baseErr, errLabelUnreadable)` carve-out so ALL non-missing base-inspect errors funnel into the same empty-fallback rebuild path. Lock the behavior with a regression test using a generic inspect error (`permission denied`) on the BASE image.
+
+### Files Touched
+
+- `internal/services/images/service.go` — single function body (`EnsureProjectImage`'s Step 2b base-inspect error handling) + comment block above L749 expanded to reflect the broadened tolerance.
+- `internal/services/images/service_test.go` — appended `TestEnsureProjectImage_GenericBaseInspectErrorFallsThroughToRebuild`. Total tests: 61 → 62.
+
+### Mage Commands Run
+
+- `mage testPkg ./internal/services/images/` → **62/62 passed**, package coverage **81.6%** (well above 60% gate; above 70% target).
+
+### Design Notes
+
+- **Why removing the `errLabelUnreadable`-only carve-out is correct.** The pre-fix code asymmetrically privileged the typecast-failure sentinel: typecast-fail → tolerate + empty-fallback; any OTHER inspect error → fatal. The asymmetry has no principled basis. The user-facing meaning of "base recipe hash unreadable" is identical regardless of whether the runner cannot capture output (test/fake scenario) or the daemon returned an error (real-world transient). Both cases should converge on the same conservative-but-recoverable behavior: log, set empty, fall through, let the next launch with a healthy daemon detect the mismatch and rebuild.
+- **No real loss of safety.** The only path that should remain fatal is `dockerImageMissingError` on the BASE image — there is genuinely no overlay to build on top of a non-existent base. That check is preserved (and short-circuits BEFORE the broadened tolerance). All other errors lose their "abort" privilege but gain the same eventual-consistency property the existing target-tag probe (`projectImageNeedsBuild`) already enjoys per PLAN.md decision 5.
+- **Daemon-recovery-friendly.** Transient daemon failures (`dockerd not responding`, `permission denied`, network blip during inspect) no longer cascade into a CLI launch failure. The user pays one extra rebuild on the next healthy launch — same trade-off the target-tag probe already accepts.
+- **Symmetry with `projectImageNeedsBuild`.** The target-tag inspect-error path at `service.go:842-867` already swallows ALL inspect errors and returns "rebuild" — that swallow logic ignores the distinction between `errLabelUnreadable` and generic errors. The base-inspect path is now structurally analogous: missing → fatal, everything-else → fall through.
+- **Test isolation.** The new test fixture is the inverse of `TestEnsureProjectImage_BaseImageMissingReturnsError`: same call surface (base inspect errors), opposite error string (`"permission denied"` vs `"no such image"`), opposite expected outcome (rebuild + nil error vs fatal error). The pair locks both branches of the base-inspect error decision.
+- **Assertion shape.** The test asserts `--label io.valv.base_recipe_hash=` (trailing equals, empty value) appears in the build call args. This confirms the empty value actually propagates into `BuildImageArgs`'s label map and gets emitted on the wire — not silently dropped. If a future refactor decides to skip empty-value labels, this assertion catches the regression.
+
+### Hylla Feedback
+
+None. Round 2 required only a localized edit to `service.go` (one function body + one comment block) plus a test append, both fully informed by the appendix's explicit code transformation. No exploratory reads beyond `service.go` itself and the existing `TestEnsureProjectImage_*` cluster in `service_test.go`. No fallback misses.
+
+### Unknowns
+
+None. Unit 12.4 remains the next blocked-by handoff; nothing new surfaced in Round 2.
+
