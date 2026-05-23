@@ -45,6 +45,10 @@ Add a generic per-account launch primitive, `valv run --account <name> [--provid
   Evidence: `internal/services/claude/service.go:162-187`, `internal/services/codex/service.go:155-178`.
 - Reuse `resolveAccountByName` for cross-provider account resolution and `--provider` semantics rather than inventing a new lookup helper.
   Evidence: `internal/cli/manage.go:1118-1162` already handles unique match, explicit provider selection, not-found, and multi-provider collision cases.
+- `valv run` local-flag extraction is prefix-only rather than whole-argv scanning: consume only `--account` / `--provider` flags that appear before the first non-flag positional, then treat the remaining argv as target-command passthrough even if later tokens spell Valv-local flags.
+  Evidence: `internal/cli/account_flag.go:3-15` currently strips `--account` by scanning until `--`, and `internal/cli/account_flag_test.go:60-106` proves the helper currently extracts mid-argv `--account` occurrences; `go doc github.com/spf13/cobra.Command.DisableFlagParsing` says when `DisableFlagParsing` is true, "all flags will be passed to the command as arguments."
+- Unbound-project recovery guidance from `valv run` preserves provider context from account resolution: explicit `--provider` should remain explicit in the suggested `valv account bind` command, while uniquely inferred providers can use the shorter provider-less suggestion.
+  Evidence: `internal/cli/manage.go:343-410` shows `account bind` accepts either `<account>` plus optional `--provider` or explicit positional provider; existing provider-specific non-TTY guidance already uses provider-qualified bind suggestions in `internal/cli/claude_setup.go:96-101` and `internal/cli/codex_setup.go:90-95`.
 - Preserve the existing `VALV_CLAUDE_IMAGE` / `VALV_CODEX_IMAGE` short-circuit behavior by keeping provider launchers on the existing `claudeImageRef` / `codexImageRef` -> `resolveProjectImage` path.
   Evidence: `internal/cli/claude.go:111-117` and `internal/cli/codex.go:116-123` still resolve provider base images before launch, and `internal/cli/operator_helpers.go:429-452` already returns the base ref unchanged when `VALV_<PROVIDER>_IMAGE` is set.
 
@@ -52,7 +56,7 @@ Add a generic per-account launch primitive, `valv run --account <name> [--provid
 
 - `valv run --account <name> [--provider <provider>] <command> [args...]` resolves `<name>` across providers without mutating bindings, then launches inside the resolved provider image with the same mount/env/isolation behavior as current runtime launchers.
 - When `--provider` is supplied, `valv run` uses the same disambiguation semantics as the existing account-resolution helper; tests cover `valv run --account work --provider claude <command>` resolving correctly when `work` exists in both Claude and Codex.
-- If `valv run --account <name>` is invoked from a directory whose detected project has no persisted Valv project row, the command errors with a clear message suggesting `valv account bind <name>` to create a project record. It does **not** auto-create or auto-bind a project row.
+- If `valv run --account <name> [--provider <provider>]` is invoked from a directory whose detected project has no persisted Valv project row, the command errors with clear bind guidance but does **not** auto-create or auto-bind a project row. The suggestion preserves runtime provider context: `valv account bind <name> --provider <provider>` when `--provider` was explicitly supplied, and `valv account bind <name>` when the provider was inferred unambiguously from `resolveAccountByName`.
 - The resolved provider still determines auth readiness, base image selection, overlay-image selection, and cross-provider mount behavior.
 - `valv claude` and `valv codex` keep their current help/version image-only shortcuts and current `--account` semantics, but their main launch paths delegate to the new primitive.
 - Existing DROP_10/12 behavior remains intact: sibling-path-aware mounts, project overlay images, and cross-provider in-container routing still work.
@@ -84,20 +88,21 @@ Blocked by: none
 
 State: `todo`
 
-Paths: `internal/cli/run.go` (new, not yet in tree), `internal/cli/run_test.go` (new, not yet in tree), `internal/cli/root.go`, `internal/cli/account_flag.go`
+Paths: `internal/cli/run.go` (new, not yet in tree), `internal/cli/run_test.go` (new, not yet in tree), `internal/cli/root.go`, `internal/cli/account_flag.go`, `internal/cli/account_flag_test.go`
 
 Packages: `internal/cli`
 
-Evidence: `internal/cli/manage.go:1118-1162` (`resolveAccountByName`), `internal/cli/account_flag.go:3-15` (`stripAccountFlag` stop-at-`--` scan), `internal/cli/root.go:120-139` (runtime command registration pattern), `internal/cli/claude.go:46-63` and `internal/cli/codex.go:51-68` (`DisableFlagParsing: true`, help/version fast paths), `go doc github.com/spf13/cobra.Command.DisableFlagParsing` ("all flags will be passed to the command as arguments"), `internal/services/claude/service.go:128-148` and `internal/services/codex/service.go:121-141` (explicit override path converts missing project rows to `domain.ErrUnboundProject`)
+Evidence: `internal/cli/manage.go:1118-1162` (`resolveAccountByName`), `internal/cli/account_flag.go:3-15` and `internal/cli/account_flag_test.go:60-106` (current helper scans until `--` and still strips mid-argv `--account`, which is the fragility this unit must remove), `internal/cli/root.go:120-139` (runtime command registration pattern), `internal/cli/claude.go:46-63` and `internal/cli/codex.go:51-68` (`DisableFlagParsing: true`, help/version fast paths), `go doc github.com/spf13/cobra.Command.DisableFlagParsing` ("all flags will be passed to the command as arguments"), `internal/cli/manage.go:343-410` (`account bind` accepts either `<account>` or `<account> --provider <provider>`), `internal/cli/claude_setup.go:96-101` and `internal/cli/codex_setup.go:90-95` (existing provider-specific bind guidance), `internal/services/claude/service.go:128-148` and `internal/services/codex/service.go:121-141` (explicit override path converts missing project rows to `domain.ErrUnboundProject`)
 
 Acceptance:
 - Register a new runtime command, `valv run`, in `internal/cli/root.go`.
-- `valv run` manually consumes only its local `--account` and `--provider` flags while leaving the target command and its flags untouched; do not require a `--` separator.
-- `valv run --help` prints `valv run`'s own help when no target command remains after local-flag stripping, while `valv run <command> --help` passes `--help` through to the target command.
+- `valv run` manually consumes only its local `--account` and `--provider` flags that appear before the first non-flag positional; once the first non-flag positional is encountered, all subsequent args, including later `--account` / `--provider`, are preserved as target-command args. Do not require a `--` separator.
+- `valv run --help` prints `valv run`'s own help when no target command remains after leading-local-flag stripping, while `valv run <command> --help` passes `--help` through to the target command.
 - The command requires `--account`, accepts optional `--provider`, resolves the named account via `resolveAccountByName`, runs provider-specific auth readiness via `ensureManagedAccountReady`, resolves the provider image via existing helpers, and then invokes the new shared run service with an explicit command override.
 - The command does not auto-bind, pick, or mutate project bindings; explicit account selection remains read-only with respect to bindings.
-- When the resolved launch path reports `domain.ErrUnboundProject` because the detected project has no persisted project row, the command returns a clear user-facing error suggesting `valv account bind <name>` to create the project record. No implicit project creation is allowed.
-- Tests cover missing `--account`, missing target command, unknown account, multi-provider name collision, explicit `--provider` disambiguation, the no-project-row error path, `valv run --help` versus target `--help`, and passthrough preservation for target-command args and flags.
+- When the resolved launch path reports `domain.ErrUnboundProject` because the detected project has no persisted project row, the command returns a clear user-facing error suggesting `valv account bind <name>` to create the project record. Preserve provider context in that suggestion: use `valv account bind <name> --provider <provider>` when `--provider` was explicitly supplied at runtime, and use `valv account bind <name>` when the provider came unambiguously from the resolved account.
+- Tests cover missing `--account`, missing target command, unknown account, multi-provider name collision, explicit `--provider` disambiguation, the no-project-row error path with both bind-suggestion variants, `valv run --help` versus target `--help`, and passthrough preservation for target-command args and flags.
+- Tests explicitly cover: (a) `valv run --account A cmd --account B` passes `--account B` to the target command unchanged, and (b) `valv run cmd --account A` treats `--account A` as a target arg and fails only because `valv run` itself is missing the required leading `--account`.
 
 Blocked by: `13.1`
 
@@ -163,6 +168,8 @@ Blocked by: `13.4`
 - Do not add new SQLite tables, columns, config fields, or per-account image settings in DROP_13.
 - Treat `valv run` as explicit-account launch only. It must not auto-bind projects, write binding rows, or auto-create a missing project record; surface bind guidance instead.
 - Keep `--provider` on `valv run` semantically aligned with the existing account-switch/account-resolution behavior: explicit provider narrows lookup, absent provider performs cross-provider resolution with collision errors.
+- For `valv run`, local flag stripping is prefix-only: consume `--account` / `--provider` only before the first non-flag positional, then leave the rest of argv untouched even if later tokens match Valv-local flag names.
+- When surfacing the unbound-project bind hint from `valv run`, preserve explicit `--provider` in the suggested bind command; when the provider was inferred uniquely from `resolveAccountByName`, use the shorter `valv account bind <name>` form.
 - Preserve the existing project-sensitive semantics: provider image selection stays provider-derived, overlay images still come from `resolveProjectImage`, and other-provider cross-mounts still depend on the bound other-provider profile for the detected project.
 - Preserve `VALV_CLAUDE_IMAGE` / `VALV_CODEX_IMAGE` short-circuit behavior by keeping provider launchers on the existing image-resolution path; do not accidentally force overlay-image work when an override is set.
 - Reuse `ContainerRunRequest.Extra` for `--entrypoint`; do not widen the Docker adapter surface unless the existing field proves insufficient in code.
