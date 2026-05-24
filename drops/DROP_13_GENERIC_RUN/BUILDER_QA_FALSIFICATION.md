@@ -192,3 +192,93 @@ All four are documented stdlib semantics — same dependency surface as the upst
 - Beyond the dispatch list: ENOTDIR, NFC/NFD, rebuild `..` injection, filesystem-root sentinel, and symlink-escape fast path also examined — no new R3 falsifier.
 
 Verdict: **pass**.
+
+## Unit 13.2 — Round 1
+
+**Verdict:** pass-with-findings
+**Reviewer:** ta-go-qa-falsification (build-QA agent)
+**Reviewed at:** 2026-05-24
+
+### Sources
+
+`drops/DROP_13_GENERIC_RUN/PLAN.md` (acceptance bullets), `BUILDER_WORKLOG.md` Unit 13.2, `internal/cli/run.go` (full read), `internal/cli/run_test.go` (full read), `internal/cli/root.go` (diff), `internal/services/run/service.go` (applyCommandOverride, LaunchRequest), `internal/adapters/docker/command.go` + `types.go`, `internal/cli/account_auth.go`. LSP for symbol resolution. `mage testPkg ./internal/cli` (independent run) + `mage build`.
+
+### Counterexamples / Attacks
+
+#### A1 — `--account` value that looks like a flag (not a confirmed bug, NIT)
+
+**Construction:** `stripRunLocalFlags(["--account", "--provider", "claude", "cmd"])`. The code at `run.go:257-260` takes `args[i+1]` as value unconditionally, so `parsed.account = "--provider"`. Next iteration: arg `"claude"` hits the default branch, returning `remaining=["claude","cmd"]`. The Valv `--provider` flag is lost; `--account` value is `"--provider"`.
+
+**Impact:** Downstream `resolveAccountByName` fails with "account '--provider' not found". Deterministic and fails loudly — no silent data loss. This is a user-error scenario, not a production bug.
+
+**Mitigation status:** Behavior is consistent and documented in the code comment; no test currently pins it. Accepted as NIT — the spec permits flag-valued names since account names are stored strings. No counterexample blocking PASS.
+
+#### A2 — `--` separator preserves all subsequent tokens
+
+**Construction:** `valv run --account A -- cmd --account B --provider codex`. Traced `stripRunLocalFlags`:
+- i=0: `--account`, i+1 `A` → `parsed.account="A"`, i=2.
+- i=2: `--` → early return with `remaining=["--","cmd","--account","B","--provider","codex"]`.
+
+The `--` is preserved in remaining, target command receives `--`, `cmd`, `--account B`, `--provider codex` verbatim. Test `TestStripRunLocalFlags/--_separator_stops_stripping_and_is_preserved` (`run_test.go:103-108`) pins this. Mitigated.
+
+#### A3 — Empty argv (`valv run` alone)
+
+`stripRunLocalFlags(nil)` returns `(parsedRunFlags{}, nil)`. Then `runRunCommand:79` checks `len(remaining)==0` → `cmd.Help()`. No panic, no missing-account error. `TestRunCommandHelpWhenNoArgs` (`run_test.go:234-250`) pins this. Mitigated.
+
+#### A4 — Collision-before-side-effect ordering is structural, not incidental
+
+`runRunCommand` calls `resolveAccountByName` at `run.go:99` before `ensureManagedAccountReady` (`run.go:108`), before `ProjectByRoot` (`run.go:129`), and before all image resolution (`run.go:153-167`). The collision error is returned at line 101-103 before any of these later steps execute. `TestRunCommandUnhappyCollisionFiresBeforeOverride` (`run_test.go:682-734`) asserts 0 override warnings and 0 buildx calls in the collision path. The ordering is code-structure guaranteed, not call-order-sensitive. Mitigated.
+
+#### A5 — Inner flags in quoted shell strings (`sh -c "echo --network"`)
+
+`valv run --account foo sh -c "echo --network"`. After stripping: `remaining=["sh","-c","echo --network"]`. These are passed verbatim into `runservice.LaunchRequest.Command`. `applyCommandOverride` at `service.go:291-297` sets `extra=["--entrypoint","sh"]` and `args=["-c","echo --network"]`. Docker receives the args as positional tokens after the image; the string `"echo --network"` is a single arg (the shell quoting resolved by the OS before exec). No `--network` flag leaks into the Docker CLI invocation — Docker flags in `ContainerRunRequest.Extra` are validated by `BuildRunArgs` which places `request.Extra` before the image token, not after. The in-container shell command `echo --network` runs as-is. Mitigated.
+
+#### A6 — Exit-code propagation from target command
+
+`docker run` with the target command exits non-zero. `SystemRunner.Run` returns `*exec.ExitError`. This bubbles through `Executor.Run` → `runservice.Service.Run` → `runRunCommand` → cobra `RunE`. Cobra prints the error and exits with code 1, regardless of the subprocess's actual exit code. This is the same behavior as `valv claude` and `valv codex` — no regression introduced by Unit 13.2. The exit code is not propagated with full fidelity; this is a pre-existing limitation of the entire launcher stack. Not a Unit 13.2 falsifier.
+
+#### A7 — `ensureManagedAccountReady` failure surfaced clearly
+
+`ensureManagedAccountReady` at `run.go:108-110` returns an error wrapped as `"run run command: %w"`. The Claude path checks for `.credentials.json` presence; if absent, returns a human-readable error. The Codex path checks `LoginStatus`; if not logged in (and not skipped), returns a non-TTY login guidance error. Both surface clearly to the caller. No swallowed error. Mitigated.
+
+#### A8 — Service construction failure leaks prepared runtime
+
+`run.go:183-200`: `runservice.New(...)` can fail (e.g., empty image repository). The code at `run.go:196-199` explicitly handles this: if `prepared != nil && prepared.Cleanup != nil { _ = prepared.Cleanup() }`. This prevents the prepared runtime's cleanup (temp dirs, bridge teardown) from being silently leaked when service construction fails. Pass.
+
+#### A9 — Two SQLite connections opened (double store-open)
+
+`openManageService` at `operator_helpers.go:35` internally calls `openStore` for the manage service's store. `runRunCommand` then calls `openStore` again at `run.go:123`. Two concurrent SQLite connections to the same file exist between lines 93 and 127. Both are properly closed via `defer closeStore()` (line 97) and `defer store.Close()` (line 127). SQLite with `modernc.org/sqlite` supports multiple readers/writers in WAL mode. This is the same pattern used by all existing provider launchers; no new regression introduced. Not a counterexample blocking PASS — accepted as pre-existing pattern.
+
+### YAGNI Check
+
+No YAGNI violations. `preparePerProviderRuntime` is a purpose-built dispatch function rather than an interface because the two provider paths are structurally identical at the call site, and the unit spec explicitly requires the dispatch to live in the CLI layer. `baseImageRefForProvider` and `ensureProviderImageCurrent` are symmetric wrappers that mirror existing single-provider patterns without adding abstraction overhead.
+
+### Hidden Dependency Check
+
+No new hidden dependencies. `runRunCommand` depends on:
+- `resolveAccountByName` — existing helper, already used by claude/codex launchers.
+- `ensureManagedAccountReady` — existing helper.
+- `openManageService` / `openStore` — existing helpers.
+- `clauderuntime.PrepareRuntime` / `codexruntime.PrepareRuntime` — existing provider adapters, not new.
+- `runservice.Service` — Unit 13.1's shared primitive (done and green).
+
+No global mutable state added. No `init()` side effects. No new package-level variables. The existing `hostCodexAccountAuth` global in `account_auth.go` (line 33) is not a new dependency — it was already a shared dependency of `valv codex` and `valv claude`, and the test infrastructure's `installStubCodexAccountAuth` correctly injects a per-command-context stub to avoid the global in tests.
+
+### Counterexample for F1 (mirror-codex missing test)
+
+Expected behavior code trace for the missing test: create `work` in both Claude and Codex; run `valv run --account work --provider codex bash` with `VALV_CODEX_IMAGE="test/codex:override"` and non-empty `tools.toml`. `resolveAccountByName` with `--provider codex` returns the Codex profile (no collision). `baseImageRefForProvider` calls `codexImageRef()` which consults `VALV_CODEX_IMAGE` and returns the override ref. `resolveProjectImage` at `run.go:164` will call `resolveProjectImageRef` internally, which short-circuits on the override-active path and emits the warning. Zero `docker buildx build` calls, exactly one `"VALV_CODEX_IMAGE override active"` warning. The production path is known-correct from the `TestRunCommandOverrideLaunchPathCodex` test that exercises it without the duplicate-name prefix. The only untested path is the `resolveAccountByName` disambiguation step for the codex side — which is already exercised by `TestRunCommandDuplicateNameRequiresProviderDisambiguation`. The two sub-behaviors are tested independently; the combination is the gap.
+
+### Falsification summary
+
+- Confirmed counterexamples blocking PASS: 0.
+- F1 (MINOR): mirror-codex duplicate-name+override test missing — gap in test coverage, not production correctness.
+- F2 (NIT): `--account` value that looks like a flag — deterministic, user-error, no silent data loss.
+- A3–A9 attacks: all mitigated by code structure, test coverage, or accepted as pre-existing limitations.
+
+Verdict: **pass-with-findings**.
+
+### Tools Used
+
+- `Read` — `internal/cli/run.go`, `internal/cli/run_test.go`, `internal/cli/root.go`, `internal/cli/account_auth.go`, `internal/cli/operator_helpers.go`, `internal/services/run/service.go`, `internal/adapters/docker/command.go`, `internal/adapters/docker/types.go`, `PLAN.md`, `BUILDER_WORKLOG.md`
+- `Bash` — `mage testPkg ./internal/cli`, `mage build`, `git show --stat 95a2604`, `git diff 95a2604~1..95a2604 -- internal/cli/root.go`, `git log --oneline -8`, `git status`, `wc -l`
+- `LSP` — `goToDefinition` on `installFakeDocker`, `installStubCodexAccountAuth`, `openManageService`, `ensureManagedAccountReady`, `applyCommandOverride`; `documentSymbol` on `run_test.go`; `findReferences`

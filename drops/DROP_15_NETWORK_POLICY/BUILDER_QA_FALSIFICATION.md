@@ -205,3 +205,101 @@ PASS with one observation.
 - Context7 evidence: builder worklog cites `/docker/cli` for `docker network create --internal` and label syntax (confirmed at BUILDER_WORKLOG.md line 33). Docker docs label-key parsing splits on first `=` per `https://docs.docker.com/reference/cli/docker/container/create/#label`.
 - Reproducer execution: temp test file `internal/adapters/docker/falsif_temp_test.go` added containing three `t.Errorf`-based attacks, run via `mage testPkg ./internal/adapters/docker`, all three FAILED as expected (3 failures / 54 tests total), then file deleted. Final `mage testPkg ./internal/adapters/docker` confirms clean tree state (51 pass).
 - No raw `go test` / `GOCACHE=...` invocations.
+
+## Unit 15.2 — Round 2
+
+**Date:** 2026-05-24
+**QA Falsification backend:** claude-sonnet-4-6 (Build-QA agent, both passes)
+**Verdict:** `pass` — no unmitigated counterexample found.
+
+### R1 Fix Verification
+
+| R1 Finding | Fix location | Validating test | Status |
+|---|---|---|---|
+| Label key with surrounding whitespace accepted | `network.go:47-50`: `TrimSpace(key) != key` check | `TestNetworkCreateRequestRejectsUntrimmedLabelKey` (4 sub-tests: leading, trailing, both, tab) | FIXED |
+| Label key with `=` not rejected | `network.go:51-54`: `ContainsRune(key, '=')` check | `TestNetworkCreateRequestRejectsLabelKeyWithEquals` (3 sub-tests) | FIXED |
+| No max network name length | `network.go:40-42` (Create) + `102-104` (Remove): `len(name) > 64` | `TestNetworkCreateRequestRejectsOverlongName` (64 accepted, 65 rejected, 256 rejected) | FIXED |
+
+### New Attack Vectors Tried
+
+**AV1 — 64-byte boundary off-by-one.**
+
+Attack: verify `len(name) > 64` uses the correct operator: 64 should accept, 65 should reject. Operator `>` means `len > 64` → 65 triggers, 64 does not. Test fixture at `network_test.go:400`: `"a" + strings.Repeat("b", 62) + "c"` = 1+62+1 = 64 bytes. The test asserts `shouldAccept: true` and `err == nil`. This directly exercises the boundary from the acceptance side.
+
+Verdict: **mitigated**. The `>` operator is correct. The test confirms 64 bytes is accepted. A tightening to `>= 64` would break this test.
+
+**AV2 — Tab character in label key.**
+
+Attack: `"\tvalv\t"` as a label key. `strings.TrimSpace("\tvalv\t") = "valv"`, which `!= "\tvalv\t"`, so the guard at `network.go:48` fires and returns the whitespace error. Explicitly covered by the "tab whitespace rejected" sub-test at `network_test.go:322-325`. `strings.TrimSpace` handles `\t`, `\n`, `\r`, `\f`, `\v` — all Unicode whitespace.
+
+Verdict: **mitigated**. Tab is caught by `strings.TrimSpace`.
+
+**AV3 — Empty label key `""` vs whitespace-only `" "`.**
+
+Attack: both should be rejected. `""`: `strings.TrimSpace("") = ""`, so the existing `== ""` guard at `network.go:44-46` catches it ("label key is required"). `" "`: `strings.TrimSpace(" ") = ""`, also caught by the same guard. Pre-existing test at `network_test.go:122-130` confirms. The new whitespace guard at line 48 is dead code for the `" "` case (already rejected at line 44 before line 48 is reached), which is fine — defense in depth is acceptable.
+
+Verdict: **mitigated**. Both empty and whitespace-only keys are rejected.
+
+**AV4 — Label VALUE containing `=` or whitespace.**
+
+Attack: verify that VALUE-side validation was NOT added (correct behavior — Docker splits on first `=`, so a value like `"val=ue"` is safe: the key is `k`, the value is `val=ue`). Code: `Valid()` only iterates `for key := range r.Labels` and checks the key. Values are never validated or constrained. `BuildNetworkCreateArgs` emits `fmt.Sprintf("%s=%s", key, request.Labels[key])` at line 79 — key goes before the first `=`, value goes after, Docker parses it correctly.
+
+Concrete test: a label `map[string]string{"valv": "network-policy=v2"}` would emit `--label valv=network-policy=v2`. Docker parses this as key=`valv`, value=`network-policy=v2`. Correct behavior. No value-side check should be present and none is.
+
+Verdict: **mitigated** (correct by design — value-side `=` is safe; the risk is only on key-side).
+
+**AV5 — Multi-byte UTF-8 name length: bytes vs runes.**
+
+Attack: could a multi-byte UTF-8 name pass the regex but have `len()` (bytes) differ from `utf8.RuneCountInString()` (runes), causing the limit to be miscounted?
+
+Analysis: the regex `^[a-zA-Z0-9][a-zA-Z0-9_.-]*$` matches only ASCII chars (0x00–0x7F range). All multi-byte UTF-8 sequences have lead bytes ≥ 0xC0, which are outside the `a-zA-Z0-9_.-` character class. Therefore any name passing the regex is guaranteed to be ASCII-only. For ASCII-only strings, `len(s) == utf8.RuneCountInString(s)`. The byte limit is rune-count-equivalent for all valid names.
+
+Verdict: **mitigated**. No divergence possible; the regex guarantees ASCII-only input before the length check.
+
+**AV6 — NetworkRemoveRequest 64-byte limit: is it enforced?**
+
+Attack: verify the builder's claim that the limit is also in `NetworkRemoveRequest.Valid()`. Code at `network.go:102-104` confirmed. The check is present and uses the identical `len(name) > 64` guard with the same error message template.
+
+Gap: there is no dedicated test for `NetworkRemoveRequest` with a 65-byte name. `TestBuildNetworkRemoveArgs` only covers empty, whitespace, and space-in-name. A 65-byte name via `BuildNetworkRemoveArgs` would hit the guard but is not tested.
+
+Verdict: **accepted risk** (minor — code exists, test absent). The production validation path is correct; the missing test is a coverage gap, not a contract bug. Routed to Findings.
+
+### YAGNI Check
+
+PASS. The R2 fixes are three narrow validation guards — no new abstraction, no new types, no new exported symbols. Each guard is minimal:
+- `TrimSpace(key) != key`: one conditional, one string op.
+- `ContainsRune(key, '=')`: one conditional, one rune search.
+- `len(name) > 64`: one conditional, one `len`.
+
+The `NetworkRemoveRequest` length check duplicates the same guard for symmetry — this is correct duplication of a boundary contract, not YAGNI bloat. No `NetworkConnectRequest` or `--network` fallback logic introduced (Schema Decision 5 cut respected).
+
+### Hidden Dep Check
+
+PASS. No new global state introduced. The three guards are pure computations inside `Valid()` method receivers. No init-time side effects. `dockerNetworkNamePattern` (existing package-level var) is read-only and unchanged. `strings.TrimSpace`, `strings.ContainsRune`, and `len` are stdlib functions with no hidden state.
+
+### Concurrency Check
+
+PASS. `Valid()` is a value receiver method — it reads the request struct but does not modify it. `BuildNetworkCreateArgs` and `BuildNetworkRemoveArgs` work on copies. No shared mutable state. The mage gate runs with `-race` enabled (confirmed by the `go test -race` flag in `mage testPkg` output). 64 tests pass under the race detector.
+
+### Interface Misuse Check
+
+No new interfaces introduced in R2. `NetworkCreateRequest.Valid()` and `NetworkRemoveRequest.Valid()` are concrete method calls, not interface dispatch. No pointer-vs-value receiver confusion (both are value receivers consistent with R1).
+
+### Error Swallowing Check
+
+No error swallowing. `Valid()` returns errors wrapped with `fmt.Errorf` (no `%w` needed — these are leaf errors with no underlying cause to preserve). `BuildNetworkCreateArgs` returns `nil, err` on validation failure (line 63-65). `BuildNetworkRemoveArgs` same pattern (line 112). Executor methods surface validation errors to callers without additional wrapping — callers see the `"validate network ... request: ..."` prefix directly.
+
+### Unknowns
+
+1. **`NetworkRemoveRequest` 65-byte name test absent.** The guard exists at `network.go:102-104`; a test pinning it does not. A future refactor could accidentally remove the `NetworkRemoveRequest` length check while keeping the `NetworkCreateRequest` one, and tests would not catch it. Low risk — accepted.
+
+2. **Context-forwarding pin for `CreateNetwork`/`RemoveNetwork`.** R1 falsification noted this gap (no `TestExecutorCreateNetworkForwardsContext` test). Unchanged in R2 — still accepted per R1's Unknowns.
+
+### Evidence
+
+- Code read: `internal/adapters/docker/network.go` (full, 116 lines) and `internal/adapters/docker/network_test.go` (full, 441 lines).
+- Diff inspected: `git show HEAD -- internal/adapters/docker/network.go` confirms 14-line insertion (3 validation guards).
+- Mage gate re-run independently: `mage testPkg ./internal/adapters/docker` → 64 tests / 65.7% / `-race` clean.
+- Path discipline: `git show --stat HEAD` → 3 files only (`BUILDER_WORKLOG.md`, `network.go` +14, `network_test.go` +144).
+- R1 falsification report at `BUILDER_QA_FALSIFICATION.md` — Unit 15.2 Round 1 section (the 3 source findings).
+- No raw `go test` / `GOCACHE=...` invocations.

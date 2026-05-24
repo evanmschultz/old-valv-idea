@@ -431,3 +431,83 @@ None. All five PLAN.md acceptance bullets (A1–A5) are satisfied with file:line
 Verdict: **pass**.
 
 Unit 15.2 cleanly adds Docker network create/remove lifecycle helpers (typed `NetworkCreateRequest` + `NetworkRemoveRequest`, deterministic arg builders, Executor methods) entirely inside `internal/adapters/docker/`. Schema-Decision-5 cut applied verbatim: no `NetworkConnectRequest`, no `BuildNetworkConnectArgs`, no `Executor.ConnectNetwork` anywhere in the repo's Go sources. `--internal` flag emission, deterministic label sorting, and required-field validation are each pinned by dedicated test cases. Executor forwarding is verified through a `CommandRunnerFunc` mock that proves args round-trip verbatim and validation errors short-circuit before the runner is invoked. `mage testPkg ./internal/adapters/docker` reproduces 51 tests passing at 67.8% coverage. Hard-constraint compliance (only edits inside `internal/adapters/docker/`) holds. Ready for QA Falsification review.
+
+## Unit 15.2 — Round 2
+
+**Date:** 2026-05-24
+**QA Proof backend:** claude-sonnet-4-6 (Build-QA agent, both passes)
+**Verdict:** `pass`
+
+### R1 Finding Verification
+
+**Finding #1 — Label key with surrounding whitespace accepted by `Valid()`.**
+
+- Fix at `internal/adapters/docker/network.go:47-50`: after the existing `strings.TrimSpace(key) == ""` empty-key check (line 44-46), a second guard checks `strings.TrimSpace(key) != key` and returns `"label key must not have leading or trailing whitespace"`. This fires for any key where the trimmed form differs from the raw form — catches leading space, trailing space, both, and tab.
+- Test at `network_test.go:298-346` (`TestNetworkCreateRequestRejectsUntrimmedLabelKey`): 4 sub-tests — leading whitespace, trailing whitespace, both sides, tab (`"\tvalv\t"`). All assert `"leading or trailing whitespace"` in the error.
+- The original R1 falsification counterexample (`"  valv  "` key) is explicitly covered by the third sub-test ("both sides rejected" at line 313-319). Counterexample is mitigated.
+
+**Finding #2 — Label key containing `=` not rejected.**
+
+- Fix at `network.go:51-54`: `strings.ContainsRune(key, '=')` check after the whitespace guard. Error message: `"label key must not contain '='"`.
+- Test at `network_test.go:348-387` (`TestNetworkCreateRequestRejectsLabelKeyWithEquals`): 3 sub-tests — `=` in middle (`"k=injected"`), `=` at start (`"=k"`), multiple equals (`"k=v=w"`). All assert the error contains `"="`.
+- Assertion at line 382 checks `strings.Contains(err.Error(), "=")`. The actual error message is `"label key must not contain '='"` which contains `=`. PASSES.
+- R1 counterexample (`"k=injected"` key silently emitting `--label k=injected=value`) is mitigated.
+
+**Finding #3 — No maximum network name length enforced.**
+
+- Fix at `network.go:40-42` (`NetworkCreateRequest.Valid()`) and `network.go:102-104` (`NetworkRemoveRequest.Valid()`): `if len(name) > 64` returns `"network name must be at most 64 bytes, got N"`. Applied to BOTH request types per builder claim.
+- Length check fires AFTER the regex match (line 37-39), so the regex already guarantees the chars are ASCII-only — meaning `len()` byte count == rune count for any name that passes the regex. No multi-byte concern.
+- Test at `network_test.go:389-440` (`TestNetworkCreateRequestRejectsOverlongName`): 3 sub-tests — 64 bytes accepted (boundary: `"a" + strings.Repeat("b", 62) + "c"` = 64 chars), 65 bytes rejected, 256 bytes rejected. The 64-byte test has `shouldAccept: true` and asserts `err == nil`. The `> 64` operator at line 40 means 64 accepts, 65 rejects — CORRECT boundary.
+- Operator: `len(name) > 64` → 64 passes, 65 fails. Test fixture confirmed: `"a" + strings.Repeat("b", 62) + "c"` = 1+62+1 = 64 bytes. VERIFIED.
+
+**NetworkRemoveRequest 64-byte enforcement:**
+
+- Builder claims it also applies to `NetworkRemoveRequest`. Verified at `network.go:102-104`. No dedicated test for this in Round 2 (the R2 tests only cover `NetworkCreateRequest`). The `TestBuildNetworkRemoveArgs` table (lines 157-214) does not include a 65-byte name case. This is a minor gap documented under Findings.
+
+### Mage Gate (independently run)
+
+```
+mage testPkg ./internal/adapters/docker
+
+[INFO] Started go test -json (-count=1 -race -cover ./internal/adapters/docker)
+[PKG PASS] github.com/evanmschultz/valv/internal/adapters/docker (2.27s)
+
+Test summary
+  tests: 64
+  passed: 64
+  failed: 0
+  skipped: 0
+
+  github.com/evanmschultz/valv/internal/adapters/docker | 65.7%
+  Minimum package coverage: 60.0%.
+  [SUCCESS] Coverage threshold met
+```
+
+Builder claimed 64 tests / 65.7% coverage. QA independently confirmed: **64 tests / 65.7% coverage**, -race enabled. Gate is GREEN.
+
+### Scope Compliance
+
+`git show --stat HEAD` for commit `70e10cd` returns exactly:
+
+- `drops/DROP_15_NETWORK_POLICY/BUILDER_WORKLOG.md`
+- `internal/adapters/docker/network.go` (+14 lines — three validation guards)
+- `internal/adapters/docker/network_test.go` (+144 lines — three new test functions)
+
+No edits to `executor.go` (builder's claim: "No edits to executor.go" — confirmed by `git show --stat HEAD`). No edits to `internal/cli/`, `internal/services/`, `internal/tools/`, or anywhere outside the declared paths. Hard-constraint compliance holds.
+
+### Findings
+
+- F1. **`NetworkRemoveRequest` 64-byte limit has no dedicated test.** The validation code is present at `network.go:102-104`, but no Round 2 test exercises a 65-byte name via `BuildNetworkRemoveArgs`. The guard exists; the test pin does not. This is a minor coverage gap — not a correctness bug — because any name that reaches the 64-byte check in `NetworkCreateRequest` would similarly hit it in `NetworkRemoveRequest`. Risk: accepted with NIT routing.
+- F2. **Validation order in `NetworkCreateRequest.Valid()`.** The length check at line 40 runs AFTER the regex match at line 37. The regex `^[a-zA-Z0-9][a-zA-Z0-9_.-]*$` rejects all non-ASCII chars, so `len()` (byte count) equals rune count for any name passing the regex. No multi-byte divergence possible. Order is safe.
+- F3. **Label-key validation runs BEFORE `=` injection is possible.** `BuildNetworkCreateArgs` calls `request.Valid()` first (line 63-65) and only proceeds to `fmt.Sprintf("%s=%s", key, ...)` (line 79) if `Valid()` returned nil. So a key containing `=` is rejected at validation time before any arg is built. Clean.
+- F4. **Existing 51 R1 tests still pass.** Test count went from 51 (R1) to 64 (R2), all passing. No regressions introduced.
+
+### Missing Evidence
+
+None that is verdict-affecting. All three R1 findings have code-level fixes with tests at the exact counterexample inputs. The mage gate independently reproduces. The `NetworkRemoveRequest` 64-byte test gap is informational (F1 above).
+
+### Summary
+
+Verdict: **pass**.
+
+All three Round 1 falsification findings are fixed with narrow, correctly-bounded validation guards in `NetworkCreateRequest.Valid()` and `NetworkRemoveRequest.Valid()`. New tests cover the label-key whitespace (4 sub-tests including tab), label-key `=` injection (3 sub-tests), and network name 64-byte limit (boundary accept + 65- and 256-byte rejection). The mage gate independently confirms 64 tests / 65.7% coverage with `-race` enabled. Scope is limited to the declared paths (`network.go` + `network_test.go` + drop worklog). Unit 15.2 is ready to close.

@@ -192,3 +192,115 @@ Round 3 closes A2 from `BUILDER_QA_FALSIFICATION.md` Round 2: missing-leaf edge 
 ### Findings
 
 No findings. A2 closure confirmed by source inspection + reproduction test + independent mage run. Verdict: pass.
+
+
+## Unit 13.2 — Round 1
+
+**Verdict:** pass-with-findings
+**Reviewed at:** 2026-05-24
+
+### Scope
+
+Unit 13.2 — `valv run` command + root wiring. New files: `internal/cli/run.go`, `internal/cli/run_test.go`. Modified: `internal/cli/root.go` (4-line delta: `newRunCommand` construction + `AddCommand`). Reviewed against all 11 acceptance bullets in `drops/DROP_13_GENERIC_RUN/PLAN.md:100-112`.
+
+### Files audited
+
+- `internal/cli/run.go` (449 lines, new)
+- `internal/cli/run_test.go` (822 lines, new)
+- `internal/cli/root.go` (4-line delta)
+- `drops/DROP_13_GENERIC_RUN/BUILDER_WORKLOG.md` — Unit 13.2 Round 1 entry
+- `drops/DROP_13_GENERIC_RUN/PLAN.md` — Unit 13.2 state flip to `done`
+
+`git show --stat 95a2604` confirms exactly these 5 files changed. No edits to `internal/services/`, `internal/adapters/`, `internal/domain/`, `magefile.go`, or `internal/cli/account_flag.go`.
+
+### Mage targets run (independent)
+
+- `mage testPkg ./internal/cli`
+  - 280 tests passed, 0 failed, 0 skipped
+  - Package coverage: 68.6% (above the 60% mage-enforced floor)
+  - `-race` enabled — race-detector clean
+  - Matches builder claim exactly.
+- `mage build` — passes; `cmd/valv` links cleanly with `runCmd` wired into root.
+
+### Per-acceptance audit
+
+**1. `valv run` registered in root.go under `runtime` group.**
+`internal/cli/root.go:130-131` constructs `runCmd := newRunCommand(paths, nil)` and sets `runCmd.GroupID = "runtime"`. Line 141 passes `runCmd` to `cmd.AddCommand(...)`. Test `TestRunCommandRegisteredInRoot` (`run_test.go:781-803`) constructs the full root command tree via `NewRootCommandWithPaths`, iterates `root.Commands()`, asserts a child named `"run"` exists with `GroupID="runtime"`. Pass.
+
+**2. Prefix-only flag extraction (`stripRunLocalFlags`).**
+`stripRunLocalFlags` at `run.go:241-292` uses a switch over each arg; the `default` branch fires on the first non-flag token and returns immediately, leaving all subsequent args in `remaining`. Exact behavior:
+- `--account` space-form: consumes `args[i+1]` as value, advances `i+=2` (`run.go:257-260`).
+- `--account=value` form: extracts `arg[len("--account="):]` (`run.go:261-269`).
+- `--` sentinel: returns remaining starting at `--` (`run.go:247-250`).
+- Malformed `--account` with no value: stops stripping, preserves malformed flag in remaining (`run.go:252-257`).
+- Malformed `--account=` empty: stops stripping (`run.go:262-265`).
+
+Test case (a): `valv run --account A cmd --account B` covered by `TestStripRunLocalFlags/later_--account_is_passthrough_after_first_positional` (`run_test.go:82-87`). Pass.
+
+Test case (b): `valv run cmd --account A` covered by `TestStripRunLocalFlags/non-flag_positional_first_leaves_--account_untouched` (`run_test.go:98-101`). Pass.
+
+Equals form (`--account=X`): covered by `TestStripRunLocalFlags/--account_equals_form_only` (`run_test.go:50-55`). Pass.
+
+`--` separator: covered by `TestStripRunLocalFlags/--_separator_stops_stripping_and_is_preserved` (`run_test.go:103-108`). Pass.
+
+No-mutation contract: `TestStripRunLocalFlagsDoesNotMutateInput` (`run_test.go:170-181`). Pass.
+
+**3. Help routing (`valv run --help` own help; `valv run cmd --help` passthrough).**
+`runRunCommand:79-81` checks `len(remaining)==0 || isRunHelpArg(remaining[0])`. When remaining is empty or first token is `--help`/`-h`/`help`, `cmd.Help()` is returned.
+
+`TestRunCommandHelpForOwnHelp` (`run_test.go:254-284`) covers `--help`, `-h`, `help`, and `--account X --help` (no positional). Pass.
+
+`TestRunCommandTargetHelpIsPassthrough` (`run_test.go:292-314`) passes `["bash","--help"]`; asserts missing-account error returned (not own-help), and own-help text not in output. Pass.
+
+**4. Requires `--account`, optional `--provider`, resolves via `resolveAccountByName`, auth via `ensureManagedAccountReady`, image via existing helpers, invokes `runservice.Service.Run` with command override.**
+
+- `--account` required guard: `run.go:84-86`. Test: `TestRunCommandMissingAccount` (`run_test.go:318-334`). Pass.
+- `resolveAccountByName`: `run.go:99`. Test: `TestRunCommandUnknownAccount` (`run_test.go:338-354`). Pass.
+- `ensureManagedAccountReady`: `run.go:108`. Dispatches via `account_auth.go:37-46`. Tests seed credentials or set `VALV_TEST_SKIP_HOST_CODEX_LOGIN=1`. Pass.
+- Image resolution: `baseImageRefForProvider` (`run.go:342-351`) → `ensureProviderImageCurrent` (`run.go:357-366`) → `resolveProjectImage` (`run.go:164-167`). Override tests confirm short-circuit. Pass.
+- `runservice.Service.Run` with `Command: append([]string(nil), remaining...)` at `run.go:202-210`. Pass.
+
+**5. No auto-bind / binding mutation.**
+`runRunCommand` at `run.go:128-135` calls `store.ProjectByRoot` and on `ErrNotFound` returns the bind-hint error — never calls `CreateProject`, `CreateBinding`, or any manage-service mutation methods. Pass.
+
+**6. `ErrNotFound` → bind hint preserving provider context.**
+`store.ProjectByRoot ErrNotFound` triggers bind hint at `run.go:131-133`. `unboundProjectBindHintError` at `run.go:312-323`:
+- `providerExplicit=true`: `"valv account bind name --provider provider"`.
+- `providerExplicit=false`: `"valv account bind name"`.
+
+`TestRunCommandUnboundProjectBindHint` (`run_test.go:387-466`) covers both variants. Pass.
+`TestUnboundProjectBindHintErrorFormat` (`run_test.go:740-777`) is a focused unit test of the formatter. Pass.
+
+**7. Override-launch-path tests (both providers + unhappy collision + duplicate-name+provider+override combined).**
+
+- Claude override: `TestRunCommandOverrideLaunchPathClaude` (`run_test.go:496-550`) — single claude account, `VALV_CLAUDE_IMAGE` set, 1 override warning, 0 buildx calls. Pass.
+- Codex override: `TestRunCommandOverrideLaunchPathCodex` (`run_test.go:554-601`) — single codex account, `VALV_CODEX_IMAGE` set, 1 override warning, 0 buildx calls. Pass.
+- Duplicate-name + `--provider claude` + override: `TestRunCommandDuplicateNameWithExplicitProviderAndOverride` (`run_test.go:614-668`) — `work` in both providers, `--provider claude`, `VALV_CLAUDE_IMAGE` set, `VALV_CODEX_IMAGE=""`. 1 Claude warning, 0 Codex warnings, 0 buildx calls. Pass.
+- Unhappy collision: `TestRunCommandUnhappyCollisionFiresBeforeOverride` (`run_test.go:682-734`) — collision error fires before any warning, 0 override warnings, 0 buildx calls. Pass.
+
+**Coverage gap — mirror-codex duplicate-name scenario (not blocking):** Acceptance bullet 10 requires the mirror Codex case (`--provider codex` + `VALV_CODEX_IMAGE` set) in the duplicate-name context. `TestRunCommandOverrideLaunchPathCodex` covers codex override with a SINGLE account (no collision). The mirror-codex-with-duplicate-name combined case has no dedicated test. See Findings.
+
+**8. Path discipline.**
+`git show --stat 95a2604` confirms exactly 5 files: `run.go` (new, +449), `run_test.go` (new, +822), `root.go` (+4/-1), `BUILDER_WORKLOG.md` (append), `PLAN.md` (state flip only). No edits outside declared paths. Pass.
+
+### Findings
+
+**F1 — Missing mirror-codex duplicate-name+override test (MINOR, not blocking)**
+
+Acceptance bullet 10 (`PLAN.md:110`) specifies the mirror Codex case: duplicate-name + `--provider codex` + `VALV_CODEX_IMAGE` set must emit exactly one Codex override warning and zero overlay docker calls. No test in `run_test.go` covers this combined scenario. `TestRunCommandOverrideLaunchPathCodex` uses a single-account (no collision) codex setup, so the disambiguation+override ordering is not exercised for codex. The production code path is identical for both providers via `preparePerProviderRuntime` dispatch — the gap is in test coverage, not production correctness. Round 2 should add `TestRunCommandDuplicateNameWithExplicitProviderAndOverrideMirrorCodex`.
+
+**F2 — `--account` with flag-valued value not explicitly tested (NIT)**
+
+`stripRunLocalFlags(["--account", "--provider", "claude", "cmd"])` sets `parsed.account="--provider"` and returns `remaining=["claude", "cmd"]`. Behavior is deterministic and `resolveAccountByName` will fail with a clear not-found error. No test documents this edge case.
+
+### Summary
+
+All 11 acceptance bullets pass. Two findings: one minor test-coverage gap (mirror-codex duplicate-name scenario unexercised) and one NIT (undocumented behavior for flag-valued `--account`). Neither blocks passing the unit. `mage testPkg ./internal/cli` independently confirms 280/280 tests pass at 68.6% coverage with race detector clean. `mage build` clean.
+
+**Verdict: pass-with-findings**
+
+### Tools Used
+
+- `Read` — `internal/cli/run.go`, `internal/cli/run_test.go`, `internal/cli/root.go`, `PLAN.md`, `BUILDER_WORKLOG.md`, `account_auth.go`, `operator_helpers.go`, `internal/services/run/service.go`, `internal/adapters/docker/command.go`, `internal/adapters/docker/types.go`
+- `Bash` — `mage testPkg ./internal/cli`, `mage build`, `git show --stat 95a2604`, `git diff 95a2604~1..95a2604 -- internal/cli/root.go`, `git log --oneline -8`, `git status`, `wc -l`
+- `LSP` — `goToDefinition` on `installFakeDocker`, `installStubCodexAccountAuth`, `openManageService`, `ensureManagedAccountReady`; `documentSymbol` on `run_test.go`; `findReferences`

@@ -125,3 +125,31 @@ Discipline clean: no `GOCACHE`, no raw `go test`, no sandbox bypass. Only `mage 
 ### Verdict Justification
 
 Twenty-two attack angles attempted against the R3 fixes; none produced a confirmed counterexample. The under-lock re-probe closes the race window from R2 counterexample #1, the `migrationHookBeforeCommit` hook closes the false-coverage gap from R2 counterexample #2, and the `context.Background()` rollback patches a real driver-behavior subtlety (uncovered by builder's own test failure, per worklog) that would have leaked tx writes on cancel. Tests target the actually-fixed code paths, not just the surrounding scaffolding. Independent `mage testPkg` reproduces 37/37 at 80.8% coverage with `-race` clean. Two fragilities recorded for future attention (hook field is unsynchronized; rollback ctx loses telemetry chain) — both acceptable as documented trade-offs, neither rises to a falsification. Verdict: PASS.
+
+## Unit 14.2 — Round 1
+
+verdict: pass
+
+Nine attack vectors attempted; none produced a confirmed counterexample.
+
+### Attack log
+
+1. **Regex anchoring** — both `^` and `$` present (`service.go:619`); Go RE2 requires full-string match. Internal-whitespace / newline / control-char cases rejected. Mitigated.
+2. **Reserved-key lowercase bypass** — reserved keys are exact-case uppercase; `codex_home` (lowercase) is a distinct user var. Runtime adapters inject only uppercase forms, so no privilege-escalation path. Accepted design.
+3. **Empty value** — key-only validation; empty VALUE accepted (correct POSIX `VAR=` semantics). Accepted.
+4. **Unicode keys** — ASCII `[A-Za-z]` regex rejects `é`/`Ω`. Mitigated structurally.
+5. **No length cap** — no max on key/value; no PLAN requirement. Accepted gap (noted).
+6. **Idempotent Set** — UPSERT `ON CONFLICT(profile_id, env_key) DO UPDATE`; `TestSetAccountEnvOverwritesExistingValue` (`service_test.go:941-964`). Mitigated.
+7. **Unset missing key** — `TestUnsetAccountEnvReturnsErrNotFoundWhenKeyMissing` (`service_test.go:995-1012`); store wraps ErrNotFound on RowsAffected==0. Mitigated.
+8. **Error wrapping** — `%w` at all boundaries (Set :648/652/656, Unset :667/671/674, List :686/690). Mitigated.
+9. **Reserved-key completeness** — all 6 present; verified against both runtime adapters. Mitigated.
+
+### YAGNI
+
+`AccountEnvEntryView` zero-cost alias, documented forward-stub for 14.3. `validateAccountEnvKey` has 3 call sites (pulls weight). No over-engineering.
+
+### Hidden dep
+
+No init() side effects beyond `regexp.MustCompile` (valid RE2, confirmed by suite). `reservedAccountEnvKeys` literal map, effectively immutable. No shared mutable state.
+
+Verdict: pass.

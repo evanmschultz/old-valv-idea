@@ -233,3 +233,29 @@ Race detector enabled by `mage`. Gofumpt check is the first step of the target a
 ### Verdict Justification
 
 All nine specifically-listed verification points pass with file:line citations against the actual Round 3 commit (`6ebccb4`). Both Round-2 findings (#1 race window, #2 fake cancel test) are addressed by code that holds up to source inspection — not just docstrings. Tests target the under-lock branch and the actual pre-COMMIT window. Independent `mage testPkg` confirms 37 passing tests at 80.8% coverage with `-race`. Scope discipline clean. No mage-discipline violations. Verdict: PASS.
+
+## Unit 14.2 — Round 1
+
+verdict: pass
+
+### Scope
+
+manage-service account-env CRUD (`SetAccountEnv` / `UnsetAccountEnv` / `ListAccountEnv`) in `internal/services/manage/service.go`. Independent `mage testPkg ./internal/services/manage`: 55 tests, 78.5% coverage, race-clean (matches builder claim exactly).
+
+### Per-acceptance audit
+
+1. **ProfileByName seam** — Set resolves at `service.go:650`, Unset at `:669`, List at `:684`; each wraps with `%w` so `errors.Is(err, domain.ErrNotFound)` propagates. Test `TestAccountEnvOperationsReturnErrNotFoundForUnknownAccount` (`service_test.go:1014-1032`).
+2. **Regex anchored + literal surfaced** — `const accountEnvKeyPattern = "^[A-Za-z_][A-Za-z0-9_]*$"` (`service.go:619`), compiled once (`:623`); rejection errors interpolate the constant (`:701` empty, `:704` invalid). Test asserts `strings.Contains(err.Error(), "^[A-Za-z_][A-Za-z0-9_]*$")` (`service_test.go:1114`).
+3. **6 reserved keys + non-persistence** — `reservedAccountEnvKeys` (`service.go:629-636`) = CODEX_HOME, CLAUDE_CONFIG_DIR, HOME, LOGNAME, TERM, USER. `TestSetAccountEnvRejectsReservedKeys` (`service_test.go:1034-1079`) sub-tests all 6 + asserts absence from ListAccountEnv after rejection. Verified against runtime adapters codex/runtime.go:117-132 + claude/runtime.go:127-142.
+4. **Cross-account separation** — `TestSetAccountEnvSeparatesValuesAcrossAccounts` (`service_test.go:1143-1189`) asserts distinct ProfileID rows.
+5. **Rename stability** — `TestAccountEnvSurvivesAccountRename` (`service_test.go:1191-1235`): renamed.ID==created.ID; old name ErrNotFound; new name same entry.
+6. **9 invalid-key cases** — `TestSetAccountEnvRejectsInvalidKeys` (`service_test.go:1081-1119`): empty, leading-digit, internal/leading/trailing whitespace, hyphenated, dotted, NUL, newline. Mirror `TestUnsetAccountEnvRejectsInvalidKeys`.
+7. **Literal regex in error** — `service_test.go:1114`.
+8. **Deterministic ordering** — `ORDER BY env_key ASC` at store layer (`account_env.go:79`); `TestSetAccountEnvPersistsAndListAccountEnvReturnsSorted` (`service_test.go:898-939`).
+9. **Scope clean** — commit touched only manage/service.go + service_test.go + magefile.go + drop dir.
+
+### Findings
+
+NIT only: `AccountEnvEntryView` type alias (`service.go:641`) has zero consumers yet (documented forward-stub for Unit 14.3). Zero-cost alias. Not a bug.
+
+Verdict: pass.
