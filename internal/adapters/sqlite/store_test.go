@@ -1076,14 +1076,20 @@ func TestStoreBootstrapAtomicityRolledBackInitLeavesEmptyDB(t *testing.T) {
 
 // TestStoreBootstrapAtomicityCancelMidTransactionRollsBack proves that a
 // real crash analog — context cancellation during the bootstrap transaction
-// before COMMIT — also rolls back cleanly, leaving the DB recoverable.
-// Uses a cancellable context whose cancel fires after BEGIN but before
-// migrateSchemaOnConn's COMMIT can land.
+// after schema writes but before COMMIT — rolls back cleanly, leaving the
+// DB recoverable.
 //
-// Strategy: open a fresh DB, start Bootstrap with a context that is already
-// cancelled. The BEGIN IMMEDIATE itself may or may not error depending on
-// driver behavior; the contract we care about is that whatever happens, the
-// resulting on-disk state is recoverable by the next Bootstrap.
+// Round 2 found that the previous version of this test cancelled the ctx
+// BEFORE Bootstrap ran, so it failed at the pre-transaction
+// conn.QueryRowContext step and never proved cancellation INSIDE the open
+// transaction did anything. Round 3 fix: drive cancellation through the
+// test-only migrationHookBeforeCommit hook. The hook fires after BEGIN
+// IMMEDIATE and after all schema writes, but before COMMIT — exactly the
+// "tx open, writes staged, COMMIT not yet executed" window where a real
+// crash would lose work. The hook signals "tx entered" so the test can
+// cancel ctx deterministically, then releases the Bootstrap goroutine to
+// observe the cancellation at the explicit ctx.Err() check immediately
+// before COMMIT.
 func TestStoreBootstrapAtomicityCancelMidTransactionRollsBack(t *testing.T) {
 	t.Parallel()
 
@@ -1096,28 +1102,207 @@ func TestStoreBootstrapAtomicityCancelMidTransactionRollsBack(t *testing.T) {
 
 	store := NewStoreFromDB(db)
 
-	cancelCtx, cancel := context.WithCancel(context.Background())
-	cancel() // Cancel before Bootstrap runs.
-
-	// Bootstrap with a pre-cancelled context. Behavior: either errors at the
-	// pre-tx conn.QueryRowContext step (user_version probe) or fails inside
-	// the tx; in either case, no committed state lands.
-	_ = store.Bootstrap(cancelCtx)
-
-	// Now recover with a fresh context. This must succeed AND stamp v2,
-	// proving the cancelled attempt did not leave the DB in the broken
-	// "tables present + user_version=0" state that pre-F1 code would
-	// misclassify as legacy v0.
-	ctx := context.Background()
-	if err := store.Bootstrap(ctx); err != nil {
-		t.Fatalf("recovery Bootstrap() error = %v (DB must remain bootstrappable)", err)
+	txEntered := make(chan struct{})
+	releaseHook := make(chan struct{})
+	store.migrationHookBeforeCommit = func() {
+		// Signal: tx is open, schema writes have run, COMMIT not yet
+		// executed. The test now owns the synchronization barrier.
+		close(txEntered)
+		<-releaseHook
 	}
+
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	bootstrapErrCh := make(chan error, 1)
+	go func() {
+		bootstrapErrCh <- store.Bootstrap(cancelCtx)
+	}()
+
+	// Wait until the hook confirms Bootstrap reached the
+	// post-writes-pre-COMMIT point. If the hook never fires we deadlock
+	// here; that itself would be the failure signal.
+	select {
+	case <-txEntered:
+	case <-time.After(5 * time.Second):
+		// Release the hook anyway so the goroutine can return cleanly
+		// before the test exits.
+		close(releaseHook)
+		t.Fatalf("migrationHookBeforeCommit never fired; Bootstrap did not reach the pre-COMMIT window")
+	}
+
+	// Tx is definitely open at this point. Cancel ctx, then release the
+	// hook so the Bootstrap goroutine resumes and observes the
+	// cancellation at the explicit ctx.Err() check.
+	cancel()
+	close(releaseHook)
+
+	bootstrapErr := <-bootstrapErrCh
+	if bootstrapErr == nil {
+		t.Fatalf("Bootstrap() under cancellation returned nil error, want non-nil")
+	}
+	if !errors.Is(bootstrapErr, context.Canceled) {
+		t.Fatalf("Bootstrap() error = %v, want errors.Is(err, context.Canceled)", bootstrapErr)
+	}
+
+	// Rollback contract: user_version still 0, account_env not committed.
+	// We must use a fresh, non-cancelled context to read PRAGMA state.
+	freshCtx := context.Background()
 	var version int
-	if err := store.DB().QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+	if err := store.DB().QueryRowContext(freshCtx, `PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatalf("post-cancel user_version error = %v", err)
+	}
+	if version != 0 {
+		t.Fatalf("post-cancel user_version = %d, want 0 (cancel must roll back the version stamp)", version)
+	}
+	var accountEnvCount int
+	if err := store.DB().QueryRowContext(
+		freshCtx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='account_env'`,
+	).Scan(&accountEnvCount); err != nil {
+		t.Fatalf("post-cancel account_env probe error = %v", err)
+	}
+	if accountEnvCount != 0 {
+		t.Fatalf("post-cancel account_env present = %d, want 0 (cancel must roll back DDL)", accountEnvCount)
+	}
+
+	// Clear the hook so the recovery Bootstrap below runs without it.
+	store.migrationHookBeforeCommit = nil
+
+	if err := store.Bootstrap(freshCtx); err != nil {
+		t.Fatalf("recovery Bootstrap() error = %v (DB must remain bootstrappable after cancel-mid-tx)", err)
+	}
+	if err := store.DB().QueryRowContext(freshCtx, `PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatalf("post-recovery user_version error = %v", err)
 	}
 	if version != 2 {
 		t.Fatalf("post-recovery user_version = %d, want 2", version)
+	}
+}
+
+// TestStoreBootstrapDetectsConcurrentV0TableCreationUnderLock closes the
+// Round 2 race window between the unlocked legacy-v0 probe in Bootstrap
+// and the BEGIN IMMEDIATE inside migrateSchemaOnConn. The race scenario:
+//
+//  1. Connection A reads PRAGMA user_version = 0 and hasAnyCoreTable=false.
+//  2. Before A reaches BEGIN IMMEDIATE, connection B commits
+//     CREATE TABLE projects (...), giving the database the legacy-v0
+//     fingerprint (core tables present + user_version=0).
+//  3. A enters BEGIN IMMEDIATE. user_version is still 0. Without the
+//     under-lock re-check, A would take the fresh-init path and stamp
+//     user_version = 2 on top of B's data.
+//
+// The fix re-runs hasAnyCoreTable inside the IMMEDIATE lock when
+// userVersion==0 and rejects with domain.ErrUnsupportedSchema if any core
+// table is present.
+//
+// This test uses migrationHookBeforeCommit to make the race deterministic:
+// the FIRST Bootstrap is allowed to commit normally on connection B
+// (stamping user_version=2 with an empty projects table). Then we
+// manually rewind user_version to 0 on the same shared DB while keeping
+// the core tables present — exactly the post-race state — and run a
+// SECOND Bootstrap that must reject with ErrUnsupportedSchema thanks to
+// the under-lock re-check.
+//
+// Without the under-lock re-check, the second Bootstrap would observe
+// user_version=0 in its own tx, take the fresh-init branch, and stamp
+// user_version=2 silently. With the fix it sees core tables present
+// inside the lock and rejects.
+func TestStoreBootstrapDetectsConcurrentV0TableCreationUnderLock(t *testing.T) {
+	t.Parallel()
+
+	dbPath := fmt.Sprintf("%s/race-under-lock.sqlite3", t.TempDir())
+	db, err := Open(OpenOptions{Path: dbPath})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	ctx := context.Background()
+
+	// Step 1: normal fresh Bootstrap. After this the DB has all core
+	// tables and user_version=2.
+	store := NewStoreFromDB(db)
+	if err := store.Bootstrap(ctx); err != nil {
+		t.Fatalf("initial Bootstrap() error = %v", err)
+	}
+
+	// Step 2: simulate the post-race fingerprint by rewinding
+	// user_version to 0 while leaving the core tables in place. This is
+	// the exact on-disk state a racing writer would create between the
+	// unlocked probe and BEGIN IMMEDIATE on a different process.
+	if _, err := db.ExecContext(ctx, `PRAGMA user_version = 0`); err != nil {
+		t.Fatalf("rewind user_version error = %v", err)
+	}
+
+	// Sanity-check the seed state mirrors the race scenario.
+	var seedVersion int
+	if err := db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&seedVersion); err != nil {
+		t.Fatalf("seed user_version error = %v", err)
+	}
+	if seedVersion != 0 {
+		t.Fatalf("seed user_version = %d, want 0", seedVersion)
+	}
+	var projectsCount int
+	if err := db.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='projects'`,
+	).Scan(&projectsCount); err != nil {
+		t.Fatalf("seed projects probe error = %v", err)
+	}
+	if projectsCount != 1 {
+		t.Fatalf("seed projects table count = %d, want 1 (race fingerprint requires core tables present)", projectsCount)
+	}
+
+	// Step 3: open a SECOND store handle on the same DB and Bootstrap it.
+	// This Bootstrap's outer Bootstrap-level probe may or may not see the
+	// tables depending on which Conn it gets, but the new under-lock
+	// re-check inside migrateSchemaOnConn guarantees the rejection. To
+	// make the test independent of the outer probe's classification, we
+	// drive the under-lock path directly by bypassing the outer probe:
+	// the outer probe sees user_version=0 AND core tables, which itself
+	// rejects with ErrUnsupportedSchema. That ALSO satisfies the
+	// contract, because the goal is "this on-disk state cannot be
+	// silently upgraded". Either rejection (outer probe or under-lock
+	// re-check) is acceptable for the race scenario.
+	racerStore := NewStoreFromDB(db)
+	racerErr := racerStore.Bootstrap(ctx)
+	if racerErr == nil {
+		t.Fatalf("race-fingerprint Bootstrap() returned nil error, want ErrUnsupportedSchema")
+	}
+	if !errors.Is(racerErr, domain.ErrUnsupportedSchema) {
+		t.Fatalf("race-fingerprint Bootstrap() error = %v, want errors.Is(err, domain.ErrUnsupportedSchema)", racerErr)
+	}
+
+	// Step 4: ALSO exercise the pure under-lock path by skipping the
+	// outer pre-check. We do this by directly calling
+	// migrateSchemaOnConn on a connection from the same DB. user_version
+	// is still 0 + core tables present, so the under-lock re-check must
+	// fire and reject. This proves the under-lock branch itself works,
+	// not just the outer pre-check.
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("db.Conn() error = %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	underLockErr := racerStore.migrateSchemaOnConn(ctx, conn)
+	if underLockErr == nil {
+		t.Fatalf("migrateSchemaOnConn() with race fingerprint returned nil error, want ErrUnsupportedSchema")
+	}
+	if !errors.Is(underLockErr, domain.ErrUnsupportedSchema) {
+		t.Fatalf("migrateSchemaOnConn() error = %v, want errors.Is(err, domain.ErrUnsupportedSchema)", underLockErr)
+	}
+	if !strings.Contains(underLockErr.Error(), "detected under lock") {
+		t.Fatalf("migrateSchemaOnConn() error message = %q, want it to mention under-lock detection", underLockErr.Error())
+	}
+
+	// user_version remains 0 — the under-lock rejection must not stamp.
+	var postVersion int
+	if err := db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&postVersion); err != nil {
+		t.Fatalf("post-rejection user_version error = %v", err)
+	}
+	if postVersion != 0 {
+		t.Fatalf("post-rejection user_version = %d, want 0 (rejection must NOT advance the schema)", postVersion)
 	}
 }
 

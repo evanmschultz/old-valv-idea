@@ -12,6 +12,17 @@ import (
 
 type Store struct {
 	db *sql.DB
+
+	// migrationHookBeforeCommit is a TEST-ONLY synchronization hook fired
+	// from inside migrateSchemaOnConn after all schema writes succeed but
+	// BEFORE the COMMIT statement runs. It exists solely to let tests build
+	// deterministic mid-transaction synchronization (signal "tx entered" /
+	// wait for ctx-cancel / etc.) without resorting to timing-based races.
+	//
+	// Production callers MUST NOT set this field. It is unexported, has no
+	// constructor that accepts it, and defaults to nil (no-op). Setting it
+	// outside the sqlite package's tests is a misuse of an internal seam.
+	migrationHookBeforeCommit func()
 }
 
 // Compile-time assertions that Store satisfies every domain repository
@@ -189,14 +200,20 @@ func hasAnyCoreTable(ctx context.Context, conn *sql.Conn) (bool, error) {
 // wait while the first writer commits; once the loser proceeds it
 // observes the final user_version and takes the no-op path.
 //
-// Pre-DDL legacy v0 detection lives in Bootstrap (hasAnyCoreTable). By
-// the time migrateSchemaOnConn runs, user_version = 0 always means
-// "fresh database" because (a) legacy v0 was already rejected and
-// (b) the atomic-bootstrap invariant guarantees no interrupted-fresh
-// state can ever land with tables-present + user_version = 0.
-// user_version = 0 takes the full fresh-init DDL path; v1 takes the
-// account_env-only upgrade; v2 is a no-op commit. Versions above
-// maxSupportedSchemaVersion are rejected with ErrUnsupportedSchema.
+// Pre-DDL legacy v0 detection lives in Bootstrap (hasAnyCoreTable), but
+// that probe runs OUTSIDE the BEGIN IMMEDIATE lock. A concurrent writer
+// could commit a `CREATE TABLE projects (...)` (or any other core table)
+// between the unlocked probe and the lock acquisition here, leaving the
+// fingerprint "core tables present + user_version=0" that means real
+// legacy v0. To close that race, when userVersion is 0 inside the lock
+// we re-run hasAnyCoreTable on the same locked connection. If a core
+// table now exists the database is treated as legacy v0 and rejected
+// with ErrUnsupportedSchema, NOT auto-migrated.
+//
+// user_version = 0 (with no tables present inside the lock) takes the
+// full fresh-init DDL path; v1 takes the account_env-only upgrade; v2 is
+// a no-op commit. Versions above maxSupportedSchemaVersion are rejected
+// with ErrUnsupportedSchema.
 func (s *Store) migrateSchemaOnConn(ctx context.Context, conn *sql.Conn) error {
 	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
 		return fmt.Errorf("bootstrap sqlite store: migrate schema: begin immediate: %w", err)
@@ -204,7 +221,14 @@ func (s *Store) migrateSchemaOnConn(ctx context.Context, conn *sql.Conn) error {
 	committed := false
 	defer func() {
 		if !committed {
-			_, _ = conn.ExecContext(ctx, `ROLLBACK`)
+			// Use a background context for ROLLBACK so that a cancelled
+			// or deadline-exceeded ctx (the canonical cancel-mid-tx case)
+			// cannot suppress the rollback exec. Without this, a
+			// cancelled ctx makes ExecContext(ctx, ROLLBACK) fail before
+			// the driver ever sends the statement, which can leave the
+			// transaction's writes visible after conn.Close() depending
+			// on the driver's cleanup path.
+			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
 		}
 	}()
 
@@ -220,11 +244,26 @@ func (s *Store) migrateSchemaOnConn(ctx context.Context, conn *sql.Conn) error {
 		)
 	}
 
-	// Fresh database (user_version = 0): run the full v2 DDL set under the
-	// transaction. The legacy-v0 case was already rejected in Bootstrap
-	// before BEGIN IMMEDIATE, so reaching this branch with user_version = 0
-	// is unambiguously "brand new + atomically locked".
+	// Fresh database (user_version = 0): re-run the legacy-v0 probe under
+	// the IMMEDIATE lock to close the race window between the unlocked
+	// pre-check in Bootstrap and the locked classification here. Any core
+	// table now visible means another writer committed legacy-v0-shaped
+	// state between the two checks; reject it with ErrUnsupportedSchema
+	// instead of stamping over real data.
 	if userVersion == 0 {
+		legacy, err := hasAnyCoreTable(ctx, conn)
+		if err != nil {
+			return err
+		}
+		if legacy {
+			return fmt.Errorf(
+				"bootstrap sqlite store: unsupported schema: got user_version=0 with pre-existing core tables (detected under lock), supported window [%d, %d]: %w",
+				minSupportedSchemaVersion, maxSupportedSchemaVersion, domain.ErrUnsupportedSchema,
+			)
+		}
+
+		// Brand new + atomically locked: run the full v2 DDL set inside
+		// this transaction.
 		for _, statement := range coreSchemaDDL {
 			if _, err := conn.ExecContext(ctx, statement); err != nil {
 				return fmt.Errorf("bootstrap sqlite store: exec core ddl: %w", err)
@@ -242,6 +281,22 @@ func (s *Store) migrateSchemaOnConn(ctx context.Context, conn *sql.Conn) error {
 		if _, err := conn.ExecContext(ctx, `PRAGMA user_version = 2`); err != nil {
 			return fmt.Errorf("bootstrap sqlite store: set user_version=2: %w", err)
 		}
+	}
+
+	// Test-only synchronization point: fired after all schema writes but
+	// before COMMIT. Production callers leave migrationHookBeforeCommit
+	// nil (no-op). See the Store field doc for rules.
+	if s.migrationHookBeforeCommit != nil {
+		s.migrationHookBeforeCommit()
+	}
+
+	// Honor context cancellation observed during the hook (or any prior
+	// step) before issuing COMMIT. modernc.org/sqlite's database/sql
+	// driver also surfaces ctx.Err() on the COMMIT exec itself, but
+	// checking here gives a deterministic, driver-independent rollback
+	// path for the cancel-mid-tx test.
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("bootstrap sqlite store: migrate schema: ctx before commit: %w", err)
 	}
 
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
