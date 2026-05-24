@@ -1,7 +1,7 @@
 # DROP_15 — NETWORK_POLICY
 
-**State:** planning
-**Blocked by:** DROP_14 (todo)
+**State:** building
+**Blocked by:** DROP_14 (building)
 **Paths (expected):** `internal/domain/` (network-policy domain type — allowlist shape), `internal/tools/` (extend `.valv/tools.toml` `[allowlist]` parsing — currently `toml.Primitive` placeholder), `internal/adapters/providers/` (Docker `--network` / `--add-host` wiring), `internal/services/networkpolicy/` (new — resolution + closed-default enforcement), `internal/services/images/` (image-build egress enforcement), `internal/cli/` (allowlist edit subcommands or `valv network` namespace)
 **Packages (expected):** `internal/domain/`, `internal/tools/`, `internal/adapters/providers/claude/`, `internal/adapters/providers/codex/`, new `internal/services/networkpolicy/`, `internal/services/images/`, `internal/cli/`
 **PLAN.md ref:** main/PLAN.md → DROP_15_NETWORK_POLICY row
