@@ -69,8 +69,8 @@ go = "1.22"
 func TestResolve_ValidManifest_WithForwardCompatSections(t *testing.T) {
 	t.Parallel()
 
-	// Mirrors testdata/valid_objects.toml so Resolve exercises the same
-	// PrimitiveDecode path Load relies on for [allowlist] + [env].
+	// DROP_15 typed Allowlist: Resolve must surface m.Allowlist.Hosts.
+	// [env] remains PrimitiveDecode'd until DROP_14.
 	dir := t.TempDir()
 	writeFixture(t, dir, `[tools]
 mage = "latest"
@@ -96,6 +96,15 @@ GOPRIVATE = "github.com/evanmschultz/*"
 	}
 	if ta.Source == "" || ta.Install == "" {
 		t.Errorf("object-form tool not decoded: %+v", ta)
+	}
+	wantHosts := []string{"github.com", "proxy.golang.org"}
+	if got := m.Allowlist.Hosts; len(got) != len(wantHosts) {
+		t.Fatalf("len(Allowlist.Hosts) = %d, want %d (got %v)", len(got), len(wantHosts), got)
+	}
+	for i, want := range wantHosts {
+		if m.Allowlist.Hosts[i] != want {
+			t.Errorf("Allowlist.Hosts[%d] = %q, want %q", i, m.Allowlist.Hosts[i], want)
+		}
 	}
 }
 

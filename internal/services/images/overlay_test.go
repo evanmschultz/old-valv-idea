@@ -146,6 +146,46 @@ func TestOverlayHash_StabilitySnapshot(t *testing.T) {
 	}
 }
 
+// TestOverlayHash_AllowlistDataIgnored is the DROP_15 Unit 15.1 regression
+// pin for Schema Decision 2: overlay image identity is `[tools]`-only.
+// Promoting `[allowlist]` from toml.Primitive to typed AllowlistConfig must
+// NOT cause non-tool edits to invalidate cached overlay images. Two
+// manifests with identical Tools but different Allowlist.Hosts must
+// therefore hash identically.
+func TestOverlayHash_AllowlistDataIgnored(t *testing.T) {
+	t.Parallel()
+
+	base := tools.ToolManifest{
+		Tools: map[string]tools.ToolSpec{
+			"ta": {Source: "github.com/evanmschultz/ta@latest", Install: "go install"},
+			"jq": {Version: "1.7"},
+		},
+		Allowlist: tools.AllowlistConfig{Hosts: []string{"a.example.com"}},
+	}
+	other := tools.ToolManifest{
+		Tools: map[string]tools.ToolSpec{
+			"ta": {Source: "github.com/evanmschultz/ta@latest", Install: "go install"},
+			"jq": {Version: "1.7"},
+		},
+		Allowlist: tools.AllowlistConfig{
+			Hosts: []string{"b.example.org", "c.example.net", "d.example.io"},
+		},
+	}
+	if got, want := OverlayHash(base), OverlayHash(other); got != want {
+		t.Fatalf("OverlayHash drifted on allowlist-only edit:\n  base  = %q\n  other = %q", got, want)
+	}
+	// And neither variant differs from the no-allowlist baseline.
+	empty := tools.ToolManifest{
+		Tools: map[string]tools.ToolSpec{
+			"ta": {Source: "github.com/evanmschultz/ta@latest", Install: "go install"},
+			"jq": {Version: "1.7"},
+		},
+	}
+	if got, want := OverlayHash(base), OverlayHash(empty); got != want {
+		t.Fatalf("OverlayHash drifted on allowlist-presence:\n  with-allowlist = %q\n  no-allowlist   = %q", got, want)
+	}
+}
+
 func TestShortOverlayHash(t *testing.T) {
 	t.Parallel()
 

@@ -67,14 +67,16 @@ func (t *ToolSpec) UnmarshalTOML(v interface{}) error {
 	}
 }
 
-// ToolManifest is the parsed structure of a `.valv/tools.toml` file. The
-// Allowlist and Env fields are captured as toml.Primitive for forward
-// compatibility — DROP_14 and DROP_15 will type-decode them. DROP_11
-// resolves them via meta.PrimitiveDecode into discarded targets so the
-// strict undecoded-key check still works for genuine unknown sections.
+// ToolManifest is the parsed structure of a `.valv/tools.toml` file.
+//
+// DROP_15 promoted Allowlist from toml.Primitive to a typed AllowlistConfig
+// (the typed schema for the `[allowlist]` section — see allowlist.go). Env
+// remains toml.Primitive pending DROP_14; Load still calls PrimitiveDecode
+// against it so the strict undecoded-key check still works for genuine
+// unknown sections.
 type ToolManifest struct {
 	Tools     map[string]ToolSpec `toml:"tools"`
-	Allowlist toml.Primitive      `toml:"allowlist"`
+	Allowlist AllowlistConfig     `toml:"allowlist"`
 	Env       toml.Primitive      `toml:"env"`
 }
 
@@ -82,10 +84,13 @@ type ToolManifest struct {
 // domain.ErrToolsNotFound (wrapped) when the file is absent so callers can
 // distinguish "no manifest declared" from other I/O failures via
 // errors.Is. The strict meta.Undecoded() check rejects any unknown
-// top-level key beyond tools/allowlist/env. Allowlist and Env are
-// explicitly decoded into discarded map[string]any targets before the
-// undecoded check; declaring toml.Primitive fields alone is not enough to
-// satisfy the strict check.
+// top-level key beyond tools/allowlist/env.
+//
+// DROP_15: Allowlist is now type-decoded directly into AllowlistConfig
+// (m.Allowlist.Hosts), so it does NOT require a PrimitiveDecode pass to be
+// considered decoded for the strict check. Env remains toml.Primitive
+// pending DROP_14; PrimitiveDecode is still called against it so its inline
+// keys (e.g. env.GOPRIVATE) do not show up as unknown.
 func Load(path string) (ToolManifest, error) {
 	if strings.TrimSpace(path) == "" {
 		return ToolManifest{}, fmt.Errorf("load tools: %w", domain.ErrToolsNotFound)
@@ -103,17 +108,10 @@ func Load(path string) (ToolManifest, error) {
 		return ToolManifest{}, fmt.Errorf("decode tools %q: %w", path, err)
 	}
 
-	// Mark Allowlist and Env as decoded so meta.Undecoded() does not
-	// flag their inline keys (e.g. allowlist.hosts, env.GOPRIVATE) as
-	// unknown. Empirical testing against BurntSushi/toml v1.6.0 confirmed
-	// that declaring toml.Primitive fields alone is NOT enough; the
-	// PrimitiveDecode call is mandatory. DROP_14 and DROP_15 will re-call
-	// PrimitiveDecode with their typed targets when they implement those
-	// sections — the discarded map[string]any here is intentional.
-	var discardAllowlist map[string]any
-	if err := meta.PrimitiveDecode(m.Allowlist, &discardAllowlist); err != nil {
-		return ToolManifest{}, fmt.Errorf("decode tools %q allowlist: %w", path, err)
-	}
+	// Env stays toml.Primitive until DROP_14 ships the typed schema; the
+	// PrimitiveDecode call marks its inline keys as decoded so they do
+	// not surface in meta.Undecoded(). DROP_14 will swap this for a typed
+	// decode target.
 	var discardEnv map[string]any
 	if err := meta.PrimitiveDecode(m.Env, &discardEnv); err != nil {
 		return ToolManifest{}, fmt.Errorf("decode tools %q env: %w", path, err)
