@@ -142,3 +142,78 @@ None — existing `internal/tools/tools.go`, `resolve.go`, and `internal/service
 
 - No changes to `internal/cli/`, `internal/adapters/docker/`, `internal/services/networkpolicy/`, `internal/services/run/`.
 - Only edits outside `internal/tools/` are the `internal/services/images/overlay_test.go` regression test, which is explicitly the one exception in the spawn appendix.
+
+## Unit 15.1 — Round 2
+
+**Date:** 2026-05-24
+**Builder backend:** claude-native (orchestrator dispatch)
+
+### Goal
+
+Address the four Round 1 falsification findings without expanding scope:
+
+1. CE#1 — indented `[allowlist]` headers break byte-preservation.
+2. CE#2 — `validateHost` did not enforce RFC 1123 label-length (63 byte) or total-length (253 byte) limits despite the worklog claim.
+3. CE#3 — multi-line-string detection over-broad: rejected lines whose only `"""` / `'''` lived inside a `#` comment.
+4. Hidden dep — `DefaultAllowlistHosts` was an exported mutable slice; any caller could silently mutate global allowlist policy.
+
+### Files Touched
+
+- `internal/tools/allowlist.go`
+  - **CE#4 (unexport defaults):** renamed `var DefaultAllowlistHosts` → unexported `var defaultAllowlistHosts`. Added exported `func DefaultAllowlistHosts() []string` that returns a fresh `make + copy` of the underlying slice on every call. Doc comment explicitly calls out the security rationale.
+  - **CE#2 (RFC 1123 length limits):** extended `validateHost` to enforce `len(h) > 253` (total) and `len(label) > 63` (each dot-separated label) AFTER the character-shape regex passes. Both new branches return errors wrapping `ErrInvalidAllowlistHost` with descriptive messages naming the relevant byte limit ("253 bytes" / "63 bytes") so test assertions can pin the failure mode.
+  - **CE#1 (indented headers):** in `splitAllowlistSpan` the header-detection block now checks `line[0] == ' ' || line[0] == '\t'` IMMEDIATELY after the regex match (which runs on the trimmed line). Indented top-level section headers return `ErrUnsupportedManifestShape` with offset-in-file context. Both `[allowlist]` and other sections are subject to the rejection; both have dedicated tests.
+  - **CE#3 (comment-aware triple-quote detection):** introduced `stripLineComment([]byte) []byte`. It walks byte-by-byte tracking single-line `"..."` basic-string state (with `\` escape handling) and `'...'` literal-string state (no escapes), and returns the slice up to the first `#` outside any string. The outside-`[allowlist]`-span check now calls `bytes.Contains(stripLineComment(line), ...)` for both triple-quote variants. Comments with embedded triple quotes are now accepted; real multi-line-string openers in code still get rejected.
+- `internal/tools/allowlist_test.go`
+  - New: `TestWriteAllowlistSection_RejectsIndentedSectionHeader` — `  [allowlist]` rejected.
+  - New: `TestWriteAllowlistSection_RejectsIndentedOtherSectionHeader` — `  [tools]` rejected (same contract applies outside `[allowlist]` because the prefix/suffix region is preserved verbatim and the rewrite cannot keep the leading whitespace attached).
+  - New: `TestWriteAllowlistSection_AcceptsCommentsContainingTripleQuotes` — file with `# keep """ here`, `mage = "latest" # also """ in this comment`, and `# and ''' literal triple quotes too` round-trips through the rewriter without `ErrUnsupportedManifestShape`. Asserts prefix bytes preserved verbatim and canonical `[allowlist]` rewrite emitted.
+  - New: `TestEffectiveAllowlist_RejectsOverlongLabel` — 64-byte label (`strings.Repeat("a", 64) + ".example.com"`) rejected with error mentioning "63 bytes".
+  - New: `TestEffectiveAllowlist_AcceptsMaxLengthLabel` — 63-byte label boundary accepted (regression pin against an off-by-one tightening).
+  - New: `TestEffectiveAllowlist_RejectsOverlongTotal` — 254-byte FQDN (`strings.Repeat("aaaa.", 50) + "aaaa"`, all labels 4 bytes so the label-limit branch does not pre-empt the total-length branch) rejected with error mentioning "253 bytes".
+  - New: `TestDefaultAllowlistHostsReturnsCopyNotMutableRef` — calls `DefaultAllowlistHosts()`, mutates every element of the returned slice in place to `"tampered.example.com"`, then calls `DefaultAllowlistHosts()` again and asserts the second call still returns the original four hosts. Also asserts `EffectiveAllowlist(AllowlistConfig{})` is unaffected after the tamper, which proves the internal `defaultAllowlistHosts` source slice was not touched.
+- `drops/DROP_15_NETWORK_POLICY/PLAN.md` — Unit 15.1 `state: done` → `in_progress` → `done`.
+
+### Counterexample Mitigation Map
+
+| Round 1 finding | Fix location | Validating test(s) |
+|---|---|---|
+| CE#1 indented `[allowlist]` header | `splitAllowlistSpan` header-detection block: `line[0]` whitespace check | `TestWriteAllowlistSection_RejectsIndentedSectionHeader`, `TestWriteAllowlistSection_RejectsIndentedOtherSectionHeader` |
+| CE#2 missing RFC 1123 length limits | `validateHost`: `len(h) > 253` + per-label `len > 63` | `TestEffectiveAllowlist_RejectsOverlongLabel`, `TestEffectiveAllowlist_AcceptsMaxLengthLabel`, `TestEffectiveAllowlist_RejectsOverlongTotal` |
+| CE#3 over-broad multi-line-string detection | `stripLineComment` + use in outside-span check | `TestWriteAllowlistSection_AcceptsCommentsContainingTripleQuotes` (plus existing `TestWriteAllowlistSection_RejectsMultilineStringOutsideAllowlist` still green — proves real multi-line openers are still rejected) |
+| Hidden dep: exported mutable defaults | unexport `defaultAllowlistHosts`, add `func DefaultAllowlistHosts()` returning a copy | `TestDefaultAllowlistHostsReturnsCopyNotMutableRef` |
+
+### Mage Targets Run
+
+- `mage testPkg ./internal/tools` → **93 tests pass, 0 failures, coverage 91.9%** (well above the 60% mage-enforced gate and 70% CLAUDE.md target). Test count delta from Round 1: 86 → 93 (+7 new tests, +1 net beyond the 5 explicitly required because both indented-header variants and the max-length boundary got their own tests).
+- `mage testPkg ./internal/services/images` → **63 tests pass, coverage 81.6%**. The `OverlayHash` allowlist-ignored regression test from Round 1 is still green; `DefaultAllowlistHosts` rename did not perturb overlay hashing because `OverlayHash` never reads allowlist data.
+- `go tool gofumpt -l internal/tools/allowlist.go internal/tools/allowlist_test.go` → clean (empty output).
+
+### Design Notes
+
+- **Indented-header rejection scope.** The Round 2 brief proposes rejecting indented `[allowlist]` headers. I extended the rejection to ALL indented top-level section headers, including `[tools]` and `[env]`. Rationale: the byte-preservation contract preserves the prefix/suffix region verbatim, so an indented `[tools]` header sitting in the suffix would also break the spec — the leading whitespace would be retained but the rewrite would lose any structural anchor for normalization. Treating "all top-level headers must start at column 0" as a single uniform contract is cleaner than carving out per-section exceptions. The Schema-Decision-3 supported-shape contract already lists narrow restrictions and this extends them by one explicit clause; both the function doc comment and the new test names make it explicit.
+- **`stripLineComment` chose a tiny single-pass byte walker over a full TOML lexer.** It only needs to distinguish `#` outside a string from `#` inside a single-line string. That requires tracking single-line `"..."` (with `\` escape) and `'...'` (no escape) states. Anything more (datetimes, integers, arrays) is irrelevant because the only thing the outside-span check needs to know is whether triple quotes appear in CODE. Returning the original line slice up to the cut point keeps the downstream `bytes.Contains` check trivial.
+- **63-byte boundary test pin.** I added `TestEffectiveAllowlist_AcceptsMaxLengthLabel` even though the brief only required the rejection test. Rationale: the spec at this boundary is asymmetric (`> 63` rejects, `<= 63` accepts), and a future refactor could easily turn `>` into `>=`. The boundary test catches that regression at the unit-test layer rather than waiting for an integration-test failure with a real-world hostname.
+- **254-byte total-length fixture construction.** I deliberately used label size 4 (`"aaaa."`) so each label is under the 63-byte limit; that ensures the test exercises the TOTAL-length branch and not the label-length branch (any per-label failure short-circuits before total-length is checked). Test asserts the error message mentions "253 bytes" so a future change that moved the limit check would break the assertion.
+- **Doc-comment gofumpt quirk.** Triple-apostrophe sequences (`'''`) inside Go doc comments get normalized by `go/printer` into curly-quote + apostrophe forms when they appear between text words, which gofumpt then rewrites. To keep the file gofumpt-clean while still describing the multi-line literal-string form, the doc comments now use prose ("triple-apostrophe sequence", "triple double-quote") instead of literal triple-apostrophe characters. The runtime detection logic (`bytes.Contains(..., []byte("'''"))`) still uses the literal byte sequence — only the prose was changed.
+
+### Hylla Feedback
+
+None — existing patterns in `internal/tools/allowlist.go` plus the Round 1 falsification report at `drops/DROP_15_NETWORK_POLICY/BUILDER_QA_FALSIFICATION.md` provided sufficient evidence directly via `Read`. LSP was unavailable (gopls sync error against the active checkout) so `goToDefinition` / `findReferences` for `DefaultAllowlistHosts` had to fall back to shell `rg` — confirmed zero external callers before unexporting.
+
+### Acceptance Check against Round 2 brief
+
+- [x] All four Round 1 findings addressed with narrow fixes (no scope expansion).
+- [x] CE#1 → `ErrUnsupportedManifestShape` for indented section headers; dedicated test.
+- [x] CE#2 → 63-byte label + 253-byte total enforced; descriptive errors; two dedicated rejection tests + one boundary acceptance test.
+- [x] CE#3 → `stripLineComment` + comment-aware scan; dedicated test proves `# ... """ ...` lines round-trip through the rewriter.
+- [x] Hidden dep → `DefaultAllowlistHosts` is now an exported function returning a copy; underlying slice is unexported; dedicated test proves tampering with a returned slice does not affect subsequent calls.
+- [x] 93 tests pass (86 baseline + 7 new). Coverage 91.9% in `internal/tools`.
+- [x] `internal/services/images` OverlayHash regression test still green (`mage testPkg ./internal/services/images` → 63 pass, 81.6% cover).
+- [x] No raw `go test` / `GOCACHE=...` invocations — only `mage testPkg`.
+
+### Hard-constraint compliance
+
+- All Round 2 production edits live in `internal/tools/allowlist.go` plus tests in `internal/tools/allowlist_test.go`.
+- No edits to `internal/services/images/`, `internal/cli/`, `internal/adapters/docker/`, `internal/services/networkpolicy/`, `internal/services/run/`.
+- Drop-dir edit limited to `PLAN.md` state-bit flip and this worklog appendix.

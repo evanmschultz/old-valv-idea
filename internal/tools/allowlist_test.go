@@ -552,3 +552,228 @@ func TestWriteAllowlistSection_EmptyPath(t *testing.T) {
 		t.Fatalf("WriteAllowlistSection(empty path): expected error, got nil")
 	}
 }
+
+func TestWriteAllowlistSection_RejectsIndentedSectionHeader(t *testing.T) {
+	t.Parallel()
+
+	// Round 2 counterexample #1: `  [allowlist]` is valid TOML but the
+	// section-safe rewrite cannot preserve the leading whitespace under
+	// the canonical (column-0) replacement. The contract treats indented
+	// top-level section headers as ErrUnsupportedManifestShape.
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".valv", "tools.toml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	const contents = `[tools]
+mage = "latest"
+
+  [allowlist]
+hosts = ["stale.example.com"]
+`
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	err := WriteAllowlistSection(path, AllowlistConfig{Hosts: []string{"b.example.com"}})
+	if err == nil {
+		t.Fatalf("WriteAllowlistSection: expected error for indented [allowlist] header, got nil")
+	}
+	if !errors.Is(err, ErrUnsupportedManifestShape) {
+		t.Errorf("error not wrapping ErrUnsupportedManifestShape: %v", err)
+	}
+}
+
+func TestWriteAllowlistSection_RejectsIndentedOtherSectionHeader(t *testing.T) {
+	t.Parallel()
+
+	// Indented section headers outside [allowlist] also break the
+	// byte-preservation contract because they sit in the preserved
+	// prefix/suffix region and the rewrite cannot reason about how to
+	// keep the whitespace attached to a canonical column-0 emit. Reject
+	// these the same way as an indented [allowlist] header.
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".valv", "tools.toml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	const contents = `  [tools]
+mage = "latest"
+
+[allowlist]
+hosts = ["stale.example.com"]
+`
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	err := WriteAllowlistSection(path, AllowlistConfig{Hosts: []string{"b.example.com"}})
+	if err == nil {
+		t.Fatalf("WriteAllowlistSection: expected error for indented [tools] header, got nil")
+	}
+	if !errors.Is(err, ErrUnsupportedManifestShape) {
+		t.Errorf("error not wrapping ErrUnsupportedManifestShape: %v", err)
+	}
+}
+
+func TestWriteAllowlistSection_AcceptsCommentsContainingTripleQuotes(t *testing.T) {
+	t.Parallel()
+
+	// Round 2 counterexample #3: a `#` comment that happens to contain
+	// `"""` is NOT a multi-line-string opener per TOML semantics, so the
+	// rewriter must accept it. Previously this hit a bytes.Contains
+	// heuristic and was wrongly rejected as unsupported shape.
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".valv", "tools.toml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	const contents = `# keep triple quotes """ here
+[tools]
+mage = "latest" # also """ in this comment
+# and ''' literal triple quotes too
+[allowlist]
+hosts = ["stale.example.com"]
+`
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	cfg := AllowlistConfig{Hosts: []string{"b.example.com"}}
+	if err := WriteAllowlistSection(path, cfg); err != nil {
+		t.Fatalf("WriteAllowlistSection: unexpected error for comments containing triple quotes: %v", err)
+	}
+
+	gotBytes, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	got := string(gotBytes)
+
+	// Prefix bytes (everything before [allowlist]) must be preserved verbatim.
+	const wantPrefix = `# keep triple quotes """ here
+[tools]
+mage = "latest" # also """ in this comment
+# and ''' literal triple quotes too
+`
+	if !strings.HasPrefix(got, wantPrefix) {
+		t.Errorf("prefix not preserved:\n--- got prefix ---\n%q\n--- want prefix ---\n%q",
+			got[:min(len(got), len(wantPrefix))], wantPrefix)
+	}
+
+	// The rewritten [allowlist] section must be the canonical form.
+	if !strings.Contains(got, "[allowlist]\nhosts = [\n  \"b.example.com\",\n]\n") {
+		t.Errorf("rewritten allowlist section missing canonical form:\n%s", got)
+	}
+
+	// Stale host must no longer appear.
+	if strings.Contains(got, "stale.example.com") {
+		t.Errorf("stale host still present after rewrite:\n%s", got)
+	}
+}
+
+func TestEffectiveAllowlist_RejectsOverlongLabel(t *testing.T) {
+	t.Parallel()
+
+	// Round 2 counterexample #2: RFC 1123 caps each dot-separated label
+	// at 63 bytes. A 64-byte label must be rejected even though it
+	// passes the character-shape regex.
+	host := strings.Repeat("a", 64) + ".example.com"
+	_, err := EffectiveAllowlist(AllowlistConfig{Hosts: []string{host}})
+	if err == nil {
+		t.Fatalf("EffectiveAllowlist(64-byte label): expected error, got nil")
+	}
+	if !errors.Is(err, ErrInvalidAllowlistHost) {
+		t.Errorf("EffectiveAllowlist(64-byte label): want errors.Is(err, ErrInvalidAllowlistHost), got %v", err)
+	}
+	if !strings.Contains(err.Error(), "63 bytes") {
+		t.Errorf("EffectiveAllowlist(64-byte label) error = %q, want it to mention the 63-byte limit", err.Error())
+	}
+}
+
+func TestEffectiveAllowlist_AcceptsMaxLengthLabel(t *testing.T) {
+	t.Parallel()
+
+	// Boundary: a 63-byte label is the RFC 1123 maximum and must be
+	// accepted.
+	host := strings.Repeat("a", 63) + ".example.com"
+	got, err := EffectiveAllowlist(AllowlistConfig{Hosts: []string{host}})
+	if err != nil {
+		t.Fatalf("EffectiveAllowlist(63-byte label): unexpected error: %v", err)
+	}
+	found := false
+	for _, h := range got {
+		if h == host {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("EffectiveAllowlist did not include 63-byte-label host %q: got %v", host, got)
+	}
+}
+
+func TestEffectiveAllowlist_RejectsOverlongTotal(t *testing.T) {
+	t.Parallel()
+
+	// Round 2 counterexample #2: RFC 1123 caps total host length at 253
+	// bytes. Construct a 254-byte FQDN by repeating "aaaa." (5 bytes,
+	// label length 4 — under the 63-byte label limit) enough times to
+	// just exceed 253.
+	//
+	// "aaaa." is 5 bytes. 50 repeats = 250 bytes. We need >253, with
+	// each label under 64 bytes and an alphanumeric end (no trailing dot).
+	// Use 50 * "aaaa." + "aaaa" = 254 bytes, all labels 4 bytes.
+	host := strings.Repeat("aaaa.", 50) + "aaaa"
+	if len(host) != 254 {
+		t.Fatalf("test fixture wrong length: got %d, want 254", len(host))
+	}
+	_, err := EffectiveAllowlist(AllowlistConfig{Hosts: []string{host}})
+	if err == nil {
+		t.Fatalf("EffectiveAllowlist(254-byte host): expected error, got nil")
+	}
+	if !errors.Is(err, ErrInvalidAllowlistHost) {
+		t.Errorf("EffectiveAllowlist(254-byte host): want errors.Is(err, ErrInvalidAllowlistHost), got %v", err)
+	}
+	if !strings.Contains(err.Error(), "253 bytes") {
+		t.Errorf("EffectiveAllowlist(254-byte host) error = %q, want it to mention the 253-byte limit", err.Error())
+	}
+}
+
+func TestDefaultAllowlistHostsReturnsCopyNotMutableRef(t *testing.T) {
+	t.Parallel()
+
+	// Round 2 hidden-dep fix: callers must not be able to mutate the
+	// built-in defaults via the public accessor. Mutate the returned
+	// slice and confirm a subsequent call still returns the original
+	// four hosts unchanged.
+	first := DefaultAllowlistHosts()
+	want := []string{
+		"github.com",
+		"objects.githubusercontent.com",
+		"proxy.golang.org",
+		"sum.golang.org",
+	}
+	if !reflect.DeepEqual(first, want) {
+		t.Fatalf("DefaultAllowlistHosts() first call = %v, want %v", first, want)
+	}
+
+	// Tamper with the returned slice in place.
+	for i := range first {
+		first[i] = "tampered.example.com"
+	}
+
+	second := DefaultAllowlistHosts()
+	if !reflect.DeepEqual(second, want) {
+		t.Errorf("DefaultAllowlistHosts() second call returned tampered data: got %v, want %v", second, want)
+	}
+
+	// And EffectiveAllowlist must still see the originals too.
+	effective, err := EffectiveAllowlist(AllowlistConfig{})
+	if err != nil {
+		t.Fatalf("EffectiveAllowlist(zero): unexpected error: %v", err)
+	}
+	if !reflect.DeepEqual(effective, want) {
+		t.Errorf("EffectiveAllowlist(zero) after tampering = %v, want %v", effective, want)
+	}
+}

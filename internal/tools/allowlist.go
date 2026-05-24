@@ -26,20 +26,38 @@ type AllowlistConfig struct {
 	Hosts []string `toml:"hosts"`
 }
 
-// DefaultAllowlistHosts are the built-in hosts the effective allowlist
-// always contains, even when no user-declared hosts are present. The list
-// covers the Go module proxy + Go sum DB + the GitHub release-object CDN +
-// github.com itself, which together let plain `go install
-// github.com/<org>/<repo>` work without any user allowlist entries.
+// defaultAllowlistHosts is the unexported source-of-truth for the built-in
+// hosts the effective allowlist always contains, even when no user-declared
+// hosts are present. The list covers the Go module proxy + Go sum DB + the
+// GitHub release-object CDN + github.com itself, which together let plain
+// `go install github.com/<org>/<repo>` work without any user allowlist
+// entries.
 //
 // The slice is sorted lexicographically so callers iterating it observe a
 // deterministic order; EffectiveAllowlist also dedupes and re-sorts after
 // unioning user hosts.
-var DefaultAllowlistHosts = []string{
+//
+// Kept package-private to prevent external callers from mutating the global
+// allowlist policy in place. External access goes through
+// DefaultAllowlistHosts(), which always returns a fresh copy.
+var defaultAllowlistHosts = []string{
 	"github.com",
 	"objects.githubusercontent.com",
 	"proxy.golang.org",
 	"sum.golang.org",
+}
+
+// DefaultAllowlistHosts returns a fresh copy of the built-in default
+// allowlist hosts. The returned slice may be mutated freely by callers
+// without affecting subsequent calls or the package's internal state.
+//
+// This is the only supported way to read the defaults from outside the
+// tools package; the underlying slice is intentionally unexported so that
+// security-sensitive allowlist policy cannot be mutated as a side effect.
+func DefaultAllowlistHosts() []string {
+	out := make([]string, len(defaultAllowlistHosts))
+	copy(out, defaultAllowlistHosts)
+	return out
 }
 
 // ErrUnsupportedManifestShape is returned by WriteAllowlistSection when the
@@ -71,18 +89,20 @@ var ErrInvalidAllowlistHost = errors.New("invalid allowlist host")
 var hostShapeRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)
 
 // EffectiveAllowlist returns the deterministic effective allowlist for the
-// given AllowlistConfig: the union of DefaultAllowlistHosts and the user
-// hosts, with each user host lowercased, trimmed of surrounding whitespace,
-// validated, and deduped. The result is sorted lexicographically.
+// given AllowlistConfig: the union of the built-in default hosts and the
+// user hosts, with each user host lowercased, trimmed of surrounding
+// whitespace, validated, and deduped. The result is sorted
+// lexicographically.
 //
-// Zero-value config (cfg.Hosts == nil) returns exactly DefaultAllowlistHosts.
-// User hosts that fail validateHost cause EffectiveAllowlist to return an
-// error wrapping ErrInvalidAllowlistHost; the partial result is discarded.
+// Zero-value config (cfg.Hosts == nil) returns exactly the built-in
+// defaults. User hosts that fail validateHost cause EffectiveAllowlist to
+// return an error wrapping ErrInvalidAllowlistHost; the partial result is
+// discarded.
 func EffectiveAllowlist(cfg AllowlistConfig) ([]string, error) {
-	seen := make(map[string]struct{}, len(DefaultAllowlistHosts)+len(cfg.Hosts))
-	out := make([]string, 0, len(DefaultAllowlistHosts)+len(cfg.Hosts))
+	seen := make(map[string]struct{}, len(defaultAllowlistHosts)+len(cfg.Hosts))
+	out := make([]string, 0, len(defaultAllowlistHosts)+len(cfg.Hosts))
 
-	for _, h := range DefaultAllowlistHosts {
+	for _, h := range defaultAllowlistHosts {
 		if _, ok := seen[h]; ok {
 			continue
 		}
@@ -107,8 +127,10 @@ func EffectiveAllowlist(cfg AllowlistConfig) ([]string, error) {
 }
 
 // validateHost rejects empty strings, URL-shaped values, ports, paths, and
-// any value that does not match hostShapeRE. The caller must lowercase and
-// trim the value first; EffectiveAllowlist does this.
+// any value that does not match hostShapeRE. It also enforces the RFC 1123
+// length limits: each dot-separated label must be at most 63 bytes, and the
+// total host length must be at most 253 bytes. The caller must lowercase
+// and trim the value first; EffectiveAllowlist does this.
 func validateHost(h string) error {
 	if h == "" {
 		return fmt.Errorf("%w: empty host", ErrInvalidAllowlistHost)
@@ -128,6 +150,16 @@ func validateHost(h string) error {
 	}
 	if !hostShapeRE.MatchString(h) {
 		return fmt.Errorf("%w: not a valid hostname or Docker alias", ErrInvalidAllowlistHost)
+	}
+	// RFC 1123 length limits. Enforced AFTER character-shape so the error
+	// for obviously broken values stays specific.
+	if len(h) > 253 {
+		return fmt.Errorf("%w: host exceeds 253 bytes (RFC 1123 limit)", ErrInvalidAllowlistHost)
+	}
+	for _, label := range strings.Split(h, ".") {
+		if len(label) > 63 {
+			return fmt.Errorf("%w: label %q exceeds 63 bytes (RFC 1123 limit)", ErrInvalidAllowlistHost, label)
+		}
 	}
 	return nil
 }
@@ -254,9 +286,19 @@ var topLevelHeaderRE = regexp.MustCompile(`^\[([^\[\]]+)\][ \t]*(?:#.*)?$`)
 // splitAllowlistSpan rejects:
 //   - UTF-8 BOM at start of file
 //   - any CR byte (CRLF or solo CR)
-//   - a multi-line basic/literal string (`"""` or `”'`) opened outside the
-//     `[allowlist]` span — the section-safe contract cannot reason about
-//     spans split across that boundary
+//   - a multi-line basic or literal string (triple-quote `"""` or
+//     triple-apostrophe sequence) opened outside the `[allowlist]` span —
+//     the section-safe contract cannot reason about
+//     spans split across that boundary. Triple-quote sequences inside
+//     comments are NOT a multi-line string per TOML semantics and are
+//     allowed; the implementation strips the comment portion of each line
+//     before scanning for triple-quote openers.
+//   - top-level section headers that begin with leading whitespace
+//     (`  [name]`). The supported shape requires section headers to start
+//     at column 0; leading-whitespace headers are valid TOML but would
+//     break the byte-preservation contract because the rewrite cannot keep
+//     the leading whitespace attached to the canonical (column-0)
+//     replacement section.
 //   - array-of-tables headers (`[[name]]`) anywhere in the file
 func splitAllowlistSpan(content []byte) ([]byte, []byte, error) {
 	if bytes.HasPrefix(content, utf8BOM) {
@@ -303,8 +345,14 @@ func splitAllowlistSpan(content []byte) ([]byte, []byte, error) {
 			return nil, nil, fmt.Errorf("write allowlist section: %w: array-of-tables header at offset %d", ErrUnsupportedManifestShape, offset)
 		}
 
-		// Detect a top-level `[section]` header.
+		// Detect a top-level `[section]` header. Reject leading-whitespace
+		// headers BEFORE applying the section-state transitions: they are
+		// valid TOML but unsupported by the section-safe rewrite (see the
+		// doc comment for the rationale).
 		if m := topLevelHeaderRE.FindSubmatch(trimmed); m != nil {
+			if len(line) > 0 && (line[0] == ' ' || line[0] == '\t') {
+				return nil, nil, fmt.Errorf("write allowlist section: %w: indented section header at offset %d (top-level [section] headers must start at column 0)", ErrUnsupportedManifestShape, offset)
+			}
 			name := strings.TrimSpace(string(m[1]))
 			headerOffset := offset + bytes.Index(line, []byte("["))
 			if name == "allowlist" {
@@ -324,8 +372,16 @@ func splitAllowlistSpan(content []byte) ([]byte, []byte, error) {
 
 		// Outside the `[allowlist]` span, reject multi-line string
 		// openers because we cannot track them across a partial rewrite.
+		// First strip the comment portion of the line: per TOML spec, `#`
+		// starts a comment that runs to end-of-line UNLESS it sits inside
+		// a string. We only need to distinguish triple-quote sequences in
+		// comments from real multi-line-string openers, so a minimal
+		// comment-stripper that respects single-quoted basic / literal
+		// strings is sufficient — and conservative: any leftover triple
+		// quote in CODE is still rejected.
 		if !insideAllowlistSpan {
-			if bytes.Contains(line, []byte(`"""`)) || bytes.Contains(line, []byte(`'''`)) {
+			codeOnly := stripLineComment(line)
+			if bytes.Contains(codeOnly, []byte(`"""`)) || bytes.Contains(codeOnly, []byte(`'''`)) {
 				return nil, nil, fmt.Errorf("write allowlist section: %w: multi-line string outside [allowlist] span", ErrUnsupportedManifestShape)
 			}
 		}
@@ -352,4 +408,53 @@ func splitAllowlistSpan(content []byte) ([]byte, []byte, error) {
 		return content[:allowlistStart], nil, nil
 	}
 	return content[:allowlistStart], content[nextStart:], nil
+}
+
+// stripLineComment returns the bytes of line up to (but excluding) the
+// first `#` that begins a TOML comment. A `#` inside a single- or
+// double-quoted string is NOT a comment introducer; this helper tracks
+// string state byte-by-byte to make that distinction.
+//
+// The helper deliberately recognizes only single-line `"..."` basic
+// strings and `'...'` literal strings. Multi-line strings (the triple
+// double-quote and triple apostrophe forms) are exactly the shape
+// splitAllowlistSpan needs to detect downstream, so stripLineComment
+// leaves them intact in the returned
+// slice — its only job is to mask comment text so a stray `#` in a
+// comment does not hide a real triple-quote opener earlier on the line,
+// nor cause a triple-quote sequence appearing only inside a comment to
+// trip the outside-span multi-line-string rejection.
+func stripLineComment(line []byte) []byte {
+	inBasic := false
+	inLiteral := false
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		switch {
+		case inBasic:
+			if c == '\\' && i+1 < len(line) {
+				// Skip escape sequence inside basic strings so an
+				// escaped quote (`\"`) does not flip the state.
+				i++
+				continue
+			}
+			if c == '"' {
+				inBasic = false
+			}
+		case inLiteral:
+			// Literal strings have no escapes.
+			if c == '\'' {
+				inLiteral = false
+			}
+		default:
+			if c == '#' {
+				return line[:i]
+			}
+			if c == '"' {
+				inBasic = true
+			} else if c == '\'' {
+				inLiteral = true
+			}
+		}
+	}
+	return line
 }
