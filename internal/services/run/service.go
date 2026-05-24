@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -341,13 +342,24 @@ func (s Service) debug(msg string, keyvals ...any) {
 // caller-supplied workingDir is returned unchanged. When the lexical check
 // rejects, the function falls back to an inode-based ancestry walk that
 // catches case-folded equivalents on case-insensitive filesystems and any
-// symlink spellings Normalize did not collapse. When the inode walk succeeds,
-// the working-directory spelling is rewritten to use projectRoot's spelling
-// joined with the subpath collected during the walk so the resulting path is
-// consistent with the project-root bind mount that Docker receives.
+// symlink spellings Normalize did not collapse.
 //
-// Both inputs MUST already be absolute + symlink-resolved via pathutil.Normalize
-// at the caller boundary.
+// The inode walk tolerates trailing missing components: if the leaf (or any
+// trailing run of components) does not exist on disk, those names are peeled
+// onto a tail accumulator and the walk continues from the closest existing
+// ancestor. When the project root is matched somewhere up the ancestry, the
+// canonical working dir is rebuilt by joining projectRoot's spelling with both
+// the traversed existing parts and the previously-missing tail. This makes the
+// guard robust to a caller passing a same-project symlink alias whose final
+// component has not been created yet.
+//
+// The walk only returns false when it reaches a filesystem root sentinel
+// (`filepath.Dir(current) == current`) without matching the project root, or
+// when an `os.Stat` error other than `fs.ErrNotExist` interrupts traversal.
+//
+// Both inputs are expected to already be absolute + symlink-resolved via
+// pathutil.Normalize at the caller boundary; this function tolerates the
+// known `pathutil.Normalize` weakness where missing leaves bypass EvalSymlinks.
 func resolveWithinProjectRoot(projectRoot, workingDir string) (bool, string, error) {
 	rel, err := filepath.Rel(projectRoot, workingDir)
 	if err != nil {
@@ -362,33 +374,66 @@ func resolveWithinProjectRoot(projectRoot, workingDir string) (bool, string, err
 
 	// Lexical check rejected. Fall back to inode-based ancestry comparison so
 	// case-folded and symlinked-but-equivalent paths are not false-rejected.
-	// Non-existent paths fail os.Stat — treat that as the original lexical
-	// rejection (we cannot prove same-project for paths that don't exist).
+	// If projectRoot itself does not exist on disk we cannot prove same-project
+	// equivalence, so fall back to the lexical rejection.
 	rootInfo, err := os.Stat(projectRoot)
 	if err != nil {
 		return false, "", nil
 	}
+
 	current := workingDir
-	var subparts []string
+	// missingTail collects trailing components whose targets do not exist on
+	// disk, in leaf-first order. Once we find an existing ancestor that shares
+	// an inode with projectRoot we splice missingTail back on in root-first
+	// order to rebuild the canonical working dir.
+	var missingTail []string
+	// existingSubparts collects components traversed BETWEEN the closest
+	// existing ancestor and the matched project-root ancestor (leaf-first
+	// during traversal, root-first when spliced back during rebuild). It is
+	// empty when the closest existing ancestor IS the project root.
+	var existingSubparts []string
 	for {
-		info, err := os.Stat(current)
-		if err != nil {
-			return false, "", nil
+		info, statErr := os.Stat(current)
+		if statErr != nil {
+			if !errors.Is(statErr, fs.ErrNotExist) {
+				// Non-ENOENT stat failures (permission denied, IO error)
+				// leave us unable to prove same-project equivalence; fall
+				// back to the lexical rejection without surfacing a hard
+				// error so the guard behaviour mirrors the previous
+				// implementation.
+				return false, "", nil
+			}
+			// Component is missing. Peel it onto the tail and continue
+			// walking up to the parent.
+			parent := filepath.Dir(current)
+			if parent == current {
+				// Reached the filesystem root without finding any existing
+				// ancestor — definitively outside the project root.
+				return false, "", nil
+			}
+			missingTail = append(missingTail, filepath.Base(current))
+			current = parent
+			continue
 		}
+
 		if os.SameFile(rootInfo, info) {
-			// Rebuild the working dir spelling using projectRoot's spelling so
-			// the result is consistent with the bind mount Docker receives.
 			canonical := projectRoot
-			for i := len(subparts) - 1; i >= 0; i-- {
-				canonical = filepath.Join(canonical, subparts[i])
+			// Splice traversed existing subparts back on (root-first).
+			for i := len(existingSubparts) - 1; i >= 0; i-- {
+				canonical = filepath.Join(canonical, existingSubparts[i])
+			}
+			// Then splice the previously missing tail back on (root-first).
+			for i := len(missingTail) - 1; i >= 0; i-- {
+				canonical = filepath.Join(canonical, missingTail[i])
 			}
 			return true, canonical, nil
 		}
+
 		parent := filepath.Dir(current)
 		if parent == current {
 			return false, "", nil
 		}
-		subparts = append(subparts, filepath.Base(current))
+		existingSubparts = append(existingSubparts, filepath.Base(current))
 		current = parent
 	}
 }

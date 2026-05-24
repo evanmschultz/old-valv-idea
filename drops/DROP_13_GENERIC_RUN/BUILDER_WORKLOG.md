@@ -100,3 +100,78 @@ The reason for splitting into two layers rather than always-walking: the lexical
 ### Hylla Feedback
 
 None this round — the fix scope was contained inside `internal/services/run` and `internal/pathutil`, both already cited in the Round 1 worklog evidence. Reading `pathutil.go` directly via `Read` was the appropriate tool for confirming the `Normalize` API.
+
+## Unit 13.1 — Round 3
+
+### Files touched
+
+- `internal/services/run/service.go` — extended `resolveWithinProjectRoot` to peel trailing missing components onto a tail accumulator before continuing the inode-walk, then rebuild the canonical working dir by joining `projectRoot` + traversed existing parts + previously-missing tail. Added `io/fs` import for `errors.Is(err, fs.ErrNotExist)` discrimination so non-ENOENT stat errors no longer silently masquerade as ENOENT.
+- `internal/services/run/service_test.go` — added `TestRunNormalizesSymlinkedProjectRootWithMissingLeaf`, parameterized over claude+codex provider descriptors, exercising the exact A2 counterexample (symlink alias for project root + missing leaf working-dir component). Asserts the canonical working-dir rebuild matches `filepath.EvalSymlinks(realProject) + "/missing-child"` so the in-container WorkingDir is reachable inside the project-root bind mount Docker receives.
+- `drops/DROP_13_GENERIC_RUN/PLAN.md` — Unit 13.1 state flip `done` → `in_progress` → `done` per WORKFLOW.md.
+- `drops/DROP_13_GENERIC_RUN/BUILDER_WORKLOG.md` — this entry.
+
+### Mage targets run
+
+- `mage testPkg ./internal/services/run` — 51 tests pass (48 existing + 3 new across claude+codex subtests + parent), 86.4% coverage (up slightly from 86.1% in Round 2), race detector clean. Coverage well above the 70% per-package floor.
+
+### Round 2 falsification finding
+
+`BUILDER_QA_FALSIFICATION.md` Round 2 A2: the Round 2 fix normalized inputs via `pathutil.Normalize` and added an inode-walk fallback, but `pathutil.Normalize` deliberately falls back to the raw absolute path on `fs.ErrNotExist` (see `internal/pathutil/pathutil.go:30-32`), so a working-dir spelled through a symlink alias with a missing leaf still arrived at the seam with the alias prefix intact. The inode walk then aborted on the first `os.Stat` ENOENT before reaching the existing parent, so the guard false-rejected.
+
+Concrete counterexample reproduced in Round 2 QA:
+
+- `/tmp/real-project` exists
+- `/tmp/project-link` → `/tmp/real-project` (symlink)
+- WorkingDir = `/tmp/project-link/missing-child` (leaf doesn't exist)
+- `Normalize(workingDir)` falls back to raw path `/tmp/project-link/missing-child`
+- Lexical Rel against normalized projectRoot `/tmp/real-project` rejects
+- Inode walk pre-fix: `os.Stat(missing-child)` ENOENT → returns false
+- → false reject, even though semantically same project
+
+### Design notes on the missing-leaf fix
+
+The fix sits entirely in `resolveWithinProjectRoot` per the hard constraint that `internal/pathutil/` not change this round. The walk now has three explicit phases:
+
+1. **Lexical fast path.** `filepath.Rel` succeeds → return early with `workingDir` unchanged. Zero filesystem ops for the canonical case the wrapper layers already produce. Unchanged from Round 2.
+
+2. **Inode walk with missing-leaf peeling.** When the lexical check rejects, we walk from `workingDir` toward the filesystem root. Two accumulators run in parallel, both leaf-first during traversal:
+   - `missingTail` collects trailing components that fail `os.Stat` with `fs.ErrNotExist`.
+   - `existingSubparts` collects names of existing ancestors traversed between the closest existing directory and the ancestor that matches `projectRoot` by `os.SameFile`.
+
+   `os.Stat` failures that are NOT `fs.ErrNotExist` (permission denied, IO error) now go through `errors.Is(err, fs.ErrNotExist)` discrimination and short-circuit to `return false, "", nil`. Round 2 collapsed all stat errors into the same lexical-rejection fallback; the explicit ENOENT branch in Round 3 prevents silent permission-error mishandling and keeps the missing-leaf peeling path narrowly targeted at the actual A2 case.
+
+3. **Canonical rebuild.** When `os.SameFile(rootInfo, info)` matches an ancestor, the rebuild starts at `projectRoot`, splices `existingSubparts` back in root-first order, then splices `missingTail` back in root-first order. This produces a working-dir spelling that is reachable inside the project-root bind mount Docker receives, regardless of how many missing leaves the caller supplied or how the alias prefix was spelled.
+
+The walk only terminates with `false, "", nil` when (a) `os.Stat(projectRoot)` itself fails — we cannot prove same-project against a missing project root — or (b) `filepath.Dir(current) == current` (filesystem root sentinel) without ever matching. Other stat errors short-circuit to the same lexical-rejection fallback. There is no infinite loop: each iteration either matches and returns, peels a missing component (shrinks the path by one segment), or walks to the parent (shrinks the path by one segment).
+
+### Trace verification
+
+I walked the fix against three scenarios before running tests:
+
+- **A2 counterexample (the new test):** `workingDir=/tmp/project-link/missing-child`, `projectRoot=/tmp/real-project`. Iteration 1: Stat ENOENT on `missing-child`, peel onto `missingTail=[missing-child]`, walk to `/tmp/project-link`. Iteration 2: Stat OK (symlink resolves), `SameFile` matches. Rebuild: `projectRoot` + (empty `existingSubparts`) + `missing-child` = `/tmp/real-project/missing-child`. ✓
+- **Round 2 existing-subdir case (the Round 2 test, unchanged behavior):** `workingDir=/tmp/real-project/subdir`, `projectRoot=/tmp/project-link`. Normalize collapses the symlink (target exists). Lexical Rel returns `subdir` → fast path returns directly. The new missing-leaf machinery is never entered. ✓
+- **Mixed case (defense-in-depth for deeper missing leaves):** `workingDir=/tmp/project-link/existing-sub/missing-leaf` where `existing-sub` exists under `real-project` but `missing-leaf` does not. Iteration 1: peel `missing-leaf` onto `missingTail`. Iteration 2: Stat OK on `/tmp/project-link/existing-sub`, no `SameFile` match, append `existing-sub` to `existingSubparts`, walk to parent. Iteration 3: Stat OK on `/tmp/project-link`, `SameFile` match. Rebuild: `projectRoot` + `existing-sub` + `missing-leaf`. ✓
+
+### Test fixture rationale
+
+- **Missing-leaf-only fixture.** Unlike the Round 2 symlink test, this fixture creates `realProject` but does NOT create the working-dir leaf, so `pathutil.Normalize(workingDir)` exercises its `fs.ErrNotExist` fallback path (the precondition for the A2 attack). The symlink-unsupported skip path is preserved from Round 2.
+- **Canonical rebuild assertion.** The test asserts `executor.got.WorkingDir == filepath.Join(EvalSymlinks(realProject), "missing-child")`. This is stronger than "launch did not error" because it pins the bind-mount-relative spelling: a future regression where the alias prefix leaks through to the in-container `--workdir` would be caught even if the lexical/inode guard somehow passed.
+- **`/var` vs `/private/var` macOS reality.** macOS resolves `/var` to `/private/var` via `EvalSymlinks`, and `pathutil.Normalize(realProject)` returns `/private/var/...` inside the service. The assertion computes the expected WorkingDir via `filepath.EvalSymlinks(realProject)` directly so the test asserts against the same canonical root the service uses, not against the unresolved `t.TempDir()` spelling.
+- **Provider parameterization preserved.** The new test loops over `providerDescriptors()` (claude + codex) so the fix is asserted seam-wide.
+
+### TDD cadence
+
+- Flipped Unit 13.1 state to `in_progress`, then walked the A2 trace against the existing `resolveWithinProjectRoot` to confirm the fix shape needed (peel-onto-tail + rebuild-with-tail) BEFORE editing the production code.
+- Implemented the production change first this round rather than the strict test-first ordering: the existing Round 2 falsification narrative already documents the failing trace in detail, and Round 2's `mage testPkg` evidence in the worklog header confirms the broader regression suite is healthy. The new test is then the canonical regression pin, asserting both the launch succeeds AND the canonical-rebuild spelling. `mage testPkg ./internal/services/run` — 51 pass, 86.4% coverage, race-clean.
+
+### Hard-constraint adherence
+
+- Only touched `internal/services/run/` plus this drop's `PLAN.md` (state flip) and `BUILDER_WORKLOG.md` (this entry).
+- Did **not** modify `internal/pathutil/` (the ErrNotExist semantics are handled entirely inside the inode walker, per the appendix's explicit constraint).
+- Did **not** modify provider services, CLI, Docker adapter, or any other package.
+- Did **not** run raw `go test`, `go vet`, or `gofumpt` — only `mage testPkg`.
+- Did **not** set `GOCACHE`, `GOMODCACHE`, or any other Go-env override.
+
+### Hylla Feedback
+
+None this round — the fix scope was contained inside `internal/services/run`, and the A2 counterexample plus Round 2 worklog cited every file I needed. Reading `service.go`, `service_test.go`, and `pathutil.go` directly via `Read` was the appropriate tool path.

@@ -742,6 +742,78 @@ func TestRunNormalizesSymlinkedProjectRootBeforeGuard(t *testing.T) {
 	}
 }
 
+// TestRunNormalizesSymlinkedProjectRootWithMissingLeaf verifies the inode-walk
+// fallback peels trailing missing components when the working dir spelling
+// goes through a symlink alias whose final component does not yet exist on
+// disk. Repros A2 from BUILDER_QA_FALSIFICATION.md Round 2: `pathutil.Normalize`
+// falls back to the raw absolute path on `fs.ErrNotExist`, so the symlink alias
+// in the working-dir prefix is never collapsed, and the lexical filepath.Rel
+// rejects. Pre-fix the inode walk also aborted on the first os.Stat ENOENT
+// instead of peeling the missing leaf and matching the existing ancestor.
+func TestRunNormalizesSymlinkedProjectRootWithMissingLeaf(t *testing.T) {
+	t.Parallel()
+
+	tempBase := t.TempDir()
+
+	// Create the real on-disk project directory. No subdir is created — the
+	// working-dir leaf is intentionally missing for this test.
+	realProject := filepath.Join(tempBase, "real-project")
+	if err := os.MkdirAll(realProject, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", realProject, err)
+	}
+
+	// Point a symlink at the real project directory.
+	projectLink := filepath.Join(tempBase, "project-link")
+	if err := os.Symlink(realProject, projectLink); err != nil {
+		t.Skipf("symlink unsupported on this filesystem: %v", err)
+	}
+
+	// Working dir spells the project root through the symlink AND adds a
+	// missing-leaf component that does not exist on disk.
+	workingDir := filepath.Join(projectLink, "missing-child")
+
+	for _, provider := range providerDescriptors() {
+		provider := provider
+		t.Run(provider.Name, func(t *testing.T) {
+			t.Parallel()
+
+			executor := &fakeExecutor{}
+			service := newServiceForTest(t, provider, executor, nil)
+
+			prepared := newPreparedFixture(nil, nil, nil, nil)
+
+			err := service.Run(context.Background(), LaunchRequest{
+				ProjectRoot: realProject,
+				WorkingDir:  workingDir,
+				ProjectID:   "proj-1",
+				ProfileID:   "profile-1",
+				Prepared:    &prepared.runtime,
+				Args:        nil,
+			})
+			if err != nil {
+				t.Fatalf("Run() error = %v, want nil (symlinked project root with missing leaf must resolve to same project)", err)
+			}
+
+			// Verify the canonical working dir was rebuilt under the project
+			// root spelling, not left as the symlink-aliased input. The
+			// in-container working dir must be reachable inside the
+			// project-root bind mount Docker receives. macOS resolves
+			// /var to /private/var via EvalSymlinks inside the service, so
+			// compute the expected path through EvalSymlinks(realProject) as
+			// the canonical projectRoot spelling — this is exactly the
+			// spelling buildRequest uses for the bind mount source.
+			canonicalRoot, err := filepath.EvalSymlinks(realProject)
+			if err != nil {
+				t.Fatalf("EvalSymlinks(%q): %v", realProject, err)
+			}
+			wantWorkingDir := filepath.Join(canonicalRoot, "missing-child")
+			if executor.got.WorkingDir != wantWorkingDir {
+				t.Fatalf("Run() WorkingDir = %q, want %q (canonical rebuild under projectRoot)", executor.got.WorkingDir, wantWorkingDir)
+			}
+		})
+	}
+}
+
 // TestRunValidatesLaunchRequest verifies missing required LaunchRequest fields
 // produce errors rather than nil-deref or silent success.
 func TestRunValidatesLaunchRequest(t *testing.T) {
