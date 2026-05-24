@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -1737,5 +1738,404 @@ func TestEnsureProjectImage_GenericBaseInspectErrorFallsThroughToRebuild(t *test
 	}
 	if !foundBaseLabel {
 		t.Errorf("build call missing empty base_recipe_hash label %q in %#v", wantBaseLabel, buildCall)
+	}
+}
+
+// --- Unit 15.2.5 — Network-policy injection on overlay build ----------------
+//
+// fakeNetworkPolicy is a minimal NetworkPolicy stub for the tests below. It
+// records Provision calls + returns canned PolicyMaterial. Cleanup is
+// counted so a test can prove the deferred cleanup ran.
+type fakeNetworkPolicy struct {
+	material      NetworkPolicyMaterial
+	cleanupCount  int
+	provisionErr  error
+	cleanupErr    error
+	lastRequest   NetworkPolicyRequest
+	provisionHits int
+}
+
+func (f *fakeNetworkPolicy) Provision(_ context.Context, req NetworkPolicyRequest) (NetworkPolicyMaterial, NetworkPolicyCleanup, error) {
+	f.provisionHits++
+	f.lastRequest = req
+	if f.provisionErr != nil {
+		return NetworkPolicyMaterial{}, nil, f.provisionErr
+	}
+	cleanup := func(_ context.Context) error {
+		f.cleanupCount++
+		return f.cleanupErr
+	}
+	return f.material, cleanup, nil
+}
+
+func newProjectImageServiceWithPolicy(t *testing.T, runner Runner, policy NetworkPolicy, endpoint string) Service {
+	t.Helper()
+	svc, err := New(Options{
+		Runner:        runner,
+		Repository:    "ghcr.io/valv/codex",
+		ContextDir:    t.TempDir(),
+		Dockerfile:    "Dockerfile",
+		DefaultTag:    "dev",
+		UserID:        1000,
+		GroupID:       1000,
+		NetworkPolicy: policy,
+		ProxyEndpoint: endpoint,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	return svc
+}
+
+func TestEnsureProjectImage_NetworkPolicyInjectsProxyArgsAndNetwork(t *testing.T) {
+	t.Parallel()
+
+	manifest := sampleProjectManifest()
+	baseRef := docker.NewImageRef("ghcr.io/valv/codex", "dev")
+	wantTag := expectedProjectTag("ghcr.io/valv/codex", manifest)
+
+	policy := &fakeNetworkPolicy{
+		material: NetworkPolicyMaterial{
+			HTTPProxyURL:  "http://host.docker.internal:18080",
+			HTTPSProxyURL: "http://host.docker.internal:18080",
+			NoProxy:       "github.com,objects.githubusercontent.com,proxy.golang.org,sum.golang.org",
+			NetworkName:   "valv-netpol-aaaaaaaaaaaa",
+		},
+	}
+
+	runner := &runnerRecorder{
+		outs: map[string]string{
+			projectInspectKey(baseRef.String(), recipeHashLabel): "base-recipe-sha256-hex",
+		},
+		errs: map[string]error{
+			projectInspectKey(wantTag, recipeHashLabel): fmt.Errorf("no such image"),
+		},
+	}
+	svc := newProjectImageServiceWithPolicy(t, runner, policy, "host.docker.internal:18080")
+
+	result, err := svc.EnsureProjectImage(context.Background(), EnsureProjectRequest{
+		Manifest:  manifest,
+		BaseImage: baseRef,
+	})
+	if err != nil {
+		t.Fatalf("EnsureProjectImage() error = %v", err)
+	}
+	if result.Action != EnsureActionUpdated {
+		t.Fatalf("Action = %q, want %q", result.Action, EnsureActionUpdated)
+	}
+
+	if policy.provisionHits != 1 {
+		t.Fatalf("policy.provisionHits = %d, want 1", policy.provisionHits)
+	}
+	// Effective allowlist must include the four built-in defaults even
+	// though the manifest has no user-declared hosts.
+	wantHosts := map[string]bool{
+		"github.com": true, "objects.githubusercontent.com": true,
+		"proxy.golang.org": true, "sum.golang.org": true,
+	}
+	for _, host := range policy.lastRequest.Allowlist {
+		delete(wantHosts, host)
+	}
+	if len(wantHosts) != 0 {
+		t.Errorf("Provision Allowlist missing built-in defaults: %#v (got %#v)", wantHosts, policy.lastRequest.Allowlist)
+	}
+	if policy.lastRequest.ProxyEndpoint != "host.docker.internal:18080" {
+		t.Errorf("Provision ProxyEndpoint = %q, want %q", policy.lastRequest.ProxyEndpoint, "host.docker.internal:18080")
+	}
+
+	// Build args must include the three proxy values; --network must point
+	// at the policy network.
+	var buildCall []string
+	for _, call := range runner.calls {
+		if len(call) >= 2 && call[0] == "buildx" && call[1] == "build" {
+			buildCall = call
+			break
+		}
+	}
+	if buildCall == nil {
+		t.Fatalf("no buildx build call recorded: %#v", runner.calls)
+	}
+
+	wantArgs := []string{
+		"HTTPS_PROXY=http://host.docker.internal:18080",
+		"HTTP_PROXY=http://host.docker.internal:18080",
+		"NO_PROXY=github.com,objects.githubusercontent.com,proxy.golang.org,sum.golang.org",
+	}
+	for _, want := range wantArgs {
+		found := false
+		for i := 0; i < len(buildCall)-1; i++ {
+			if buildCall[i] == "--build-arg" && buildCall[i+1] == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("build call missing --build-arg %q in %#v", want, buildCall)
+		}
+	}
+
+	// --network <policy network>
+	foundNetwork := false
+	for i := 0; i < len(buildCall)-1; i++ {
+		if buildCall[i] == "--network" && buildCall[i+1] == "valv-netpol-aaaaaaaaaaaa" {
+			foundNetwork = true
+			break
+		}
+	}
+	if !foundNetwork {
+		t.Errorf("build call missing --network valv-netpol-aaaaaaaaaaaa in %#v", buildCall)
+	}
+
+	// Deferred cleanup must have run.
+	if policy.cleanupCount != 1 {
+		t.Errorf("policy.cleanupCount = %d, want 1 (deferred cleanup must run)", policy.cleanupCount)
+	}
+
+	// Freshness label contract preserved: the five Unit 12.3 labels still
+	// appear on the build call.
+	overlayContent, err := BuildOverlayDockerfile(manifest, baseRef)
+	if err != nil {
+		t.Fatalf("BuildOverlayDockerfile error = %v", err)
+	}
+	wantLabels := []string{
+		fmt.Sprintf("%s=%s", baseRecipeHashLabel, "base-recipe-sha256-hex"),
+		fmt.Sprintf("%s=%s", managedLabel, "true"),
+		fmt.Sprintf("%s=%s", recipeHashLabel, sha256Hex(overlayContent)),
+		fmt.Sprintf("%s=%s", scopeLabel, scopeValueProjectOverlay),
+		fmt.Sprintf("%s=%s", toolsHashLabel, OverlayHash(manifest)),
+	}
+	for _, want := range wantLabels {
+		found := false
+		for i := 0; i < len(buildCall)-1; i++ {
+			if buildCall[i] == "--label" && buildCall[i+1] == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("build call missing --label %q in %#v", want, buildCall)
+		}
+	}
+
+	// Target tag identity preserved across policy on/off — the tag is
+	// computed from OverlayHash(manifest) only, never the allowlist.
+	if result.Image.String() != wantTag {
+		t.Errorf("Image = %q, want %q (overlay tag must not change with policy on)", result.Image.String(), wantTag)
+	}
+}
+
+func TestEnsureProjectImage_NetworkPolicyOff_NoProxyArgsNoNetwork(t *testing.T) {
+	t.Parallel()
+
+	manifest := sampleProjectManifest()
+	baseRef := docker.NewImageRef("ghcr.io/valv/codex", "dev")
+	wantTag := expectedProjectTag("ghcr.io/valv/codex", manifest)
+
+	runner := &runnerRecorder{
+		outs: map[string]string{
+			projectInspectKey(baseRef.String(), recipeHashLabel): "base-recipe-sha256-hex",
+		},
+		errs: map[string]error{
+			projectInspectKey(wantTag, recipeHashLabel): fmt.Errorf("no such image"),
+		},
+	}
+	// No NetworkPolicy in Options — policy off.
+	svc := newProjectImageService(t, runner)
+
+	if _, err := svc.EnsureProjectImage(context.Background(), EnsureProjectRequest{
+		Manifest:  manifest,
+		BaseImage: baseRef,
+	}); err != nil {
+		t.Fatalf("EnsureProjectImage() error = %v", err)
+	}
+
+	var buildCall []string
+	for _, call := range runner.calls {
+		if len(call) >= 2 && call[0] == "buildx" && call[1] == "build" {
+			buildCall = call
+			break
+		}
+	}
+	if buildCall == nil {
+		t.Fatalf("no buildx build call recorded: %#v", runner.calls)
+	}
+
+	// No proxy --build-arg pairs.
+	for i := 0; i < len(buildCall)-1; i++ {
+		if buildCall[i] != "--build-arg" {
+			continue
+		}
+		val := buildCall[i+1]
+		if strings.HasPrefix(val, "HTTP_PROXY=") || strings.HasPrefix(val, "HTTPS_PROXY=") || strings.HasPrefix(val, "NO_PROXY=") {
+			t.Errorf("policy-off build call contained proxy build-arg %q: %#v", val, buildCall)
+		}
+	}
+	// No --network flag.
+	for i := 0; i < len(buildCall); i++ {
+		if buildCall[i] == "--network" {
+			t.Errorf("policy-off build call contained --network at index %d: %#v", i, buildCall)
+		}
+	}
+}
+
+func TestEnsureProjectImage_NetworkPolicyEmptyManifest_NoProvision(t *testing.T) {
+	t.Parallel()
+
+	policy := &fakeNetworkPolicy{}
+	runner := &runnerRecorder{}
+	svc := newProjectImageServiceWithPolicy(t, runner, policy, "host.docker.internal:18080")
+
+	result, err := svc.EnsureProjectImage(context.Background(), EnsureProjectRequest{
+		Manifest:  tools.ToolManifest{},
+		BaseImage: docker.NewImageRef("ghcr.io/valv/codex", "dev"),
+	})
+	if err != nil {
+		t.Fatalf("EnsureProjectImage() error = %v", err)
+	}
+	if result.Action != EnsureActionUsingExistingImage {
+		t.Errorf("Action = %q, want %q", result.Action, EnsureActionUsingExistingImage)
+	}
+	if policy.provisionHits != 0 {
+		t.Errorf("policy.provisionHits = %d, want 0 (empty manifest must short-circuit)", policy.provisionHits)
+	}
+	if policy.cleanupCount != 0 {
+		t.Errorf("policy.cleanupCount = %d, want 0 (no cleanup when no provision)", policy.cleanupCount)
+	}
+}
+
+func TestEnsureProjectImage_NetworkPolicyUpToDate_NoProvision(t *testing.T) {
+	t.Parallel()
+
+	manifest := sampleProjectManifest()
+	baseRef := docker.NewImageRef("ghcr.io/valv/codex", "dev")
+	wantTag := expectedProjectTag("ghcr.io/valv/codex", manifest)
+
+	overlayContent, err := BuildOverlayDockerfile(manifest, baseRef)
+	if err != nil {
+		t.Fatalf("BuildOverlayDockerfile error = %v", err)
+	}
+	expectedRecipe := sha256Hex(overlayContent)
+	expectedTools := OverlayHash(manifest)
+	const expectedBaseRecipe = "base-recipe-sha256-hex"
+
+	runner := &runnerRecorder{
+		outs: map[string]string{
+			projectInspectKey(baseRef.String(), recipeHashLabel): expectedBaseRecipe,
+			projectInspectKey(wantTag, recipeHashLabel):          expectedRecipe,
+			projectInspectKey(wantTag, toolsHashLabel):           expectedTools,
+			projectInspectKey(wantTag, baseRecipeHashLabel):      expectedBaseRecipe,
+		},
+	}
+	policy := &fakeNetworkPolicy{}
+	svc := newProjectImageServiceWithPolicy(t, runner, policy, "host.docker.internal:18080")
+
+	result, err := svc.EnsureProjectImage(context.Background(), EnsureProjectRequest{
+		Manifest:  manifest,
+		BaseImage: baseRef,
+	})
+	if err != nil {
+		t.Fatalf("EnsureProjectImage() error = %v", err)
+	}
+	if result.Action != EnsureActionUpToDate {
+		t.Errorf("Action = %q, want %q (up-to-date overlay must skip rebuild)", result.Action, EnsureActionUpToDate)
+	}
+	if policy.provisionHits != 0 {
+		t.Errorf("policy.provisionHits = %d, want 0 (up-to-date must not provision)", policy.provisionHits)
+	}
+	if policy.cleanupCount != 0 {
+		t.Errorf("policy.cleanupCount = %d, want 0 (no cleanup when no provision)", policy.cleanupCount)
+	}
+}
+
+func TestEnsureProjectImage_NetworkPolicyProvisionError_Wraps(t *testing.T) {
+	t.Parallel()
+
+	manifest := sampleProjectManifest()
+	baseRef := docker.NewImageRef("ghcr.io/valv/codex", "dev")
+	wantTag := expectedProjectTag("ghcr.io/valv/codex", manifest)
+
+	sentinel := errors.New("docker daemon unreachable")
+	policy := &fakeNetworkPolicy{provisionErr: sentinel}
+
+	runner := &runnerRecorder{
+		outs: map[string]string{
+			projectInspectKey(baseRef.String(), recipeHashLabel): "base-recipe-sha256-hex",
+		},
+		errs: map[string]error{
+			projectInspectKey(wantTag, recipeHashLabel): fmt.Errorf("no such image"),
+		},
+	}
+	svc := newProjectImageServiceWithPolicy(t, runner, policy, "host.docker.internal:18080")
+
+	_, err := svc.EnsureProjectImage(context.Background(), EnsureProjectRequest{
+		Manifest:  manifest,
+		BaseImage: baseRef,
+	})
+	if err == nil {
+		t.Fatal("EnsureProjectImage() error = nil, want provision error")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("err = %v, want errors.Is sentinel", err)
+	}
+	if !strings.Contains(err.Error(), "provision network policy") {
+		t.Errorf("err = %q, want context containing 'provision network policy'", err.Error())
+	}
+}
+
+func TestEnsureProjectImage_NetworkPolicyHonorsUserAllowlist(t *testing.T) {
+	t.Parallel()
+
+	baseRef := docker.NewImageRef("ghcr.io/valv/codex", "dev")
+	manifest := tools.ToolManifest{
+		Tools: map[string]tools.ToolSpec{
+			"ta": {Source: "github.com/evanmschultz/ta@latest", Install: "go install"},
+		},
+		Allowlist: tools.AllowlistConfig{
+			Hosts: []string{"internal.example.com", "registry.example.org"},
+		},
+	}
+	wantTag := expectedProjectTag("ghcr.io/valv/codex", manifest)
+
+	policy := &fakeNetworkPolicy{
+		material: NetworkPolicyMaterial{
+			HTTPProxyURL:  "http://host.docker.internal:18080",
+			HTTPSProxyURL: "http://host.docker.internal:18080",
+			NoProxy:       "ignored-for-this-test",
+			NetworkName:   "valv-netpol-aaaaaaaaaaaa",
+		},
+	}
+	runner := &runnerRecorder{
+		outs: map[string]string{
+			projectInspectKey(baseRef.String(), recipeHashLabel): "base-recipe-sha256-hex",
+		},
+		errs: map[string]error{
+			projectInspectKey(wantTag, recipeHashLabel): fmt.Errorf("no such image"),
+		},
+	}
+	svc := newProjectImageServiceWithPolicy(t, runner, policy, "host.docker.internal:18080")
+
+	if _, err := svc.EnsureProjectImage(context.Background(), EnsureProjectRequest{
+		Manifest:  manifest,
+		BaseImage: baseRef,
+	}); err != nil {
+		t.Fatalf("EnsureProjectImage() error = %v", err)
+	}
+	if policy.provisionHits != 1 {
+		t.Fatalf("policy.provisionHits = %d, want 1", policy.provisionHits)
+	}
+	// Effective allowlist must be union of user hosts + four defaults.
+	got := map[string]bool{}
+	for _, h := range policy.lastRequest.Allowlist {
+		got[h] = true
+	}
+	required := []string{
+		"github.com", "objects.githubusercontent.com",
+		"proxy.golang.org", "sum.golang.org",
+		"internal.example.com", "registry.example.org",
+	}
+	for _, want := range required {
+		if !got[want] {
+			t.Errorf("Provision Allowlist missing %q in %#v", want, policy.lastRequest.Allowlist)
+		}
 	}
 }

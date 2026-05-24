@@ -130,7 +130,7 @@ Ship DROP_15 as a closed-by-default, macOS-compatible network policy layer acros
 
 #### Unit 15.2.5 — Shared networkpolicy service and image-build egress enforcement
 
-**State:** todo
+**State:** done
 
 **Paths:**
 - `internal/services/networkpolicy/service.go` (new, not yet in tree)

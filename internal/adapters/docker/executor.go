@@ -1,6 +1,10 @@
 package docker
 
-import "context"
+import (
+	"context"
+	"fmt"
+	"strings"
+)
 
 func (e Executor) Build(ctx context.Context, request ImageBuildRequest) error {
 	args, err := BuildImageArgs(request)
@@ -60,4 +64,39 @@ func (e Executor) RemoveNetwork(ctx context.Context, request NetworkRemoveReques
 		return err
 	}
 	return e.runner.Run(ctx, args)
+}
+
+// ListNetworks shells out `docker network ls --filter label=<label>
+// --format {{.Name}}` and returns one network name per line. The label
+// filter accepts either a key (e.g. "valv") or a key=value pair (e.g.
+// "valv=network-policy"); Docker treats both forms uniformly.
+//
+// Returns an empty slice when no networks match. Requires the underlying
+// runner to implement Output(context.Context, []string) (string, error); a
+// non-outputting runner returns ErrOutputUnsupported.
+func (e Executor) ListNetworks(ctx context.Context, label string) ([]string, error) {
+	outputter, ok := e.runner.(interface {
+		Output(context.Context, []string) (string, error)
+	})
+	if !ok {
+		return nil, ErrOutputUnsupported
+	}
+	args := []string{"network", "ls", "--filter", "label=" + label, "--format", "{{.Name}}"}
+	out, err := outputter.Output(ctx, args)
+	if err != nil {
+		return nil, fmt.Errorf("docker network ls: %w", err)
+	}
+	if strings.TrimSpace(out) == "" {
+		return nil, nil
+	}
+	lines := strings.Split(out, "\n")
+	names := make([]string, 0, len(lines))
+	for _, line := range lines {
+		name := strings.TrimSpace(line)
+		if name == "" {
+			continue
+		}
+		names = append(names, name)
+	}
+	return names, nil
 }

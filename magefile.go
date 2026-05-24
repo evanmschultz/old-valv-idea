@@ -144,7 +144,7 @@ func TestPkg(pkg string) error {
 
 // Integration runs the Docker-backed integration and external golden tests.
 func Integration() error {
-	return runGoTest("-tags=integration", "-count=1", "./internal/cli")
+	return runGoTest("-tags=integration", "-count=1", "./internal/cli", "./internal/services/images")
 }
 
 // Golden runs the full golden suite.

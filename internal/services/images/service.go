@@ -86,22 +86,71 @@ type Options struct {
 	// Clock overrides time.Now for deterministic testing.  If nil, time.Now
 	// is used.
 	Clock func() time.Time
+	// NetworkPolicy, when non-nil, makes EnsureProjectImage drive overlay
+	// builds through the shared closed-default network policy: a single
+	// `--internal` docker network plus predefined HTTP_PROXY / HTTPS_PROXY /
+	// NO_PROXY build args. When nil, EnsureProjectImage builds with the
+	// default (open) docker network and emits no proxy build args.
+	//
+	// DROP_15 Unit 15.2.5 introduces this seam. The interface lives in this
+	// package (consumer-side) so the production network-policy service
+	// satisfies it without importing this package.
+	NetworkPolicy NetworkPolicy
+	// ProxyEndpoint is the host:port string the policy proxy daemon
+	// listens on, threaded into PolicyMaterial when NetworkPolicy is set.
+	// Ignored when NetworkPolicy is nil. Example:
+	// "host.docker.internal:18080".
+	ProxyEndpoint string
 }
 
+// NetworkPolicy is the consumer-side seam Service.EnsureProjectImage uses to
+// fetch closed-default network policy material for an overlay build. The
+// production implementation is *networkpolicy.Service; tests inject a fake.
+//
+// Provision must return a non-nil PolicyMaterial on success and a non-nil
+// Cleanup that the caller defers to remove the policy resources.
+type NetworkPolicy interface {
+	Provision(ctx context.Context, request NetworkPolicyRequest) (NetworkPolicyMaterial, NetworkPolicyCleanup, error)
+}
+
+// NetworkPolicyRequest carries the inputs Service.EnsureProjectImage hands
+// to NetworkPolicy.Provision: the effective allowlist and the proxy
+// endpoint. The fields mirror networkpolicy.ProvisionRequest verbatim so
+// the consumer-side interface stays decoupled from the producer package.
+type NetworkPolicyRequest struct {
+	Allowlist     []string
+	ProxyEndpoint string
+}
+
+// NetworkPolicyMaterial is the policy material EnsureProjectImage threads
+// into the overlay ImageBuildRequest.
+type NetworkPolicyMaterial struct {
+	HTTPProxyURL  string
+	HTTPSProxyURL string
+	NoProxy       string
+	NetworkName   string
+}
+
+// NetworkPolicyCleanup matches networkpolicy.Cleanup; defined here so the
+// consumer-side interface is self-contained.
+type NetworkPolicyCleanup func(ctx context.Context) error
+
 type Service struct {
-	runner     Runner
-	stateStore StateStore
-	resolver   VersionResolver
-	provider   domain.Provider
-	repository string
-	contextDir string
-	dockerfile string
-	defaultTag string
-	userID     int
-	groupID    int
-	logger     *log.Logger
-	cachePath  string
-	clock      func() time.Time
+	runner        Runner
+	stateStore    StateStore
+	resolver      VersionResolver
+	provider      domain.Provider
+	repository    string
+	contextDir    string
+	dockerfile    string
+	defaultTag    string
+	userID        int
+	groupID       int
+	logger        *log.Logger
+	cachePath     string
+	clock         func() time.Time
+	networkPolicy NetworkPolicy
+	proxyEndpoint string
 }
 
 type BuildRequest struct {
@@ -321,19 +370,21 @@ func New(options Options) (Service, error) {
 		clock = time.Now
 	}
 	return Service{
-		runner:     options.Runner,
-		stateStore: options.StateStore,
-		resolver:   resolver,
-		provider:   provider,
-		repository: strings.TrimSpace(options.Repository),
-		contextDir: strings.TrimSpace(options.ContextDir),
-		dockerfile: dockerfile,
-		defaultTag: defaultTag,
-		userID:     userID,
-		groupID:    groupID,
-		logger:     options.Logger,
-		cachePath:  cachePath,
-		clock:      clock,
+		runner:        options.Runner,
+		stateStore:    options.StateStore,
+		resolver:      resolver,
+		provider:      provider,
+		repository:    strings.TrimSpace(options.Repository),
+		contextDir:    strings.TrimSpace(options.ContextDir),
+		dockerfile:    dockerfile,
+		defaultTag:    defaultTag,
+		userID:        userID,
+		groupID:       groupID,
+		logger:        options.Logger,
+		cachePath:     cachePath,
+		clock:         clock,
+		networkPolicy: options.NetworkPolicy,
+		proxyEndpoint: strings.TrimSpace(options.ProxyEndpoint),
 	}, nil
 }
 
@@ -796,11 +847,57 @@ func (s Service) EnsureProjectImage(ctx context.Context, request EnsureProjectRe
 		return EnsureProjectResult{}, fmt.Errorf("ensure project image: write overlay dockerfile: %w", err)
 	}
 
+	// Step 5a: closed-default network policy. When a NetworkPolicy is
+	// configured, provision the managed network + proxy material and
+	// thread it into the build request. PolicyMaterial is consumed only
+	// at build time; freshness labels (recipe/tools/base-recipe/managed/
+	// scope) are unchanged so OverlayHash + project-overlay tag identity
+	// stay constant across policy on/off transitions.
+	var (
+		policyMaterial NetworkPolicyMaterial
+		policyCleanup  NetworkPolicyCleanup
+	)
+	if s.networkPolicy != nil {
+		effective, allowErr := tools.EffectiveAllowlist(request.Manifest.Allowlist)
+		if allowErr != nil {
+			return EnsureProjectResult{}, fmt.Errorf("ensure project image: build effective allowlist: %w", allowErr)
+		}
+		material, cleanup, provErr := s.networkPolicy.Provision(ctx, NetworkPolicyRequest{
+			Allowlist:     effective,
+			ProxyEndpoint: s.proxyEndpoint,
+		})
+		if provErr != nil {
+			return EnsureProjectResult{}, fmt.Errorf("ensure project image: provision network policy: %w", provErr)
+		}
+		policyMaterial = material
+		policyCleanup = cleanup
+		defer func() {
+			if cleanupErr := policyCleanup(ctx); cleanupErr != nil {
+				s.debug("network policy cleanup failed", "err", cleanupErr)
+			}
+		}()
+	}
+
+	buildArgs := map[string]string{}
+	buildNetwork := ""
+	if s.networkPolicy != nil {
+		// Predefined Docker proxy build args. These are case-insensitive
+		// on the buildkit side and do NOT require an explicit ARG in the
+		// overlay Dockerfile (verified via Docker docs § "Pre-defined
+		// build arguments > Proxy arguments").
+		buildArgs["HTTP_PROXY"] = policyMaterial.HTTPProxyURL
+		buildArgs["HTTPS_PROXY"] = policyMaterial.HTTPSProxyURL
+		buildArgs["NO_PROXY"] = policyMaterial.NoProxy
+		buildNetwork = policyMaterial.NetworkName
+	}
+
 	buildRequest := docker.ImageBuildRequest{
 		ContextDir: tempDir,
 		Dockerfile: dockerfilePath,
 		Tags:       []docker.ImageRef{targetRef},
 		Builder:    "auto",
+		BuildArgs:  buildArgs,
+		Network:    buildNetwork,
 		Labels: map[string]string{
 			recipeHashLabel:     expectedRecipeHash,
 			baseRecipeHashLabel: baseRecipeHash,
