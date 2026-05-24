@@ -175,3 +175,66 @@ I walked the fix against three scenarios before running tests:
 ### Hylla Feedback
 
 None this round — the fix scope was contained inside `internal/services/run`, and the A2 counterexample plus Round 2 worklog cited every file I needed. Reading `service.go`, `service_test.go`, and `pathutil.go` directly via `Read` was the appropriate tool path.
+
+## Unit 13.2 — Round 1
+
+### Files touched
+
+- `internal/cli/run.go` (new) — `valv run` cobra command + prefix-only local-flag stripping + provider runtime prep dispatch + shared `internal/services/run.Service` invocation with command override.
+- `internal/cli/run_test.go` (new) — table-driven `stripRunLocalFlags` proof + end-to-end command tests covering help routing, missing-account, unknown-account, duplicate-name collision (happy + unhappy), unbound-project bind-hint (both variants), and override-launch path (claude + codex + duplicate-name + explicit-provider).
+- `internal/cli/root.go` — register `valv run` under the existing `runtime` group alongside `valv codex` / `valv claude`.
+- `drops/DROP_13_GENERIC_RUN/PLAN.md` — Unit 13.2 state flip `todo` → `in_progress` → `done`.
+- `drops/DROP_13_GENERIC_RUN/BUILDER_WORKLOG.md` — this entry.
+
+`internal/cli/account_flag.go` + test were listed in the plan paths but **not modified**: per the plan's explicit option "or add a new helper specific to `valv run`", a separate `stripRunLocalFlags` lives in `run.go`. Mixing prefix-only behavior into the existing `stripAccountFlag` would have changed the provider launchers' broader-pass-through semantics and broken `TestStripAccountFlag`'s `--account in the middle of other args` case — a real regression.
+
+### Mage targets run
+
+- `mage testPkg ./internal/cli` — 280 tests pass (275 pre-existing + 5 new top-level + a handful of subtests under `TestStripRunLocalFlags`, `TestRunCommandHelpForOwnHelp`, `TestRunCommandUnboundProjectBindHint`, `TestUnboundProjectBindHintErrorFormat`). Package coverage 68.6% — above the mage-enforced 60% floor. `internal/cli` is a large package (manage.go alone is 74 KB) with significant code paths that no DROP_13 unit exercises directly; the new `run.go` paths are exercised by the new tests.
+- `mage build` — passes; confirms `cmd/valv` links cleanly with the new `runCmd` wired into `internal/cli/root.go`.
+- Did **not** run `mage test` or `mage integration` (drop-end concerns, per WORKFLOW.md). The package-level gate is sufficient for per-unit build-QA.
+- Did **not** run raw `go test` / `go build` / `go vet` / `gofumpt` directly except `go tool gofumpt -w` to format the new files before `mage testPkg` retried (the `mage testPkg` formatter check fails fast on unformatted source, so a one-shot `go tool gofumpt -w` on the just-written files is the canonical workflow).
+- Did **not** set `GOCACHE`, `GOMODCACHE`, or any other Go-env override.
+
+### Design notes on prefix-only flag stripping
+
+`stripRunLocalFlags` differs from the existing `stripAccountFlag` (in `internal/cli/account_flag.go`) in one critical dimension: **the scan stops at the first non-flag positional token**, not at `--`. The Schema Decision in `drops/DROP_13_GENERIC_RUN/PLAN.md` line 50 frames the rationale — `valv run` may launch arbitrary commands that themselves accept `--account` / `--provider`, so any mid-argv occurrence of those flags must belong to the target command, not to Valv. The table-driven test pins:
+
+- Case (a) from the unit's acceptance: `valv run --account A cmd --account B` → `parsed.account="A"`, `remaining=[cmd, --account, B]`. The later `--account B` is passthrough.
+- Case (b): `valv run cmd --account A` → `parsed.account=""`, `remaining=[cmd, --account, A]`. The leading positional terminates stripping immediately.
+- Equality form (`--account=X`), space form (`--account X`), and ordering invariance (`--provider X --account Y` vs `--account Y --provider X`) are all covered.
+- Malformed cases (`--account` alone, `--account=`) leave the flag in `remaining` rather than silently dropping it.
+- `--` continues to act as a hard separator — preserved in `remaining` so the target command sees it.
+
+A snapshot/non-mutation test (`TestStripRunLocalFlagsDoesNotMutateInput`) pins the slice-safety contract because both the cobra DisableFlagParsing path and downstream `LaunchRequest` build steps assume the original argv is read-only.
+
+### Design notes on the launch path
+
+`runRunCommand` follows the same shape as `runClaudeCommand` / `runCodexCommand`, but resolves provider dynamically:
+
+1. **Prefix flag stripping** + help / missing-account guards.
+2. **`resolveAccountByName`** with explicit/inferred `--provider`. The collision error (multi-provider name) is raised here and propagates up unchanged — the unhappy-collision test (`TestRunCommandUnhappyCollisionFiresBeforeOverride`) asserts this fires **before** any image-resolution-side override warning.
+3. **`ensureManagedAccountReady`** — dispatches to `ensureCodexAccountReady` (host-side login status) or `ensureClaudeAccountReady` (`.credentials.json` presence + non-empty size). Tests that don't exercise the auth flow itself either seed `.credentials.json` (claude) or set `VALV_TEST_SKIP_HOST_CODEX_LOGIN=1` (codex) so the gate passes deterministically.
+4. **Store-open + `ProjectByRoot`** — `valv run` is explicit-account / explicit-project: no auto-bind, no project-row creation. The manage service does not expose project / binding / profile repository methods (its public surface is higher-level), so the launch path opens the SQLite store directly via `openStore(paths)` — mirroring how `internal/services/claude.Service` and `internal/services/codex.Service` consume the store interfaces. When `ProjectByRoot` returns `domain.ErrNotFound`, the bind-hint formatter (`unboundProjectBindHintError`) emits the suggested `valv account bind <name>` with `--provider <p>` appended **only** when `parsed.providerExplicit` — preserving the runtime provider-context invariant from the unit's acceptance criteria.
+5. **Cross-provider binding lookup** — `BindingByProjectID` against the OTHER provider, then `ProfileByID`. Silent skip on `ErrNotFound`; fatal on any other error. Matches the DROP_10 silent-skip semantics in `internal/services/{claude,codex}/service.go`.
+6. **Image resolution** — `baseImageRefForProvider` returns `claudeImageRef()` or `codexImageRef()`, then `ensureProviderImageCurrent` runs (preserving DROP_12 Unit 12.4 reorder: image-current before `resolveProjectImage`), then `resolveProjectImage` produces the per-project ref (or returns base unchanged on empty-manifest / override-active).
+7. **Provider runtime prep** — `preparePerProviderRuntime` dispatches to `clauderuntime.PrepareRuntime` or `codexruntime.PrepareRuntime`. For codex, `SharedHome` is empty (the isolated-account model `valv run` operates under doesn't apply Codex's `sharedCodexStateHome` derivation — that stays provider-wrapper-specific and remains in the codex CLI's own launcher per Unit 13.4's scope). The provider-specific `PreparedRuntime` is then **adapted** to `runservice.PreparedRuntime` via `adaptClaudePreparedRuntime` / `adaptCodexPreparedRuntime`, whose `Cleanup` closures delegate to the provider's `Close()` so sync-back and temp-dir removal still run.
+8. **`runservice.Service.Run`** with `LaunchRequest.Command` populated from `remaining`. The shared service emits `--entrypoint <command[0]>` via `ContainerRunRequest.Extra` and forwards `command[1:]` as container args — exactly the override path Unit 13.1 exercised in its own tests.
+
+### Test fixture decisions
+
+- **`writeRunToolsManifest`** is a per-projectRoot variant of `writeCodexToolsManifest` (which only accepts an implicit `t.TempDir()`). The override-launch tests need a fully bound project, so the manifest must land at the same project root as `bind`; the existing helper's implicit-temp-dir behavior doesn't compose.
+- **`seedClaudeAccountCredentials`** is a thin testing helper that writes `.credentials.json` into the manage-resolved account home (`<providerRoot>/claude/profiles/<name>/.credentials.json`). It avoids exporting `writeCredsToDir` from `claude_auth_test.go` (which currently only takes a bare dir) and avoids depending on internal `manageservice` resolution details that could shift across drops.
+- **No t.Parallel on commands that mutate cwd**. Tests that `os.Chdir` (override-launch path, unbound-project bind hint) are serial; the strip-helper tests and metadata tests are parallel.
+- **Best-effort RunE for override tests**: `_ = cmd.RunE(...)`. The override-warning assertion is independent of whether downstream PrepareRuntime + docker-run succeeds; in fact PrepareRuntime + `installFakeDocker`'s tiny shell script don't model a successful container launch, so the command path errors after the warning has already been written to stderr. The assertion is: "warning emitted exactly once" — true regardless of downstream success.
+
+### Constraints honored
+
+- Edits **only** in `internal/cli/run.go` (new), `internal/cli/run_test.go` (new), and `internal/cli/root.go` (one-line `AddCommand` + `runCmd.GroupID` wiring) plus the drop dir. `internal/cli/account_flag.go` / `account_flag_test.go` were unmodified — the new helper is purpose-built for prefix-only and avoids regressing the existing provider-launcher tests.
+- Did **not** modify `internal/services/run/` (Unit 13.1 is `done`).
+- Did **not** modify provider services (`internal/services/claude`, `internal/services/codex`) — that's Units 13.3 / 13.4.
+- Did **not** touch the Docker adapter — `ContainerRunRequest.Extra` already supports the `--entrypoint` injection path Unit 13.1 wired.
+
+### Hylla Feedback
+
+None this round — every grounding source needed (`resolveAccountByName`, `ensureManagedAccountReady`, `resolveProjectImage`, both PrepareRuntime adapters, `internal/services/run.Service`) was cited explicitly in the unit's acceptance + the Round 5 worklog from Unit 13.1. `Read` + `Bash`/`rg` were sufficient.

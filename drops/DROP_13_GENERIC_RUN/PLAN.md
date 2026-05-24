@@ -89,7 +89,7 @@ Blocked by: none
 
 #### Unit 13.2 — Add `valv run` and root wiring
 
-State: `todo`
+State: `done`
 
 Paths: `internal/cli/run.go` (new, not yet in tree), `internal/cli/run_test.go` (new, not yet in tree), `internal/cli/root.go`, `internal/cli/account_flag.go`, `internal/cli/account_flag_test.go`
 

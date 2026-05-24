@@ -127,6 +127,8 @@ valv claude --version
 	codexCmd.GroupID = "runtime"
 	claudeCmd := newClaudeCommand(paths, nil)
 	claudeCmd.GroupID = "runtime"
+	runCmd := newRunCommand(paths, nil)
+	runCmd.GroupID = "runtime"
 	accountCmd := newManageAccountCommand(paths, opts)
 	accountCmd.GroupID = "account"
 	globalCmd := newGlobalCommand(paths, opts)
@@ -136,7 +138,7 @@ valv claude --version
 	toolsCmd := newToolsCommand()
 	toolsCmd.GroupID = "runtime"
 
-	cmd.AddCommand(pathsCmd, versionCmd, statusCmd, codexCmd, claudeCmd, accountCmd, globalCmd, imageCmd, toolsCmd)
+	cmd.AddCommand(pathsCmd, versionCmd, statusCmd, codexCmd, claudeCmd, runCmd, accountCmd, globalCmd, imageCmd, toolsCmd)
 	installBranchHelpCommands(cmd)
 
 	return cmd, nil
