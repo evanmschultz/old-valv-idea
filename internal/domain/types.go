@@ -3,7 +3,19 @@ package domain
 import (
 	"fmt"
 	"strings"
+	"time"
 )
+
+// AccountEnvEntry is one row of the per-account env-var map. EnvValue is
+// stored plaintext in SQLite at v0.1 of DROP_14 — keychain / at-rest
+// encryption is deferred to a later drop.
+type AccountEnvEntry struct {
+	ProfileID string
+	EnvKey    string
+	EnvValue  string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
 
 type Provider string
 

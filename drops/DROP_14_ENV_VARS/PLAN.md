@@ -32,7 +32,7 @@ DROP_14 adds an account-scoped env map persisted in SQLite and injected into con
 - **F3: JSON list output is redacted by default with explicit metadata.** `valv account env list <name>` uses top-level key `env` (new, not yet in tree) whose entries are `{"key":"FOO","value":"***","redacted":true}` by default and `{"key":"FOO","value":"raw","redacted":false}` when `--reveal` is present. This is intentionally more specific than the generic list-item envelope used by existing manage commands (`internal/output/output.go:82-93`, `internal/cli/extended_test.go:136-153`): env values need machine-readable redaction state so consumers do not have to infer policy from the literal string `"***"`.
 
 ### Unit 14.1
-- state: todo
+- state: done
 - blocked_by: none
 - paths: `internal/domain/repository.go`, `internal/adapters/sqlite/open.go`, `internal/adapters/sqlite/open_test.go`, `internal/adapters/sqlite/store.go`, `internal/adapters/sqlite/store_test.go`
 - packages: `internal/domain`, `internal/adapters/sqlite`

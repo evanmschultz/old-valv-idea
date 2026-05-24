@@ -37,7 +37,57 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+// minSupportedSchemaVersion / maxSupportedSchemaVersion bound the schema
+// window the current binary understands. Bootstrap rejects PRAGMA
+// user_version values outside [min, max] with domain.ErrUnsupportedSchema.
+// DROP_14 dropped legacy v0 support; the minimum supported starting schema
+// is v1. New databases bootstrap straight to v2.
+const (
+	minSupportedSchemaVersion = 1
+	maxSupportedSchemaVersion = 2
+)
+
+// coreSchemaTables is the set of table names whose presence (with
+// user_version = 0) indicates a legacy v0 database. v0 is no longer
+// supported as of DROP_14; pre-existing rows must be migrated by rebuilding
+// the database, not by auto-upgrade.
+var coreSchemaTables = []string{
+	"projects",
+	"profiles",
+	"project_bindings",
+	"runtimes",
+	"provider_images",
+}
+
 func (s *Store) Bootstrap(ctx context.Context) error {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("bootstrap sqlite store: acquire conn: %w", err)
+	}
+	defer conn.Close()
+
+	// Detect "legacy v0 database" vs "brand-new database" BEFORE running any
+	// DDL. A legacy v0 database has core tables present but user_version = 0
+	// (because previous bootstrap iterations never set the marker). DROP_14
+	// dropped v0 support, so this state must be rejected with
+	// ErrUnsupportedSchema rather than silently auto-migrating.
+	var preUserVersion int
+	if err := conn.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&preUserVersion); err != nil {
+		return fmt.Errorf("bootstrap sqlite store: read user_version: %w", err)
+	}
+	if preUserVersion == 0 {
+		legacy, err := hasAnyCoreTable(ctx, conn)
+		if err != nil {
+			return err
+		}
+		if legacy {
+			return fmt.Errorf(
+				"bootstrap sqlite store: unsupported schema: got user_version=0 with pre-existing core tables, supported window [%d, %d]: %w",
+				minSupportedSchemaVersion, maxSupportedSchemaVersion, domain.ErrUnsupportedSchema,
+			)
+		}
+	}
+
 	statements := []string{
 		`PRAGMA foreign_keys = ON;`,
 		`CREATE TABLE IF NOT EXISTS projects (
@@ -90,121 +140,90 @@ func (s *Store) Bootstrap(ctx context.Context) error {
 		);`,
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("bootstrap sqlite store: begin tx: %w", err)
-	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback()
-		}
-	}()
-
 	for _, statement := range statements {
-		if _, err = tx.ExecContext(ctx, statement); err != nil {
+		if _, err := conn.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("bootstrap sqlite store: exec statement: %w", err)
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("bootstrap sqlite store: commit tx: %w", err)
-	}
 
-	return s.migrateProjectBindings(ctx)
+	return s.migrateSchemaOnConn(ctx, conn)
 }
 
-func (s *Store) migrateProjectBindings(ctx context.Context) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("bootstrap sqlite store: migrate project_bindings: begin tx: %w", err)
+// hasAnyCoreTable reports whether any of the DROP_14-era core tables are
+// present in sqlite_master. Used during pre-DDL legacy detection.
+func hasAnyCoreTable(ctx context.Context, conn *sql.Conn) (bool, error) {
+	for _, name := range coreSchemaTables {
+		var count int
+		if err := conn.QueryRowContext(
+			ctx,
+			`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`,
+			name,
+		).Scan(&count); err != nil {
+			return false, fmt.Errorf("bootstrap sqlite store: probe legacy table %q: %w", name, err)
+		}
+		if count > 0 {
+			return true, nil
+		}
 	}
+	return false, nil
+}
+
+// migrateSchemaOnConn advances the schema forward through the supported
+// version window on the supplied connection.
+//
+// Migrations run inside an explicit BEGIN IMMEDIATE block so that a second
+// process opening the same database during first-time bootstrap blocks on
+// the reserved lock instead of seeing SQLITE_BUSY. The DSN-level
+// busy_timeout(5000) configured in open.go absorbs the wait while the
+// first writer commits; once the loser proceeds it observes the final
+// user_version and takes the no-op path.
+//
+// Pre-DDL legacy v0 detection lives in Bootstrap (hasAnyCoreTable). By the
+// time migrateSchemaOnConn runs, user_version = 0 always means "fresh
+// database" and is stamped straight to v2. v1 databases upgrade to v2.
+// Versions above maxSupportedSchemaVersion are rejected with
+// ErrUnsupportedSchema.
+func (s *Store) migrateSchemaOnConn(ctx context.Context, conn *sql.Conn) error {
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return fmt.Errorf("bootstrap sqlite store: migrate schema: begin immediate: %w", err)
+	}
+	committed := false
 	defer func() {
-		if err != nil {
-			_ = tx.Rollback()
+		if !committed {
+			_, _ = conn.ExecContext(ctx, `ROLLBACK`)
 		}
 	}()
 
 	var userVersion int
-	if err = tx.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&userVersion); err != nil {
+	if err := conn.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&userVersion); err != nil {
 		return fmt.Errorf("bootstrap sqlite store: read user_version: %w", err)
 	}
-	if userVersion >= 1 {
-		if err = tx.Commit(); err != nil {
-			return fmt.Errorf("bootstrap sqlite store: migrate project_bindings: commit tx: %w", err)
-		}
-		return nil
+
+	if userVersion > maxSupportedSchemaVersion {
+		return fmt.Errorf(
+			"bootstrap sqlite store: unsupported schema: got user_version=%d, supported window [%d, %d]: %w",
+			userVersion, minSupportedSchemaVersion, maxSupportedSchemaVersion, domain.ErrUnsupportedSchema,
+		)
 	}
 
-	legacy, err := isLegacyProjectBindingsShape(ctx, tx)
-	if err != nil {
-		return err
-	}
-	if legacy {
-		rebuild := []string{
-			`CREATE TABLE project_bindings_new (
-				project_id TEXT NOT NULL,
-				profile_id TEXT NOT NULL,
-				provider TEXT NOT NULL,
-				created_at TEXT NOT NULL,
-				modified_at TEXT NOT NULL,
-				PRIMARY KEY (project_id, provider),
-				FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
-				FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE
-			);`,
-			`INSERT INTO project_bindings_new (project_id, profile_id, provider, created_at, modified_at)
-			 SELECT project_id, profile_id, provider, created_at, modified_at FROM project_bindings;`,
-			`DROP TABLE project_bindings;`,
-			`ALTER TABLE project_bindings_new RENAME TO project_bindings;`,
+	// Fresh database (user_version = 0 + no pre-existing core tables — the
+	// legacy-v0 case was already rejected in Bootstrap) or v1 database both
+	// need the account_env table. CREATE TABLE IF NOT EXISTS makes the
+	// statement idempotent across both starting points.
+	if userVersion < 2 {
+		if _, err := conn.ExecContext(ctx, accountEnvCreateTable); err != nil {
+			return fmt.Errorf("bootstrap sqlite store: create account_env: %w", err)
 		}
-		for _, statement := range rebuild {
-			if _, err = tx.ExecContext(ctx, statement); err != nil {
-				return fmt.Errorf("bootstrap sqlite store: migrate project_bindings: exec rebuild: %w", err)
-			}
+		if _, err := conn.ExecContext(ctx, `PRAGMA user_version = 2`); err != nil {
+			return fmt.Errorf("bootstrap sqlite store: set user_version=2: %w", err)
 		}
 	}
 
-	if _, err = tx.ExecContext(ctx, `PRAGMA user_version = 1`); err != nil {
-		return fmt.Errorf("bootstrap sqlite store: set user_version: %w", err)
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return fmt.Errorf("bootstrap sqlite store: migrate schema: commit: %w", err)
 	}
-	if err = tx.Commit(); err != nil {
-		return fmt.Errorf("bootstrap sqlite store: migrate project_bindings: commit tx: %w", err)
-	}
+	committed = true
 	return nil
-}
-
-// isLegacyProjectBindingsShape returns true when project_bindings is still shaped with a
-// single-column PK on project_id (pk=1 on project_id, pk=0 on provider). A composite PK
-// reports pk>0 on both project_id and provider; treat that as already-migrated.
-func isLegacyProjectBindingsShape(ctx context.Context, tx *sql.Tx) (bool, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT name, pk FROM pragma_table_info('project_bindings')`)
-	if err != nil {
-		return false, fmt.Errorf("bootstrap sqlite store: probe project_bindings shape: %w", err)
-	}
-	defer rows.Close()
-
-	var projectIDPK, providerPK int
-	var sawProjectID, sawProvider bool
-	for rows.Next() {
-		var name string
-		var pk int
-		if err := rows.Scan(&name, &pk); err != nil {
-			return false, fmt.Errorf("bootstrap sqlite store: probe project_bindings shape: scan: %w", err)
-		}
-		switch name {
-		case "project_id":
-			projectIDPK = pk
-			sawProjectID = true
-		case "provider":
-			providerPK = pk
-			sawProvider = true
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return false, fmt.Errorf("bootstrap sqlite store: probe project_bindings shape: %w", err)
-	}
-	if !sawProjectID || !sawProvider {
-		return false, nil
-	}
-	return projectIDPK == 1 && providerPK == 0, nil
 }
 
 func (s *Store) CreateProject(ctx context.Context, project domain.Project) (domain.Project, error) {

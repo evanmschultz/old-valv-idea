@@ -2,9 +2,11 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -419,7 +421,11 @@ func TestStoreDeleteBindingReturnsErrNotFoundWhenAbsent(t *testing.T) {
 	}
 }
 
-func TestStoreMigrationPreservesLegacyCodexBinding(t *testing.T) {
+// TestStoreBootstrapAdvancesV1ToV2 seeds an existing v1 database (the
+// minimum supported starting schema after DROP_14 dropped legacy v0
+// support) and asserts that Bootstrap advances it to v2, leaving existing
+// rows intact and adding the account_env table.
+func TestStoreBootstrapAdvancesV1ToV2(t *testing.T) {
 	t.Parallel()
 
 	name := strings.ReplaceAll(strings.ToLower(t.Name()), "/", "-")
@@ -432,81 +438,36 @@ func TestStoreMigrationPreservesLegacyCodexBinding(t *testing.T) {
 	})
 
 	ctx := context.Background()
-	legacyDDL := []string{
-		`CREATE TABLE projects (
-			id TEXT PRIMARY KEY,
-			root TEXT NOT NULL UNIQUE,
-			name TEXT NOT NULL,
-			created_at TEXT NOT NULL
-		);`,
-		`CREATE TABLE profiles (
-			id TEXT PRIMARY KEY,
-			provider TEXT NOT NULL,
-			name TEXT NOT NULL,
-			home_path TEXT NOT NULL,
-			created_at TEXT NOT NULL,
-			UNIQUE(provider, name)
-		);`,
-		`CREATE TABLE project_bindings (
-			project_id TEXT PRIMARY KEY,
-			profile_id TEXT NOT NULL,
-			provider TEXT NOT NULL,
-			created_at TEXT NOT NULL,
-			modified_at TEXT NOT NULL,
-			FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
-			FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE
-		);`,
-	}
-	for _, statement := range legacyDDL {
-		if _, err := db.ExecContext(ctx, statement); err != nil {
-			t.Fatalf("legacy DDL exec error = %v", err)
-		}
-	}
+	seedV1Schema(t, ctx, db)
 
-	legacyProjectID := "legacy-project-id"
-	legacyProfileID := "legacy-profile-id"
+	projectID := "seed-project-id"
+	profileID := "seed-profile-id"
 	originalCreatedAt := "2025-01-02T03:04:05Z"
 	originalModifiedAt := "2025-01-02T03:04:05Z"
 
 	if _, err := db.ExecContext(
 		ctx,
 		`INSERT INTO projects (id, root, name, created_at) VALUES (?, ?, ?, ?)`,
-		legacyProjectID,
-		"/tmp/example/legacy",
-		"legacy",
-		"2025-01-01T00:00:00Z",
+		projectID, "/tmp/example/v1", "v1-seed", "2025-01-01T00:00:00Z",
 	); err != nil {
 		t.Fatalf("seed projects row error = %v", err)
 	}
 	if _, err := db.ExecContext(
 		ctx,
 		`INSERT INTO profiles (id, provider, name, home_path, created_at) VALUES (?, ?, ?, ?, ?)`,
-		legacyProfileID,
-		string(domain.ProviderCodex),
-		"legacy-codex",
-		"/tmp/valv/providers/codex/legacy",
-		"2025-01-01T00:00:00Z",
+		profileID, string(domain.ProviderCodex), "v1-seed-codex",
+		"/tmp/valv/providers/codex/v1-seed", "2025-01-01T00:00:00Z",
 	); err != nil {
 		t.Fatalf("seed profiles row error = %v", err)
 	}
 	if _, err := db.ExecContext(
 		ctx,
-		`INSERT INTO project_bindings (project_id, profile_id, provider, created_at, modified_at) VALUES (?, ?, ?, ?, ?)`,
-		legacyProjectID,
-		legacyProfileID,
-		string(domain.ProviderCodex),
-		originalCreatedAt,
-		originalModifiedAt,
+		`INSERT INTO project_bindings (project_id, profile_id, provider, created_at, modified_at)
+		 VALUES (?, ?, ?, ?, ?)`,
+		projectID, profileID, string(domain.ProviderCodex),
+		originalCreatedAt, originalModifiedAt,
 	); err != nil {
-		t.Fatalf("seed legacy binding row error = %v", err)
-	}
-
-	var preVersion int
-	if err := db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&preVersion); err != nil {
-		t.Fatalf("pre-bootstrap user_version error = %v", err)
-	}
-	if preVersion != 0 {
-		t.Fatalf("pre-bootstrap user_version = %d, want 0", preVersion)
+		t.Fatalf("seed binding row error = %v", err)
 	}
 
 	store := NewStoreFromDB(db)
@@ -518,26 +479,102 @@ func TestStoreMigrationPreservesLegacyCodexBinding(t *testing.T) {
 	if err := db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&postVersion); err != nil {
 		t.Fatalf("post-bootstrap user_version error = %v", err)
 	}
-	if postVersion != 1 {
-		t.Fatalf("post-bootstrap user_version = %d, want 1", postVersion)
+	if postVersion != 2 {
+		t.Fatalf("post-bootstrap user_version = %d, want 2", postVersion)
 	}
 
-	binding, err := store.BindingByProjectID(ctx, legacyProjectID, domain.ProviderCodex)
+	binding, err := store.BindingByProjectID(ctx, projectID, domain.ProviderCodex)
 	if err != nil {
 		t.Fatalf("BindingByProjectID() error = %v", err)
 	}
-	if binding.ProfileID != legacyProfileID {
-		t.Fatalf("BindingByProjectID().ProfileID = %q, want %q", binding.ProfileID, legacyProfileID)
+	if binding.ProfileID != profileID {
+		t.Fatalf("BindingByProjectID().ProfileID = %q, want %q", binding.ProfileID, profileID)
 	}
 	if got, want := binding.CreatedAt.UTC().Format(time.RFC3339Nano), originalCreatedAt; got != want {
 		t.Fatalf("BindingByProjectID().CreatedAt = %q, want %q", got, want)
 	}
-	if got, want := binding.ModifiedAt.UTC().Format(time.RFC3339Nano), originalModifiedAt; got != want {
-		t.Fatalf("BindingByProjectID().ModifiedAt = %q, want %q", got, want)
+
+	// account_env must exist at v2.
+	var tableCount int
+	if err := db.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='account_env'`,
+	).Scan(&tableCount); err != nil {
+		t.Fatalf("sqlite_master probe for account_env error = %v", err)
+	}
+	if tableCount != 1 {
+		t.Fatalf("account_env table count = %d, want 1", tableCount)
 	}
 }
 
-func TestStoreBootstrapIsIdempotentAfterMigration(t *testing.T) {
+// seedV1Schema writes the v1 DDL and sets PRAGMA user_version = 1. The
+// schema mirrors the post-DROP_8 state of the store after composite
+// project_bindings PK was introduced.
+func seedV1Schema(t *testing.T, ctx context.Context, db *sql.DB) {
+	t.Helper()
+	ddl := []string{
+		`CREATE TABLE projects (
+			id TEXT PRIMARY KEY,
+			root TEXT NOT NULL UNIQUE,
+			name TEXT NOT NULL,
+			created_at TEXT NOT NULL
+		);`,
+		`CREATE TABLE profiles (
+			id TEXT PRIMARY KEY,
+			provider TEXT NOT NULL,
+			name TEXT NOT NULL,
+			home_path TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			UNIQUE(provider, name)
+		);`,
+		`CREATE TABLE project_bindings (
+			project_id TEXT NOT NULL,
+			profile_id TEXT NOT NULL,
+			provider TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			modified_at TEXT NOT NULL,
+			PRIMARY KEY (project_id, provider),
+			FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+			FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+		);`,
+		`CREATE TABLE runtimes (
+			id TEXT PRIMARY KEY,
+			provider TEXT NOT NULL,
+			project_id TEXT NOT NULL,
+			profile_id TEXT NOT NULL,
+			mode TEXT NOT NULL,
+			container_id TEXT NOT NULL,
+			image_ref TEXT NOT NULL,
+			status TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+			FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+		);`,
+		`CREATE INDEX idx_runtimes_project_id ON runtimes(project_id);`,
+		`CREATE TABLE provider_images (
+			provider TEXT PRIMARY KEY,
+			latest_version TEXT NOT NULL,
+			latest_checked_at TEXT NOT NULL,
+			installed_version TEXT NOT NULL,
+			installed_image_ref TEXT NOT NULL,
+			installed_version_tag TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);`,
+		`PRAGMA user_version = 1;`,
+	}
+	for _, statement := range ddl {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			t.Fatalf("seed v1 schema exec error = %v", err)
+		}
+	}
+}
+
+// TestStoreBootstrapRejectsLegacyV0 seeds a legacy v0 database (core tables
+// present, user_version = 0 — the pre-DROP_8 fingerprint that DROP_14
+// drops) and asserts Bootstrap rejects it with ErrUnsupportedSchema rather
+// than auto-migrating.
+func TestStoreBootstrapRejectsLegacyV0(t *testing.T) {
 	t.Parallel()
 
 	name := strings.ReplaceAll(strings.ToLower(t.Name()), "/", "-")
@@ -545,9 +582,7 @@ func TestStoreBootstrapIsIdempotentAfterMigration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
-	t.Cleanup(func() {
-		_ = db.Close()
-	})
+	t.Cleanup(func() { _ = db.Close() })
 
 	ctx := context.Background()
 	legacyDDL := []string{
@@ -580,68 +615,143 @@ func TestStoreBootstrapIsIdempotentAfterMigration(t *testing.T) {
 			t.Fatalf("legacy DDL exec error = %v", err)
 		}
 	}
+	// user_version is intentionally left at 0; this is the legacy v0
+	// fingerprint we are asserting gets rejected.
 
-	legacyProjectID := "idempotent-project-id"
-	legacyProfileID := "idempotent-profile-id"
+	store := NewStoreFromDB(db)
+	bootErr := store.Bootstrap(ctx)
+	if bootErr == nil {
+		t.Fatal("Bootstrap() error = nil, want ErrUnsupportedSchema for legacy v0")
+	}
+	if !errors.Is(bootErr, domain.ErrUnsupportedSchema) {
+		t.Fatalf("Bootstrap() error = %v, want errors.Is(., ErrUnsupportedSchema)", bootErr)
+	}
+	if !strings.Contains(bootErr.Error(), "user_version=0") {
+		t.Fatalf("Bootstrap() error message = %q, want contains user_version=0", bootErr.Error())
+	}
+	if !strings.Contains(bootErr.Error(), "[1, 2]") {
+		t.Fatalf("Bootstrap() error message = %q, want contains [1, 2]", bootErr.Error())
+	}
+}
+
+// TestStoreBootstrapRejectsForwardIncompatibleSchema seeds user_version = 99
+// directly and asserts Bootstrap rejects it with ErrUnsupportedSchema and a
+// message that includes the observed version.
+func TestStoreBootstrapRejectsForwardIncompatibleSchema(t *testing.T) {
+	t.Parallel()
+
+	name := strings.ReplaceAll(strings.ToLower(t.Name()), "/", "-")
+	db, err := Open(OpenOptions{URI: fmt.Sprintf("file:%s?mode=memory&cache=shared", name)})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	ctx := context.Background()
+	seedV1Schema(t, ctx, db)
+	if _, err := db.ExecContext(ctx, `PRAGMA user_version = 99`); err != nil {
+		t.Fatalf("seed user_version=99 error = %v", err)
+	}
+
+	store := NewStoreFromDB(db)
+	err = store.Bootstrap(ctx)
+	if err == nil {
+		t.Fatal("Bootstrap() error = nil, want unsupported-schema rejection")
+	}
+	if !errors.Is(err, domain.ErrUnsupportedSchema) {
+		t.Fatalf("Bootstrap() error = %v, want errors.Is(., ErrUnsupportedSchema)", err)
+	}
+	if !strings.Contains(err.Error(), "user_version=99") {
+		t.Fatalf("Bootstrap() error message = %q, want contains user_version=99", err.Error())
+	}
+	if !strings.Contains(err.Error(), "[1, 2]") {
+		t.Fatalf("Bootstrap() error message = %q, want contains [1, 2]", err.Error())
+	}
+}
+
+func TestStoreBootstrapIsIdempotentAtV2(t *testing.T) {
+	t.Parallel()
+
+	store := newBootstrappedStore(t)
+	ctx := context.Background()
+
+	// Already bootstrapped once via newBootstrappedStore. Re-bootstrap and
+	// confirm user_version stays at 2 and no rows are corrupted.
+	if err := store.Bootstrap(ctx); err != nil {
+		t.Fatalf("second Bootstrap() error = %v", err)
+	}
+	if err := store.Bootstrap(ctx); err != nil {
+		t.Fatalf("third Bootstrap() error = %v", err)
+	}
+
+	var version int
+	if err := store.DB().QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatalf("read user_version error = %v", err)
+	}
+	if version != 2 {
+		t.Fatalf("user_version = %d, want 2", version)
+	}
+}
+
+// TestStoreBootstrapV1ToV2PreservesBindings seeds a v1 database with an
+// existing binding row, runs Bootstrap (advancing to v2), and asserts the
+// pre-existing rows survive intact across the upgrade.
+func TestStoreBootstrapV1ToV2PreservesBindings(t *testing.T) {
+	t.Parallel()
+
+	name := strings.ReplaceAll(strings.ToLower(t.Name()), "/", "-")
+	db, err := Open(OpenOptions{URI: fmt.Sprintf("file:%s?mode=memory&cache=shared", name)})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = db.Close()
+	})
+
+	ctx := context.Background()
+	seedV1Schema(t, ctx, db)
+
+	projectID := "idempotent-project-id"
+	profileID := "idempotent-profile-id"
 	originalCreatedAt := "2025-02-03T04:05:06Z"
 	originalModifiedAt := "2025-02-03T04:05:06Z"
 
 	if _, err := db.ExecContext(
 		ctx,
 		`INSERT INTO projects (id, root, name, created_at) VALUES (?, ?, ?, ?)`,
-		legacyProjectID,
-		"/tmp/example/idempotent",
-		"idempotent",
-		"2025-01-01T00:00:00Z",
+		projectID, "/tmp/example/idempotent", "idempotent", "2025-01-01T00:00:00Z",
 	); err != nil {
 		t.Fatalf("seed projects row error = %v", err)
 	}
 	if _, err := db.ExecContext(
 		ctx,
 		`INSERT INTO profiles (id, provider, name, home_path, created_at) VALUES (?, ?, ?, ?, ?)`,
-		legacyProfileID,
-		string(domain.ProviderCodex),
-		"idempotent-codex",
-		"/tmp/valv/providers/codex/idempotent",
-		"2025-01-01T00:00:00Z",
+		profileID, string(domain.ProviderCodex), "idempotent-codex",
+		"/tmp/valv/providers/codex/idempotent", "2025-01-01T00:00:00Z",
 	); err != nil {
 		t.Fatalf("seed profiles row error = %v", err)
 	}
 	if _, err := db.ExecContext(
 		ctx,
-		`INSERT INTO project_bindings (project_id, profile_id, provider, created_at, modified_at) VALUES (?, ?, ?, ?, ?)`,
-		legacyProjectID,
-		legacyProfileID,
-		string(domain.ProviderCodex),
-		originalCreatedAt,
-		originalModifiedAt,
+		`INSERT INTO project_bindings (project_id, profile_id, provider, created_at, modified_at)
+		 VALUES (?, ?, ?, ?, ?)`,
+		projectID, profileID, string(domain.ProviderCodex),
+		originalCreatedAt, originalModifiedAt,
 	); err != nil {
-		t.Fatalf("seed legacy binding row error = %v", err)
+		t.Fatalf("seed binding row error = %v", err)
 	}
 
 	store := NewStoreFromDB(db)
 	if err := store.Bootstrap(ctx); err != nil {
 		t.Fatalf("first Bootstrap() error = %v", err)
 	}
-
-	firstBinding, err := store.BindingByProjectID(ctx, legacyProjectID, domain.ProviderCodex)
+	firstBinding, err := store.BindingByProjectID(ctx, projectID, domain.ProviderCodex)
 	if err != nil {
 		t.Fatalf("first BindingByProjectID() error = %v", err)
 	}
 
 	if err := store.Bootstrap(ctx); err != nil {
 		t.Fatalf("second Bootstrap() error = %v", err)
-	}
-
-	var stagingCount int
-	if err := db.QueryRowContext(
-		ctx,
-		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='project_bindings_new'`,
-	).Scan(&stagingCount); err != nil {
-		t.Fatalf("sqlite_master probe error = %v", err)
-	}
-	if stagingCount != 0 {
-		t.Fatalf("project_bindings_new table count = %d, want 0", stagingCount)
 	}
 
 	var bindingCount int
@@ -652,7 +762,7 @@ func TestStoreBootstrapIsIdempotentAfterMigration(t *testing.T) {
 		t.Fatalf("project_bindings COUNT(*) = %d, want 1", bindingCount)
 	}
 
-	secondBinding, err := store.BindingByProjectID(ctx, legacyProjectID, domain.ProviderCodex)
+	secondBinding, err := store.BindingByProjectID(ctx, projectID, domain.ProviderCodex)
 	if err != nil {
 		t.Fatalf("second BindingByProjectID() error = %v", err)
 	}
@@ -664,5 +774,242 @@ func TestStoreBootstrapIsIdempotentAfterMigration(t *testing.T) {
 	}
 	if !secondBinding.ModifiedAt.Equal(firstBinding.ModifiedAt) {
 		t.Fatalf("ModifiedAt changed across bootstrap: got %v, want %v", secondBinding.ModifiedAt, firstBinding.ModifiedAt)
+	}
+}
+
+// TestStoreAccountEnvCRUD round-trips set/get/list/unset on one profile and
+// verifies ListAccountEnv returns alphabetical order regardless of insert
+// order.
+func TestStoreAccountEnvCRUD(t *testing.T) {
+	t.Parallel()
+
+	store := newBootstrappedStore(t)
+	ctx := context.Background()
+
+	profile := mustProfile(t, domain.ProviderCodex, "crud-account", "/tmp/valv/providers/codex/crud-account")
+	if _, err := store.CreateProfile(ctx, profile); err != nil {
+		t.Fatalf("CreateProfile() error = %v", err)
+	}
+
+	// Insert in non-alphabetical order to prove ORDER BY env_key ASC fires.
+	wantEntries := map[string]string{
+		"GAMMA": "g-val",
+		"ALPHA": "a-val",
+		"BETA":  "b-val",
+	}
+	for _, key := range []string{"GAMMA", "ALPHA", "BETA"} {
+		entry, err := store.SetAccountEnv(ctx, profile.ID, key, wantEntries[key])
+		if err != nil {
+			t.Fatalf("SetAccountEnv(%q) error = %v", key, err)
+		}
+		if entry.EnvKey != key || entry.EnvValue != wantEntries[key] {
+			t.Fatalf("SetAccountEnv(%q) returned %+v, want key=%q value=%q",
+				key, entry, key, wantEntries[key])
+		}
+	}
+
+	// Get round-trip
+	got, err := store.GetAccountEnv(ctx, profile.ID, "BETA")
+	if err != nil {
+		t.Fatalf("GetAccountEnv(BETA) error = %v", err)
+	}
+	if got.EnvValue != "b-val" {
+		t.Fatalf("GetAccountEnv(BETA).EnvValue = %q, want %q", got.EnvValue, "b-val")
+	}
+
+	listed, err := store.ListAccountEnv(ctx, profile.ID)
+	if err != nil {
+		t.Fatalf("ListAccountEnv() error = %v", err)
+	}
+	if got, want := len(listed), 3; got != want {
+		t.Fatalf("ListAccountEnv() len = %d, want %d", got, want)
+	}
+	wantOrder := []string{"ALPHA", "BETA", "GAMMA"}
+	for i, e := range listed {
+		if e.EnvKey != wantOrder[i] {
+			t.Fatalf("ListAccountEnv()[%d].EnvKey = %q, want %q", i, e.EnvKey, wantOrder[i])
+		}
+	}
+
+	// Upsert replaces value.
+	if _, err := store.SetAccountEnv(ctx, profile.ID, "ALPHA", "a-val-updated"); err != nil {
+		t.Fatalf("SetAccountEnv(ALPHA, updated) error = %v", err)
+	}
+	updated, err := store.GetAccountEnv(ctx, profile.ID, "ALPHA")
+	if err != nil {
+		t.Fatalf("GetAccountEnv(ALPHA) after upsert error = %v", err)
+	}
+	if updated.EnvValue != "a-val-updated" {
+		t.Fatalf("GetAccountEnv(ALPHA).EnvValue = %q, want %q", updated.EnvValue, "a-val-updated")
+	}
+
+	// Unset removes one entry; the other two remain.
+	if err := store.UnsetAccountEnv(ctx, profile.ID, "BETA"); err != nil {
+		t.Fatalf("UnsetAccountEnv(BETA) error = %v", err)
+	}
+	if _, err := store.GetAccountEnv(ctx, profile.ID, "BETA"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("GetAccountEnv(BETA) after unset error = %v, want ErrNotFound", err)
+	}
+	listed, err = store.ListAccountEnv(ctx, profile.ID)
+	if err != nil {
+		t.Fatalf("ListAccountEnv() post-unset error = %v", err)
+	}
+	if got, want := len(listed), 2; got != want {
+		t.Fatalf("ListAccountEnv() post-unset len = %d, want %d", got, want)
+	}
+
+	// Unset of non-existent key returns ErrNotFound.
+	if err := store.UnsetAccountEnv(ctx, profile.ID, "MISSING"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("UnsetAccountEnv(MISSING) error = %v, want ErrNotFound", err)
+	}
+
+	// Get on missing key returns ErrNotFound.
+	if _, err := store.GetAccountEnv(ctx, profile.ID, "NOPE"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("GetAccountEnv(NOPE) error = %v, want ErrNotFound", err)
+	}
+}
+
+// TestStoreAccountEnvDuplicateKeyAcrossProfiles proves that the same env_key
+// is legal across two different profiles — exactly the cross-account
+// scenario that motivates account-scoped env maps (e.g. ANTHROPIC_API_KEY
+// differs per account).
+func TestStoreAccountEnvDuplicateKeyAcrossProfiles(t *testing.T) {
+	t.Parallel()
+
+	store := newBootstrappedStore(t)
+	ctx := context.Background()
+
+	personal := mustProfile(t, domain.ProviderClaude, "personal", "/tmp/valv/providers/claude/personal")
+	hylla := mustProfile(t, domain.ProviderClaude, "hylla", "/tmp/valv/providers/claude/hylla")
+	if _, err := store.CreateProfile(ctx, personal); err != nil {
+		t.Fatalf("CreateProfile(personal) error = %v", err)
+	}
+	if _, err := store.CreateProfile(ctx, hylla); err != nil {
+		t.Fatalf("CreateProfile(hylla) error = %v", err)
+	}
+
+	const key = "ANTHROPIC_API_KEY"
+	if _, err := store.SetAccountEnv(ctx, personal.ID, key, "sk-personal"); err != nil {
+		t.Fatalf("SetAccountEnv(personal) error = %v", err)
+	}
+	if _, err := store.SetAccountEnv(ctx, hylla.ID, key, "sk-hylla"); err != nil {
+		t.Fatalf("SetAccountEnv(hylla) error = %v", err)
+	}
+
+	gotPersonal, err := store.GetAccountEnv(ctx, personal.ID, key)
+	if err != nil {
+		t.Fatalf("GetAccountEnv(personal) error = %v", err)
+	}
+	gotHylla, err := store.GetAccountEnv(ctx, hylla.ID, key)
+	if err != nil {
+		t.Fatalf("GetAccountEnv(hylla) error = %v", err)
+	}
+	if gotPersonal.EnvValue != "sk-personal" {
+		t.Fatalf("personal env value = %q, want %q", gotPersonal.EnvValue, "sk-personal")
+	}
+	if gotHylla.EnvValue != "sk-hylla" {
+		t.Fatalf("hylla env value = %q, want %q", gotHylla.EnvValue, "sk-hylla")
+	}
+}
+
+// TestStoreAccountEnvSurvivesProfileRename proves that env entries are
+// owned by profile.ID, not profile.Name — renaming the account via
+// UpdateProfileName preserves all env rows.
+func TestStoreAccountEnvSurvivesProfileRename(t *testing.T) {
+	t.Parallel()
+
+	store := newBootstrappedStore(t)
+	ctx := context.Background()
+
+	profile := mustProfile(t, domain.ProviderCodex, "old-name", "/tmp/valv/providers/codex/old-name")
+	if _, err := store.CreateProfile(ctx, profile); err != nil {
+		t.Fatalf("CreateProfile() error = %v", err)
+	}
+	if _, err := store.SetAccountEnv(ctx, profile.ID, "FOO", "bar"); err != nil {
+		t.Fatalf("SetAccountEnv() error = %v", err)
+	}
+
+	renamed, err := store.UpdateProfileName(ctx, domain.ProviderCodex, "old-name", "new-name")
+	if err != nil {
+		t.Fatalf("UpdateProfileName() error = %v", err)
+	}
+	if renamed.ID != profile.ID {
+		t.Fatalf("UpdateProfileName().ID = %q, want %q (ID must be stable across rename)",
+			renamed.ID, profile.ID)
+	}
+
+	// Env entry resolved by profile.ID is preserved.
+	got, err := store.GetAccountEnv(ctx, profile.ID, "FOO")
+	if err != nil {
+		t.Fatalf("GetAccountEnv() after rename error = %v", err)
+	}
+	if got.EnvValue != "bar" {
+		t.Fatalf("GetAccountEnv().EnvValue = %q, want %q", got.EnvValue, "bar")
+	}
+}
+
+// TestStoreBootstrapConcurrentFirstOpen exercises the "two goroutines, one
+// shared sqlite file, both call Bootstrap" path. The DSN-level
+// busy_timeout(5000) + BEGIN IMMEDIATE inside migrateSchemaOnConn together
+// guarantee "one waits, both succeed" with no SQLITE_BUSY surface; the
+// final user_version must be 2.
+func TestStoreBootstrapConcurrentFirstOpen(t *testing.T) {
+	t.Parallel()
+
+	// Use a real file under t.TempDir() so each connection opens its own
+	// SQLite file handle (shared-cache memory DBs would short-circuit the
+	// lock behavior we want to exercise).
+	dbPath := fmt.Sprintf("%s/concurrent.sqlite3", t.TempDir())
+
+	dbA, err := Open(OpenOptions{Path: dbPath})
+	if err != nil {
+		t.Fatalf("Open(A) error = %v", err)
+	}
+	t.Cleanup(func() { _ = dbA.Close() })
+
+	// Pre-seed dbA at v1 with the v1 DDL so both goroutines race to advance
+	// it to v2.
+	ctx := context.Background()
+	seedV1Schema(t, ctx, dbA)
+
+	dbB, err := Open(OpenOptions{Path: dbPath})
+	if err != nil {
+		t.Fatalf("Open(B) error = %v", err)
+	}
+	t.Cleanup(func() { _ = dbB.Close() })
+
+	storeA := NewStoreFromDB(dbA)
+	storeB := NewStoreFromDB(dbB)
+
+	start := make(chan struct{})
+	errCh := make(chan error, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		errCh <- storeA.Bootstrap(ctx)
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		errCh <- storeB.Bootstrap(ctx)
+	}()
+	close(start)
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		if err != nil {
+			t.Fatalf("concurrent Bootstrap() error = %v (want both succeed)", err)
+		}
+	}
+
+	var version int
+	if err := dbA.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatalf("read user_version error = %v", err)
+	}
+	if version != 2 {
+		t.Fatalf("post-concurrent user_version = %d, want 2", version)
 	}
 }
