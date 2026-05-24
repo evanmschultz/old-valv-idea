@@ -1,47 +1,38 @@
 verdict: fail
 
-# Plan QA Falsification — Round 4
+# Plan QA Falsification — Round 5
 
 ## Counterexamples
 
-### F4.1 Legacy first-open migration is still a live path, but the new concurrency gate only covers `v1 -> v2`
+### F5.1 Prefix-based pragma dedup can suppress the required `busy_timeout`
 
-- Plan claim under attack: Unit 14.1 closes the `SQLITE_BUSY` first-open gap by adding `_pragma=busy_timeout(5000)` and proving a two-connection `v1 -> v2` upgrade succeeds without `SQLITE_BUSY` (`drops/DROP_14_ENV_VARS/PLAN.md:29`, `drops/DROP_14_ENV_VARS/PLAN.md:39-46`).
-- Repo evidence: the committed store still carries a legacy `user_version = 0` migration path and explicitly tests it. `Store.Bootstrap` only early-exits when `user_version >= 1`, so `0` still takes the older migration branch (`internal/adapters/sqlite/store.go:95-153`). The existing tests seed `user_version = 0` and verify migration/idempotence (`internal/adapters/sqlite/store_test.go:504-523`, `internal/adapters/sqlite/store_test.go:540-668`).
-- Counterexample: a real older install can first-open a legacy `user_version = 0` database, which means the concurrent race is not limited to the new `v1 -> v2` path. Round 4 can still pass even if `v0 -> v2` is the path that returns `SQLITE_BUSY`, because the required concurrency acceptance never exercises it.
-- Narrow fix: extend Unit 14.1 acceptance to require the same two-connection "one waits, both succeed" proof for a seeded legacy `user_version = 0` database upgrading all the way to `2`, or explicitly drop `v0` support in the same unit and delete the legacy migration path.
+- Plan claim under attack: Unit 14.1 says DSN dedup is a case-insensitive prefix match like `busy_timeout` / `foreign_keys` rather than exact-string equality ([drops/DROP_14_ENV_VARS/PLAN.md](/Users/evanschultz/Documents/Code/hylla/valv/main/drops/DROP_14_ENV_VARS/PLAN.md:29), [drops/DROP_14_ENV_VARS/PLAN.md](/Users/evanschultz/Documents/Code/hylla/valv/main/drops/DROP_14_ENV_VARS/PLAN.md:46)).
+- Repo evidence: the current DSN helper works on raw `_pragma` query-string values, not parsed pragma names, so any new dedup rule here will be string inspection over arbitrary caller-supplied values ([internal/adapters/sqlite/open.go](/Users/evanschultz/Documents/Code/hylla/valv/main/internal/adapters/sqlite/open.go:53)).
+- Counterexample: `Open(OpenOptions{URI: "file:/tmp/valv.db?_pragma=busy_timeout_pragma%3Dfoo"})` yields `_pragma=busy_timeout_pragma=foo`. A naive case-insensitive `HasPrefix("busy_timeout")` rule treats that as an existing busy-timeout pragma and skips appending `busy_timeout(5000)`, even though no actual `busy_timeout(...)` pragma is present. The same false positive shape exists for `foreign_keys`.
+- Why this still breaks the claim: the plan currently encodes the buggy matching rule directly. A builder can implement the plan exactly and still lose the required busy policy for supported URI callers.
+- Narrow fix: require exact pragma-name parsing, not prefix matching. Normalize one `_pragma` value by trimming spaces, splitting at the first `(` or `=`, lowercasing the resulting pragma name, and comparing for equality with `busy_timeout` / `foreign_keys`. Add explicit tests that `_pragma=busy_timeout_pragma=foo` and `_pragma=foreign_keys_extra=1` do not suppress the required appended pragmas.
 
-### F4.2 The new "_no duplicate pragma" claim is false for URI callers that already set `busy_timeout`
+### F5.2 Unsupported-schema handling is still underspecified and misses forward-incompatible DBs
 
-- Plan claim under attack: Unit 14.1 will add both pragmas "without duplicating either pragma when already present" (`drops/DROP_14_ENV_VARS/PLAN.md:45`).
-- Repo evidence: the current helper only deduplicates exact string matches, not pragma names (`internal/adapters/sqlite/open.go:53-70`).
-- Library evidence: `modernc.org/sqlite` explicitly allows `_pragma` to appear more than once (`driver.go:45-52`), then executes every `_pragma` value in order (`sqlite.go:142-165`).
-- Counterexample: `Open(OpenOptions{URI: "file:/tmp/valv.db?_pragma=busy_timeout(30000)"})` still receives an added `_pragma=busy_timeout(5000)` because `busy_timeout(30000) != busy_timeout(5000)`. The driver accepts both values and executes both pragmas, so the Round 4 dedup acceptance is falsified for an existing supported caller shape.
-- Narrow fix: normalize `_pragma` entries by pragma key, not exact string, and define precedence. The safest plan-level rule is "if any existing `_pragma` starts with `busy_timeout`, do not append another one."
-
-### F4.3 Env-list ordering is unspecified, so human and JSON output can still drift
-
-- Plan claim under attack: Unit 14.1/14.3 is sufficiently specified for `set/list/unset` and list output (`drops/DROP_14_ENV_VARS/PLAN.md:39-46`, `drops/DROP_14_ENV_VARS/PLAN.md:69-77`).
-- Repo evidence: existing list surfaces pin deterministic ordering in the store layer; `ListProfilesByProvider` uses `ORDER BY name ASC` (`internal/adapters/sqlite/store.go:333-338`).
-- Counterexample: if account env rows are listed without `ORDER BY env_key ASC`, two keys inserted in different orders can render in different orders depending on row layout. Human users lose alphabetical output, and JSON snapshots become order-sensitive without a plan requirement catching it.
-- Narrow fix: require the store-layer env list query to sort by `env_key ASC`, then add sqlite and CLI assertions that the returned/rendered order is deterministic.
-
-### F4.4 `--format plain` can regress and still satisfy the current acceptance
-
-- Plan claim under attack: Unit 14.3 fully specifies CLI output behavior for the new command (`drops/DROP_14_ENV_VARS/PLAN.md:68-77`).
-- Repo evidence: `--format plain` is a root-level persistent flag (`internal/cli/root.go:114-116`), and the shared output package has a distinct plain-mode branch for lists (`internal/output/output.go:82-118`). Existing CLI tests already pin command-owned output keys and output-mode behavior (`internal/cli/extended_test.go:136-153`).
-- Counterexample: Unit 14.3 intentionally introduces a custom env-list formatter instead of reusing `output.WriteListWithKey` for JSON, but its acceptance only mentions human and JSON. A builder can implement human + JSON, forget plain mode entirely, and still satisfy the Round 4 test list while `valv account env list <name> --format plain` errors or emits inconsistent ad hoc text.
-- Narrow fix: add explicit plain-mode acceptance for `list` with and without `--reveal`, or explicitly declare plain unsupported for this command and require a stable rejection path.
+- Plan claim under attack: Unit 14.1 drops `user_version = 0` support and says v0 must fail fast with a "clear unsupported-schema error" ([drops/DROP_14_ENV_VARS/PLAN.md](/Users/evanschultz/Documents/Code/hylla/valv/main/drops/DROP_14_ENV_VARS/PLAN.md:30), [drops/DROP_14_ENV_VARS/PLAN.md](/Users/evanschultz/Documents/Code/hylla/valv/main/drops/DROP_14_ENV_VARS/PLAN.md:47), [drops/DROP_14_ENV_VARS/PLAN.md](/Users/evanschultz/Documents/Code/hylla/valv/main/drops/DROP_14_ENV_VARS/PLAN.md:102)).
+- Repo evidence:
+  - the domain layer has no existing `ErrUnsupportedSchema`-style sentinel today ([internal/domain/errors.go](/Users/evanschultz/Documents/Code/hylla/valv/main/internal/domain/errors.go:5));
+  - the current bootstrap logic accepts any `user_version >= 1` and returns success without an upper-bound check ([internal/adapters/sqlite/store.go](/Users/evanschultz/Documents/Code/hylla/valv/main/internal/adapters/sqlite/store.go:126));
+  - CLI store opening just wraps bootstrap errors generically, so a vague string-only contract stays vague all the way out ([internal/cli/store.go](/Users/evanschultz/Documents/Code/hylla/valv/main/internal/cli/store.go:11)).
+- Counterexample A: a builder can satisfy "clear unsupported-schema error" with a plain `fmt.Errorf("unsupported schema")`. That leaves tests and callers with brittle string matching instead of the repo's normal sentinel-plus-wrap pattern for semantic error categories.
+- Counterexample B: seed a DB with `PRAGMA user_version = 3` and the pre-env tables only. If DROP_14 keeps the current "supported when `user_version >= current`" shape and only adds a v0 rejection branch, `Bootstrap` can return nil even though the v2 binary cannot actually trust the schema. The later env CRUD path then fails with table-shape/runtime errors instead of a fail-fast schema gate.
+- Why this still breaks the claim: the plan narrows only the lower bound and never states the supported version window or the error identity. That leaves a concrete forward-compat hole and an ambiguous error contract.
+- Narrow fix: define an explicit unsupported-schema sentinel, most naturally `domain.ErrUnsupportedSchema`, and require all schema-version rejections to wrap it with version details. Acceptance should cover both directions: seeded `user_version = 0` and seeded `user_version > 2` must fail from bootstrap with `errors.Is(err, domain.ErrUnsupportedSchema)`, while the error string includes the found and supported versions.
 
 ## YAGNI Pressure Check
 
-- The shared `internal/services/run` seam in Unit 14.4 is justified by the accepted DROP_13 architecture and serves three launch surfaces (`valv run`, `valv codex`, `valv claude`), so the abstraction itself is not premature.
-- The plan still keeps scope tight: no keychain work, no extra provider forks, no new config model. YAGNI is tolerable.
+- No new YAGNI failure surfaced in Round 5. The two fixes above are minimal safety constraints on an already-approved design, not extra abstraction.
+- The shared `internal/services/run` dependency remains justified by DROP_13's accepted architecture and still has more than one concrete caller (`valv run`, `valv codex`, `valv claude`).
 
 ## Hidden Dependency Check
 
-- The DROP_13 dependency is explicit in the plan (`drops/DROP_14_ENV_VARS/PLAN.md:20`, `drops/DROP_14_ENV_VARS/PLAN.md:30`, `drops/DROP_14_ENV_VARS/PLAN.md:81-90`, `drops/DROP_14_ENV_VARS/PLAN.md:97-98`).
-- Two hidden dependencies are not explicit enough yet:
-  - the still-supported legacy `user_version = 0` migration path;
-  - the repo-wide `plain` output contract exposed by the root command.
-- Verdict remains `fail` until those dependencies are either covered in acceptance or intentionally removed from scope.
+- DROP_13 remains an explicit dependency, and the workflow already prevents drop close while Unit 14.4 is still blocked ([drops/WORKFLOW.md](/Users/evanschultz/Documents/Code/hylla/valv/main/drops/WORKFLOW.md:184), [drops/WORKFLOW.md](/Users/evanschultz/Documents/Code/hylla/valv/main/drops/WORKFLOW.md:191)).
+- Two hidden dependencies are still not explicit enough in the plan:
+  - the DSN dedup rule currently depends on raw `_pragma` string grammar, but the plan specifies only a lossy prefix heuristic rather than the exact parsing rule;
+  - the schema contract still lacks an explicit supported-version window and stable error identity for both "too old" and "too new" databases.
+- I did not confirm a new counterexample for the existing v0 test file references, the `env_key` column naming, the custom plain formatter, or the DROP_13 scheduling question. Those attacks are either already covered by the current unit acceptance or by the drop workflow itself.
