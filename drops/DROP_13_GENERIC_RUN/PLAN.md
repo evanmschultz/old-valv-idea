@@ -69,7 +69,7 @@ Add a generic per-account launch primitive, `valv run --account <name> [--provid
 
 #### Unit 13.1 — Shared provider-agnostic launch service
 
-State: `todo`
+State: `done`
 
 Paths: `internal/services/run/service.go` (new, not yet in tree), `internal/services/run/service_test.go` (new, not yet in tree)
 
