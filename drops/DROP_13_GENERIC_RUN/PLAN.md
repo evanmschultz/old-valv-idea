@@ -83,7 +83,7 @@ Acceptance:
 - When an explicit command override is provided, the service emits `--entrypoint <command[0]>` via `ContainerRunRequest.Extra` and forwards the remaining tokens unchanged as container args.
 - The shared service preserves the current within-project-root guard, project/profile labels, provider-prepared `Env`, `EnvPassthrough`, and `Mounts`, attached/non-attached execution, warning-to-notice propagation, and runtime cleanup behavior now implemented separately in `internal/services/claude` and `internal/services/codex`.
 - Provider wrappers remain responsible for provider-specific runtime prep inputs, including Codex shared-home derivation from `realHome` and the other-provider profile lookup that feeds cross-provider mounts.
-- Tests prove explicit-command mode uses `ContainerRunRequest.Extra`; `EnvPassthrough` names from the prepared runtime flow through into `ContainerRunRequest.EnvPassthrough`; `prepared.Warnings` are propagated to notices rather than silently dropped (`internal/services/claude/service.go:191-194`, `internal/services/codex/service.go:182-185`); provider-prepared `Mounts` pass through unchanged, including the worktree gitdir mount sourced from `pathutil.ResolveWorktreeGitDir` (`internal/adapters/providers/claude/runtime.go:143-145`, `internal/adapters/providers/codex/runtime.go:113-115`); `Close()` cleanup runs on both success and failure; and no Docker type changes are required outside this package.
+- Tests prove explicit-command mode uses `ContainerRunRequest.Extra`; `EnvPassthrough` names from the prepared runtime flow through into `ContainerRunRequest.EnvPassthrough`; `prepared.Warnings` are propagated to notices rather than silently dropped (`internal/services/claude/service.go:191-194`, `internal/services/codex/service.go:182-185`); provider-prepared `Mounts` flow through with **exact equality** — the resulting `ContainerRunRequest.Mounts` MUST equal `[]MountSpec{projectRootMount} ++ prepared.Mounts` byte-for-byte; no extra default mounts (e.g. `/tmp`) are permitted beyond that sequence; the worktree gitdir mount sourced from `pathutil.ResolveWorktreeGitDir` (`internal/adapters/providers/claude/runtime.go:143-145`, `internal/adapters/providers/codex/runtime.go:113-115`) is part of `prepared.Mounts` and survives the exact-equality assertion; `Close()` cleanup runs on both success and failure; and no Docker type changes are required outside this package.
 
 Blocked by: none
 
@@ -108,6 +108,7 @@ Acceptance:
 - Tests explicitly cover: (a) `valv run --account A cmd --account B` passes `--account B` to the target command unchanged, and (b) `valv run cmd --account A` treats `--account A` as a target arg and fails only because `valv run` itself is missing the required leading `--account`.
 - Tests explicitly cover the override launch path through `valv run` for both providers: with a non-empty `.valv/tools.toml` and `VALV_<PROVIDER>_IMAGE` set, launch emits exactly one override warning, makes zero overlay-image docker calls, and passes the override-derived base image into the shared run service.
 - Tests explicitly cover the duplicate-account-name + explicit-`--provider` + override combined case: create an account named `work` in both Claude and Codex, run `valv run --account work --provider claude <cmd>` with a non-empty `.valv/tools.toml`, with `VALV_CLAUDE_IMAGE` set and `VALV_CODEX_IMAGE` unset. Launch must emit exactly one Claude override warning, make zero overlay-image docker calls, and pass the Claude override-derived base image into the shared run service. The mirror Codex case (`--provider codex` + `VALV_CODEX_IMAGE` set) must succeed identically.
+- Tests explicitly cover the unhappy collision path: account name `work` exists in BOTH Claude and Codex, but `--provider` is NOT supplied, `.valv/tools.toml` is non-empty, and `VALV_CLAUDE_IMAGE` is set. The command MUST fail with the duplicate-account-name collision error from `resolveAccountByName` BEFORE any override warning is emitted AND BEFORE any overlay-image docker call occurs. Assert ordering via mocked image-resolution + warning sink: zero overlay docker calls observed, zero override warnings observed, exit error is the collision error.
 
 Blocked by: `13.1`
 
@@ -139,6 +140,8 @@ Paths: `internal/cli/codex.go`, `internal/cli/codex_test.go`, `internal/services
 
 Packages: `internal/cli`, `internal/services/codex`
 
+Note on `blocked_by`: although Units 13.3 and 13.4 both touch `internal/cli`, their file sets are disjoint (`claude.go`/`claude_test.go` vs `codex.go`/`codex_test.go`). The shared run seam from Unit 13.1 and the root wiring from Unit 13.2 are both complete by then, so Codex adapter rewire does not semantically depend on Claude adapter completion. Builders coordinating in parallel should coordinate merge order to avoid `internal/cli` package conflicts but do not need to serialize the work.
+
 Evidence: `internal/cli/codex.go:58-145` (`runCodexCommand`), `internal/cli/codex.go:148-185` (`runCodexImageOnlyCommand`), `internal/cli/codex_setup.go:14-118` (`ensureCodexAccountReadyForLaunch`), `internal/cli/codex.go:208-218` (`codexArgsSkipAccountReady`), `internal/services/codex/service.go:121-239` (`Service.Run`, `sharedCodexStateHome`), `internal/services/codex/service_test.go:658-746` (cross-provider mount coverage scaffold), `CLAUDE.md:9-16` (provider launchers become thin adapters over the generic primitive)
 
 Acceptance:
@@ -149,7 +152,7 @@ Acceptance:
 - Tests explicitly cover the status-quo silent-skip branch where a Claude binding exists but `ProfileByID` for that binding fails: Codex launch still succeeds, without the Claude mount or `CLAUDE_CONFIG_DIR` env.
 - Existing `internal/cli/codex_test.go` and `internal/services/codex/service_test.go` coverage remains green after the rewire.
 
-Blocked by: `13.3`
+Blocked by: `13.2`
 
 #### Unit 13.5 — Rewrite README around the generic primitive
 
