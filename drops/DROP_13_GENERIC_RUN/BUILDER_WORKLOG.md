@@ -48,3 +48,55 @@ Key design properties:
 ### Hylla Feedback
 
 No Hylla MCP query was made: the unit's scope was completely self-contained in evidence already cited by the planner (`internal/services/claude/service.go`, `internal/services/codex/service.go`, both provider runtime files, and `internal/adapters/docker/types.go`). Reading those files directly via the `Read` tool was the lowest-latency path, and the plan's evidence cites covered every file I needed. No Hylla miss to record — this is the "non-Hylla path taken intentionally" case rather than the "Hylla missed something" case.
+
+## Unit 13.1 — Round 2
+
+### Files touched
+
+- `internal/services/run/service.go` — added `pathutil.Normalize` of `ProjectRoot` + `WorkingDir` at the seam boundary; replaced lexical `withinProjectRoot` with `resolveWithinProjectRoot`, which keeps the cheap lexical Rel check as the fast path and falls back to an inode-based ancestry walk when lexical rejects.
+- `internal/services/run/service_test.go` — added `TestRunNormalizesCaseVariantProjectRootBeforeGuard` and `TestRunNormalizesSymlinkedProjectRootBeforeGuard`, both parameterized over claude+codex provider descriptors. Added an `isCaseInsensitiveFS` probe helper so the case-variant test skips gracefully on case-sensitive filesystems (Linux CI).
+- `drops/DROP_13_GENERIC_RUN/PLAN.md` — Unit 13.1 state flip `done` → `in_progress` → `done` per WORKFLOW.md.
+- `drops/DROP_13_GENERIC_RUN/BUILDER_WORKLOG.md` — this entry.
+
+### Mage targets run
+
+- `mage testPkg ./internal/services/run` — 48 tests pass (42 existing + 6 new across claude+codex subtests), 86.1% coverage (up from 82.4% in Round 1), race detector clean. Coverage well above the 70% per-package floor.
+
+### Round 1 falsification finding
+
+`BUILDER_QA_FALSIFICATION.md` Round 1 A1: `withinProjectRoot` did a purely lexical `filepath.Rel` check, false-rejecting equivalent paths that differ only by case (on case-insensitive macOS volumes) or by symlink spelling. The upstream Claude/Codex services normalize CWD via `pathutil.Normalize` and detect the project root from that normalized cwd so spellings stay consistent — the new shared seam dropped that precondition and never re-encoded it.
+
+### Design notes on the normalization approach
+
+The fix layers two passes inside `buildRequest`:
+
+1. **`pathutil.Normalize` on both `ProjectRoot` and `WorkingDir` at the seam boundary.** This handles the symlink case directly: `pathutil.Normalize` calls `filepath.EvalSymlinks` and, for paths that exist on disk, returns the symlink-resolved spelling. Both inputs are normalized BEFORE the ancestry check, the mount path, and the in-container working dir, so the bind mount and `--workdir` agree on a canonical project-root spelling.
+
+2. **`resolveWithinProjectRoot` with a fast lexical path + inode-walk fallback.** The lexical `filepath.Rel` check stays as the fast path (zero filesystem ops for the common already-canonicalized case). When the lexical check rejects, the function falls back to an inode-based ancestry walk using `os.Stat` + `os.SameFile` — this catches case-folded equivalents on case-insensitive filesystems that `EvalSymlinks` does not collapse (macOS APFS / HFS+ return user-supplied case verbatim even though the volume folds case for lookups). Non-existent paths fail the `os.Stat` and return the original lexical rejection — we cannot prove same-project for paths that don't exist, but that mirrors the original behavior.
+
+3. **Canonical working-dir spelling for `WorkingDir`.** When the inode walk succeeds, `resolveWithinProjectRoot` rebuilds `workingDir` using `projectRoot`'s spelling joined with the subpath collected during the walk. This guarantees the Docker `--workdir` is reachable inside the bind-mounted project root regardless of how the caller spelled the input.
+
+The reason for splitting into two layers rather than always-walking: the lexical Rel path is correct and cheap for the overwhelmingly common case where the caller (the future provider thin-wrappers from Unit 13.3 / 13.4) has already canonicalized. The inode fallback is a safety net for the seam contract, not a performance-critical path.
+
+### Test fixture rationale
+
+- **Case-variant test.** Creates the canonical lowercase project directory on disk, then references the project root with the lowercase spelling and the working dir with an uppercase prefix (`/tmp/project` vs `/tmp/PROJECT/subdir`). `pathutil.Normalize` does not fold case (`EvalSymlinks` returns user spelling), so the lexical `filepath.Rel` returns `../PROJECT/subdir` and rejects; the inode-walk fallback catches the equivalence via `os.SameFile`. The test uses an `isCaseInsensitiveFS` probe (write lowercase file, stat uppercase) and `t.Skip`s on case-sensitive filesystems so Linux CI runners pass without false failures.
+- **Symlink test.** Creates the real on-disk project directory, then creates a sibling symlink at `project-link` → `real-project`. The launch passes `ProjectRoot=<tmp>/project-link` and `WorkingDir=<tmp>/real-project/subdir`. `pathutil.Normalize` resolves the symlink for `ProjectRoot` (since the target exists), producing a consistent spelling — this case is handled by the normalize layer alone. The test `t.Skip`s if the runtime filesystem rejects `os.Symlink`.
+- **Provider parameterization preserved.** Both new tests loop over `providerDescriptors()` (claude + codex) so the fix is asserted seam-wide and not only for one provider.
+
+### TDD cadence
+
+- After flipping state to `in_progress`, I added both new tests first and ran `mage testPkg ./internal/services/run` — 6 tests failed (TDD red) with the exact "outside project root" error reproducing both A1 attack vectors.
+- Applied the two-layer fix (Normalize + inode-walk fallback). Re-ran `mage testPkg` — 48 tests pass (TDD green), no regressions, coverage 86.1%.
+
+### Hard-constraint adherence
+
+- Only touched `internal/services/run/` plus this drop's `PLAN.md` (state flip) and `BUILDER_WORKLOG.md` (this entry).
+- Did **not** modify `internal/pathutil/` (used the existing helper as-is).
+- Did **not** modify provider services, CLI, Docker adapter, or any other package.
+- Did **not** run raw `go test`, `go vet`, or `gofumpt` — only `mage testPkg`.
+- Did **not** set `GOCACHE`, `GOMODCACHE`, or any other Go-env override.
+
+### Hylla Feedback
+
+None this round — the fix scope was contained inside `internal/services/run` and `internal/pathutil`, both already cited in the Round 1 worklog evidence. Reading `pathutil.go` directly via `Read` was the appropriate tool for confirming the `Normalize` API.

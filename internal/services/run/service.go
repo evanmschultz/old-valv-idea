@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -27,6 +28,7 @@ import (
 	"github.com/charmbracelet/log"
 
 	"github.com/evanmschultz/valv/internal/adapters/docker"
+	"github.com/evanmschultz/valv/internal/pathutil"
 )
 
 // Executor runs Docker containers. The shared launch service requires only
@@ -224,16 +226,31 @@ func (s Service) validate(request LaunchRequest) error {
 }
 
 func (s Service) buildRequest(launch LaunchRequest) (docker.ContainerRunRequest, error) {
-	withinRoot, err := withinProjectRoot(launch.ProjectRoot, launch.WorkingDir)
+	// Normalize both paths before the within-project ancestry check so that
+	// callers passing equivalent-but-differently-spelled paths (case-variant
+	// on case-insensitive filesystems, symlinked project root) are not
+	// false-rejected by the lexical guard. The provider services upstream
+	// already normalize via pathutil.Normalize; the shared seam must do the
+	// same so the contract holds regardless of which caller routes through.
+	normalizedProjectRoot, err := pathutil.Normalize(launch.ProjectRoot)
+	if err != nil {
+		return docker.ContainerRunRequest{}, fmt.Errorf("normalize project root %q: %w", launch.ProjectRoot, err)
+	}
+	normalizedWorkingDir, err := pathutil.Normalize(launch.WorkingDir)
+	if err != nil {
+		return docker.ContainerRunRequest{}, fmt.Errorf("normalize working directory %q: %w", launch.WorkingDir, err)
+	}
+
+	withinRoot, canonicalWorkingDir, err := resolveWithinProjectRoot(normalizedProjectRoot, normalizedWorkingDir)
 	if err != nil {
 		return docker.ContainerRunRequest{}, err
 	}
 	if !withinRoot {
-		return docker.ContainerRunRequest{}, fmt.Errorf("working directory %q is outside project root %q", launch.WorkingDir, launch.ProjectRoot)
+		return docker.ContainerRunRequest{}, fmt.Errorf("working directory %q is outside project root %q", normalizedWorkingDir, normalizedProjectRoot)
 	}
 
 	mounts := append(
-		[]docker.MountSpec{docker.NewMountSpec(launch.ProjectRoot, launch.ProjectRoot, false)},
+		[]docker.MountSpec{docker.NewMountSpec(normalizedProjectRoot, normalizedProjectRoot, false)},
 		launch.Prepared.Mounts...,
 	)
 
@@ -242,7 +259,7 @@ func (s Service) buildRequest(launch LaunchRequest) (docker.ContainerRunRequest,
 	request := docker.ContainerRunRequest{
 		Name:           s.containerName(launch),
 		Image:          s.image,
-		WorkingDir:     launch.WorkingDir,
+		WorkingDir:     canonicalWorkingDir,
 		Env:            launch.Prepared.Env,
 		EnvPassthrough: launch.Prepared.EnvPassthrough,
 		Labels: map[string]string{
@@ -316,21 +333,64 @@ func (s Service) debug(msg string, keyvals ...any) {
 	s.logger.Debug(msg, keyvals...)
 }
 
-// withinProjectRoot reports whether workingDir is the project root or nested
-// under it. It mirrors the helper used by the existing claude/codex services
-// so the shared service preserves the current sibling-path rejection.
-func withinProjectRoot(projectRoot, workingDir string) (bool, error) {
+// resolveWithinProjectRoot reports whether workingDir is the project root or
+// nested under it AND returns the working-directory spelling that is safe to
+// use as the in-container WorkingDir.
+//
+// It first tries the cheap lexical Rel-based comparison; when that passes, the
+// caller-supplied workingDir is returned unchanged. When the lexical check
+// rejects, the function falls back to an inode-based ancestry walk that
+// catches case-folded equivalents on case-insensitive filesystems and any
+// symlink spellings Normalize did not collapse. When the inode walk succeeds,
+// the working-directory spelling is rewritten to use projectRoot's spelling
+// joined with the subpath collected during the walk so the resulting path is
+// consistent with the project-root bind mount that Docker receives.
+//
+// Both inputs MUST already be absolute + symlink-resolved via pathutil.Normalize
+// at the caller boundary.
+func resolveWithinProjectRoot(projectRoot, workingDir string) (bool, string, error) {
 	rel, err := filepath.Rel(projectRoot, workingDir)
 	if err != nil {
-		return false, fmt.Errorf("compare working directory %q to project root %q: %w", workingDir, projectRoot, err)
+		return false, "", fmt.Errorf("compare working directory %q to project root %q: %w", workingDir, projectRoot, err)
 	}
 	if rel == "." {
-		return true, nil
+		return true, workingDir, nil
 	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return false, nil
+	if rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return true, workingDir, nil
 	}
-	return true, nil
+
+	// Lexical check rejected. Fall back to inode-based ancestry comparison so
+	// case-folded and symlinked-but-equivalent paths are not false-rejected.
+	// Non-existent paths fail os.Stat — treat that as the original lexical
+	// rejection (we cannot prove same-project for paths that don't exist).
+	rootInfo, err := os.Stat(projectRoot)
+	if err != nil {
+		return false, "", nil
+	}
+	current := workingDir
+	var subparts []string
+	for {
+		info, err := os.Stat(current)
+		if err != nil {
+			return false, "", nil
+		}
+		if os.SameFile(rootInfo, info) {
+			// Rebuild the working dir spelling using projectRoot's spelling so
+			// the result is consistent with the bind mount Docker receives.
+			canonical := projectRoot
+			for i := len(subparts) - 1; i >= 0; i-- {
+				canonical = filepath.Join(canonical, subparts[i])
+			}
+			return true, canonical, nil
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return false, "", nil
+		}
+		subparts = append(subparts, filepath.Base(current))
+		current = parent
+	}
 }
 
 func sanitizeContainerPart(value string) string {

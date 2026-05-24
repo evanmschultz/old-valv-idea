@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync/atomic"
@@ -607,6 +609,134 @@ func TestRunBuildsInteractiveFlagsFromOptions(t *testing.T) {
 			}
 			if !executor.got.Remove {
 				t.Errorf("Remove = false, want true")
+			}
+		})
+	}
+}
+
+// isCaseInsensitiveFS detects whether the filesystem hosting dir treats names
+// in a case-insensitive way. It creates a lowercase probe file and then
+// attempts to Stat its uppercase spelling: a successful stat means the volume
+// folds case (e.g. the default macOS APFS / HFS+ configuration on
+// `/private/tmp`).
+func isCaseInsensitiveFS(t *testing.T, dir string) bool {
+	t.Helper()
+	probe := filepath.Join(dir, "case_probe")
+	if err := os.WriteFile(probe, []byte("x"), 0o600); err != nil {
+		t.Fatalf("isCaseInsensitiveFS: write probe: %v", err)
+	}
+	defer os.Remove(probe)
+	upper := filepath.Join(dir, "CASE_PROBE")
+	if _, err := os.Stat(upper); err == nil {
+		return true
+	}
+	return false
+}
+
+// TestRunNormalizesCaseVariantProjectRootBeforeGuard verifies that when the
+// caller hands the service a ProjectRoot whose spelling differs only by case
+// from a prefix of WorkingDir on a case-insensitive filesystem, the shared
+// service normalizes both paths before the within-project guard and the launch
+// succeeds rather than being false-rejected.
+//
+// Repros A1 from BUILDER_QA_FALSIFICATION.md Round 1. Pre-fix: this test
+// fails with "outside project root" because withinProjectRoot is lexical-only.
+func TestRunNormalizesCaseVariantProjectRootBeforeGuard(t *testing.T) {
+	t.Parallel()
+
+	tempBase := t.TempDir()
+	if !isCaseInsensitiveFS(t, tempBase) {
+		t.Skipf("filesystem at %q is case-sensitive; skipping case-variant guard test", tempBase)
+	}
+
+	// Create the canonical lowercase project directory and a nested subdir.
+	canonical := filepath.Join(tempBase, "project")
+	subdir := filepath.Join(canonical, "subdir")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", subdir, err)
+	}
+	// Reference the same project root using a different case spelling for
+	// ProjectRoot (lowercase) vs WorkingDir (uppercase prefix). On a
+	// case-insensitive filesystem both paths resolve to the same physical
+	// directory but lexical filepath.Rel returns "../PROJECT/subdir" and
+	// rejects the launch.
+	projectRoot := canonical
+	workingDir := filepath.Join(tempBase, "PROJECT", "subdir")
+
+	for _, provider := range providerDescriptors() {
+		provider := provider
+		t.Run(provider.Name, func(t *testing.T) {
+			t.Parallel()
+
+			executor := &fakeExecutor{}
+			service := newServiceForTest(t, provider, executor, nil)
+
+			prepared := newPreparedFixture(nil, nil, nil, nil)
+
+			err := service.Run(context.Background(), LaunchRequest{
+				ProjectRoot: projectRoot,
+				WorkingDir:  workingDir,
+				ProjectID:   "proj-1",
+				ProfileID:   "profile-1",
+				Prepared:    &prepared.runtime,
+				Args:        nil,
+			})
+			if err != nil {
+				t.Fatalf("Run() error = %v, want nil (case-variant paths must resolve to same project)", err)
+			}
+		})
+	}
+}
+
+// TestRunNormalizesSymlinkedProjectRootBeforeGuard verifies that when
+// ProjectRoot is a symlink that resolves to the same physical directory as a
+// prefix of WorkingDir, the shared service normalizes both paths before the
+// within-project guard and the launch succeeds.
+//
+// Repros A1 from BUILDER_QA_FALSIFICATION.md Round 1 (symlink variant).
+// Pre-fix: this test fails with "outside project root" because
+// withinProjectRoot is lexical-only.
+func TestRunNormalizesSymlinkedProjectRootBeforeGuard(t *testing.T) {
+	t.Parallel()
+
+	tempBase := t.TempDir()
+
+	// Create the real on-disk project directory and a nested subdir.
+	realProject := filepath.Join(tempBase, "real-project")
+	subdir := filepath.Join(realProject, "subdir")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", subdir, err)
+	}
+
+	// Point a symlink at the real project directory and reference the project
+	// root through the symlink spelling. The working directory references the
+	// real (non-symlinked) path so the two spellings differ.
+	projectLink := filepath.Join(tempBase, "project-link")
+	if err := os.Symlink(realProject, projectLink); err != nil {
+		t.Skipf("symlink unsupported on this filesystem: %v", err)
+	}
+	workingDir := filepath.Join(realProject, "subdir")
+
+	for _, provider := range providerDescriptors() {
+		provider := provider
+		t.Run(provider.Name, func(t *testing.T) {
+			t.Parallel()
+
+			executor := &fakeExecutor{}
+			service := newServiceForTest(t, provider, executor, nil)
+
+			prepared := newPreparedFixture(nil, nil, nil, nil)
+
+			err := service.Run(context.Background(), LaunchRequest{
+				ProjectRoot: projectLink,
+				WorkingDir:  workingDir,
+				ProjectID:   "proj-1",
+				ProfileID:   "profile-1",
+				Prepared:    &prepared.runtime,
+				Args:        nil,
+			})
+			if err != nil {
+				t.Fatalf("Run() error = %v, want nil (symlinked project root must resolve to same project)", err)
 			}
 		})
 	}
