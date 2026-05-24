@@ -72,3 +72,67 @@ Narrow fix: make the defaults unexported and expose either a getter that returns
 - Repo contract read: `drops/DROP_15_NETWORK_POLICY/PLAN.md`, `drops/DROP_15_NETWORK_POLICY/BUILDER_WORKLOG.md`
 - External semantics: TOML v1.0.0 table/comment rules (`https://toml.io/en/v1.0.0`)
 - Verification attempt: temporary falsification tests were added and removed, but `mage testPkg ./internal/tools` could not run in this sandbox because `go list` failed opening the default Go build cache under `/Users/evanschultz/Library/Caches/go-build/...` with `operation not permitted`
+
+## Unit 15.1 — Round 2
+
+Verdict: PASS — no unmitigated counterexample found against the Round 2 fixes.
+
+### Round 1 counterexample-fix verification
+
+| R1 finding | R2 fix location | Verified by |
+|---|---|---|
+| CE#1 indented `[allowlist]` header breaks byte-preservation | `splitAllowlistSpan` lines 352-355: `line[0] == ' ' || line[0] == '\t'` AFTER `topLevelHeaderRE` match | `TestWriteAllowlistSection_RejectsIndentedSectionHeader` (allowlist case) + `TestWriteAllowlistSection_RejectsIndentedOtherSectionHeader` (other section case, scope expansion documented in worklog) |
+| CE#2 missing RFC 1123 length limits | `validateHost` lines 156-163: `len(h) > 253` then per-label `len(label) > 63`, AFTER `hostShapeRE` so the more specific error wins on broken values | `TestEffectiveAllowlist_RejectsOverlongLabel` (64-byte label) + `TestEffectiveAllowlist_AcceptsMaxLengthLabel` (63-byte boundary accept pin) + `TestEffectiveAllowlist_RejectsOverlongTotal` (254-byte total, labels deliberately 4 bytes so the total-length branch fires) |
+| CE#3 over-broad triple-quote detection | new `stripLineComment` helper at lines 427-460 + use in `splitAllowlistSpan` line 383: `bytes.Contains(stripLineComment(line), …)` | `TestWriteAllowlistSection_AcceptsCommentsContainingTripleQuotes` exercises `# keep """ here`, `mage = "latest" # also """ in this comment`, `# and ''' literal triple quotes too` — all round-trip. Existing `TestWriteAllowlistSection_RejectsMultilineStringOutsideAllowlist` still green proves real `"""` openers in CODE are still rejected. |
+| Hidden #4: exported mutable defaults | rename `var DefaultAllowlistHosts` → unexported `var defaultAllowlistHosts`; add `func DefaultAllowlistHosts() []string` at lines 57-61 that returns `make + copy` | `TestDefaultAllowlistHostsReturnsCopyNotMutableRef` mutates the returned slice in place and re-asserts both `DefaultAllowlistHosts()` and `EffectiveAllowlist(AllowlistConfig{})` still return the originals |
+
+### New attack vectors — counterexample search
+
+All attacks attempted; no confirmed counterexamples.
+
+1. **Tab-indented section header (`\t[allowlist]`)**: explicit `line[0] == '\t'` branch at `splitAllowlistSpan` line 353 covers tabs equally with spaces. Mitigated by design.
+2. **Trailing whitespace on `[allowlist]` header (`[allowlist]  ` or `[allowlist]\t`)**: `topLevelHeaderRE` (`internal/tools/allowlist.go:273`) tolerates `[ \t]*` plus optional `# comment` after the closing bracket. Header detection works; no leading whitespace means the `line[0]` rejection does not fire. Mitigated.
+3. **`stripLineComment` with escaped quote inside basic string** (`key = "value with \" embedded #" # comment`): trace — at index of first `"` enter basic; at `\` do `i++` + `continue` so the for-loop's `i++` advances past the escaped char (net +2); at the real closing `"` exit basic; at the next `#` cut. codeOnly correctly captures the string and excludes the trailing comment. Mitigated.
+4. **Multi-byte UTF-8 inside comments and strings** (`# 你好 """ 世界`, `key = "日本"`): every UTF-8 multi-byte code unit has byte ≥ 0x80 by construction. None of the bytes `#` (0x23), `"` (0x22), `'` (0x27), or `\` (0x5C) can ever appear as a UTF-8 continuation or lead byte. The byte walker never mis-toggles state mid-codepoint. For the `# 你好 """` case the very first byte is `#`, so `stripLineComment` returns the empty prefix and the outside-span check correctly sees no `"""`. Mitigated.
+5. **RFC 1123 63-byte boundary precision** (`>` vs `>=`): builder added an explicit accept-side pin at 63 bytes (`TestEffectiveAllowlist_AcceptsMaxLengthLabel`). A future `>` → `>=` tightening would break that test. Mitigated.
+6. **`DefaultAllowlistHosts()` concurrent access**: the function never writes the underlying `defaultAllowlistHosts` slice; it does `make + copy`. Read-only access to a package-level slice initialized at package-init time is data-race-free under the Go memory model. `mage testPkg ./internal/tools` runs `-race` per the project gate and passed (per worklog). Mitigated.
+7. **Comment-only / blank lines between `[allowlist]` and the next section**: span boundary defined as "first byte of the next top-level `[section]` header". `splitAllowlistSpan`'s scan only sets `nextStart` on a header match — blank and `# comment` lines never trigger the transition. Schema-Decision-3-compliant: in-span discard is documented and asserted by the existing golden test (`TestWriteAllowlistSection_PreservesPrefixAndSuffix`). Mitigated.
+8. **`[allowlist]` as the first line of file** (no preceding prefix): `prefix` becomes `content[:0]` (empty). The `len(prefix) > 0` guard at line 234 skips the conditional `\n` injection, so the rendered section is not prefixed with a stray newline. Mitigated.
+9. **File ending without trailing newline + multiple sections**: scanner's `lineLen = len(line) + 1` over-counts by 1 on the final unterminated line; the clamp `if offset > len(content) { offset = len(content) }` at line 398 reconciles. Recorded section offsets are `bytes.Index(line, []byte("["))`-relative to the start-of-line offset, which is correct because each line's start offset is captured BEFORE the increment. Hand-traced a four-section file with no trailing LF; prefix/suffix slices land on correct byte boundaries.
+10. **Section-header regex matching `key = "[foo]"`-style payload**: `topLevelHeaderRE` is anchored with `^\[`. The trimmed line of an assignment starts with the key letter, never `[`. Mitigated.
+11. **Multi-line array `arr = [` opening on one line, content on later lines, closing `]` on its own line**: none of those lines start with `[<name>]` matching the header regex. Mitigated.
+12. **Section header with trailing comment containing brackets**: `topLevelHeaderRE` uses `[^\[\]]+` inside the captured name group, then `[ \t]*(?:#.*)?$`. The optional comment is `.*` so `[allowlist] # foo [bar]` still matches. Mitigated.
+13. **Single-quote literal-string `#` handling** (`path = 'C:\Users\#test'`): literal strings don't honor escapes; the walker's `inLiteral` branch only toggles on `'` and never cuts on `#`. Comment cut only fires outside both string states. Mitigated.
+14. **`'''` in CODE (not a comment)** (e.g. `s = ''''`): walker keeps toggling but does not mask the byte sequence. `bytes.Contains(codeOnly, []byte("'''"))` finds it and the line is correctly rejected as a multi-line-literal opener. Mitigated.
+15. **`[allowlist] # comment with """`** on the header line itself: header-detection runs FIRST and sets `insideAllowlistSpan = true` on the same iteration; the subsequent triple-quote check is gated by `if !insideAllowlistSpan` and skipped. Mitigated by control-flow ordering.
+16. **Same control-flow on `[othersection] # """`** BEFORE `[allowlist]`: `stripLineComment(line)` returns `[othersection] ` (cut at the `#`), `bytes.Contains` sees no `"""`. Mitigated.
+17. **`s = "a\"b\"c" # comment with """`**: trace through the basic-string escape-skip leaves the closing `"` exiting basic state; the next `#` cuts; codeOnly is the string portion only, which contains at most pairs of `"` (never three consecutive). Mitigated.
+18. **Empty file content**: `splitAllowlistSpan([])` returns `(nil, nil, nil)`; caller emits just the canonical `[allowlist]` block. Mitigated.
+19. **Indented `[allowlist]` header with leading TAB instead of spaces**: `line[0] == '\t'` branch fires. Mitigated. (Round 2 fix is whitespace-class-complete.)
+20. **External-caller audit for renamed `defaultAllowlistHosts`**: `rg DefaultAllowlistHosts|defaultAllowlistHosts` returns 0 production callers outside `internal/tools/` — confirmed (BUILDER_QA_PROOF.md:277 also pinned this). Rename is safe; no silent breakage elsewhere in the tree.
+
+### YAGNI check
+
+PASS. The four Round 2 fixes are minimum-viable: a one-line whitespace check in `splitAllowlistSpan`, an 8-line extension of `validateHost`, a 34-line `stripLineComment` helper that does exactly the work needed and nothing more (no datetime / integer / array lexing), and a 5-line `DefaultAllowlistHosts()` accessor. No new abstraction layer, no new TOML lexer, no exposed configuration of validation policy. Doc-comment prose adjustments to dodge the `gofumpt` triple-apostrophe quirk are cosmetic.
+
+The one scope expansion — rejecting indented `[tools]` / `[env]` headers, not just indented `[allowlist]` headers — is justified by uniform contract: the byte-preservation guarantee applies symmetrically to the prefix and suffix regions, and an indented header in either region would break that contract. Worklog Design Notes record the rationale. Not a YAGNI violation: the test surface explicitly covers BOTH cases, and the doc comment names the rule.
+
+### Hidden dep check
+
+PASS with one accepted residual.
+
+The `DefaultAllowlistHosts` rename closes the externally-mutable-global hole. Verified by `TestDefaultAllowlistHostsReturnsCopyNotMutableRef` — direct in-place mutation of the returned slice does not affect any subsequent `DefaultAllowlistHosts()` or `EffectiveAllowlist(AllowlistConfig{})` call.
+
+Residual (accepted): same-package code under `package tools` can still mutate `defaultAllowlistHosts` directly because Go's package-private visibility allows it. This is the standard idiom for package-private state — not a regression and not in scope to harden further. No production code outside `allowlist.go` accesses the var (confirmed by `rg`). If a future drop introduces in-package mutation, it would be a code-review concern at that point, not a current falsifier.
+
+### Unknowns
+
+1. **Missing 253-byte total-length accept-boundary test.** The 63-byte label limit has a symmetric pair (`TestEffectiveAllowlist_RejectsOverlongLabel` + `TestEffectiveAllowlist_AcceptsMaxLengthLabel`); the 253-byte total limit has only the reject side (`TestEffectiveAllowlist_RejectsOverlongTotal` at 254). A future refactor that tightens `len(h) > 253` to `len(h) >= 253` would not be caught at the unit-test layer. Low-priority — both fences would behave identically for any realistic hostname; the missing pin is symmetry, not a correctness bug.
+
+### Evidence
+
+- Delta inspected: round-2 builder edits in `internal/tools/allowlist.go` and `internal/tools/allowlist_test.go` per `BUILDER_WORKLOG.md:146-219`.
+- Code read: `internal/tools/allowlist.go` (full file), `internal/tools/allowlist_test.go` (full file).
+- External-caller audit: `rg DefaultAllowlistHosts|defaultAllowlistHosts` confirms zero production callers outside `internal/tools/`.
+- Tool invariants verified by trace (no test rerun this round — Round 2 builder already ran `mage testPkg ./internal/tools` → 93 pass / 91.9% cover, recorded at `BUILDER_WORKLOG.md:187-189`; QA Proof R2 already verified completeness — this falsification pass is pure adversarial reasoning over the same evidence base).
+- No raw `go test` / `GOCACHE=...` invocations were issued.

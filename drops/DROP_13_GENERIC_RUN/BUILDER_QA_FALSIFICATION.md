@@ -117,3 +117,78 @@ Hidden dependency confirmed. The round-2 fix still assumes the aliased `WorkingD
 - Remaining attack vectors were either mitigated by the current code or stayed at the level of unconfirmed risk.
 
 Verdict: **fail**.
+
+## Unit 13.1 — Round 3
+
+**Verdict:** pass
+**Reviewer:** ta-go-qa-falsification
+**Reviewed at:** 2026-05-24T00:00:00Z
+
+Reviewed against `drops/DROP_13_GENERIC_RUN/PLAN.md`, `drops/DROP_13_GENERIC_RUN/BUILDER_WORKLOG.md` (Rounds 1+2+3), `drops/DROP_13_GENERIC_RUN/BUILDER_QA_PROOF.md`, direct reads of `internal/services/run/service.go` (Round 3, 51-test build, 86.4% coverage per worklog), `internal/services/run/service_test.go` (the new `TestRunNormalizesSymlinkedProjectRootWithMissingLeaf` at lines 745-815), `internal/pathutil/pathutil.go`, plus `go doc os.IsNotExist` and `go doc io/fs.ErrNotExist` for ENOTDIR/ENOENT class-mapping behavior. Hylla MCP was not consulted for this round — the targeted attack surface (`resolveWithinProjectRoot` in a single file) was small enough that direct `Read` + line-by-line trace was the lowest-latency evidence path. Per repo rule I did NOT re-run `mage testPkg` (sandbox prohibits raw `go test` / `GOCACHE` overrides and `mage testPkg` was already executed by the builder per BUILDER_WORKLOG.md Round 3 § "Mage targets run").
+
+### Counterexamples / Attacks
+
+No new counterexamples confirmed. All eight dispatch-listed attack vectors were traced against the Round 3 `resolveWithinProjectRoot` (`internal/services/run/service.go:363-439`). Each either resolves correctly, hits a Normalize-error short-circuit safely, or maps to an accepted/pre-existing limitation.
+
+#### Attack 1 — Deeply nested missing tail
+
+`projectRoot=/realProject`, `workingDir=/projectLink/a/b/c/d/missing/grand/great`, where `projectLink -> realProject`, `a/b` exist under realProject, `c` onwards do not. Traced eight iterations of the walk: `great`/`grand`/`missing`/`d`/`c` peel onto `missingTail` (5 ENOENT peels); Stat succeeds on `/projectLink/a/b` and `/projectLink/a` (SameFile mismatch — append `b`, then `a` to `existingSubparts`); Stat on `/projectLink` resolves through the symlink, `os.SameFile` matches `realProject`. Rebuild loops both accumulators in root-first order: `realProject + a + b + c + d + missing + grand + great`. Correct.
+
+#### Attack 2 — All-missing WorkingDir under existing project link
+
+`projectRoot=/realProject`, `workingDir=/projectLink/totally-missing`. iter1 peels `totally-missing`, current=`/projectLink`. iter2 Stat succeeds (symlink follows to realProject), SameFile matches. Rebuild: `realProject + totally-missing`. Correct — this is the canonical R3 case, exactly mirrored by the new `TestRunNormalizesSymlinkedProjectRootWithMissingLeaf` test (`service_test.go:753-815`).
+
+#### Attack 3 — Symlink in middle of path (target inside project)
+
+`projectRoot=/realProject`, `workingDir=/realProject/sub-link/missing-child`, `sub-link -> /realProject/actual`. `pathutil.Normalize` of workingDir hits `fs.ErrNotExist` (leaf missing) and falls back to the raw absolute path. Lexical `filepath.Rel("/realProject", "/realProject/sub-link/missing-child")` returns `sub-link/missing-child` (no `..` prefix) → fast path at `service.go:368-373` returns `(true, workingDir, nil)` unchanged. The in-container `--workdir` becomes `/realProject/sub-link/missing-child`; `sub-link` is a directory entry inside the bind-mounted project root and Docker handles the symlink follow inside the container. No false reject, no canonical-rebuild needed.
+
+#### Attack 4 — Cyclic symlink at project root
+
+`projectRoot=/cyclic`, `/cyclic -> /cyclic/sub -> /cyclic`. `pathutil.Normalize(projectRoot)` calls `filepath.EvalSymlinks`, which detects the symlink cycle and returns `too many links` (not wrapped as `fs.ErrNotExist`). `pathutil.Normalize` then takes the third branch (`pathutil.go:34`), wrapping the error as `normalize path %q: resolve symlinks: %w`. `buildRequest` returns at `service.go:236-238` with `normalize project root %q: %w`. The error bubbles out cleanly — there is no path into `resolveWithinProjectRoot`, so no infinite loop is possible. Mitigated by Normalize's explicit `fs.ErrNotExist`-only fallback.
+
+#### Attack 5 — Permission denied mid-walk
+
+Parent directory chmod 000 in the ancestry. `os.Stat` returns EACCES, which does NOT satisfy `errors.Is(err, fs.ErrNotExist)` (per `go doc os.IsNotExist` — EACCES is "permission denied", distinct from ENOENT/ENOTDIR). The `service.go:397-405` branch short-circuits to `return false, "", nil`, `withinRoot` is false, `buildRequest` returns `working directory %q is outside project root %q`. No panic, no infinite loop. The user-facing error is misleading (says "outside project root" when the actual cause was permission denied), but this is the **intentional, documented** R3 design choice (`service.go:396-404`: "fall back to the lexical rejection without surfacing a hard error so the guard behaviour mirrors the previous implementation"). Worth noting as a UX-clarity limitation, not as a behavioral falsifier of the R3 missing-leaf fix. Accepted.
+
+#### Attack 6 — TOCTOU race between Normalize and inode walk
+
+Symlink swap or directory removal between the `pathutil.Normalize` call and the `os.Stat` in the inode walker. Concern is real but is **not new in Round 3** — Round 2 already introduced both the Normalize call and the inode walk, with the same gap. The R3 worklog does not claim atomicity, and the existing Claude/Codex services have identical TOCTOU exposure (`internal/services/claude/service.go` lines 332-344, called out as a "verbatim port" in BUILDER_WORKLOG R1). No new R3 counterexample.
+
+#### Attack 7 — Trailing slash semantics
+
+`workingDir=/projectLink/missing/`. `pathutil.Normalize` calls `filepath.Abs`, which internally Cleans the path and strips trailing separators (per `go doc path/filepath.Clean`). So Normalize produces `/projectLink/missing` (or the EvalSymlinks-resolved form). The walker sees a normalized leaf-form path and proceeds identically to Attack 2. No false reject.
+
+#### Attack 8 — Tilde in path
+
+`~/projects/foo/missing`. `filepath.Abs` does **not** expand `~` — tilde expansion is a shell construct, not a filesystem one. `Abs` would return `<cwd>/~/projects/foo/missing`, a nonsense literal path. The walker would correctly false-reject because no ancestor SameFile-matches the project root. This is a **caller precondition violation**, not a falsifier of the R3 missing-leaf fix — the same false-reject would occur in Round 1 and Round 2, and is consistent with the upstream Claude/Codex services that also never tilde-expand. Not new in Round 3.
+
+### Additional probes beyond the dispatch list
+
+- **ENOTDIR mapping.** `errors.Is(err, fs.ErrNotExist)` per Go stdlib syscall-error mapping returns true for both ENOENT and ENOTDIR (`go doc os.IsNotExist`: "satisfied by ErrNotExist as well as some syscall errors"). A path like `/projectLink/somefile.txt/missing` (treating a regular file as a directory) hits ENOTDIR; the walker peels `missing` and walks to `somefile.txt`. Stat there succeeds (it's a file), SameFile mismatches, walk continues to `/projectLink` and matches. Rebuild produces `realProject/somefile.txt/missing` — a nonsensical canonical path that Docker `--workdir` would reject at runtime, but this is garbage-in / garbage-out, not a falsifier of the R3 fix.
+- **NFC/NFD Unicode (macOS).** Filesystem stores names in NFD, user can spell in NFC. `EvalSymlinks` returns on-disk (NFD) form; `os.SameFile` compares inodes (Unicode-spelling-independent). The R3 walker survives NFC/NFD spelling drift because SameFile is the ancestry-match operation.
+- **Rebuild `..` injection via missingTail.** `filepath.Base` on each iteration returns only the final component (`go doc path/filepath.Base`), so `missingTail` cannot contain `..` or path separators. The subsequent `filepath.Join` in the rebuild therefore cannot collapse the canonical path back outside `projectRoot`. Safe.
+- **`/` filesystem root reached without match.** `workingDir=/foo/missing` with `/foo` also missing and `projectRoot=/realProject`. Walk peels `missing`, peels `foo`, lands on `/`. Stat `/` succeeds, SameFile mismatches `realProject`. `parent := filepath.Dir("/")` returns `/`; `parent == current` triggers the `return false, "", nil` sentinel at `service.go:432-434`. No infinite loop.
+- **Symlink-escape via lexical fast path.** `projectRoot=/projectA`, `workingDir=/projectA/escape-link/missing` where `escape-link -> /projectB`. Lexical Rel returns `escape-link/missing` (no `..` prefix), fast path passes, canonical = workingDir unchanged. Docker bind-mounts only `/projectA`; inside the container, `escape-link` is a dangling symlink (target `/projectB` is not mounted). This is a **pre-existing concern in Round 1's "verbatim port"** of the Claude/Codex `withinProjectRoot` helper — BUILDER_WORKLOG R1 § "Within-project guard preserved" explicitly notes the verbatim port. Not a Round 3 regression and not in the dispatch attack list; noted here for context, not as a counterexample.
+
+### YAGNI check
+
+No YAGNI blocker. The missing-tail peeling machinery is justified by the R2 falsification finding (the A2 counterexample is concrete and reproducible). The two accumulators (`missingTail`, `existingSubparts`) are minimal — no additional abstractions or generic-walker layers introduced. The walk terminates in at most O(path-depth) iterations and is gated behind a lexical fast path so the common already-canonical case never enters it.
+
+### Hidden dep check
+
+No new hidden dependencies introduced in Round 3 relative to Round 2. The fix depends on:
+
+- `os.Stat` following symlinks transparently (stdlib contract, verified).
+- `errors.Is(err, fs.ErrNotExist)` matching both ENOENT and ENOTDIR (stdlib contract, verified via `go doc`).
+- `filepath.Base` never returning `..` or path separators (stdlib contract, verified).
+- `os.SameFile` comparing inodes only (stdlib contract, verified).
+
+All four are documented stdlib semantics — same dependency surface as the upstream Claude/Codex services. The R2 hidden-dep concern (caller pre-normalizes paths) is now resolved by the missing-tail peeling; the R3 walker no longer assumes the working-dir leaf already exists on disk.
+
+### Falsification summary
+
+- Confirmed counterexamples blocking PASS: 0.
+- All eight dispatch-listed NEW attack vectors traced; each either resolves correctly, hits a safe Normalize-error short-circuit, or is an accepted documented limitation / pre-existing concern.
+- Beyond the dispatch list: ENOTDIR, NFC/NFD, rebuild `..` injection, filesystem-root sentinel, and symlink-escape fast path also examined — no new R3 falsifier.
+
+Verdict: **pass**.

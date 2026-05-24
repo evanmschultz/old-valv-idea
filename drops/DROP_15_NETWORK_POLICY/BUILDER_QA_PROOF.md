@@ -236,3 +236,97 @@ None for the unit's documented scope. All 8 PLAN.md acceptance bullets are satis
 Verdict: **pass**.
 
 Unit 15.1 cleanly promotes `[allowlist]` from `toml.Primitive` to typed `AllowlistConfig`, ships an effective-allowlist helper with built-in defaults + union semantics + RFC 1123 validation, and adds a section-safe `WriteAllowlistSection` writer with the explicit bounded-span byte-preservation contract from PLAN.md Schema Decision 3. The strict unknown-key check still works after removing the discarded `PrimitiveDecode(m.Allowlist, ...)` call because BurntSushi/toml correctly tracks sub-key decode state when the field itself is typed. The 17 test functions in `allowlist_test.go` (5 more than the builder note claimed) plus the `TestOverlayHash_AllowlistDataIgnored` regression pin cover every acceptance bullet, every unsupported-shape rejection, and the byte-preservation golden fixture. `mage testPkg ./internal/tools` reproduces 86 tests passing at 93.4% coverage; `mage testPkg ./internal/services/images` reproduces 63 tests passing at 81.6% coverage. Hard-constraint compliance holds (only edits outside `internal/tools/` are the documented `overlay_test.go` regression).
+
+## Unit 15.1 — Round 2
+
+### Verdict
+
+**pass**
+
+All four Round 1 findings (CE#1, CE#2, CE#3, Hidden #4) are fixed at the code level with new tests that exercise the boundary cases. Independent `mage testPkg ./internal/tools` reports 93 tests passing at 91.9% coverage (up from 86 / 93.4% in R1 — 7 added tests). Independent `mage testPkg ./internal/services/images` still reports 63 tests passing at 81.6% coverage, so the cross-package OverlayHash regression pin holds. No edits leak outside `internal/tools/` + the drop dir. No `GOCACHE=...` / raw `go test` discipline violations in the diff.
+
+### Per-claim audit
+
+**CE#1 — Indented [allowlist] header (`splitAllowlistSpan`).**
+
+- Code: `internal/tools/allowlist.go:352-355` — after `topLevelHeaderRE.FindSubmatch(trimmed)` matches, the function immediately checks `line[0] == ' ' || line[0] == '\t'` and returns `ErrUnsupportedManifestShape` with byte-offset context. This fires BEFORE the section-state transitions at lines 358-370, so indented headers cannot silently advance `allowlistStart` / `nextStart`.
+- Applies uniformly to `[allowlist]` AND other top-level sections (the indentation guard happens before the `name == "allowlist"` branch).
+- Tests: `TestWriteAllowlistSection_RejectsIndentedSectionHeader` at `allowlist_test.go:556` (indented `[allowlist]`) and `TestWriteAllowlistSection_RejectsIndentedOtherSectionHeader` at `allowlist_test.go:587` (indented `[tools]`). Both assert `errors.Is(err, ErrUnsupportedManifestShape)`.
+- Verdict: fix is correct, test coverage matches the contract widening.
+
+**CE#2 — RFC 1123 length limits (`validateHost`).**
+
+- Code: `internal/tools/allowlist.go:156-163` — after `hostShapeRE.MatchString(h)` passes, the helper enforces `len(h) > 253` (total) then iterates `strings.Split(h, ".")` checking `len(label) > 63` per label. Error messages name the exact byte limit ("253 bytes" / "63 bytes"). Doc comment at line 130-133 documents the byte-limit contract.
+- Length-checks fire AFTER character-shape (line 154 comment), so obviously broken inputs still get the specific underscore / port / scheme error.
+- Tests: `TestEffectiveAllowlist_RejectsOverlongLabel` at `allowlist_test.go:675` uses `strings.Repeat("a", 64) + ".example.com"` (64-byte label); `TestEffectiveAllowlist_AcceptsMaxLengthLabel` at line 694 uses `strings.Repeat("a", 63) + ".example.com"` (63-byte boundary accepted); `TestEffectiveAllowlist_RejectsOverlongTotal` at line 716 constructs `strings.Repeat("aaaa.", 50) + "aaaa"` and asserts `len(host) == 254` before checking rejection. All three assert `errors.Is(err, ErrInvalidAllowlistHost)` and the over-length tests grep the error message for "63 bytes" / "253 bytes" so the specific limit surfaces.
+- Verdict: boundary coverage is correct — 63 ok, 64 fail; total-length test is genuinely 254 bytes (asserted by the test).
+
+**CE#3 — Multi-line-string detection (`stripLineComment`).**
+
+- Code: `internal/tools/allowlist.go:427-460` — single-pass byte walker over `line`, tracking `inBasic` (`"..."`) and `inLiteral` (`'...'`) state. Inside basic strings, a `\` consumes the next byte (escape handling); inside literal strings there are no escapes (line 444-446 comment matches TOML spec). Outside both, `#` returns `line[:i]`.
+- Applied at `allowlist.go:383` — `codeOnly := stripLineComment(line); bytes.Contains(codeOnly, []byte("\"\"\""))` etc. Only the comment-stripped slice is scanned for triple-quote openers, so a `"""` that appears only inside a `#` comment no longer trips the rejection.
+- Test: `TestWriteAllowlistSection_AcceptsCommentsContainingTripleQuotes` at `allowlist_test.go:619` includes (a) a top-of-file comment containing `"""`, (b) a trailing-comment `mage = "latest" # also """ in this comment` (real basic string preceding a comment containing triples), and (c) a comment with `'''` literal triples. The test asserts the rewrite succeeds AND the prefix bytes are preserved verbatim.
+- Implementation is a byte walker, not a regex. Matches the spec.
+- Verdict: fix is correct; the trailing-comment-after-real-string case is the load-bearing one and is covered.
+
+**Hidden #4 — Exported mutable defaults.**
+
+- Code: `internal/tools/allowlist.go:43` — `var defaultAllowlistHosts = []string{...}` is unexported. Doc comment at lines 29-42 explains the rationale: "Kept package-private to prevent external callers from mutating the global allowlist policy in place".
+- Code: `internal/tools/allowlist.go:57-61` — exported `func DefaultAllowlistHosts() []string` allocates via `make([]string, len(defaultAllowlistHosts))` + `copy(out, defaultAllowlistHosts)` then returns `out`. The returned slice's backing array is independent of the package state.
+- Test: `TestDefaultAllowlistHostsReturnsCopyNotMutableRef` at `allowlist_test.go:743` — first call returns the four built-in hosts, mutates `first[i] = "tampered.example.com"` for every index, then a second `DefaultAllowlistHosts()` call asserts `reflect.DeepEqual(second, want)` where `want` is the original four hosts. Finally `EffectiveAllowlist(AllowlistConfig{})` is re-checked to confirm the internal source-of-truth slice is not tampered.
+- External-caller audit: `rg "DefaultAllowlistHosts|defaultAllowlistHosts"` finds 15 matches across exactly 2 files — `internal/tools/allowlist.go` (10 matches) + `internal/tools/allowlist_test.go` (5 matches). No external production callers, no external test callers. Renaming the var was safe.
+- Verdict: fix is correct, backing-array isolation is verified by the in-place mutation + second-call equality assertion.
+
+### Out-of-scope-edit audit
+
+- `git diff HEAD~1 HEAD --stat` reports exactly three files: `internal/tools/allowlist.go`, `internal/tools/allowlist_test.go`, `drops/DROP_15_NETWORK_POLICY/BUILDER_WORKLOG.md`. Nothing outside `internal/tools/` was touched.
+- `internal/services/images/overlay_test.go` was NOT modified — the existing `TestOverlayHash_AllowlistDataIgnored` continues to pass against the renamed `defaultAllowlistHosts` because it uses `tools.AllowlistConfig` directly and `OverlayHash` is `[tools]`-only.
+
+### Mage results (reproduced independently)
+
+`mage testPkg ./internal/tools`:
+
+```
+[INFO] Started go test -json (-count=1 -race -cover ./internal/tools)
+[PKG PASS] github.com/evanmschultz/valv/internal/tools (1.22s)
+
+Test summary
+  tests: 93
+  passed: 93
+  failed: 0
+
+  github.com/evanmschultz/valv/internal/tools | 91.9%
+```
+
+`mage testPkg ./internal/services/images`:
+
+```
+[INFO] Started go test -json (-count=1 -race -cover ./internal/services/images)
+[PKG PASS] github.com/evanmschultz/valv/internal/services/images (1.28s)
+
+Test summary
+  tests: 63
+  passed: 63
+  failed: 0
+
+  github.com/evanmschultz/valv/internal/services/images | 81.6%
+```
+
+Coverage threshold (60% per package; the project's wider `mage test` enforces 70%, also met for `internal/tools` at 91.9%) holds.
+
+### Findings (informational, non-blocking)
+
+- F8. The doc comment for `stripLineComment` at `allowlist.go:413-426` correctly notes that multi-line strings are deliberately NOT recognized by the helper — that responsibility stays in `splitAllowlistSpan`'s outside-span check on `bytes.Contains(codeOnly, []byte(\`"""\`))`. The split between "mask comments" and "detect triple-quote openers" is clean.
+- F9. The fix for CE#1 extends the contract: per the new doc comment at `allowlist.go:296-301`, ALL top-level section headers must start at column 0, not just `[allowlist]`. This is a slightly broader rejection than R1's CE#1 strictly required, but the rationale ("the rewrite cannot keep the leading whitespace attached to the canonical replacement section") applies symmetrically. Documented + tested. Acceptable widening.
+- F10. The 254-byte FQDN test fixture (`allowlist_test.go:727`) asserts its own length via `if len(host) != 254 { t.Fatalf(...) }` before exercising the validator. Self-checking test fixture — good defensive practice for boundary tests.
+- F11. The CR-detection guard at `allowlist.go:307-309` is unchanged from R1 and remains correct (single `bytes.IndexByte(content, '\r')` catches CRLF AND solo CR). Not part of R1 findings but verified incidentally.
+
+### Missing evidence
+
+None. All four R1 counterexamples are mitigated at the code level, all four mitigations have boundary-case tests in `allowlist_test.go`, and both mage gates reproduce green. Builder discipline (mage-only, scoped edits) is clean.
+
+### Summary
+
+Verdict: **pass**.
+
+Round 2 fixes the three QA-Falsification counterexamples (CE#1 indented section headers, CE#2 RFC 1123 length limits, CE#3 multi-line-string-vs-comment ambiguity) and the QA-Proof hidden-dep finding (#4 exported mutable defaults) cleanly. The `splitAllowlistSpan` rewrite tightens the contract uniformly across all top-level sections, the new `stripLineComment` is a correct byte-walker (basic-string escape handling + literal-string no-escape semantics + comment introducer outside strings), `validateHost` enforces RFC 1123 byte limits with specific error messages, and the public `DefaultAllowlistHosts()` accessor returns a fresh copy verified by in-place mutation. 7 new tests bring the package to 93 tests / 91.9% coverage. The `OverlayHash` regression pin in `internal/services/images` still passes. Unit 15.1 is ready to close.

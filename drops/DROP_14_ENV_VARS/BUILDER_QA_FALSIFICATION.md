@@ -39,3 +39,89 @@ Verdict: FAIL
 
 - The correctness of the "legacy v0 probe stays outside the tx" design now depends on an unstated environmental assumption: no other writer may create core-schema tables between the unlocked probe and `BEGIN IMMEDIATE`. That assumption is not enforced by the code and is the root cause of counterexample 1.
 - `coreSchemaDDL` and `coreSchemaTables` are package-level mutable vars (`internal/adapters/sqlite/store.go:53-123`). Nothing in-tree mutates them today, so I am not filing a separate failure on test-order coupling, but the bootstrap path and the new rollback test both implicitly depend on those vars remaining immutable and ordered.
+
+## Unit 14.1 — Round 3
+
+Verdict: PASS
+
+### Counterexamples
+
+None confirmed. Twenty-two distinct attack angles were attempted against the Round 3 fixes (under-lock re-probe, `migrationHookBeforeCommit` hook, `context.Background()` rollback) and each either failed to construct a counterexample or yielded only mitigated/accepted findings recorded below. Independent `mage testPkg ./internal/adapters/sqlite` reproduced the builder's claim exactly: 37 tests, 0 failures, 80.8% coverage, `-race` clean.
+
+### Attack Log
+
+1. **Conn lifecycle across `migrateSchemaOnConn`.** Probed whether the `*sql.Conn` holding `BEGIN IMMEDIATE` could be released to the pool mid-tx. `Bootstrap` (`internal/adapters/sqlite/store.go:137-141`) acquires the conn via `s.db.Conn(ctx)`, `defer`s `conn.Close()`, and passes the SAME conn to `migrateSchemaOnConn` (`store.go:167`). `database/sql` semantics (verified via `go doc database/sql DB.Conn`: *"Queries run on the same Conn will be run in the same database session"*) guarantee the IMMEDIATE lock, the under-lock re-probe (`store.go:253-263`), all schema writes, the `ctx.Err()` check, the `COMMIT`, and the deferred `ROLLBACK` all execute on a single contiguous session. No pool-release window. Not a counterexample.
+
+2. **Hook leak across tests.** `store.migrationHookBeforeCommit` is set per-`Store` instance (`store_test.go:1107`) and cleared per-test (`store_test.go:1170`). Both R3 tests create their own `NewStoreFromDB(db)` instance (`store_test.go:1103`, `1225`, `1268`), so a stale hook on one `Store` cannot bleed into another. Verified by reading the field declaration at `store.go:25` — instance-scoped, not package-scoped. Not a counterexample. (Note as future fragility: the field has no `sync.Mutex`; if a future test ever spawns two concurrent `Bootstrap` calls on the same `Store` with the hook set, that would be a race. No such test exists today.)
+
+3. **Hook panic propagation.** If `migrationHookBeforeCommit()` panics, control unwinds through `migrateSchemaOnConn`'s `defer` block at `store.go:222-233`. `committed` is still `false`, so the deferred ROLLBACK on `context.Background()` fires before the panic propagates. The transaction's writes are rolled back even on a panicking hook. Not a counterexample.
+
+4. **`context.Background()` rollback loses caller ctx tracing.** Confirmed real trade-off — OTel/trace contexts threaded through the caller would not propagate to the rollback exec. But the rollback is a low-level recovery operation on an error path, not a logical operation worth tracing, and the block-comment at `store.go:223-230` documents the explicit reason. Accepted, not a counterexample.
+
+5. **Race test seeds post-race state instead of simulating the race.** Step 1-3 of `TestStoreBootstrapDetectsConcurrentV0TableCreationUnderLock` (`store_test.go:1223-1275`) intentionally seed the post-race fingerprint by rewinding `PRAGMA user_version = 0` while leaving the core tables present. That alone exercises only the outer pre-check at `store.go:154-165`, NOT the under-lock branch. The load-bearing assertion is Step 4 at lines 1283-1297: it opens a fresh `*sql.Conn` via `db.Conn(ctx)` and calls `racerStore.migrateSchemaOnConn(ctx, conn)` directly, bypassing the outer pre-check. The assertion `strings.Contains(underLockErr.Error(), "detected under lock")` at line 1295 distinguishes the under-lock error message (`store.go:259-262`) from the outer-probe error message (`store.go:161-163`) — the outer message does NOT contain `"detected under lock"`, so this assertion can only pass if the under-lock branch fired. Verified by inspection: Step 4 actually exercises the new code path, not just the pre-existing outer rejection. Not a counterexample.
+
+6. **`errors.Is` wrap correctness for the new under-lock error.** `store.go:258-263` reads `fmt.Errorf("...: %w", domain.ErrUnsupportedSchema)` with `%w` at the trailing slot. Test `store_test.go:1292-1294` asserts `errors.Is(underLockErr, domain.ErrUnsupportedSchema)`. Mage run passes; the wrap is correct. Not a counterexample.
+
+7. **`BEGIN IMMEDIATE` mode preserved.** `store.go:218` still reads `conn.ExecContext(ctx, BEGIN IMMEDIATE)`; the R3 delta only added code AFTER this point. Not a counterexample.
+
+8. **Cancel-test goroutine cleanup if hook never fires.** Lines 1125-1132 wrap the `<-txEntered` receive in a 5-second `select`. On timeout, the test closes `releaseHook` and calls `t.Fatalf`. If the hook genuinely never fires, Bootstrap proceeds normally (no cancellation), commits successfully, and sends nil to `bootstrapErrCh` (buffered size 1, so the send does not block). The goroutine then exits cleanly. `t.Fatalf` exits the test goroutine before reading the channel, so the buffered send is harmless. No deadlock, no leaked goroutine past the package's test process. Not a counterexample.
+
+9. **PRAGMA user_version rollback on `ROLLBACK`.** Re-verified the R2 evidence stands: with the default `journal_mode=delete` set in `internal/adapters/sqlite/open.go`, `PRAGMA user_version = N` inside a `BEGIN IMMEDIATE` ... `ROLLBACK` reverts to the pre-tx value. The cancel-mid-tx test asserts `post-cancel user_version == 0` at lines 1150-1157 AND `account_env table count == 0` at lines 1158-1167 — both pass on the actual `mage testPkg` run. Not a counterexample.
+
+10. **Race detector vs. hook field write.** `store.migrationHookBeforeCommit = func(){...}` at line 1107 executes before `go func() { ... store.Bootstrap(cancelCtx) }()` at lines 1117-1120. Go memory model: writes before `go` happen-before the spawned goroutine's reads. The bootstrap goroutine reads the hook at `store.go:289`. After the test goroutine receives from `bootstrapErrCh` at line 1140, the bootstrap goroutine has returned, so the clear at line 1170 happens-after the last read. Race detector confirms clean on the actual run. Not a counterexample.
+
+11. **Outer probe and under-lock probe on the same `*sql.Conn`.** Both `Bootstrap`'s outer probe (`store.go:151-165`) and the under-lock re-probe (`store.go:253-263`) run on the SAME `*sql.Conn` because `Bootstrap` passes its locally-acquired `conn` directly to `migrateSchemaOnConn` (`store.go:167`). The "race" closed by the fix is therefore between THIS conn and OTHER conns/processes — exactly what the block comment at `store.go:203-211` describes. Not a counterexample, but confirms the fix's threat model.
+
+12. **Premature cancellation in cancel-mid-tx test.** Line 1114 creates `cancelCtx` from `context.Background()` (not cancelled). Bootstrap launches at 1118 with this ctx. The pre-tx PRAGMA read at `store.go:151` runs with non-cancelled ctx and succeeds. The BEGIN IMMEDIATE at `store.go:218` and all schema writes succeed. Only when the hook fires (line 289) and the test goroutine reaches line 1137 does `cancel()` execute. The cancellation window is therefore strictly inside the open transaction, after writes, before COMMIT — exactly the documented condition. Not a counterexample.
+
+13. **`Store.Close()` mid-test.** No call to `store.Close()` appears in either R3 test. `t.Cleanup(func() { _ = db.Close() })` (lines 1101, 1219) runs after `t.Fatalf` or normal exit. By that point, the bootstrap goroutine has finished (sync via `<-bootstrapErrCh`). Not a counterexample.
+
+14. **Race on `s.migrationHookBeforeCommit != nil` read.** Already covered by attack #10. The unsync'd field read at `store.go:289` is safe under the test's actual call pattern. Annotated as future fragility, not a counterexample.
+
+15. **PRAGMA user_version scope (file vs. connection).** Sanity-checked: `PRAGMA user_version` is a 32-bit slot in the SQLite file header. It is persistent and visible to every connection on the same file. So the rewind at `store_test.go:1234` (on whatever conn `db.ExecContext` picks) is fully observable to the subsequent `racerStore.Bootstrap(ctx)` call and to the direct `db.Conn(ctx)` at Step 4. The test's race-fingerprint state is genuinely visible to the conn under test. Not a counterexample.
+
+16. **Step 3 outer-probe rejection coverage.** `racerStore.Bootstrap(ctx)` at line 1269 calls into `Bootstrap`, which acquires its own conn from the same `*sql.DB`. That conn reads `PRAGMA user_version` (file-scope = 0) and runs `hasAnyCoreTable` (sees the still-present core tables). The outer pre-check at `store.go:154-165` rejects with `ErrUnsupportedSchema`. Test asserts `errors.Is(racerErr, domain.ErrUnsupportedSchema)` at line 1273. The block-comment at lines 1257-1267 explicitly accepts EITHER rejection (outer probe or under-lock branch). Both code paths produce a wrapping that satisfies `errors.Is`. Not a counterexample.
+
+17. **Hook field cleared before recovery Bootstrap.** Line 1170 `store.migrationHookBeforeCommit = nil` happens after `<-bootstrapErrCh` (line 1140), so the bootstrap goroutine has completed. Recovery Bootstrap at line 1172 sees `nil` and skips the hook invocation (`store.go:289`). Recovery commits successfully and stamps v2. Test asserts user_version == 2 at line 1178-1180. Verified by `mage testPkg` run. Not a counterexample.
+
+18. **Hook fires twice?** Single call site at `store.go:289`, single straight-line code path. The `if s.migrationHookBeforeCommit != nil` block is not in any loop and not duplicated. One `migrateSchemaOnConn` call → at most one hook invocation. The test's `close(txEntered)` therefore never double-closes. Not a counterexample.
+
+19. **Test count drift.** Independent `mage testPkg ./internal/adapters/sqlite` (this falsification session, working directory `/Users/evanschultz/Documents/Code/hylla/valv/main`): `tests: 37, passed: 37, failed: 0, skipped: 0, Coverage: 80.8%`. Matches builder claim exactly. Not a counterexample.
+
+20. **`%w` placement in new error.** `store.go:258-263`: format string has six `%`-verbs; the trailing one is `%w` with `domain.ErrUnsupportedSchema` as the argument. Single `%w` per `fmt.Errorf` (Go's wrap rules). Not a counterexample.
+
+21. **Interface assertion still holds with new hook field.** Line 32 `var _ domain.AccountEnvRepository = (*Store)(nil)` is interface-shape assertion only; adding a non-method field (`migrationHookBeforeCommit`) cannot affect it. `mage testPkg` reaches the test phase, which means compile succeeded, which means the assertion held. Not a counterexample.
+
+22. **`close(releaseHook)` then `t.Fatalf` order.** Timeout path at lines 1127-1131: `close(releaseHook)` runs BEFORE `t.Fatalf`. If a regression caused the hook to fire AFTER the timeout (timing fluke), the hook would land on an already-closed `releaseHook` channel and unblock immediately (closed-channel receive returns zero value). Bootstrap would proceed, attempt COMMIT (ctx still non-cancelled in this regression path), succeed, send to buffered `bootstrapErrCh`. No panic, no deadlock. `t.Fatalf` correctly signals the regression. Not a counterexample.
+
+### YAGNI check
+
+- `migrationHookBeforeCommit` is an unexported `func()` field on `Store` with one call site and one test consumer. Its purpose is documented (`store.go:16-25`) as a test-only synchronization seam to replace a timing-based race. The field has no constructor parameter, is `nil`-default no-op in production, and is the minimum surface needed to make the cancel-mid-tx test deterministic. Alternative approaches considered: (a) injecting a `chan struct{}` would require an exported accessor or a constructor change; (b) wiring a global package-level hook would create test-order coupling. The chosen shape buys deterministic mid-tx synchronization at the cost of one unexported field with prominent docstring. Acceptable. Not over-engineered.
+- The under-lock re-probe at `store.go:253-263` is six lines of code in the same migration function on the same connection. No new helper, no new abstraction. Minimal fix for a real race window documented in R2 counterexample #1. YAGNI-clean.
+
+### Hidden dep check
+
+- `Store.migrationHookBeforeCommit` is unsynchronized mutable state on the `Store` receiver. The R3 tests are careful about set-before-spawn / clear-after-receive ordering, but the type system does not enforce this. If a future caller (test or production) mutates the field from one goroutine while another goroutine runs `Bootstrap` concurrently, the race detector will flag it. Recording as a fragility to surface in the closeout cycle, not a counterexample for this round.
+- `context.Background()` rollback breaks the caller's `context` chain for telemetry purposes. Already covered under attack #4 — accepted trade-off, documented.
+- The under-lock re-probe assumes `hasAnyCoreTable` is safe to call on a connection holding `BEGIN IMMEDIATE`. SQLite's RESERVED lock blocks other writers but allows same-connection reads on the connection's own snapshot. Verified by the live `mage testPkg` run (Step 4 of the race test successfully runs the read inside the open IMMEDIATE tx without `SQLITE_BUSY`). No hidden deadlock risk.
+- I did not find any new `init()` side effects, package-level state mutation, or test-order coupling in the R3 delta beyond what was already noted in R2 (the `coreSchemaDDL`/`coreSchemaTables` immutable-vars caveat from R2 still applies, but R3 does not introduce new instances).
+
+### Independent Mage Verification (falsification session)
+
+```
+mage testPkg ./internal/adapters/sqlite
+[INFO] Started go test -json (-count=1 -race -cover ./internal/adapters/sqlite)
+[PKG PASS] github.com/evanmschultz/valv/internal/adapters/sqlite (1.49s)
+  tests: 37
+  passed: 37
+  failed: 0
+  skipped: 0
+  Coverage: 80.8% (gate: 60.0%)
+[SUCCESS] All tests passed
+```
+
+Discipline clean: no `GOCACHE`, no raw `go test`, no sandbox bypass. Only `mage testPkg` invoked.
+
+### Verdict Justification
+
+Twenty-two attack angles attempted against the R3 fixes; none produced a confirmed counterexample. The under-lock re-probe closes the race window from R2 counterexample #1, the `migrationHookBeforeCommit` hook closes the false-coverage gap from R2 counterexample #2, and the `context.Background()` rollback patches a real driver-behavior subtlety (uncovered by builder's own test failure, per worklog) that would have leaked tx writes on cancel. Tests target the actually-fixed code paths, not just the surrounding scaffolding. Independent `mage testPkg` reproduces 37/37 at 80.8% coverage with `-race` clean. Two fragilities recorded for future attention (hook field is unsynchronized; rollback ctx loses telemetry chain) — both acceptable as documented trade-offs, neither rises to a falsification. Verdict: PASS.

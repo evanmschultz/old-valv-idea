@@ -163,3 +163,32 @@ Round 2's new tests reproduce both exact scenarios (`service_test.go:663-664` an
 ### Findings
 
 No findings. All eight verification points satisfied, A1 closure independently confirmed via reproduction tests + green `mage testPkg` run, scope clean, coverage up.
+
+## Unit 13.1 — Round 3
+
+verdict: pass
+
+### Scope
+
+Round 3 closes A2 from `BUILDER_QA_FALSIFICATION.md` Round 2: missing-leaf edge case where `pathutil.Normalize` falls back to the raw absolute path on `fs.ErrNotExist` and the prior inode walk aborted on first stat ENOENT before reaching the existing ancestor. Builder extended `resolveWithinProjectRoot` to peel trailing missing components onto a `missingTail` accumulator, continue the inode walk to the closest existing ancestor, and rebuild the canonical WorkingDir from `projectRoot + existingSubparts + missingTail` in root-first order. Added `io/fs` import for `errors.Is(err, fs.ErrNotExist)` discrimination. New regression test `TestRunNormalizesSymlinkedProjectRootWithMissingLeaf` parameterized over claude+codex.
+
+### Evidence audit
+
+| Check | Cite | Verified |
+|---|---|---|
+| ENOENT peeling not abort | `internal/services/run/service.go:396-417` (errors.Is(err, fs.ErrNotExist) → peel filepath.Base(current) onto missingTail, advance current=parent) | yes |
+| Non-ENOENT short-circuit clean | `service.go:398-404` (negated branch returns false,"",nil — no hard error surfaced) | yes |
+| Termination guaranteed | three sentinel exits: stat-fail on projectRoot at :379-382; parent==current sentinel inside ENOENT branch at :408-413; parent==current inside existing-no-match branch at :432-437 | yes |
+| Root-first rebuild order | `service.go:419-430` (canonical=projectRoot, reverse-iter existingSubparts then missingTail) | yes |
+| A2 test exercises exact counterexample | `service_test.go:753-815` (realProject + projectLink symlink + missing leaf; asserts canonical WorkingDir matches EvalSymlinks(realProject)+"/missing-child") | yes |
+| Existing 48 R2 tests still pass | `mage testPkg` reports 51 = 48 + 3 (parent + 2 provider subtests) | yes |
+| Scope clean | `git show --stat e6b38ff` shows only service.go (+62/-17), service_test.go (+72/-0), BUILDER_WORKLOG.md (+75/-0) | yes |
+| No GOCACHE / raw go test | builder used `mage testPkg` only; `io/fs` is stdlib | yes |
+
+### Independent mage reproduction
+
+`mage testPkg ./internal/services/run` reports: 51 tests / 0 failed / 0 skipped / 86.4% coverage / race-clean. Matches builder claim byte-for-byte. Coverage trajectory 82.4% → 86.1% → 86.4% across rounds (monotonic).
+
+### Findings
+
+No findings. A2 closure confirmed by source inspection + reproduction test + independent mage run. Verdict: pass.
