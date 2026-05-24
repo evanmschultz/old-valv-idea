@@ -88,3 +88,78 @@ All eight bullets at `drops/DROP_13_GENERIC_RUN/PLAN.md:80-86` map onto the chec
 ### Findings
 
 No findings. All twelve verification checks plus all eight PLAN.md acceptance bullets are satisfied. Mage independently confirms 42/42 pass at 82.4% coverage with `-race` enabled.
+
+## Unit 13.1 — Round 2
+
+verdict: pass
+
+### Scope of verification
+
+Round 2 fix for `BUILDER_QA_FALSIFICATION.md` Round 1 finding **A1** — the lexical-only `withinProjectRoot` guard false-rejected same-project paths that differed only by case (macOS case-insensitive volumes) or by symlink spelling. Verified the builder's Round 2 commit `4dac53d` against the eight specific verification points in the spawn prompt and against the original A1 reproduction conditions.
+
+### Files audited
+
+- `internal/services/run/service.go` — modified (residue of seam-boundary `pathutil.Normalize` calls + replacement of `withinProjectRoot` with `resolveWithinProjectRoot`).
+- `internal/services/run/service_test.go` — modified (added `isCaseInsensitiveFS` helper + `TestRunNormalizesCaseVariantProjectRootBeforeGuard` + `TestRunNormalizesSymlinkedProjectRootBeforeGuard`).
+- `drops/DROP_13_GENERIC_RUN/BUILDER_WORKLOG.md` — Round 2 entry appended.
+- `internal/pathutil/pathutil.go` — read-only confirmation that `Normalize` is the right helper (`filepath.Abs` + `filepath.EvalSymlinks` with non-existent-path fallback; pathutil.go:15-35).
+
+`git diff --name-only 4dac53d~1 4dac53d` confirms the commit touched exactly three files: the worklog, `service.go`, and `service_test.go`. No edits to `internal/services/claude/`, `internal/services/codex/`, `internal/adapters/`, `internal/cli/`, `internal/domain/`, `internal/pathutil/`, or `magefile.go`. Hard-constraint scope holds.
+
+### Mage targets I ran
+
+- `mage testPkg ./internal/services/run`
+  - `48 tests passed`, `0 failed`, `0 skipped`
+  - Package coverage: `86.1%` (up from Round 1's `82.4%`, well above the 70% per-package floor)
+  - `-race` enabled — race detector clean.
+
+Numbers match the builder's claim exactly. No `GOCACHE`, no raw `go test`, no env overrides.
+
+### Per-verification-point audit
+
+**1. `pathutil.Normalize` is actually called on both `ProjectRoot` and `WorkingDir` in `buildRequest`.**
+Confirmed at `internal/services/run/service.go:235-242`:
+- Line 235-238: `normalizedProjectRoot, err := pathutil.Normalize(launch.ProjectRoot)` with error-wrapped return on failure.
+- Line 239-242: `normalizedWorkingDir, err := pathutil.Normalize(launch.WorkingDir)` with error-wrapped return on failure.
+Both normalizations execute BEFORE `resolveWithinProjectRoot` (line 244) and BEFORE the mount-construction (line 252-255) that injects `normalizedProjectRoot` as both host and container path of the first mount. The normalized values are also threaded into the resulting `docker.ContainerRunRequest.WorkingDir` (line 262, via `canonicalWorkingDir`). Pass.
+
+**2. `withinProjectRoot` was actually refactored into `resolveWithinProjectRoot` with dual-mode behavior.**
+Confirmed at `internal/services/run/service.go:351-394`:
+- Function signature `func resolveWithinProjectRoot(projectRoot, workingDir string) (bool, string, error)` — returns the canonical working-dir spelling in addition to the boolean ancestry result (service.go:351).
+- Lexical fast path (service.go:352-361): `filepath.Rel` followed by `rel == "."` and `rel != ".."` && `!strings.HasPrefix(rel, ".."+sep)` checks. Returns the caller-supplied `workingDir` unchanged when the lexical check passes.
+- Inode-walk fallback (service.go:367-393): when the lexical check rejects, `os.Stat(projectRoot)` then a parent-walk from `workingDir` calling `os.Stat` + `os.SameFile` at every ancestor. `subparts` accumulator captures `filepath.Base(current)` at each step so the canonical spelling can be rebuilt under `projectRoot` (service.go:381-385). Non-existent paths fail `os.Stat` and return `false, "", nil` — preserves the legacy behavior for paths that don't exist on disk. Old name `withinProjectRoot` does not appear anywhere in `service.go` (confirmed via the full read). Pass.
+
+**3. A1 counterexample no longer reproduces (case-variant).**
+`TestRunNormalizesCaseVariantProjectRootBeforeGuard` at `internal/services/run/service_test.go:644-689` reproduces the exact A1 case-variant attack: lowercase canonical project dir at `<tempBase>/project`, `WorkingDir=<tempBase>/PROJECT/subdir`, both parameterized over claude+codex. The independent `mage testPkg` run confirms both subtests passed (claude + codex = 2 subtests, both in the 48-test pass count, 0 skips on this macOS APFS tempdir). The A1 attack is exhausted on case-insensitive filesystems where it could reproduce. Pass.
+
+**4. A1 counterexample no longer reproduces (symlink).**
+`TestRunNormalizesSymlinkedProjectRootBeforeGuard` at `internal/services/run/service_test.go:699-743` reproduces the exact A1 symlink attack: real dir at `<tempBase>/real-project`, symlink at `<tempBase>/project-link → real-project`, `ProjectRoot=project-link`, `WorkingDir=<tempBase>/real-project/subdir`, both parameterized over claude+codex. The independent `mage testPkg` run confirms both subtests passed (0 skips). `pathutil.Normalize` calls `filepath.EvalSymlinks` (pathutil.go:26), which resolves the symlink in `ProjectRoot` to the same canonical path as the symlink-free `WorkingDir`, so the lexical fast path now matches without needing the inode-walk fallback for this case — consistent with the builder's design note in `BUILDER_WORKLOG.md:73-74`. Pass.
+
+**5. Tests skip cleanly on case-sensitive FS / no-symlink-perm systems.**
+- Case-sensitive FS guard at `service_test.go:648-650`: `if !isCaseInsensitiveFS(t, tempBase) { t.Skipf(...) }` — calls `t.Skipf`, not `t.Fatal`. `isCaseInsensitiveFS` itself (service_test.go:622-634) writes a lowercase probe file via `os.WriteFile`, then `os.Stat`s the uppercase spelling — returns `true` on a successful stat (case-folded volume), `false` otherwise. The probe is cleaned up via `defer os.Remove(probe)`.
+- Symlink permission guard at `service_test.go:715-717`: `if err := os.Symlink(realProject, projectLink); err != nil { t.Skipf("symlink unsupported on this filesystem: %v", err) }` — calls `t.Skipf`, not `t.Fatal`. The skip message includes the underlying error for diagnostic clarity.
+Both skip paths use `t.Skipf` (variadic with format string), which records the skip reason without failing the test. Linux CI on case-sensitive ext4 / Windows runners without symlink perm both stay green. Pass.
+
+**6. WorkingDir spelling is rebuilt under `projectRoot`'s spelling when inode-walk succeeds.**
+Confirmed at `internal/services/run/service.go:381-385`: when `os.SameFile(rootInfo, info)` returns true, the function builds `canonical := projectRoot` and then iterates `subparts` in reverse to join the captured `filepath.Base(current)` segments back under `projectRoot`. The result becomes `canonicalWorkingDir` at line 244 and is threaded into `docker.ContainerRunRequest.WorkingDir` at line 262. Because the project-root mount (service.go:253) uses `normalizedProjectRoot` as both host and container path, the rewritten working-dir spelling sits under the same bind-mount prefix the container sees — Docker `--workdir` will succeed inside the container. The lexical fast path (service.go:357, 360) returns the input `workingDir` unchanged because in that case the input already lives under the canonical root spelling. Pass.
+
+**7. Existing Round 1 tests still pass + new tests + no regressions = 48 pass.**
+`mage testPkg` reports `tests: 48, passed: 48, failed: 0, skipped: 0`. Round 1 had 42 passing tests; Round 2's two new test funcs each parameterize over claude + codex (2 subtests each = 6 added — accounting for the new helper-less style, the increment is consistent). Coverage went up from `82.4%` to `86.1%` because the new `resolveWithinProjectRoot` fallback branch is exercised by the case-variant test, which the lexical-only Round 1 code path didn't cover. No regressions in existing test names. Pass.
+
+**8. No edits outside `internal/services/run/` + drop dir; no raw `go test` / `GOCACHE` discipline violations.**
+- `git diff --name-only 4dac53d~1 4dac53d` lists exactly three files: `drops/DROP_13_GENERIC_RUN/BUILDER_WORKLOG.md`, `internal/services/run/service.go`, `internal/services/run/service_test.go`. No edits outside the unit's owned scope.
+- The new tests use Go stdlib (`os.WriteFile`, `os.Stat`, `os.Symlink`, `os.MkdirAll`, `t.TempDir`, `t.Skipf`) with no shell-out, no env overrides, no raw `go test` invocations.
+- `BUILDER_WORKLOG.md:97-98` explicitly states the builder ran only `mage testPkg` and did not set `GOCACHE` / `GOMODCACHE`. The independent run I performed used `mage testPkg ./internal/services/run` with no env overrides — matches.
+Pass.
+
+### A1 closure verification (cross-reference)
+
+The Round 1 falsification A1 attack (`BUILDER_QA_FALSIFICATION.md:13-30`) constructed two concrete repros:
+- Case variant: `ProjectRoot=<tmp>/project`, `WorkingDir=<tmp>/PROJECT/subdir` returning `outside project root`.
+- Symlink variant: `ProjectRoot=<tmp>/project-link → real-project`, `WorkingDir=<tmp>/real-project/subdir` returning the same error.
+
+Round 2's new tests reproduce both exact scenarios (`service_test.go:663-664` and `service_test.go:713-718`), and `mage testPkg` confirms both pass with no skips on this macOS host. The narrow-fix proposal in `BUILDER_QA_FALSIFICATION.md:30` ("Normalize both `LaunchRequest.ProjectRoot` and `LaunchRequest.WorkingDir` inside `buildRequest` with `pathutil.Normalize` before ancestry comparison, or replace the lexical check with a resolved-path ancestry test (`EvalSymlinks`/`os.SameFile`-style)") is implemented as a layered combination of BOTH suggestions — Normalize at the seam AND an inode-based fallback that catches case-folded equivalents `EvalSymlinks` does not collapse on macOS APFS/HFS+. A1 is closed.
+
+### Findings
+
+No findings. All eight verification points satisfied, A1 closure independently confirmed via reproduction tests + green `mage testPkg` run, scope clean, coverage up.
