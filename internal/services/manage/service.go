@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -22,6 +23,7 @@ type Store interface {
 	domain.ProjectRepository
 	domain.BindingRepository
 	domain.ProfileRepository
+	domain.AccountEnvRepository
 }
 
 type DetectFunc func(string) (projectdetect.Result, error)
@@ -609,6 +611,102 @@ func isLegacyHostAlias(name string) bool {
 	default:
 		return false
 	}
+}
+
+// accountEnvKeyPattern is the literal regex string surfaced in env-key
+// validation errors so operators see the exact constraint the service
+// applied. The compiled form is held in accountEnvKeyRegexp.
+const accountEnvKeyPattern = `^[A-Za-z_][A-Za-z0-9_]*$`
+
+// accountEnvKeyRegexp validates env-var keys per accountEnvKeyPattern.
+// Compiled once at package init via regexp.MustCompile.
+var accountEnvKeyRegexp = regexp.MustCompile(accountEnvKeyPattern)
+
+// reservedAccountEnvKeys are env-var names owned by the Valv runtime / launch
+// path. The account-env map must not be allowed to override them — the
+// runtime adapters set CODEX_HOME / CLAUDE_CONFIG_DIR, and the container
+// image owns HOME / LOGNAME / TERM / USER for an isolated Linux user.
+var reservedAccountEnvKeys = map[string]struct{}{
+	"CODEX_HOME":        {},
+	"CLAUDE_CONFIG_DIR": {},
+	"HOME":              {},
+	"LOGNAME":           {},
+	"TERM":              {},
+	"USER":              {},
+}
+
+// AccountEnvEntryView is the service-facing projection of a single account
+// env-var row. Today it is a thin wrapper over domain.AccountEnvEntry; it
+// exists so future redaction / metadata fields land in one place.
+type AccountEnvEntryView = domain.AccountEnvEntry
+
+// SetAccountEnv validates the env key, resolves the named account via
+// ProfileByName, and upserts the (profileID, envKey) row through the store.
+// Returns the persisted entry on success.
+func (s Service) SetAccountEnv(ctx context.Context, provider domain.Provider, accountName, envKey, envValue string) (domain.AccountEnvEntry, error) {
+	if err := validateAccountEnvKey(envKey); err != nil {
+		return domain.AccountEnvEntry{}, fmt.Errorf("set account env: %w", err)
+	}
+	profile, err := s.ProfileByName(ctx, provider, accountName)
+	if err != nil {
+		return domain.AccountEnvEntry{}, fmt.Errorf("set account env: %w", err)
+	}
+	entry, err := s.store.SetAccountEnv(ctx, profile.ID, envKey, envValue)
+	if err != nil {
+		return domain.AccountEnvEntry{}, fmt.Errorf("set account env %q/%q: %w", provider, accountName, err)
+	}
+	s.debug("set account env", "provider", provider, "account", profile.Name, "key", envKey)
+	return entry, nil
+}
+
+// UnsetAccountEnv validates the env key, resolves the named account, and
+// removes the (profileID, envKey) row through the store. Wraps
+// domain.ErrNotFound when no row matches.
+func (s Service) UnsetAccountEnv(ctx context.Context, provider domain.Provider, accountName, envKey string) error {
+	if err := validateAccountEnvKey(envKey); err != nil {
+		return fmt.Errorf("unset account env: %w", err)
+	}
+	profile, err := s.ProfileByName(ctx, provider, accountName)
+	if err != nil {
+		return fmt.Errorf("unset account env: %w", err)
+	}
+	if err := s.store.UnsetAccountEnv(ctx, profile.ID, envKey); err != nil {
+		return fmt.Errorf("unset account env %q/%q: %w", provider, accountName, err)
+	}
+	s.debug("unset account env", "provider", provider, "account", profile.Name, "key", envKey)
+	return nil
+}
+
+// ListAccountEnv resolves the named account and returns its env-var entries
+// ordered alphabetically by env_key. Returns a nil slice when no entries
+// exist.
+func (s Service) ListAccountEnv(ctx context.Context, provider domain.Provider, accountName string) ([]domain.AccountEnvEntry, error) {
+	profile, err := s.ProfileByName(ctx, provider, accountName)
+	if err != nil {
+		return nil, fmt.Errorf("list account env: %w", err)
+	}
+	entries, err := s.store.ListAccountEnv(ctx, profile.ID)
+	if err != nil {
+		return nil, fmt.Errorf("list account env %q/%q: %w", provider, accountName, err)
+	}
+	s.debug("listed account env", "provider", provider, "account", profile.Name, "count", len(entries))
+	return entries, nil
+}
+
+// validateAccountEnvKey enforces the env-key regex and the reserved-key
+// blocklist. Rejection errors include the literal regex string so operators
+// see the constraint that fired.
+func validateAccountEnvKey(envKey string) error {
+	if envKey == "" {
+		return fmt.Errorf("env key is empty: must match %s", accountEnvKeyPattern)
+	}
+	if !accountEnvKeyRegexp.MatchString(envKey) {
+		return fmt.Errorf("env key %q is invalid: must match %s", envKey, accountEnvKeyPattern)
+	}
+	if _, reserved := reservedAccountEnvKeys[envKey]; reserved {
+		return fmt.Errorf("env key %q is reserved by the Valv runtime and cannot be set per account", envKey)
+	}
+	return nil
 }
 
 func copyFile(sourcePath, targetPath string, mode os.FileMode) error {

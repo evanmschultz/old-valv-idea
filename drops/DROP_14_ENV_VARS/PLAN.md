@@ -49,7 +49,7 @@ DROP_14 adds an account-scoped env map persisted in SQLite and injected into con
   - a two-connection first-open upgrade from a v1 DB to v2 results in "one waits, both succeed", no `SQLITE_BUSY`, and final `PRAGMA user_version = 2`.
 
 ### Unit 14.2
-- state: todo
+- state: done
 - blocked_by: 14.1
 - paths: `internal/services/manage/service.go`, `internal/services/manage/service_test.go`
 - packages: `internal/services/manage`

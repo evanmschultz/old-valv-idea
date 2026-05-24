@@ -895,6 +895,345 @@ func TestDeleteProfileLeavesCustomHomePathUntouched(t *testing.T) {
 	}
 }
 
+func TestSetAccountEnvPersistsAndListAccountEnvReturnsSorted(t *testing.T) {
+	t.Parallel()
+
+	store, providerRoot := testStore(t)
+	service, err := New(Options{Store: store, ProviderRoot: providerRoot})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := service.CreateProfile(context.Background(), domain.ProviderCodex, "hylla", ""); err != nil {
+		t.Fatalf("CreateProfile() error = %v", err)
+	}
+
+	// Set in non-alphabetical order so we can prove ORDER BY env_key ASC.
+	for _, kv := range [][2]string{
+		{"FOO", "1"},
+		{"BAR", "2"},
+		{"ZED", "3"},
+	} {
+		if _, err := service.SetAccountEnv(context.Background(), domain.ProviderCodex, "hylla", kv[0], kv[1]); err != nil {
+			t.Fatalf("SetAccountEnv(%q) error = %v", kv[0], err)
+		}
+	}
+
+	entries, err := service.ListAccountEnv(context.Background(), domain.ProviderCodex, "hylla")
+	if err != nil {
+		t.Fatalf("ListAccountEnv() error = %v", err)
+	}
+	if got, want := len(entries), 3; got != want {
+		t.Fatalf("ListAccountEnv() len = %d, want %d", got, want)
+	}
+	wantOrder := []string{"BAR", "FOO", "ZED"}
+	wantValues := map[string]string{"BAR": "2", "FOO": "1", "ZED": "3"}
+	for i, entry := range entries {
+		if entry.EnvKey != wantOrder[i] {
+			t.Fatalf("entries[%d].EnvKey = %q, want %q", i, entry.EnvKey, wantOrder[i])
+		}
+		if entry.EnvValue != wantValues[entry.EnvKey] {
+			t.Fatalf("entries[%d].EnvValue = %q, want %q", i, entry.EnvValue, wantValues[entry.EnvKey])
+		}
+	}
+}
+
+func TestSetAccountEnvOverwritesExistingValue(t *testing.T) {
+	t.Parallel()
+
+	store, providerRoot := testStore(t)
+	service, err := New(Options{Store: store, ProviderRoot: providerRoot})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := service.CreateProfile(context.Background(), domain.ProviderCodex, "hylla", ""); err != nil {
+		t.Fatalf("CreateProfile() error = %v", err)
+	}
+
+	if _, err := service.SetAccountEnv(context.Background(), domain.ProviderCodex, "hylla", "FOO", "one"); err != nil {
+		t.Fatalf("SetAccountEnv(first) error = %v", err)
+	}
+	entry, err := service.SetAccountEnv(context.Background(), domain.ProviderCodex, "hylla", "FOO", "two")
+	if err != nil {
+		t.Fatalf("SetAccountEnv(second) error = %v", err)
+	}
+	if entry.EnvValue != "two" {
+		t.Fatalf("SetAccountEnv(second).EnvValue = %q, want %q", entry.EnvValue, "two")
+	}
+}
+
+func TestUnsetAccountEnvRemovesEntry(t *testing.T) {
+	t.Parallel()
+
+	store, providerRoot := testStore(t)
+	service, err := New(Options{Store: store, ProviderRoot: providerRoot})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := service.CreateProfile(context.Background(), domain.ProviderCodex, "hylla", ""); err != nil {
+		t.Fatalf("CreateProfile() error = %v", err)
+	}
+	if _, err := service.SetAccountEnv(context.Background(), domain.ProviderCodex, "hylla", "FOO", "1"); err != nil {
+		t.Fatalf("SetAccountEnv() error = %v", err)
+	}
+
+	if err := service.UnsetAccountEnv(context.Background(), domain.ProviderCodex, "hylla", "FOO"); err != nil {
+		t.Fatalf("UnsetAccountEnv() error = %v", err)
+	}
+
+	entries, err := service.ListAccountEnv(context.Background(), domain.ProviderCodex, "hylla")
+	if err != nil {
+		t.Fatalf("ListAccountEnv() error = %v", err)
+	}
+	if got, want := len(entries), 0; got != want {
+		t.Fatalf("ListAccountEnv() len after unset = %d, want %d", got, want)
+	}
+}
+
+func TestUnsetAccountEnvReturnsErrNotFoundWhenKeyMissing(t *testing.T) {
+	t.Parallel()
+
+	store, providerRoot := testStore(t)
+	service, err := New(Options{Store: store, ProviderRoot: providerRoot})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := service.CreateProfile(context.Background(), domain.ProviderCodex, "hylla", ""); err != nil {
+		t.Fatalf("CreateProfile() error = %v", err)
+	}
+
+	err = service.UnsetAccountEnv(context.Background(), domain.ProviderCodex, "hylla", "MISSING")
+	if !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("UnsetAccountEnv() error = %v, want domain.ErrNotFound", err)
+	}
+}
+
+func TestAccountEnvOperationsReturnErrNotFoundForUnknownAccount(t *testing.T) {
+	t.Parallel()
+
+	store, providerRoot := testStore(t)
+	service, err := New(Options{Store: store, ProviderRoot: providerRoot})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := service.SetAccountEnv(context.Background(), domain.ProviderCodex, "ghost", "FOO", "1"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("SetAccountEnv(ghost) error = %v, want domain.ErrNotFound", err)
+	}
+	if err := service.UnsetAccountEnv(context.Background(), domain.ProviderCodex, "ghost", "FOO"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("UnsetAccountEnv(ghost) error = %v, want domain.ErrNotFound", err)
+	}
+	if _, err := service.ListAccountEnv(context.Background(), domain.ProviderCodex, "ghost"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("ListAccountEnv(ghost) error = %v, want domain.ErrNotFound", err)
+	}
+}
+
+func TestSetAccountEnvRejectsReservedKeys(t *testing.T) {
+	t.Parallel()
+
+	store, providerRoot := testStore(t)
+	service, err := New(Options{Store: store, ProviderRoot: providerRoot})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := service.CreateProfile(context.Background(), domain.ProviderCodex, "hylla", ""); err != nil {
+		t.Fatalf("CreateProfile() error = %v", err)
+	}
+
+	reserved := []string{
+		"CODEX_HOME",
+		"CLAUDE_CONFIG_DIR",
+		"HOME",
+		"LOGNAME",
+		"TERM",
+		"USER",
+	}
+	for _, key := range reserved {
+		t.Run(key, func(t *testing.T) {
+			_, err := service.SetAccountEnv(context.Background(), domain.ProviderCodex, "hylla", key, "x")
+			if err == nil {
+				t.Fatalf("SetAccountEnv(%q) error = nil, want reserved-key rejection", key)
+			}
+			if !strings.Contains(err.Error(), "reserved by the Valv runtime") {
+				t.Fatalf("SetAccountEnv(%q) error = %v, want reserved-key message", key, err)
+			}
+			if !strings.Contains(err.Error(), key) {
+				t.Fatalf("SetAccountEnv(%q) error = %v, want error to surface offending key", key, err)
+			}
+			// Confirm the row was NOT persisted.
+			entries, listErr := service.ListAccountEnv(context.Background(), domain.ProviderCodex, "hylla")
+			if listErr != nil {
+				t.Fatalf("ListAccountEnv() error = %v", listErr)
+			}
+			for _, entry := range entries {
+				if entry.EnvKey == key {
+					t.Fatalf("reserved key %q was persisted despite rejection", key)
+				}
+			}
+		})
+	}
+}
+
+func TestSetAccountEnvRejectsInvalidKeys(t *testing.T) {
+	t.Parallel()
+
+	store, providerRoot := testStore(t)
+	service, err := New(Options{Store: store, ProviderRoot: providerRoot})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := service.CreateProfile(context.Background(), domain.ProviderCodex, "hylla", ""); err != nil {
+		t.Fatalf("CreateProfile() error = %v", err)
+	}
+
+	cases := []struct {
+		label string
+		key   string
+	}{
+		{"empty", ""},
+		{"leading_digit", "1FOO"},
+		{"whitespace_internal", "FOO BAR"},
+		{"whitespace_leading", " FOO"},
+		{"whitespace_trailing", "FOO "},
+		{"hyphenated", "FOO-BAR"},
+		{"dotted", "FOO.BAR"},
+		{"control_character", "FOO\x00BAR"},
+		{"newline", "FOO\nBAR"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.label, func(t *testing.T) {
+			_, err := service.SetAccountEnv(context.Background(), domain.ProviderCodex, "hylla", tc.key, "x")
+			if err == nil {
+				t.Fatalf("SetAccountEnv(%q) error = nil, want invalid-key rejection", tc.key)
+			}
+			if !strings.Contains(err.Error(), `^[A-Za-z_][A-Za-z0-9_]*$`) {
+				t.Fatalf("SetAccountEnv(%q) error = %v, want error to surface literal regex pattern", tc.key, err)
+			}
+		})
+	}
+}
+
+func TestUnsetAccountEnvRejectsInvalidKeys(t *testing.T) {
+	t.Parallel()
+
+	store, providerRoot := testStore(t)
+	service, err := New(Options{Store: store, ProviderRoot: providerRoot})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := service.CreateProfile(context.Background(), domain.ProviderCodex, "hylla", ""); err != nil {
+		t.Fatalf("CreateProfile() error = %v", err)
+	}
+
+	err = service.UnsetAccountEnv(context.Background(), domain.ProviderCodex, "hylla", "1BAD")
+	if err == nil {
+		t.Fatalf("UnsetAccountEnv() error = nil, want invalid-key rejection")
+	}
+	if !strings.Contains(err.Error(), `^[A-Za-z_][A-Za-z0-9_]*$`) {
+		t.Fatalf("UnsetAccountEnv() error = %v, want error to surface literal regex pattern", err)
+	}
+}
+
+func TestSetAccountEnvSeparatesValuesAcrossAccounts(t *testing.T) {
+	t.Parallel()
+
+	store, providerRoot := testStore(t)
+	service, err := New(Options{Store: store, ProviderRoot: providerRoot})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := service.CreateProfile(context.Background(), domain.ProviderCodex, "personal", ""); err != nil {
+		t.Fatalf("CreateProfile(personal) error = %v", err)
+	}
+	if _, err := service.CreateProfile(context.Background(), domain.ProviderCodex, "hylla", ""); err != nil {
+		t.Fatalf("CreateProfile(hylla) error = %v", err)
+	}
+
+	if _, err := service.SetAccountEnv(context.Background(), domain.ProviderCodex, "personal", "ANTHROPIC_API_KEY", "sk-aaa"); err != nil {
+		t.Fatalf("SetAccountEnv(personal) error = %v", err)
+	}
+	if _, err := service.SetAccountEnv(context.Background(), domain.ProviderCodex, "hylla", "ANTHROPIC_API_KEY", "sk-bbb"); err != nil {
+		t.Fatalf("SetAccountEnv(hylla) error = %v", err)
+	}
+
+	personalEntries, err := service.ListAccountEnv(context.Background(), domain.ProviderCodex, "personal")
+	if err != nil {
+		t.Fatalf("ListAccountEnv(personal) error = %v", err)
+	}
+	hyllaEntries, err := service.ListAccountEnv(context.Background(), domain.ProviderCodex, "hylla")
+	if err != nil {
+		t.Fatalf("ListAccountEnv(hylla) error = %v", err)
+	}
+	if got, want := len(personalEntries), 1; got != want {
+		t.Fatalf("personal entries len = %d, want %d", got, want)
+	}
+	if got, want := len(hyllaEntries), 1; got != want {
+		t.Fatalf("hylla entries len = %d, want %d", got, want)
+	}
+	if personalEntries[0].EnvValue != "sk-aaa" {
+		t.Fatalf("personal[FOO] = %q, want %q", personalEntries[0].EnvValue, "sk-aaa")
+	}
+	if hyllaEntries[0].EnvValue != "sk-bbb" {
+		t.Fatalf("hylla[FOO] = %q, want %q", hyllaEntries[0].EnvValue, "sk-bbb")
+	}
+	if personalEntries[0].ProfileID == hyllaEntries[0].ProfileID {
+		t.Fatalf("personal and hylla share ProfileID %q, want distinct rows", personalEntries[0].ProfileID)
+	}
+}
+
+func TestAccountEnvSurvivesAccountRename(t *testing.T) {
+	t.Parallel()
+
+	store, providerRoot := testStore(t)
+	service, err := New(Options{Store: store, ProviderRoot: providerRoot})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	created, err := service.CreateProfile(context.Background(), domain.ProviderCodex, "personal", "")
+	if err != nil {
+		t.Fatalf("CreateProfile() error = %v", err)
+	}
+	if _, err := service.SetAccountEnv(context.Background(), domain.ProviderCodex, "personal", "ANTHROPIC_API_KEY", "sk-aaa"); err != nil {
+		t.Fatalf("SetAccountEnv() error = %v", err)
+	}
+
+	renamed, err := service.RenameProfile(context.Background(), domain.ProviderCodex, "personal", "primary")
+	if err != nil {
+		t.Fatalf("RenameProfile() error = %v", err)
+	}
+	if renamed.ID != created.ID {
+		t.Fatalf("rename changed Profile.ID: got %q, want %q (env ownership would break)", renamed.ID, created.ID)
+	}
+
+	// Lookup by the old name MUST now fail.
+	if _, err := service.ListAccountEnv(context.Background(), domain.ProviderCodex, "personal"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("ListAccountEnv(old name) error = %v, want domain.ErrNotFound", err)
+	}
+
+	// Lookup by the new name MUST still return the same row.
+	entries, err := service.ListAccountEnv(context.Background(), domain.ProviderCodex, "primary")
+	if err != nil {
+		t.Fatalf("ListAccountEnv(new name) error = %v", err)
+	}
+	if got, want := len(entries), 1; got != want {
+		t.Fatalf("ListAccountEnv(new name) len = %d, want %d", got, want)
+	}
+	if entries[0].EnvValue != "sk-aaa" {
+		t.Fatalf("entry.EnvValue = %q, want %q", entries[0].EnvValue, "sk-aaa")
+	}
+	if entries[0].ProfileID != created.ID {
+		t.Fatalf("entry.ProfileID = %q, want %q (must remain stable through rename)", entries[0].ProfileID, created.ID)
+	}
+}
+
 func testStore(t *testing.T) (*sqliteadapter.Store, string) {
 	t.Helper()
 
