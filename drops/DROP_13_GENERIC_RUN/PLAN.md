@@ -114,7 +114,7 @@ Blocked by: `13.1`
 
 #### Unit 13.3 — Re-derive `valv claude` and Claude service as thin adapters
 
-State: `todo`
+State: `done`
 
 Paths: `internal/cli/claude.go`, `internal/cli/claude_test.go`, `internal/services/claude/service.go`, `internal/services/claude/service_test.go`
 

@@ -531,22 +531,6 @@ func TestEmitNoticesWritesWarningsWithoutTTY(t *testing.T) {
 	}
 }
 
-// TestContainerNameContainsClaude verifies containerName produces a name with
-// the "claude" prefix, not "codex".
-func TestContainerNameContainsClaude(t *testing.T) {
-	t.Parallel()
-
-	service := Service{now: func() time.Time { return time.Unix(0, 42) }}
-	project := domain.Project{Name: "myapp", Root: "/tmp/myapp"}
-	name := service.containerName(project)
-	if !strings.HasPrefix(name, "valv-claude-interactive-") {
-		t.Fatalf("containerName() = %q, want valv-claude-interactive-* prefix", name)
-	}
-	if strings.Contains(name, "codex") {
-		t.Fatalf("containerName() = %q, must not contain \"codex\"", name)
-	}
-}
-
 // TestRunRejectsOverrideProfileWithWrongProvider verifies that Run returns an
 // error containing "provider mismatch" when OverrideProfile has a provider
 // that is not ProviderClaude.

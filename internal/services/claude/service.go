@@ -6,10 +6,8 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/charmbracelet/log"
 
@@ -18,6 +16,7 @@ import (
 	"github.com/evanmschultz/valv/internal/domain"
 	"github.com/evanmschultz/valv/internal/pathutil"
 	projectdetect "github.com/evanmschultz/valv/internal/project"
+	runservice "github.com/evanmschultz/valv/internal/services/run"
 )
 
 // Store aggregates the repository interfaces required by the Claude launch service.
@@ -188,49 +187,52 @@ func (s Service) Run(ctx context.Context, cwd string, claudeArgs []string) error
 	if err != nil {
 		return fmt.Errorf("run claude launch service: prepare runtime: %w", err)
 	}
-	defer prepared.Close()
 	s.emitNotices(resolved.profile, prepared.Warnings, claudeArgs)
 
-	request, err := s.buildRequest(resolved.workingDir, resolved.project, resolved.profile, prepared, claudeArgs)
+	// Adapt Claude's PreparedRuntime to the shared run service contract.
+	// The shared run service will invoke the Cleanup func via defer on both
+	// success and failure paths.
+	runPrepared := &runservice.PreparedRuntime{
+		Env:            prepared.Env,
+		EnvPassthrough: prepared.EnvPassthrough,
+		Mounts:         prepared.Mounts,
+		Warnings:       prepared.Warnings,
+		Cleanup: func() error {
+			return prepared.Close()
+		},
+	}
+
+	// Delegate to the shared run service with no command override (Claude
+	// entrypoint is baked into the image).
+	sharedService, err := runservice.New(runservice.Options{
+		Executor: s.executor,
+		Image:    s.image,
+		User:     s.user,
+		TTY:      s.tty,
+		Stdin:    s.stdin,
+		Logger:   s.logger,
+		Notices:  s.notices,
+		Now:      s.now,
+		Provider: runservice.Provider{
+			Name:                "claude",
+			ContainerNamePrefix: "valv-claude-interactive",
+			NoticePrefix:        "Valv note",
+		},
+	})
 	if err != nil {
-		return fmt.Errorf("run claude launch service: build docker request: %w", err)
+		return fmt.Errorf("run claude launch service: initialize shared run service: %w", err)
 	}
-	s.debug(
-		"launching claude container",
-		"container_name", request.Name,
-		"image", request.Image.String(),
-		"args", request.Args,
-		"tty", request.TTY,
-		"interactive", request.Interactive,
-		"init", request.Init,
-		"user", request.User,
-		"working_dir", request.WorkingDir,
-		"profile_home", resolved.profile.HomePath,
-		"env_passthrough", request.EnvPassthrough,
-		"mount_count", len(request.Mounts),
-	)
 
-	if request.Interactive && request.TTY {
-		if err := s.runAttached(ctx, resolved.project.Root, request); err != nil {
-			return err
-		}
-		return nil
-	}
-	if err := s.executor.Run(ctx, request); err != nil {
-		return fmt.Errorf("run claude launch service: execute docker request for project %q: %w", resolved.project.Root, err)
-	}
-	return nil
-}
-
-func (s Service) runAttached(ctx context.Context, projectRoot string, request docker.ContainerRunRequest) error {
-	request.Detached = false
-	request.Remove = true
-	s.debug("starting interactive claude container", "name", request.Name, "image", request.Image.String(), "working_dir", request.WorkingDir)
-
-	if err := s.executor.Run(ctx, request); err != nil {
-		return fmt.Errorf("run claude launch service: run attached docker request for project %q: %w", projectRoot, err)
-	}
-	return nil
+	return sharedService.Run(ctx, runservice.LaunchRequest{
+		ProjectRoot: resolved.project.Root,
+		WorkingDir:  resolved.workingDir,
+		ProjectID:   resolved.project.ID,
+		ProfileID:   resolved.profile.ID,
+		ProjectName: resolved.project.Name,
+		Prepared:    runPrepared,
+		Args:        append([]string(nil), claudeArgs...),
+		Command:     nil, // No entrypoint override for Claude.
+	})
 }
 
 // ValidateBinding resolves the project binding at cwd and returns an error if
@@ -295,54 +297,6 @@ func (s Service) resolveBinding(ctx context.Context, cwd string) (resolvedLaunch
 	}, nil
 }
 
-func (s Service) buildRequest(workingDir string, project domain.Project, profile domain.Profile, prepared clauderuntime.PreparedRuntime, claudeArgs []string) (docker.ContainerRunRequest, error) {
-	withinRoot, err := withinProjectRoot(project.Root, workingDir)
-	if err != nil {
-		return docker.ContainerRunRequest{}, err
-	}
-	if !withinRoot {
-		return docker.ContainerRunRequest{}, fmt.Errorf("working directory %q is outside project root %q", workingDir, project.Root)
-	}
-
-	request := docker.ContainerRunRequest{
-		Name:           s.containerName(project),
-		Image:          s.image,
-		WorkingDir:     workingDir,
-		Env:            prepared.Env,
-		EnvPassthrough: prepared.EnvPassthrough,
-		Labels: map[string]string{
-			"io.valv.managed":    "true",
-			"io.valv.provider":   "claude",
-			"io.valv.scope":      "interactive",
-			"io.valv.project_id": project.ID,
-			"io.valv.profile_id": profile.ID,
-		},
-		Mounts:      append([]docker.MountSpec{docker.NewMountSpec(project.Root, project.Root, false)}, prepared.Mounts...),
-		Args:        append([]string(nil), claudeArgs...),
-		Interactive: s.stdin,
-		TTY:         s.tty,
-		Init:        s.tty || s.stdin,
-		Remove:      true,
-		User:        s.user,
-	}
-
-	return request, nil
-}
-
-func withinProjectRoot(projectRoot, workingDir string) (bool, error) {
-	rel, err := filepath.Rel(projectRoot, workingDir)
-	if err != nil {
-		return false, fmt.Errorf("compare working directory %q to project root %q: %w", workingDir, projectRoot, err)
-	}
-	if rel == "." {
-		return true, nil
-	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return false, nil
-	}
-	return true, nil
-}
-
 func (s Service) debug(msg string, keyvals ...any) {
 	if s.logger == nil {
 		return
@@ -363,38 +317,4 @@ func (s Service) emitNotices(_ domain.Profile, warnings, _ []string) {
 	for _, warning := range warnings {
 		_, _ = fmt.Fprintf(s.notices, "Valv note: %s\n", warning)
 	}
-}
-
-func (s Service) containerName(project domain.Project) string {
-	base := sanitizeContainerPart(project.Name)
-	if base == "" {
-		base = sanitizeContainerPart(filepath.Base(project.Root))
-	}
-	if base == "" {
-		base = "project"
-	}
-	return fmt.Sprintf("valv-claude-interactive-%s-%d", base, s.now().UnixNano())
-}
-
-func sanitizeContainerPart(value string) string {
-	var b strings.Builder
-	lastDash := false
-	for _, r := range strings.ToLower(strings.TrimSpace(value)) {
-		switch {
-		case unicode.IsLetter(r) || unicode.IsDigit(r):
-			b.WriteRune(r)
-			lastDash = false
-		case r == '-' || r == '_' || r == '.':
-			if !lastDash {
-				b.WriteByte('-')
-				lastDash = true
-			}
-		default:
-			if !lastDash {
-				b.WriteByte('-')
-				lastDash = true
-			}
-		}
-	}
-	return strings.Trim(b.String(), "-")
 }
