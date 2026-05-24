@@ -444,33 +444,6 @@ func TestRunRejectsWorkingDirectoryOutsideProjectRoot(t *testing.T) {
 	}
 }
 
-func TestBuildRequestCarriesEnvPassthrough(t *testing.T) {
-	t.Parallel()
-
-	service := Service{
-		image: docker.NewImageRef("valv-codex", "dev"),
-		now:   func() time.Time { return time.Unix(0, 1) },
-	}
-	project := domain.Project{ID: "project-1234567890", Root: "/tmp/project", Name: "project"}
-	profile := domain.Profile{ID: "profile-1", Provider: domain.ProviderCodex, HomePath: "/tmp/profile"}
-	prepared := codexruntime.PreparedRuntime{
-		Env: map[string]string{
-			"CODEX_HOME": codexruntime.ContainerCodexDir,
-			"HOME":       codexruntime.ContainerHomeDir,
-		},
-		EnvPassthrough: []string{"CONTEXT7_API_KEY"},
-		Mounts:         []docker.MountSpec{docker.NewMountSpec("/tmp/profile", codexruntime.ContainerCodexDir, false)},
-	}
-
-	request, err := service.buildRequest("/tmp/project", project, profile, prepared, []string{"--help"})
-	if err != nil {
-		t.Fatalf("buildRequest() error = %v", err)
-	}
-	if !strings.Contains(strings.Join(request.EnvPassthrough, ","), "CONTEXT7_API_KEY") {
-		t.Fatalf("EnvPassthrough = %#v, want CONTEXT7_API_KEY", request.EnvPassthrough)
-	}
-}
-
 func TestRunUsesSharedHostHomeForCodexStateWhenRealHomeIsSet(t *testing.T) {
 	t.Parallel()
 

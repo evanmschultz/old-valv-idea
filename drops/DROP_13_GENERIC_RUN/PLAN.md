@@ -134,7 +134,7 @@ Blocked by: `13.2`
 
 #### Unit 13.4 — Re-derive `valv codex` and Codex service as thin adapters
 
-State: `todo`
+State: `done`
 
 Paths: `internal/cli/codex.go`, `internal/cli/codex_test.go`, `internal/services/codex/service.go`, `internal/services/codex/service_test.go`
 

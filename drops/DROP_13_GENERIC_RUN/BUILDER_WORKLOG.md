@@ -347,3 +347,127 @@ This test runs for both `Provider{Name: "claude", ContainerNamePrefix: "valv-cla
 ### Hylla Feedback
 
 None — the stale test reference was identified via direct inspection of `service_test.go` (Read tool) and the shared run service's corresponding test (Read tool) to confirm the behavior was already covered. The grounding for deleting the test was: (a) `containerName` method is gone (refactored away), (b) the shared service tests verify the replacement behavior, (c) all three related packages (claude, run, codex) pass their test suites.
+
+## Unit 13.4 — Round 1
+
+### Task
+
+Mirror the Unit 13.3 (Claude refactor) pattern to Codex: replace `internal/services/codex/service.go` with a thin adapter over the shared `internal/services/run` service, preserving the public API and Codex-specific runtime prep (shared-home derivation, other-provider mount logic).
+
+### Files touched
+
+- `internal/services/codex/service.go` — refactored to thin adapter over `internal/services/run.Service`.
+- `drops/DROP_13_GENERIC_RUN/PLAN.md` — unit state flip `in_progress` → `blocked` (see "Blocker" below).
+- `drops/DROP_13_GENERIC_RUN/BUILDER_WORKLOG.md` — this entry.
+
+### Status
+
+**BLOCKED** on test-file compiler error.
+
+The refactored `service.go` file compiles correctly (verified by temporarily removing `service_test.go` and confirming `mage testPkg ./internal/services/codex` reports 0 tests + 0% coverage but 0 build errors). The service implementation is correct and mirrors Unit 13.3 exactly:
+
+- Removed `buildRequest`, `containerName`, `sanitizeContainerPart`, and `withinProjectRoot` methods (all moved to the shared service).
+- Removed unused imports (`path/filepath`, `unicode`).
+- Refactored `Run()` to adapt Codex's `PreparedRuntime` to the shared service contract and delegate to `runservice.New(...).Run(...)`.
+- Preserved `sharedCodexStateHome`, `ValidateBinding`, `resolveBinding`, `debug`, and `emitNotices` methods.
+- Kept the public `Service.Run(ctx, cwd, codexArgs)` signature unchanged.
+
+### Blocker
+
+**Compiler error in `service_test.go`**: `mage testPkg ./internal/services/codex` reports "build errors: 1" but does not show the error message. The service file is correct (builds clean in isolation), so the error is in the test file. The test file has not been modified since the start of this round — it is the committed version from before Unit 13.4 began. This suggests either:
+
+1. A subtle syntax issue or undefined reference in the test file that only manifests when Codex service methods are deleted (e.g., a test explicitly calling `service.containerName(...)` or `service.buildRequest(...)`).
+2. A missing import or type issue that becomes apparent after the service refactor.
+
+**Diagnosis attempted:**
+- Moved `service_test.go` out temporarily: service builds cleanly (no test file errors).
+- Restored `service_test.go`: compiler error returns.
+- Conclusion: The error is test-file specific, not a service-file issue.
+
+The test file is 824 lines; scanning for deleted-method references did not immediately surface an obvious call to a removed function. Without mage reporting the detailed compiler error, further diagnosis requires either:
+- A way to extract the actual Go compiler error message from `go test` (e.g., via LSP diagnostics when the server is available).
+- Running the test file through a Go compiler/checker that emits the full error.
+
+### What was completed
+
+The refactored `internal/services/codex/service.go` file is fully correct and ready. The only blocking issue is the unexplained test-file compiler error. If the test file is fixed (or if the error can be diagnosed), the unit will be `done` immediately.
+
+### Design verification (from code inspection)
+
+- ✓ Codex service now delegates to the shared run service.
+- ✓ Container naming uses the shared seam's format (prefix + sanitized project name + timestamp).
+- ✓ Cross-provider mount behavior (silent-skip if Claude binding/profile lookup fails) is preserved.
+- ✓ Shared-home derivation for Codex is preserved in the `sharedCodexStateHome` method.
+- ✓ Notice handling is parameterized via the shared service's `Provider.NoticePrefix` (set to `"Valv MCP note"` for Codex).
+- ✓ No changes to public API or CLI command files.
+- ✓ Unused imports removed; code is clean.
+
+### Hylla Feedback
+
+No Hylla queries were made; this unit was mechanical (pattern-match from 13.3). The code inspection was done via Read tool on the committed 13.3 diff and current service files. Hylla would have confirmed the absence of deleted methods elsewhere, but the test-file scope is small enough for manual search (824 lines).
+
+### Verdict
+
+**Awaiting unblocking**: Fix the compiler error in `service_test.go` and re-run `mage testPkg ./internal/services/codex` to confirm tests pass. Expected outcome: all existing tests pass with the refactored service (no test deletions required for Codex, unlike Claude's containerName test).
+
+## Unit 13.4 — Round 2
+
+### Problem diagnosis
+
+Round 1 refactored `internal/services/codex/service.go` into a thin adapter over `internal/services/run.Service`, removing methods `buildRequest`, `containerName`, `sanitizeContainerPart`, and `withinProjectRoot`. However, `internal/services/codex/service_test.go` (824 lines, not modified by Round 1) still had a stale test referencing the removed `buildRequest` method.
+
+Identified test: `TestBuildRequestCarriesEnvPassthrough` (lines 447-472) called `service.buildRequest("/tmp/project", project, profile, prepared, []string{"--help"})`, which no longer exists in the refactored service. This method is now owned by the shared `internal/services/run` service and is tested there via `TestRunEnvPassthroughFlowsFromPrepared` in `internal/services/run/service_test.go` (lines 249-280), which parameterizes the test over both claude and codex providers to verify the behavior works for both.
+
+### Files touched
+
+- `internal/services/codex/service_test.go` — deleted `TestBuildRequestCarriesEnvPassthrough` (lines 447-472), which tested a now-removed `buildRequest` method. `EnvPassthrough` flow is the shared run service's responsibility and is fully tested in `internal/services/run/service_test.go` with provider parameterization (both claude + codex).
+- `drops/DROP_13_GENERIC_RUN/PLAN.md` — Unit 13.4 state flip `in_progress` → `done`.
+- `drops/DROP_13_GENERIC_RUN/BUILDER_WORKLOG.md` — this entry.
+
+### Mage targets run
+
+- `mage testPkg ./internal/services/codex` — 16 tests pass (no stale test), 76.0% coverage (well above the 70% per-package floor).
+- `mage testPkg ./internal/cli` — 280 tests pass (codex CLI integration), 68.6% coverage.
+- `mage testPkg ./internal/services/run` — 51 tests pass (Unit 13.1 baseline), 86.4% coverage.
+- `mage testPkg ./internal/services/claude` — 22 tests pass (sibling provider unaffected), 84.2% coverage.
+- `mage build` — passes; confirms `cmd/valv` links cleanly.
+
+### Rationale for deleting `TestBuildRequestCarriesEnvPassthrough`
+
+The test exercised `Service.buildRequest(...)` a private method that the Round 1 refactor removed. The `buildRequest` method and all its concerns (Docker request building, within-project guarding, mount sequencing) are now the shared run service's responsibility — the refactored `Service.Run` delegates the entire container-launch orchestration to `runservice.Service`.
+
+The shared service's `TestRunEnvPassthroughFlowsFromPrepared` in `internal/services/run/service_test.go` (lines 249-280) already verifies both claude and codex `EnvPassthrough` flow correctly:
+
+```go
+for _, provider := range providerDescriptors() {
+    ...
+    if !reflect.DeepEqual(executor.got.EnvPassthrough, passthrough) {
+        t.Fatalf("Run() EnvPassthrough = %v, want %v", executor.got.EnvPassthrough, passthrough)
+    }
+}
+```
+
+This test runs for both `Provider{Name: "claude", ...}` and `Provider{Name: "codex", ...}`, ensuring the `EnvPassthrough` contract is verified at the shared orchestration boundary for both providers. The stale codex-service test was a duplicate of this behavior now housed correctly in the shared layer.
+
+### Verification of Unit 13.4 acceptance criteria
+
+- ✓ **Thin adapter over shared primitive**: `internal/services/codex/service.go` now resolves binding/account and performs Codex-specific runtime prep (shared-home derivation, cross-provider lookup), then delegates the container launch to the shared run service. The public `Service.Run(ctx, cwd, codexArgs)` signature is preserved.
+- ✓ **Silent-skip on cross-provider lookup**: Tests cover the Claude binding lookup; when `ProfileByID` fails with `ErrNotFound`, launch continues without the cross-mount — verified by `TestRunCrossProviderMountWhenClaudeBound` in `service_test.go` (lines 664-802).
+- ✓ **Tests remain green**: All 16 tests in `internal/services/codex` pass after deleting the stale test; no regressions across CLI (280 tests), run service (51 tests), or claude service (22 tests).
+
+### Hard constraints honored
+
+- Only touched `internal/services/codex/service_test.go` (deleted stale test) + drop dir (state flip + this worklog).
+- Did **not** modify the refactored `service.go` (the refactor is correct and builds/tests clean as-is).
+- Did **not** modify `internal/services/run/`, `internal/cli/`, or any other package.
+- Did **not** change the public `Service.Run` API signature.
+- Did **not** run raw `go test`, `go build`, `go vet`, or `gofumpt` — only `mage testPkg` and `mage build`.
+- Did **not** set `GOCACHE`, `GOMODCACHE`, or any other Go-env override.
+
+### Hylla Feedback
+
+None — the stale test reference was identified via direct inspection of `service_test.go` (Read tool) at line 465 and confirmed by reading the shared run service's corresponding test (Read tool) to verify the behavior was already covered. The grounding for deleting the test was: (a) `buildRequest` method is gone (refactored away), (b) the shared service tests verify the replacement behavior, (c) all four related packages (claude, codex, run, cli) pass their test suites.
+
+## Verdict
+
+**Unit 13.4 DONE**: All tests pass. The refactored Codex thin adapter successfully delegates to the shared run service. The blocker from Round 1 is resolved. Unit 13.4 state flipped to `done` in PLAN.md.
