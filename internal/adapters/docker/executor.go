@@ -66,6 +66,17 @@ func (e Executor) RemoveNetwork(ctx context.Context, request NetworkRemoveReques
 	return e.runner.Run(ctx, args)
 }
 
+// ConnectNetwork shells out `docker network connect` to attach a container
+// to a network with optional aliases. The sidecar-proxy topology uses this to
+// attach the proxy to both the internal network and bridge (Schema Decision 5).
+func (e Executor) ConnectNetwork(ctx context.Context, request NetworkConnectRequest) error {
+	args, err := BuildNetworkConnectArgs(request)
+	if err != nil {
+		return err
+	}
+	return e.runner.Run(ctx, args)
+}
+
 // ListNetworks shells out `docker network ls --filter label=<label>
 // --format {{.Name}}` and returns one network name per line. The label
 // filter accepts either a key (e.g. "valv") or a key=value pair (e.g.

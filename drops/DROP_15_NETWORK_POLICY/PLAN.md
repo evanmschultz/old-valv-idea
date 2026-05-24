@@ -113,7 +113,7 @@ Ship DROP_15 as a closed-by-default, macOS-compatible network policy layer acros
 
 #### Unit 15.2 — Docker network lifecycle helpers (create/remove/connect)
 
-**State:** todo
+**State:** done
 
 **Paths:**
 - `internal/adapters/docker/network.go`

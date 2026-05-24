@@ -16,8 +16,7 @@ var dockerNetworkNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`
 // NetworkCreateRequest carries the inputs for `docker network create`.
 //
 // DROP_15 uses this exclusively to provision a single `--internal` network
-// per Schema Decision 5; the bridge fallback was cut and there is no
-// `NetworkConnectRequest` symbol in this drop.
+// per Schema Decision 5.
 type NetworkCreateRequest struct {
 	// Name is the Docker network name. Required.
 	Name string
@@ -112,4 +111,75 @@ func BuildNetworkRemoveArgs(request NetworkRemoveRequest) ([]string, error) {
 		return nil, err
 	}
 	return []string{"network", "rm", strings.TrimSpace(request.Name)}, nil
+}
+
+// NetworkConnectRequest carries the inputs for `docker network connect`.
+//
+// The sidecar-proxy topology (Schema Decision 5) uses this to attach a
+// container to multiple networks with a stable alias on the internal network.
+type NetworkConnectRequest struct {
+	// Network is the Docker network name to connect to. Required.
+	Network string
+	// Container is the container ID or name to connect. Required.
+	Container string
+	// Aliases are network aliases (DNS names) for the container on this network.
+	// Optional. Each alias must be non-empty and pattern-valid.
+	Aliases []string
+}
+
+// Valid reports any input violations for a NetworkConnectRequest.
+func (r NetworkConnectRequest) Valid() error {
+	network := strings.TrimSpace(r.Network)
+	if network == "" {
+		return fmt.Errorf("validate network connect request: network is required")
+	}
+	if !dockerNetworkNamePattern.MatchString(network) {
+		return fmt.Errorf("validate network connect request: invalid network name %q", network)
+	}
+	if len(network) > 64 {
+		return fmt.Errorf("validate network connect request: network name must be at most 64 bytes, got %d", len(network))
+	}
+
+	container := strings.TrimSpace(r.Container)
+	if container == "" {
+		return fmt.Errorf("validate network connect request: container is required")
+	}
+
+	for i, alias := range r.Aliases {
+		alias = strings.TrimSpace(alias)
+		if alias == "" {
+			return fmt.Errorf("validate network connect request: alias %d is empty", i)
+		}
+		if !dockerNetworkNamePattern.MatchString(alias) {
+			return fmt.Errorf("validate network connect request: invalid alias %q at index %d", alias, i)
+		}
+	}
+
+	return nil
+}
+
+// BuildNetworkConnectArgs renders a deterministic `docker network connect` arg
+// vector for the supplied request. Aliases are sorted for determinism; the
+// positional network and container names are last.
+func BuildNetworkConnectArgs(request NetworkConnectRequest) ([]string, error) {
+	if err := request.Valid(); err != nil {
+		return nil, err
+	}
+
+	args := []string{"network", "connect"}
+
+	// Sort aliases for deterministic output.
+	if len(request.Aliases) > 0 {
+		sortedAliases := make([]string, len(request.Aliases))
+		copy(sortedAliases, request.Aliases)
+		sort.Strings(sortedAliases)
+		for _, alias := range sortedAliases {
+			alias = strings.TrimSpace(alias)
+			args = append(args, "--alias", alias)
+		}
+	}
+
+	// Positional network and container names last.
+	args = append(args, strings.TrimSpace(request.Network), strings.TrimSpace(request.Container))
+	return args, nil
 }

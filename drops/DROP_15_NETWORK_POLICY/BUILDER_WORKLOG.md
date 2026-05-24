@@ -2,6 +2,50 @@
 
 Append a `## Unit 15.M — Round K` section per build attempt. See `main/drops/WORKFLOW.md` § "Phase 4 — Build (per unit)" for what each section should contain.
 
+## Unit 15.2 — Round 3 (ADDITIVE — NetworkConnect surface)
+
+**Date:** 2026-05-24
+**Builder backend:** claude-native (orchestrator dispatch)
+
+### Files Touched
+
+- `internal/adapters/docker/network.go` — added `NetworkConnectRequest` struct with `Network`, `Container`, and `Aliases []string` fields; added `Valid()` validation method; added `BuildNetworkConnectArgs()` function emitting `docker network connect --alias <alias> <network> <container>` with sorted aliases for determinism.
+- `internal/adapters/docker/executor.go` — added `Executor.ConnectNetwork()` method, mirroring the `CreateNetwork` / `RemoveNetwork` pattern via `e.runner.Run()`.
+- `internal/adapters/docker/network_test.go` — added comprehensive test suite: `TestBuildNetworkConnectArgs` (19 test cases covering single/multiple aliases sorted, no aliases, whitespace trimming, and validation errors for missing network/container/empty-alias/invalid patterns/exceeding length limits); `TestExecutorConnectNetworkForwardsArgs` (verifies args forwarded to runner); `TestExecutorConnectNetworkReturnsBuildError` (verifies validation errors returned before invocation).
+- `drops/DROP_15_NETWORK_POLICY/PLAN.md` — Unit 15.2 `state: in_progress` → `done`.
+
+### Mage Targets Run
+
+- `mage testPkg ./internal/adapters/docker` → 82 tests pass, coverage 67.9% (above the enforced 60.0% gate).
+- `mage build` → clean build succeeds.
+
+### Design Notes
+
+- **Round 4 YAGNI cut REVERSED.** The sidecar-proxy topology (Schema Decision 5 in re-planned DROP_15) has a concrete caller: the proxy sidecar must attach to BOTH the `--internal` network (internal-only workload reachability) AND the `bridge` network (external egress). The `docker network connect` surface was cut as YAGNI in Round 4; Round 3 re-planning activates that caller, so the surface is now justified.
+- **Validation pattern mirrors Create/Remove.** `NetworkConnectRequest.Valid()` enforces: network non-empty + valid pattern + ≤64 bytes (matches `NetworkCreateRequest`); container non-empty (no length limit — container IDs and names are Docker-managed); each alias non-empty + valid pattern (same `dockerNetworkNamePattern` as network names). Validation errors prefixed `validate network connect request: ...` for boundary clarity.
+- **Deterministic alias order.** Aliases are sorted before emission to ensure `docker network connect --alias alpha ... --alias zulu ...` produces consistent arg vectors across runs. This matches the pattern used in `BuildNetworkCreateArgs` for label keys.
+- **Positional args last.** The `<network> <container>` positional arguments are appended after all `--alias` flags, matching `docker network connect` CLI semantics.
+- **Executor pattern.** `ConnectNetwork` mirrors `CreateNetwork` and `RemoveNetwork`: build args via the typed request, validate via `Valid()`, shell out via `e.runner.Run()`, return errors directly (no adaptation).
+
+### Context7 Evidence
+
+- `/docker/docs` confirmed `docker network connect` CLI with `--alias` flag for network aliases (DNS names). Multiple `--alias` values allowed per invocation. Containers can connect to multiple networks either via repeated `--network` at create time or via `docker network connect` for a running container.
+
+### Hylla Feedback
+
+None — existing Docker adapter patterns (network create/remove, image build args, container run args) provided sufficient evidence; no external library/CLI lookup needed.
+
+### Acceptance Check
+
+- [x] R2 `NetworkCreateRequest` / `BuildNetworkCreateArgs` / `Executor.CreateNetwork` + `RemoveRequest` / `BuildNetworkRemoveArgs` / `Executor.RemoveNetwork` remain unchanged (KEEP constraint).
+- [x] `NetworkConnectRequest` struct added with `Network`, `Container`, `Aliases []string` (optional).
+- [x] `Valid()` method mirrors Create/Remove validation pattern (required-field checks, name-pattern validation, length limits).
+- [x] `BuildNetworkConnectArgs` emits `docker network connect --alias <alias> <network> <container>` with sorted aliases.
+- [x] `Executor.ConnectNetwork` added, mirroring Create/Remove pattern via `e.runner.Run()`.
+- [x] Tests cover: required-field validation (missing network/container, empty alias), `--alias` emission (single/multiple sorted), whitespace trimming, deterministic arg order (positional tail), name/alias pattern validation errors, length-limit rejection.
+- [x] `mage testPkg ./internal/adapters/docker` passes; coverage 67.9% ≥ 60% enforced gate.
+- [x] `mage build` succeeds.
+
 ## Unit 15.2 — Round 1
 
 **Date:** 2026-05-23

@@ -438,3 +438,197 @@ func TestNetworkCreateRequestRejectsOverlongName(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildNetworkConnectArgs(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		request NetworkConnectRequest
+		want    []string
+		wantErr string
+	}{
+		{
+			name: "single alias with sidecar attachment",
+			request: NetworkConnectRequest{
+				Network:   "valv-netpolicy-abc",
+				Container: "container-id-xyz",
+				Aliases:   []string{"valv-proxy"},
+			},
+			want: []string{
+				"network", "connect",
+				"--alias", "valv-proxy",
+				"valv-netpolicy-abc", "container-id-xyz",
+			},
+		},
+		{
+			name: "multiple aliases sorted deterministically",
+			request: NetworkConnectRequest{
+				Network:   "valv-netpolicy-abc",
+				Container: "container-id-xyz",
+				Aliases:   []string{"zulu", "alpha", "bravo"},
+			},
+			want: []string{
+				"network", "connect",
+				"--alias", "alpha",
+				"--alias", "bravo",
+				"--alias", "zulu",
+				"valv-netpolicy-abc", "container-id-xyz",
+			},
+		},
+		{
+			name: "no aliases emits only required args",
+			request: NetworkConnectRequest{
+				Network:   "valv-netpolicy-abc",
+				Container: "container-id-xyz",
+				Aliases:   nil,
+			},
+			want: []string{
+				"network", "connect",
+				"valv-netpolicy-abc", "container-id-xyz",
+			},
+		},
+		{
+			name: "empty aliases slice emits only required args",
+			request: NetworkConnectRequest{
+				Network:   "valv-netpolicy-abc",
+				Container: "container-id-xyz",
+				Aliases:   []string{},
+			},
+			want: []string{
+				"network", "connect",
+				"valv-netpolicy-abc", "container-id-xyz",
+			},
+		},
+		{
+			name: "whitespace-padded fields are trimmed",
+			request: NetworkConnectRequest{
+				Network:   "  valv-net  ",
+				Container: "  container-id  ",
+				Aliases:   []string{"  alias1  "},
+			},
+			want: []string{
+				"network", "connect",
+				"--alias", "alias1",
+				"valv-net", "container-id",
+			},
+		},
+		{
+			name:    "empty network rejected",
+			request: NetworkConnectRequest{Network: "", Container: "ctr", Aliases: nil},
+			wantErr: "network is required",
+		},
+		{
+			name:    "whitespace-only network rejected",
+			request: NetworkConnectRequest{Network: "   ", Container: "ctr", Aliases: nil},
+			wantErr: "network is required",
+		},
+		{
+			name:    "invalid network name rejected",
+			request: NetworkConnectRequest{Network: "valv/net", Container: "ctr", Aliases: nil},
+			wantErr: "invalid network name",
+		},
+		{
+			name:    "empty container rejected",
+			request: NetworkConnectRequest{Network: "valv-net", Container: "", Aliases: nil},
+			wantErr: "container is required",
+		},
+		{
+			name:    "whitespace-only container rejected",
+			request: NetworkConnectRequest{Network: "valv-net", Container: "   ", Aliases: nil},
+			wantErr: "container is required",
+		},
+		{
+			name:    "empty alias in slice rejected",
+			request: NetworkConnectRequest{Network: "valv-net", Container: "ctr", Aliases: []string{"valid", ""}},
+			wantErr: "empty",
+		},
+		{
+			name:    "whitespace-only alias rejected",
+			request: NetworkConnectRequest{Network: "valv-net", Container: "ctr", Aliases: []string{"   "}},
+			wantErr: "empty",
+		},
+		{
+			name:    "invalid alias pattern rejected",
+			request: NetworkConnectRequest{Network: "valv-net", Container: "ctr", Aliases: []string{"invalid/alias"}},
+			wantErr: "invalid alias",
+		},
+		{
+			name:    "network name with leading hyphen rejected",
+			request: NetworkConnectRequest{Network: "-invalid", Container: "ctr", Aliases: nil},
+			wantErr: "invalid network name",
+		},
+		{
+			name:    "network name exceeds 64 bytes rejected",
+			request: NetworkConnectRequest{Network: "a" + strings.Repeat("b", 63) + "c", Container: "ctr", Aliases: nil},
+			wantErr: "at most 64 bytes",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := BuildNetworkConnectArgs(tt.request)
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("BuildNetworkConnectArgs() error = nil, want error containing %q", tt.wantErr)
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("BuildNetworkConnectArgs() error = %q, want substring %q", err.Error(), tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("BuildNetworkConnectArgs() error = %v", err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("BuildNetworkConnectArgs() = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExecutorConnectNetworkForwardsArgs(t *testing.T) {
+	t.Parallel()
+
+	var got []string
+	exec := NewExecutor(CommandRunnerFunc(func(_ context.Context, args []string) error {
+		got = append([]string(nil), args...)
+		return nil
+	}))
+
+	if err := exec.ConnectNetwork(context.Background(), NetworkConnectRequest{
+		Network:   "valv-netpolicy-abc",
+		Container: "container-id-xyz",
+		Aliases:   []string{"valv-proxy"},
+	}); err != nil {
+		t.Fatalf("ConnectNetwork() error = %v", err)
+	}
+
+	want := []string{
+		"network", "connect",
+		"--alias", "valv-proxy",
+		"valv-netpolicy-abc", "container-id-xyz",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ConnectNetwork() args = %#v, want %#v", got, want)
+	}
+}
+
+func TestExecutorConnectNetworkReturnsBuildError(t *testing.T) {
+	t.Parallel()
+
+	exec := NewExecutor(CommandRunnerFunc(func(_ context.Context, _ []string) error {
+		t.Fatal("runner should not be invoked when build fails")
+		return nil
+	}))
+
+	err := exec.ConnectNetwork(context.Background(), NetworkConnectRequest{Network: ""})
+	if err == nil {
+		t.Fatalf("ConnectNetwork() error = nil, want validation error")
+	}
+	if !strings.Contains(err.Error(), "network is required") {
+		t.Fatalf("ConnectNetwork() error = %q, want substring %q", err.Error(), "network is required")
+	}
+}
