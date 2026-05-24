@@ -330,3 +330,104 @@ None. All four R1 counterexamples are mitigated at the code level, all four miti
 Verdict: **pass**.
 
 Round 2 fixes the three QA-Falsification counterexamples (CE#1 indented section headers, CE#2 RFC 1123 length limits, CE#3 multi-line-string-vs-comment ambiguity) and the QA-Proof hidden-dep finding (#4 exported mutable defaults) cleanly. The `splitAllowlistSpan` rewrite tightens the contract uniformly across all top-level sections, the new `stripLineComment` is a correct byte-walker (basic-string escape handling + literal-string no-escape semantics + comment introducer outside strings), `validateHost` enforces RFC 1123 byte limits with specific error messages, and the public `DefaultAllowlistHosts()` accessor returns a fresh copy verified by in-place mutation. 7 new tests bring the package to 93 tests / 91.9% coverage. The `OverlayHash` regression pin in `internal/services/images` still passes. Unit 15.1 is ready to close.
+
+## Unit 15.2 — Round 1
+
+**Date:** 2026-05-24
+**QA Proof backend:** claude-native (orchestrator dispatch, opus)
+**Verdict:** `pass`
+
+### Per-Acceptance Audit
+
+**A1. Add typed request structs `NetworkCreateRequest` and `NetworkRemoveRequest`; do NOT add `NetworkConnectRequest`.**
+
+- `NetworkCreateRequest` at `internal/adapters/docker/network.go:21-29` with fields `Name string`, `Internal bool`, `Labels map[string]string`. Doc comment at lines 16-20 explicitly states "there is no `NetworkConnectRequest` symbol in this drop" per Schema Decision 5.
+- `NetworkRemoveRequest` at `internal/adapters/docker/network.go:77-80` with field `Name string`.
+- Forbidden-symbol audit: `rg --glob '*.go' "ConnectNetwork|NetworkConnect|BuildNetworkConnect"` across the entire repo returns ZERO matches in any `.go` file. The only mentions are deliberate negative statements in the drop dir (`BUILDER_WORKLOG.md:25,41-43`, `PLAN.md:121`) and a single doc-comment line at `internal/adapters/docker/network.go:20` documenting the absence. Verdict: Schema-Decision-5 cut applied verbatim.
+
+**A2. Add arg builders `BuildNetworkCreateArgs` and `BuildNetworkRemoveArgs` in `internal/adapters/docker/network.go`.**
+
+- `BuildNetworkCreateArgs` at `network.go:51-74` — calls `request.Valid()` first, then emits `["network", "create", (maybe "--internal"), (sorted --label k=v pairs), <name>]`.
+- `BuildNetworkRemoveArgs` at `network.go:96-101` — calls `request.Valid()`, returns `["network", "rm", <trimmed-name>]`.
+- Validators `NetworkCreateRequest.Valid()` (lines 32-46) and `NetworkRemoveRequest.Valid()` (lines 83-92) both wrap errors with `"validate network ... request: ..."` boundary prefix.
+
+**A3. Add `Executor.CreateNetwork` and `Executor.RemoveNetwork` in `internal/adapters/docker/executor.go`.**
+
+- `Executor.CreateNetwork(ctx, request)` at `executor.go:46-52` — `context.Context` first param; calls `BuildNetworkCreateArgs(request)` then `e.runner.Run(ctx, args)`. Mirrors the existing `Build` / `RemoveImage` / `PruneBuilder` pattern at lines 5-41 verbatim.
+- `Executor.RemoveNetwork(ctx, request)` at `executor.go:57-63` — same shape. Both methods bubble validation errors from the arg-builder without wrapping (so callers see the underlying `"validate network ..."` prefix directly).
+- `Executor` type at `internal/adapters/docker/command.go:8-14`; `CommandRunnerFunc` at `internal/adapters/docker/types.go:127-131`. Both seams predate this unit and are reused unchanged.
+
+**A4. `BuildNetworkCreateArgs` emits `docker network create --internal ...`.**
+
+- Code: `network.go:57-59` — `if request.Internal { args = append(args, "--internal") }`. Conditional on the `Internal bool` field at struct line 26.
+- Tests pinning the `--internal` arg appearance:
+  - `TestBuildNetworkCreateArgs/internal network with default valv label` at `network_test.go:19-32` — asserts `--internal` is the third arg after `"network", "create"`.
+  - `TestBuildNetworkCreateArgs/multiple labels sorted deterministically` at lines 34-54 — same.
+  - `TestBuildNetworkCreateArgs/no labels emits only required args` at lines 68-79 — asserts `["network", "create", "--internal", "valv-bare"]` exactly.
+- Tests pinning the `--internal` arg ABSENCE when `Internal: false`:
+  - `TestBuildNetworkCreateArgs/internal false omits flag` at lines 56-67 — asserts `["network", "create", "--label", "valv=network-policy", "valv-open-net"]` with NO `--internal`.
+
+**A5. Tests cover required-field validation, `--internal` emission, and deterministic arg order.**
+
+- Required-field validation:
+  - `empty name rejected` (`network_test.go:93-96`) → "name is required".
+  - `whitespace-only name rejected` (lines 98-101) → "name is required".
+  - `label with empty key rejected` (lines 122-130) → "label key is required".
+  - `RemoveArgs/empty name rejected` (lines 177-180) + `whitespace name rejected` (lines 182-185).
+- `--internal` emission: A4 above.
+- Deterministic arg order:
+  - `TestBuildNetworkCreateArgs/multiple labels sorted deterministically` at `network_test.go:34-54` — input map has keys `{zebra, alpha, valv, project}`; assertion at lines 46-53 requires `alpha → project → valv → zebra` in lexicographic order. The implementation sorts keys at `network.go:62-67` via `sort.Strings(keys)`.
+  - Confirms `BuildNetworkCreateArgs` is map-iteration-stable.
+- Network name validation regex (`dockerNetworkNamePattern = ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$` at `network.go:14`):
+  - Acceptance: hyphens + dots + underscores (`network_test.go:81-91`).
+  - Rejection: space (`104-106`), slash (`108-111`), leading hyphen (`113-116`), leading dot (`118-121`). All return "invalid network name".
+
+### Executor forwarding audit
+
+- `TestExecutorCreateNetworkForwardsArgs` at `network_test.go:217-243` — installs `CommandRunnerFunc` that captures `args` (`got = append([]string(nil), args...)`), invokes `exec.CreateNetwork(ctx, ...)`, asserts the captured args equal `["network", "create", "--internal", "--label", "valv=network-policy", "valv-netpolicy-abc"]`. Proves the executor forwards verbatim what the arg builder produced.
+- `TestExecutorCreateNetworkReturnsBuildError` at lines 245-260 — installs runner with `t.Fatal("runner should not be invoked when build fails")`, invokes with `NetworkCreateRequest{Name: ""}`, asserts the validation error contains "name is required". Proves the executor SHORT-CIRCUITS on `BuildNetworkCreateArgs` error and does NOT call the runner.
+- Mirror tests for remove: `TestExecutorRemoveNetworkForwardsArgs` (262-279), `TestExecutorRemoveNetworkReturnsBuildError` (281-296).
+- `context.Context` is the first parameter of both executor methods (matches CLAUDE.md § "Go Development Rules" context-propagation rule). `context.Background()` is passed in the tests; `_ context.Context` is ignored inside the mock CommandRunnerFunc, which is fine because the executor-forwarding contract is "build args + forward to runner", and `Run(ctx, args)` is the runner-side seam that does the actual ctx propagation.
+
+### Mage Results (run by QA Proof)
+
+```
+mage testPkg ./internal/adapters/docker
+[PKG PASS] github.com/evanmschultz/valv/internal/adapters/docker (2.24s)
+  tests: 51
+  passed: 51
+  failed: 0
+  package coverage: 67.8% (above 60.0% gate)
+```
+
+Reproduces the builder-claimed 51-test / 67.8%-coverage signal exactly.
+
+### Scope Compliance
+
+`git show --stat d128363` returns exactly:
+
+- `internal/adapters/docker/executor.go` (+22 lines — added `CreateNetwork` / `RemoveNetwork` methods)
+- `internal/adapters/docker/network.go` (+101 lines — new file)
+- `internal/adapters/docker/network_test.go` (+296 lines — new file)
+
+No edits to `internal/cli/`, `internal/services/`, `internal/tools/`, `internal/adapters/sqlite/`, `internal/adapters/providers/`, drop dir, or anywhere else. Unit 15.2's hard-constraint compliance ("only edits inside `internal/adapters/docker/`") holds. PLAN.md was state-bit flipped to `done` in a separate commit per drop-state convention — confirmed via `git status` clean.
+
+### Findings
+
+- F1. Network-name regex matches Docker's actual accepted shape. Doc comment at `network.go:10-13` cites the "docker network create reference" as source. Pattern `^[a-zA-Z0-9][a-zA-Z0-9_.-]*$` rejects leading hyphens (which would collide with Docker CLI flag-parsing), whitespace, and path separators while allowing the typical `valv-netpolicy-<hash>` shape. Tests cover both directions of the boundary.
+- F2. Label emission uses `sort.Strings` over the key set, which is the canonical Go pattern for deterministic map iteration. Matches existing `BuildBuilderPruneArgs` / `BuildImageArgs` style in the same package — no new pattern introduced.
+- F3. Label key validation only rejects empty/whitespace keys; values are accepted as-is (including empty values). This matches Docker's own `--label key=value` behavior where an empty value is legal (`--label valv=`). Defensible — not in the acceptance bullet, but a reasonable design.
+- F4. Both validators trim the name (`strings.TrimSpace`) before regex match AND before emitting it as the positional arg (`network.go:72`, `network.go:100`). Surrounding whitespace is silently stripped — this is documented behavior because `name = strings.TrimSpace(r.Name)` is the canonical form fed to the regex.
+- F5. `Valid()` is a public method on both request types, which means external callers can pre-validate before constructing a builder call. This is consistent with the existing `ContainerRunRequest.Valid()` / `ImageBuildRequest.Valid()` pattern in `types.go`.
+- F6. `Internal: false` path is tested (`network_test.go:56-67`) and produces a network with default (bridge) connectivity. This is not the path DROP_15 actually uses (Schema Decision 5 always sets `Internal: true`) but the unit's interface keeps the flag flexible, and the test pins the omission behavior so a future caller toggling the flag works as advertised.
+- F7. Coverage drift from package-baseline: the file `internal/adapters/docker` package was previously above the 60% gate. Adding `network.go` (101 lines, mostly covered) plus 4 executor methods (CreateNetwork / RemoveNetwork are tested directly, but the existing `Build` / `RemoveImage` / `PruneBuilder` etc. cover paths are unchanged) brings the package to 67.8% — well above the gate. The builder's claim is reproduced.
+
+### Missing Evidence
+
+None. All five PLAN.md acceptance bullets (A1–A5) are satisfied with file:line citations, scope is clean per `git show --stat d128363` (3 files all inside `internal/adapters/docker/`), and the mage gate reproduces independently at 51 tests / 67.8% coverage.
+
+### Summary
+
+Verdict: **pass**.
+
+Unit 15.2 cleanly adds Docker network create/remove lifecycle helpers (typed `NetworkCreateRequest` + `NetworkRemoveRequest`, deterministic arg builders, Executor methods) entirely inside `internal/adapters/docker/`. Schema-Decision-5 cut applied verbatim: no `NetworkConnectRequest`, no `BuildNetworkConnectArgs`, no `Executor.ConnectNetwork` anywhere in the repo's Go sources. `--internal` flag emission, deterministic label sorting, and required-field validation are each pinned by dedicated test cases. Executor forwarding is verified through a `CommandRunnerFunc` mock that proves args round-trip verbatim and validation errors short-circuit before the runner is invoked. `mage testPkg ./internal/adapters/docker` reproduces 51 tests passing at 67.8% coverage. Hard-constraint compliance (only edits inside `internal/adapters/docker/`) holds. Ready for QA Falsification review.

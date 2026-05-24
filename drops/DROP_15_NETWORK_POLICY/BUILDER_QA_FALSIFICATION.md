@@ -136,3 +136,72 @@ Residual (accepted): same-package code under `package tools` can still mutate `d
 - External-caller audit: `rg DefaultAllowlistHosts|defaultAllowlistHosts` confirms zero production callers outside `internal/tools/`.
 - Tool invariants verified by trace (no test rerun this round — Round 2 builder already ran `mage testPkg ./internal/tools` → 93 pass / 91.9% cover, recorded at `BUILDER_WORKLOG.md:187-189`; QA Proof R2 already verified completeness — this falsification pass is pure adversarial reasoning over the same evidence base).
 - No raw `go test` / `GOCACHE=...` invocations were issued.
+
+## Unit 15.2 — Round 1
+
+Verdict: FAIL — three confirmed counterexamples in label/name handling.
+
+### Counterexamples
+
+1. **Label key with surrounding whitespace is accepted by `Valid()` but emitted untrimmed into `--label`.**
+   `NetworkCreateRequest.Valid()` rejects only keys whose `strings.TrimSpace` is empty (`internal/adapters/docker/network.go:40-44`). A key like `"  valv  "` passes that check because the trimmed form is `"valv"` (non-empty). But `BuildNetworkCreateArgs` emits the raw key without trimming: `fmt.Sprintf("%s=%s", key, request.Labels[key])` (`internal/adapters/docker/network.go:68`). The resulting arg is `--label   valv  =x`, which Docker accepts but treats as a label whose key has leading/trailing spaces — distinct from the operator's intent and from the `valv=network-policy` label callers will use for orphan-cleanup matching (Unit 15.2.5 contract, PLAN.md line 156). Operator-cleanup queries using `--filter label=valv=network-policy` will not match this network because the actual label key is `"  valv  "` not `"valv"`.
+
+   Concrete reproducer (added then deleted from `internal/adapters/docker/`):
+   ```go
+   req := NetworkCreateRequest{
+       Name:     "valv-net",
+       Internal: true,
+       Labels:   map[string]string{"  valv  ": "x"},
+   }
+   got, _ := BuildNetworkCreateArgs(req)
+   // got contains "  valv  =x" — confirmed at runtime via mage testPkg.
+   ```
+   Test failed with: `UNTRIMMED-KEY-IN-OUTPUT: arg="  valv  =x"`.
+
+   Narrow fix: either trim the key inside `Valid()` and store the trimmed value back (requires struct mutation or normalization at the build-args layer), OR reject any key whose untrimmed form differs from its trimmed form. The latter is the cleaner contract — matches the existing "leading-hyphen rejected" precedent in name validation.
+
+2. **Label key containing `=` produces a `--label key=injected=value` arg that Docker's label parser treats as `key="injected=value"`, hiding the original key.**
+   No validation rejects `=` in label keys (`internal/adapters/docker/network.go:32-46`). A key like `"k=injected"` with value `"value"` emits `--label k=injected=value`. Docker's CLI label parsing splits on the FIRST `=`, so the resulting metadata is `{"k": "injected=value"}` — silently dropping the `=injected` suffix from the operator's intended key. This is a subtle data-integrity hazard for the Unit 15.2.5 orphan-cleanup label contract, where every network is expected to carry a deterministic Valv-owned label.
+
+   Reproducer test failed with: `EMBEDDED-EQUALS: arg="k=injected=value" forms ambiguous key=value`.
+
+   Narrow fix: reject `=` in label keys at `Valid()` time. Docker label keys are documented as DNS-prefix-style identifiers (e.g. `com.docker.compose.project`); `=` is never valid in a key.
+
+3. **No maximum network name length is enforced; a 256-byte name is accepted.**
+   `dockerNetworkNamePattern = ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$` has no length anchor. Docker's networking layer treats network names as Linux interface-name-bounded for derived bridge/veth interface names (`IFNAMSIZ = 16` byte limit historically; modern Docker normally hashes/truncates internally). A request with `Name = strings.Repeat("a", 256)` builds args successfully without error.
+
+   Reproducer test failed with: `256-BYTE-NAME-ACCEPTED: no length limit enforced`.
+
+   The product impact is bounded — Docker itself will return a runtime error if the name is rejected at the daemon — but the unit's contract is "deterministic arg builder with required-field validation" (PLAN.md line 125 "Tests cover required-field validation, --internal emission, and deterministic arg order") and the worklog claims the regex "mirrors Docker's documented network-name shape" (BUILDER_WORKLOG.md line 27-28). The shape part is correct; the length part is not enforced. This is a contract-drift miss, not a runtime safety bug.
+
+   Narrow fix: add a length limit. Docker's documented practical maximum is 64 bytes for a network name (`docker network create` reference) — pick that or a similar bound and enforce it in `Valid()`.
+
+### YAGNI check
+
+PASS. Unit 15.2 deliberately did NOT add `NetworkConnectRequest` / `BuildNetworkConnectArgs` / `Executor.ConnectNetwork` (worklog line 25, network.go lines 16-20), which matches Schema Decision 5's no-second-network rule. The `Labels` field is `map[string]string` rather than a custom type — minimal. No speculative interfaces.
+
+### Hidden dep check
+
+PASS with one observation.
+
+- `dockerNetworkNamePattern` is a package-level `var` (not `const`-equivalent immutable). It is set once at init via `regexp.MustCompile` and not exported, so no external caller can replace it (`network.go:14`). Internally `Valid()` and the existing tests rely on it. This is the standard Go idiom for compiled-once regex; not a regression.
+- `Executor.CreateNetwork` / `RemoveNetwork` inherit their `CommandRunner` from `Executor.runner` set by `NewExecutor` (`command.go:8-13`). No hidden global runner state. Tests inject via `CommandRunnerFunc`. The production wiring follows the same path as the existing `Run`/`Build`/`RemoveImage` methods.
+- Context propagation: both new Executor methods forward `ctx` to `e.runner.Run(ctx, args)`. `TestExecutorRunUsesBuiltArgs` (`command_test.go:14-35`) already pins context-forwarding behavior for the original `Run` method; the new methods follow the same pattern but do NOT have an equivalent ctx-forwarding pin. Low-priority gap — the existing test pattern in `command_test.go:14-35` could be replicated for `CreateNetwork`/`RemoveNetwork` to lock the contract.
+
+### Coverage gap
+
+`mage testPkg ./internal/adapters/docker` reports 67.8% coverage (per worklog) / 65.3% in current tree state (other WIP modifications to `executor.go` from Unit 15.2.5 work). Both numbers are below the 70% CLAUDE.md target. Unit 15.2's specific uncovered paths are the OS-runner `Stream`/`Output` branches in `os_runner.go` (existing, not introduced by 15.2) — not a 15.2 falsifier on its own, but the worklog claim "above the enforced 60.0% gate" understates the project's 70% target.
+
+### Unknowns
+
+1. **Idempotency contract is not part of the unit.** `docker network create <existing-name>` errors at the daemon with "network with name X already exists" (Docker docs). `Executor.CreateNetwork` will surface that wrapped via the runner's `fmt.Errorf` boundary. The plan does not require idempotent create; orphan-cleanup (Unit 15.2.5) is the layer that resolves this. Not a 15.2 falsifier.
+2. **Concurrent create+remove on the same name.** Same network name from two goroutines: Docker serializes at the daemon and the loser gets an error. Go-side `Executor` has no shared mutable state, so no race in the Valv layer. Not a falsifier.
+3. **`docker network rm` of non-existent network.** Errors at the daemon (`Error response from daemon: network X not found`); `Executor.RemoveNetwork` surfaces the wrapped error. Unit 15.2.5's orphan-cleanup will decide whether to swallow `not found` as idempotent success. Out of 15.2 scope.
+
+### Evidence
+
+- Delta inspected: `git show d128363 -- internal/adapters/docker/network.go internal/adapters/docker/executor.go internal/adapters/docker/network_test.go`
+- Code read: `internal/adapters/docker/network.go` (full), `internal/adapters/docker/network_test.go` (full), `internal/adapters/docker/executor.go` (full), `internal/adapters/docker/command.go` (full), `internal/adapters/docker/ops.go` (full — pattern reference), `internal/adapters/docker/types.go` (header).
+- Context7 evidence: builder worklog cites `/docker/cli` for `docker network create --internal` and label syntax (confirmed at BUILDER_WORKLOG.md line 33). Docker docs label-key parsing splits on first `=` per `https://docs.docker.com/reference/cli/docker/container/create/#label`.
+- Reproducer execution: temp test file `internal/adapters/docker/falsif_temp_test.go` added containing three `t.Errorf`-based attacks, run via `mage testPkg ./internal/adapters/docker`, all three FAILED as expected (3 failures / 54 tests total), then file deleted. Final `mage testPkg ./internal/adapters/docker` confirms clean tree state (51 pass).
+- No raw `go test` / `GOCACHE=...` invocations.
