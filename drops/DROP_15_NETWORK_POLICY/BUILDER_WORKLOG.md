@@ -309,3 +309,61 @@ None — existing patterns in `internal/services/images/service.go`, `internal/a
 - [x] Docker Desktop macOS gate marker present + builder notes captured the validation outcome.
 - [x] Orphan-cleanup contract: `valv=network-policy` label on every managed network; startup reclaim/clean loop in `Provision`; explicit `CleanupStale` for non-provisioning startup recovery. Tests prove a stale labeled network is detected and reused/cleaned.
 - [x] Error wrapping boundaries explicit for policy setup, image-build request assembly, docker build execution, and cleanup.
+
+## Unit 15.2 — Round 2
+
+**Date:** 2026-05-24
+**Builder backend:** claude-native (orchestrator dispatch)
+
+### Goal
+
+Address the three Round 1 falsification findings in `internal/adapters/docker/network.go` validation:
+
+1. Label keys with surrounding whitespace are accepted by `Valid()` but emitted untrimmed into `--label` args, breaking Unit 15.2.5 orphan-cleanup label matching.
+2. Label keys containing `=` are not rejected, which breaks Docker's label parsing (splits on first `=`, dropping the suffix).
+3. No maximum network name length is enforced; a 256-byte name is accepted when Docker's practical limit is 64 bytes.
+
+### Files Touched
+
+- `internal/adapters/docker/network.go`
+  - **Fix #1 (untrimmed label keys):** added validation in `NetworkCreateRequest.Valid()` that rejects any label key where `strings.TrimSpace(key) != key`. Matches the existing "leading-hyphen rejected" precedent in name validation. Error message: "label key must not have leading or trailing whitespace".
+  - **Fix #2 (label keys with `=`):** added validation in `NetworkCreateRequest.Valid()` that rejects any label key containing the `=` rune via `strings.ContainsRune(key, '=')`. Error message: "label key must not contain '='".
+  - **Fix #3 (network name length):** added length limit validation in both `NetworkCreateRequest.Valid()` and `NetworkRemoveRequest.Valid()` that rejects names longer than 64 bytes. Error message: "network name must be at most 64 bytes, got N".
+
+- `internal/adapters/docker/network_test.go` — added three new test functions covering all three findings:
+  - `TestNetworkCreateRequestRejectsUntrimmedLabelKey` — 4 sub-tests covering leading whitespace, trailing whitespace, both sides, and tab characters.
+  - `TestNetworkCreateRequestRejectsLabelKeyWithEquals` — 3 sub-tests covering `=` in middle, at start, and multiple equals.
+  - `TestNetworkCreateRequestRejectsOverlongName` — 3 sub-tests: 64-byte boundary acceptance, 65-byte rejection, 256-byte rejection.
+
+- `drops/DROP_15_NETWORK_POLICY/PLAN.md` — Unit 15.2 `state: done` → `in_progress` → (pending final state flip).
+
+### Mage Targets Run
+
+- `mage testPkg ./internal/adapters/docker` → **64 tests pass, 0 failures, coverage 65.7%** (51 baseline + 13 new tests). All tests green across original + new test cases.
+
+### Design Notes
+
+- **Untrimmed-key fix strategy:** Chose rejection over mutation because it matches the existing name-validation style ("leading-hyphen rejected") and keeps the contract clear at the input boundary. Mutation inside `Valid()` would require either struct modification or hiding the transformation from the caller.
+- **Label-key `=` rejection:** Docker's CLI label syntax is `--label key=value` where Docker parses on the FIRST `=` — a key like `k=injected` with value `v` becomes Docker label `{"k": "injected=v"}`, losing the operator's intended suffix. Rejecting `=` in keys at validation time prevents this silent data corruption.
+- **Network name 64-byte limit:** Docker's documented practical maximum for network names is 64 bytes. The regex pattern is correct but lacked a length anchor. Applied to both `NetworkCreateRequest.Valid()` and `NetworkRemoveRequest.Valid()` for symmetry.
+- **Boundary test:** Added 64-byte acceptance case plus 65-byte rejection case to pin the boundary. A future tightening would fail the accept case.
+
+### Hylla Feedback
+
+None — existing patterns in `internal/adapters/docker/network.go` provided sufficient evidence directly via `Read`. The three findings came from BUILDER_QA_FALSIFICATION.md Unit 15.2 Round 1 section.
+
+### Acceptance Check against Round 2 brief
+
+- [x] All three Round 1 findings addressed with narrow fixes (validation layer only).
+- [x] Fix #1 → untrimmed-key rejection with descriptive error message and 4 sub-tests.
+- [x] Fix #2 → `=` in keys rejection with descriptive error message and 3 sub-tests.
+- [x] Fix #3 → 64-byte name limit with descriptive error message and 3 sub-tests (boundary + rejection cases).
+- [x] 64 tests pass (51 baseline + 13 new). Coverage 65.7% ≥ 60% enforced gate.
+- [x] No raw `go test` / `GOCACHE=...` invocations — only `mage testPkg`.
+
+### Hard-Constraint Compliance
+
+- All Round 2 edits live in `internal/adapters/docker/network.go` (three validation guards) and `internal/adapters/docker/network_test.go` (three new test functions).
+- No edits to executor.go (Unit 15.2.5 already added ListNetworks there).
+- No edits to drop dir except PLAN.md state-bit flip and this worklog appendix.
+- No `NetworkConnectRequest` added (Schema Decision 5 cut respected).

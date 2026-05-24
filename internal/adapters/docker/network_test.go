@@ -294,3 +294,147 @@ func TestExecutorRemoveNetworkReturnsBuildError(t *testing.T) {
 		t.Fatalf("RemoveNetwork() error = %q, want substring %q", err.Error(), "name is required")
 	}
 }
+
+func TestNetworkCreateRequestRejectsUntrimmedLabelKey(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		labelKey  string
+		wantError string
+	}{
+		{
+			name:      "leading whitespace rejected",
+			labelKey:  "  valv",
+			wantError: "leading or trailing whitespace",
+		},
+		{
+			name:      "trailing whitespace rejected",
+			labelKey:  "valv  ",
+			wantError: "leading or trailing whitespace",
+		},
+		{
+			name:      "both sides rejected",
+			labelKey:  "  valv  ",
+			wantError: "leading or trailing whitespace",
+		},
+		{
+			name:      "tab whitespace rejected",
+			labelKey:  "\tvalv\t",
+			wantError: "leading or trailing whitespace",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			req := NetworkCreateRequest{
+				Name:     "valv-test",
+				Internal: true,
+				Labels:   map[string]string{tt.labelKey: "value"},
+			}
+			_, err := BuildNetworkCreateArgs(req)
+			if err == nil {
+				t.Fatalf("BuildNetworkCreateArgs() error = nil, want error containing %q", tt.wantError)
+			}
+			if !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("BuildNetworkCreateArgs() error = %q, want substring %q", err.Error(), tt.wantError)
+			}
+		})
+	}
+}
+
+func TestNetworkCreateRequestRejectsLabelKeyWithEquals(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		labelKey string
+	}{
+		{
+			name:     "equals in middle",
+			labelKey: "k=injected",
+		},
+		{
+			name:     "equals at start",
+			labelKey: "=k",
+		},
+		{
+			name:     "multiple equals",
+			labelKey: "k=v=w",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			req := NetworkCreateRequest{
+				Name:     "valv-test",
+				Internal: true,
+				Labels:   map[string]string{tt.labelKey: "value"},
+			}
+			_, err := BuildNetworkCreateArgs(req)
+			if err == nil {
+				t.Fatalf("BuildNetworkCreateArgs() error = nil, want error containing '='")
+			}
+			if !strings.Contains(err.Error(), "=") {
+				t.Fatalf("BuildNetworkCreateArgs() error = %q, want substring containing '='", err.Error())
+			}
+		})
+	}
+}
+
+func TestNetworkCreateRequestRejectsOverlongName(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		networkName   string
+		shouldAccept  bool
+		wantErrSubstr string
+	}{
+		{
+			name:         "64 bytes accepted (boundary)",
+			networkName:  "a" + strings.Repeat("b", 62) + "c", // exactly 64 bytes
+			shouldAccept: true,
+		},
+		{
+			name:          "65 bytes rejected",
+			networkName:   "a" + strings.Repeat("b", 63) + "c", // exactly 65 bytes
+			shouldAccept:  false,
+			wantErrSubstr: "at most 64 bytes",
+		},
+		{
+			name:          "256 bytes rejected",
+			networkName:   strings.Repeat("a", 256),
+			shouldAccept:  false,
+			wantErrSubstr: "at most 64 bytes",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			req := NetworkCreateRequest{
+				Name:     tt.networkName,
+				Internal: true,
+			}
+			_, err := BuildNetworkCreateArgs(req)
+			if tt.shouldAccept {
+				if err != nil {
+					t.Fatalf("BuildNetworkCreateArgs() error = %v, want nil", err)
+				}
+			} else {
+				if err == nil {
+					t.Fatalf("BuildNetworkCreateArgs() error = nil, want error containing %q", tt.wantErrSubstr)
+				}
+				if !strings.Contains(err.Error(), tt.wantErrSubstr) {
+					t.Fatalf("BuildNetworkCreateArgs() error = %q, want substring %q", err.Error(), tt.wantErrSubstr)
+				}
+			}
+		})
+	}
+}

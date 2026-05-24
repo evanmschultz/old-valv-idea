@@ -37,9 +37,20 @@ func (r NetworkCreateRequest) Valid() error {
 	if !dockerNetworkNamePattern.MatchString(name) {
 		return fmt.Errorf("validate network create request: invalid network name %q", name)
 	}
+	if len(name) > 64 {
+		return fmt.Errorf("validate network create request: network name must be at most 64 bytes, got %d", len(name))
+	}
 	for key := range r.Labels {
 		if strings.TrimSpace(key) == "" {
 			return fmt.Errorf("validate network create request: label key is required")
+		}
+		// Reject keys that differ when trimmed (contain surrounding whitespace).
+		if strings.TrimSpace(key) != key {
+			return fmt.Errorf("validate network create request: label key must not have leading or trailing whitespace")
+		}
+		// Reject keys containing '=' which would break Docker's label parsing.
+		if strings.ContainsRune(key, '=') {
+			return fmt.Errorf("validate network create request: label key must not contain '='")
 		}
 	}
 	return nil
@@ -87,6 +98,9 @@ func (r NetworkRemoveRequest) Valid() error {
 	}
 	if !dockerNetworkNamePattern.MatchString(name) {
 		return fmt.Errorf("validate network remove request: invalid network name %q", name)
+	}
+	if len(name) > 64 {
+		return fmt.Errorf("validate network remove request: network name must be at most 64 bytes, got %d", len(name))
 	}
 	return nil
 }
