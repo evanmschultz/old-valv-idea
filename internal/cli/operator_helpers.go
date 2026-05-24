@@ -17,6 +17,7 @@ import (
 	"github.com/evanmschultz/valv/internal/config"
 	"github.com/evanmschultz/valv/internal/domain"
 	"github.com/evanmschultz/valv/internal/output"
+	"github.com/evanmschultz/valv/internal/project"
 	cleanupservice "github.com/evanmschultz/valv/internal/services/cleanup"
 	globalswitchservice "github.com/evanmschultz/valv/internal/services/globalswitch"
 	imagesservice "github.com/evanmschultz/valv/internal/services/images"
@@ -421,24 +422,36 @@ func projectImageOverrideEnvName(provider domain.Provider) string {
 // resolveProjectImage returns the image reference the binding-aware launch
 // path should use for the given provider in the given working directory.
 //
-// Behavior follows DROP_12 Unit 12.4 (PLAN.md decisions 12 + 13):
+// Behavior follows DROP_12 Unit 12.4 (PLAN.md decisions 12 + 13) plus
+// DROP_15 Unit 15.0 (schema decision 8 — project-root-based resolution):
 //
-//   - When tools.Resolve reports an empty manifest (no `.valv/tools.toml`, or
-//     a file with no [tools] entries), returns baseRef unchanged. No docker
-//     calls, no overlay build.
+//   - First resolves the project root from workingDir via project.DetectFrom
+//     so a repo-subdirectory launch sees the same `.valv/tools.toml` as a
+//     repo-root launch. Falls back to workingDir itself when no git marker
+//     is found, matching project.DetectFrom's documented behavior.
+//   - When tools.Resolve reports an empty manifest (no `.valv/tools.toml`,
+//     or a file with no [tools] entries) at the detected project root,
+//     returns baseRef unchanged. No docker calls, no overlay build.
 //   - When the manifest is non-empty AND VALV_<PROVIDER>_IMAGE is set, the
 //     env-var override wins: the function emits a single stderr warning and
 //     returns baseRef (which the upstream claudeImageRef/codexImageRef has
 //     already resolved to the override value). The overlay is skipped to
 //     keep the override path semantically identical to its pre-DROP_12
-//     behavior.
+//     behavior. The override applies AFTER project-root manifest
+//     resolution so subdir invocations behave identically to root
+//     invocations.
 //   - Otherwise, opens the images service for the provider, calls
 //     EnsureProjectImage with the resolved manifest and baseRef, and returns
 //     the per-project tag from the result. Any tools.Resolve error other
 //     than the absent-file case (already handled by tools.Resolve itself
 //     returning {Manifest:{}, nil}) is wrapped and returned.
 func resolveProjectImage(cmd *cobra.Command, paths config.Paths, provider domain.Provider, workingDir string, baseRef dockeradapter.ImageRef) (dockeradapter.ImageRef, error) {
-	manifest, err := tools.Resolve(workingDir)
+	detected, err := project.DetectFrom(workingDir)
+	if err != nil {
+		return dockeradapter.ImageRef{}, fmt.Errorf("resolve project image: %w", err)
+	}
+
+	manifest, err := tools.Resolve(detected.Root)
 	if err != nil {
 		return dockeradapter.ImageRef{}, fmt.Errorf("resolve project image: %w", err)
 	}

@@ -174,3 +174,170 @@ ta = { source = "github.com/evanmschultz/ta@main", install = "go install" }
 	}
 	return workingDir
 }
+
+// writeClaudeNestedToolsManifest writes a minimal `.valv/tools.toml` at a
+// project root marked by `.git/`, then creates a nested subdirectory inside
+// that root. It returns (projectRoot, nestedSubdir). The nested subdir does
+// NOT itself contain a `.valv/tools.toml` — the only manifest lives at the
+// project root. Unit 15.0 acceptance: invoking from the nested subdir must
+// still resolve and use the root-level manifest via project.DetectFrom.
+func writeClaudeNestedToolsManifest(t *testing.T) (string, string) {
+	t.Helper()
+	projectRoot := t.TempDir()
+	// .git marker so project.DetectFrom climbs back to projectRoot.
+	if err := os.MkdirAll(filepath.Join(projectRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git) error = %v", err)
+	}
+	valvDir := filepath.Join(projectRoot, ".valv")
+	if err := os.MkdirAll(valvDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", valvDir, err)
+	}
+	manifest := strings.TrimSpace(`
+[tools]
+ta = { source = "github.com/evanmschultz/ta@main", install = "go install" }
+`) + "\n"
+	manifestPath := filepath.Join(valvDir, "tools.toml")
+	if err := os.WriteFile(manifestPath, []byte(manifest), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", manifestPath, err)
+	}
+	nested := filepath.Join(projectRoot, "pkg", "sub")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", nested, err)
+	}
+	return projectRoot, nested
+}
+
+// writeClaudeNestedNoManifest creates a project root marked by `.git/` with
+// NO `.valv/tools.toml` and returns a nested subdirectory inside that root.
+// Unit 15.0 acceptance: when no manifest exists at the detected project
+// root, invoking from a nested subdir must still return the base ref with
+// zero docker calls (no overlay attempted).
+func writeClaudeNestedNoManifest(t *testing.T) string {
+	t.Helper()
+	projectRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(projectRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git) error = %v", err)
+	}
+	nested := filepath.Join(projectRoot, "pkg", "sub")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", nested, err)
+	}
+	return nested
+}
+
+// TestResolveProjectImageClaudeNestedSubdirFindsRootManifest pins Unit 15.0
+// (DROP_15 schema decision 8): when invoked from a nested subdirectory of a
+// repo whose root holds `.valv/tools.toml`, resolveProjectImage MUST resolve
+// the project root via project.DetectFrom(workingDir) before calling
+// tools.Resolve, so the overlay build path runs identically to a repo-root
+// launch.
+func TestResolveProjectImageClaudeNestedSubdirFindsRootManifest(t *testing.T) {
+	t.Setenv("VALV_CLAUDE_IMAGE", "")
+	paths := testCodexPaths(t)
+	_, nested := writeClaudeNestedToolsManifest(t)
+
+	logPath := installFakeDocker(t)
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	var stderr bytes.Buffer
+	cmd.SetIn(bytes.NewBuffer(nil))
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&stderr)
+
+	baseRef := claudeImageRef()
+	got, err := resolveProjectImage(cmd, paths, domain.ProviderClaude, nested, baseRef)
+	if err != nil {
+		t.Fatalf("resolveProjectImage() error = %v", err)
+	}
+	if got.String() == baseRef.String() {
+		t.Fatalf("resolveProjectImage() = %q, want resolved per-project ref distinct from base %q (manifest at root should have triggered overlay)", got.String(), baseRef.String())
+	}
+	if !strings.HasPrefix(got.Tag, "proj-") {
+		t.Fatalf("resolveProjectImage() tag = %q, want proj- prefix", got.Tag)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("unexpected stderr %q, want no warning when override unset", stderr.String())
+	}
+
+	logContent := mustReadFile(t, logPath)
+	if !strings.Contains(logContent, "buildx build --load") {
+		t.Fatalf("docker log %q missing buildx build invocation — overlay was not triggered from nested subdir", logContent)
+	}
+}
+
+// TestResolveProjectImageClaudeNestedSubdirNoManifestReturnsBase pins Unit
+// 15.0: when invoked from a nested subdirectory of a repo whose root has NO
+// `.valv/tools.toml`, resolveProjectImage still resolves to the project root
+// (via project.DetectFrom) but returns baseRef unchanged with zero docker
+// calls because the resolved manifest is empty.
+func TestResolveProjectImageClaudeNestedSubdirNoManifestReturnsBase(t *testing.T) {
+	paths := testCodexPaths(t)
+	nested := writeClaudeNestedNoManifest(t)
+
+	logPath := installFakeDocker(t)
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	var stderr bytes.Buffer
+	cmd.SetIn(bytes.NewBuffer(nil))
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&stderr)
+
+	baseRef := claudeImageRef()
+	got, err := resolveProjectImage(cmd, paths, domain.ProviderClaude, nested, baseRef)
+	if err != nil {
+		t.Fatalf("resolveProjectImage() error = %v", err)
+	}
+	if got.String() != baseRef.String() {
+		t.Fatalf("resolveProjectImage() = %q, want base ref %q (no manifest at root)", got.String(), baseRef.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("unexpected stderr %q, want no warning for empty manifest", stderr.String())
+	}
+	if data, err := os.ReadFile(logPath); err == nil && len(data) > 0 {
+		t.Fatalf("unexpected docker calls for nested-subdir empty-root case: %q", data)
+	}
+}
+
+// TestResolveProjectImageClaudeNestedSubdirOverrideAfterRootResolve pins
+// Unit 15.0: VALV_CLAUDE_IMAGE override semantics remain unchanged AFTER
+// project-root-based manifest resolution. Invoking from a nested subdir
+// with a root-level manifest AND override set must still emit one warning
+// and skip overlay work — proving the override applies after root-based
+// manifest resolution (not after raw-cwd resolution that wouldn't find the
+// manifest at all).
+func TestResolveProjectImageClaudeNestedSubdirOverrideAfterRootResolve(t *testing.T) {
+	t.Setenv("VALV_CLAUDE_IMAGE", "test/claude:override")
+	paths := testCodexPaths(t)
+	_, nested := writeClaudeNestedToolsManifest(t)
+
+	logPath := installFakeDocker(t)
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	var stderr bytes.Buffer
+	cmd.SetIn(bytes.NewBuffer(nil))
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&stderr)
+
+	baseRef := claudeImageRef()
+	got, err := resolveProjectImage(cmd, paths, domain.ProviderClaude, nested, baseRef)
+	if err != nil {
+		t.Fatalf("resolveProjectImage() error = %v", err)
+	}
+	if got.String() != baseRef.String() {
+		t.Fatalf("resolveProjectImage() = %q, want base ref %q (override path from nested)", got.String(), baseRef.String())
+	}
+
+	const wantWarning = "warning: VALV_CLAUDE_IMAGE override active; .valv/tools.toml overlay skipped"
+	if !strings.Contains(stderr.String(), wantWarning) {
+		t.Fatalf("stderr %q missing override warning %q (override must apply after root-based manifest resolution)", stderr.String(), wantWarning)
+	}
+	if got, want := strings.Count(stderr.String(), wantWarning), 1; got != want {
+		t.Fatalf("override warning emitted %d times, want %d", got, want)
+	}
+	if data, err := os.ReadFile(logPath); err == nil && len(data) > 0 {
+		t.Fatalf("unexpected docker calls under override + nested subdir: %q", data)
+	}
+}

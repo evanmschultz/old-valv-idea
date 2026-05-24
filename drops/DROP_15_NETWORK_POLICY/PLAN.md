@@ -55,7 +55,7 @@ Ship DROP_15 as a closed-by-default, macOS-compatible network policy layer acros
 
 #### Unit 15.0 — Re-root project-image manifest resolution to the detected project root
 
-**State:** todo
+**State:** done
 
 **Paths:**
 - `internal/cli/operator_helpers.go`
@@ -78,7 +78,7 @@ Ship DROP_15 as a closed-by-default, macOS-compatible network policy layer acros
 
 #### Unit 15.1 — Typed allowlist schema, default hosts, and section-safe `.valv/tools.toml` editing
 
-**State:** todo
+**State:** done
 
 **Paths:**
 - `internal/tools/tools.go`
@@ -106,7 +106,7 @@ Ship DROP_15 as a closed-by-default, macOS-compatible network policy layer acros
 
 #### Unit 15.2 — Docker network lifecycle helpers
 
-**State:** todo
+**State:** done
 
 **Paths:**
 - `internal/adapters/docker/network.go` (new, not yet in tree)
