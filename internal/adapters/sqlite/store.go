@@ -14,6 +14,12 @@ type Store struct {
 	db *sql.DB
 }
 
+// Compile-time assertions that Store satisfies every domain repository
+// contract it advertises. Adding the AccountEnvRepository line catches
+// interface drift between domain.AccountEnvRepository and the matching
+// Store methods at compile time, before tests run.
+var _ domain.AccountEnvRepository = (*Store)(nil)
+
 func NewStore(path string) (*Store, error) {
 	db, err := Open(OpenOptions{Path: path})
 	if err != nil {
@@ -59,6 +65,63 @@ var coreSchemaTables = []string{
 	"provider_images",
 }
 
+// coreSchemaDDL is the ordered set of CREATE TABLE statements that
+// constitute the v2 core schema. Every statement is idempotent
+// (`CREATE TABLE IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`) and is
+// executed inside the same transaction as the `PRAGMA user_version = 2`
+// stamp so a crash mid-bootstrap rolls back to an empty database (the
+// next bootstrap then correctly classifies it as fresh, not legacy v0).
+var coreSchemaDDL = []string{
+	`CREATE TABLE IF NOT EXISTS projects (
+		id TEXT PRIMARY KEY,
+		root TEXT NOT NULL UNIQUE,
+		name TEXT NOT NULL,
+		created_at TEXT NOT NULL
+	);`,
+	`CREATE TABLE IF NOT EXISTS profiles (
+		id TEXT PRIMARY KEY,
+		provider TEXT NOT NULL,
+		name TEXT NOT NULL,
+		home_path TEXT NOT NULL,
+		created_at TEXT NOT NULL,
+		UNIQUE(provider, name)
+	);`,
+	`CREATE TABLE IF NOT EXISTS project_bindings (
+		project_id TEXT NOT NULL,
+		profile_id TEXT NOT NULL,
+		provider TEXT NOT NULL,
+		created_at TEXT NOT NULL,
+		modified_at TEXT NOT NULL,
+		PRIMARY KEY (project_id, provider),
+		FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+		FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+	);`,
+	`CREATE TABLE IF NOT EXISTS runtimes (
+		id TEXT PRIMARY KEY,
+		provider TEXT NOT NULL,
+		project_id TEXT NOT NULL,
+		profile_id TEXT NOT NULL,
+		mode TEXT NOT NULL,
+		container_id TEXT NOT NULL,
+		image_ref TEXT NOT NULL,
+		status TEXT NOT NULL,
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL,
+		FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+		FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+	);`,
+	`CREATE INDEX IF NOT EXISTS idx_runtimes_project_id ON runtimes(project_id);`,
+	`CREATE TABLE IF NOT EXISTS provider_images (
+		provider TEXT PRIMARY KEY,
+		latest_version TEXT NOT NULL,
+		latest_checked_at TEXT NOT NULL,
+		installed_version TEXT NOT NULL,
+		installed_image_ref TEXT NOT NULL,
+		installed_version_tag TEXT NOT NULL,
+		updated_at TEXT NOT NULL
+	);`,
+}
+
 func (s *Store) Bootstrap(ctx context.Context) error {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
@@ -66,11 +129,13 @@ func (s *Store) Bootstrap(ctx context.Context) error {
 	}
 	defer conn.Close()
 
-	// Detect "legacy v0 database" vs "brand-new database" BEFORE running any
-	// DDL. A legacy v0 database has core tables present but user_version = 0
-	// (because previous bootstrap iterations never set the marker). DROP_14
-	// dropped v0 support, so this state must be rejected with
-	// ErrUnsupportedSchema rather than silently auto-migrating.
+	// Detect "legacy v0 database" vs "brand-new database" BEFORE entering the
+	// migration transaction. A legacy v0 database has core tables present but
+	// user_version = 0 (because pre-DROP_14 bootstrap never set the marker).
+	// The atomic transaction below means "tables present + user_version = 0"
+	// can ONLY occur on a real legacy v0 database; a crashed fresh-init
+	// rolls back to an empty DB. DROP_14 dropped v0 support, so this state
+	// must be rejected with ErrUnsupportedSchema rather than auto-migrating.
 	var preUserVersion int
 	if err := conn.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&preUserVersion); err != nil {
 		return fmt.Errorf("bootstrap sqlite store: read user_version: %w", err)
@@ -85,64 +150,6 @@ func (s *Store) Bootstrap(ctx context.Context) error {
 				"bootstrap sqlite store: unsupported schema: got user_version=0 with pre-existing core tables, supported window [%d, %d]: %w",
 				minSupportedSchemaVersion, maxSupportedSchemaVersion, domain.ErrUnsupportedSchema,
 			)
-		}
-	}
-
-	statements := []string{
-		`PRAGMA foreign_keys = ON;`,
-		`CREATE TABLE IF NOT EXISTS projects (
-			id TEXT PRIMARY KEY,
-			root TEXT NOT NULL UNIQUE,
-			name TEXT NOT NULL,
-			created_at TEXT NOT NULL
-		);`,
-		`CREATE TABLE IF NOT EXISTS profiles (
-			id TEXT PRIMARY KEY,
-			provider TEXT NOT NULL,
-			name TEXT NOT NULL,
-			home_path TEXT NOT NULL,
-			created_at TEXT NOT NULL,
-			UNIQUE(provider, name)
-		);`,
-		`CREATE TABLE IF NOT EXISTS project_bindings (
-			project_id TEXT NOT NULL,
-			profile_id TEXT NOT NULL,
-			provider TEXT NOT NULL,
-			created_at TEXT NOT NULL,
-			modified_at TEXT NOT NULL,
-			PRIMARY KEY (project_id, provider),
-			FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
-			FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE
-		);`,
-		`CREATE TABLE IF NOT EXISTS runtimes (
-			id TEXT PRIMARY KEY,
-			provider TEXT NOT NULL,
-			project_id TEXT NOT NULL,
-			profile_id TEXT NOT NULL,
-			mode TEXT NOT NULL,
-			container_id TEXT NOT NULL,
-			image_ref TEXT NOT NULL,
-			status TEXT NOT NULL,
-			created_at TEXT NOT NULL,
-			updated_at TEXT NOT NULL,
-			FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
-			FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE
-		);`,
-		`CREATE INDEX IF NOT EXISTS idx_runtimes_project_id ON runtimes(project_id);`,
-		`CREATE TABLE IF NOT EXISTS provider_images (
-			provider TEXT PRIMARY KEY,
-			latest_version TEXT NOT NULL,
-			latest_checked_at TEXT NOT NULL,
-			installed_version TEXT NOT NULL,
-			installed_image_ref TEXT NOT NULL,
-			installed_version_tag TEXT NOT NULL,
-			updated_at TEXT NOT NULL
-		);`,
-	}
-
-	for _, statement := range statements {
-		if _, err := conn.ExecContext(ctx, statement); err != nil {
-			return fmt.Errorf("bootstrap sqlite store: exec statement: %w", err)
 		}
 	}
 
@@ -168,21 +175,28 @@ func hasAnyCoreTable(ctx context.Context, conn *sql.Conn) (bool, error) {
 	return false, nil
 }
 
-// migrateSchemaOnConn advances the schema forward through the supported
-// version window on the supplied connection.
+// migrateSchemaOnConn brings the schema forward to the v2 window on the
+// supplied connection. The fresh-init core-table DDL, the account_env
+// table DDL, and the `PRAGMA user_version = 2` stamp all execute inside a
+// single BEGIN IMMEDIATE / COMMIT transaction so that a crash anywhere in
+// the bootstrap path rolls back to the pre-bootstrap on-disk state. This
+// closes the false-legacy-v0 window: post-rollback, the database is
+// either truly empty (next bootstrap classifies it as fresh) or already
+// stamped at v2 (next bootstrap takes the no-op path).
 //
-// Migrations run inside an explicit BEGIN IMMEDIATE block so that a second
-// process opening the same database during first-time bootstrap blocks on
-// the reserved lock instead of seeing SQLITE_BUSY. The DSN-level
-// busy_timeout(5000) configured in open.go absorbs the wait while the
-// first writer commits; once the loser proceeds it observes the final
-// user_version and takes the no-op path.
+// The IMMEDIATE lock also serializes concurrent first-open bootstrap.
+// The DSN-level busy_timeout(5000) configured in open.go absorbs the
+// wait while the first writer commits; once the loser proceeds it
+// observes the final user_version and takes the no-op path.
 //
-// Pre-DDL legacy v0 detection lives in Bootstrap (hasAnyCoreTable). By the
-// time migrateSchemaOnConn runs, user_version = 0 always means "fresh
-// database" and is stamped straight to v2. v1 databases upgrade to v2.
-// Versions above maxSupportedSchemaVersion are rejected with
-// ErrUnsupportedSchema.
+// Pre-DDL legacy v0 detection lives in Bootstrap (hasAnyCoreTable). By
+// the time migrateSchemaOnConn runs, user_version = 0 always means
+// "fresh database" because (a) legacy v0 was already rejected and
+// (b) the atomic-bootstrap invariant guarantees no interrupted-fresh
+// state can ever land with tables-present + user_version = 0.
+// user_version = 0 takes the full fresh-init DDL path; v1 takes the
+// account_env-only upgrade; v2 is a no-op commit. Versions above
+// maxSupportedSchemaVersion are rejected with ErrUnsupportedSchema.
 func (s *Store) migrateSchemaOnConn(ctx context.Context, conn *sql.Conn) error {
 	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
 		return fmt.Errorf("bootstrap sqlite store: migrate schema: begin immediate: %w", err)
@@ -206,10 +220,21 @@ func (s *Store) migrateSchemaOnConn(ctx context.Context, conn *sql.Conn) error {
 		)
 	}
 
-	// Fresh database (user_version = 0 + no pre-existing core tables — the
-	// legacy-v0 case was already rejected in Bootstrap) or v1 database both
-	// need the account_env table. CREATE TABLE IF NOT EXISTS makes the
-	// statement idempotent across both starting points.
+	// Fresh database (user_version = 0): run the full v2 DDL set under the
+	// transaction. The legacy-v0 case was already rejected in Bootstrap
+	// before BEGIN IMMEDIATE, so reaching this branch with user_version = 0
+	// is unambiguously "brand new + atomically locked".
+	if userVersion == 0 {
+		for _, statement := range coreSchemaDDL {
+			if _, err := conn.ExecContext(ctx, statement); err != nil {
+				return fmt.Errorf("bootstrap sqlite store: exec core ddl: %w", err)
+			}
+		}
+	}
+
+	// v0 → v2 and v1 → v2 both need the account_env table.
+	// CREATE TABLE IF NOT EXISTS keeps the statement safe across both
+	// starting points.
 	if userVersion < 2 {
 		if _, err := conn.ExecContext(ctx, accountEnvCreateTable); err != nil {
 			return fmt.Errorf("bootstrap sqlite store: create account_env: %w", err)

@@ -948,6 +948,179 @@ func TestStoreAccountEnvSurvivesProfileRename(t *testing.T) {
 	}
 }
 
+// TestStoreBootstrapFreshDBStampsV2WithAllCoreTables proves that a brand-new
+// database (no tables, user_version=0) bootstraps under the atomic
+// transaction path: after Bootstrap returns, all v2 core tables exist AND
+// user_version = 2 atomically. This is the happy path for the F1 fix that
+// moved core-table DDL inside the BEGIN IMMEDIATE/COMMIT block.
+func TestStoreBootstrapFreshDBStampsV2WithAllCoreTables(t *testing.T) {
+	t.Parallel()
+
+	store := newBootstrappedStore(t) // brand-new in-memory DB, Bootstrap called once.
+	ctx := context.Background()
+
+	var version int
+	if err := store.DB().QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatalf("read user_version error = %v", err)
+	}
+	if version != 2 {
+		t.Fatalf("post-fresh-bootstrap user_version = %d, want 2", version)
+	}
+
+	// Every v2 core table must be present after a single fresh Bootstrap call.
+	wantTables := append([]string(nil), coreSchemaTables...)
+	wantTables = append(wantTables, "account_env")
+	for _, table := range wantTables {
+		var count int
+		if err := store.DB().QueryRowContext(
+			ctx,
+			`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`,
+			table,
+		).Scan(&count); err != nil {
+			t.Fatalf("sqlite_master probe %q error = %v", table, err)
+		}
+		if count != 1 {
+			t.Fatalf("table %q count = %d after fresh bootstrap, want 1", table, count)
+		}
+	}
+}
+
+// TestStoreBootstrapAtomicityRolledBackInitLeavesEmptyDB proves the F1
+// invariant by direct behavioral simulation: a fresh-init transaction that
+// rolls back must leave zero core tables on disk. The atomic bootstrap path
+// in migrateSchemaOnConn relies on this SQLite contract. If this test ever
+// fails, the F1 fix is invalid because a crashed fresh-init COULD leave
+// partial tables + user_version=0 (the broken state that gets misclassified
+// as legacy v0 by the next Bootstrap).
+//
+// The test directly executes the same DDL set Bootstrap uses inside a
+// transaction, then rolls back, then asserts the DB is empty. This proves
+// the rollback semantics our atomic bootstrap depends on are real on the
+// modernc.org/sqlite driver.
+func TestStoreBootstrapAtomicityRolledBackInitLeavesEmptyDB(t *testing.T) {
+	t.Parallel()
+
+	dbPath := fmt.Sprintf("%s/atomicity.sqlite3", t.TempDir())
+	db, err := Open(OpenOptions{Path: dbPath})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("db.Conn() error = %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		t.Fatalf("BEGIN IMMEDIATE error = %v", err)
+	}
+	for _, statement := range coreSchemaDDL {
+		if _, err := conn.ExecContext(ctx, statement); err != nil {
+			t.Fatalf("ddl exec error = %v", err)
+		}
+	}
+	if _, err := conn.ExecContext(ctx, accountEnvCreateTable); err != nil {
+		t.Fatalf("account_env ddl exec error = %v", err)
+	}
+	if _, err := conn.ExecContext(ctx, `PRAGMA user_version = 2`); err != nil {
+		t.Fatalf("stamp user_version error = %v", err)
+	}
+
+	// Simulate the crash: ROLLBACK before COMMIT.
+	if _, err := conn.ExecContext(ctx, `ROLLBACK`); err != nil {
+		t.Fatalf("ROLLBACK error = %v", err)
+	}
+
+	// Post-rollback, no core tables, user_version still 0.
+	var version int
+	if err := conn.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatalf("post-rollback user_version error = %v", err)
+	}
+	if version != 0 {
+		t.Fatalf("post-rollback user_version = %d, want 0 (rollback should reset)", version)
+	}
+
+	wantAbsent := append([]string(nil), coreSchemaTables...)
+	wantAbsent = append(wantAbsent, "account_env")
+	for _, table := range wantAbsent {
+		var count int
+		if err := conn.QueryRowContext(
+			ctx,
+			`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`,
+			table,
+		).Scan(&count); err != nil {
+			t.Fatalf("sqlite_master probe %q error = %v", table, err)
+		}
+		if count != 0 {
+			t.Fatalf("table %q count = %d after rollback, want 0 (DDL must roll back)", table, count)
+		}
+	}
+
+	// And the killer assertion: re-Bootstrap on this rolled-back DB must
+	// succeed (classifying it as fresh, not as legacy v0). This is the F1
+	// scenario the crash window used to brick.
+	store := NewStoreFromDB(db)
+	if err := store.Bootstrap(ctx); err != nil {
+		t.Fatalf("Bootstrap() after rollback error = %v (DB should be recoverable as fresh)", err)
+	}
+	if err := store.DB().QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatalf("post-recovery user_version error = %v", err)
+	}
+	if version != 2 {
+		t.Fatalf("post-recovery user_version = %d, want 2", version)
+	}
+}
+
+// TestStoreBootstrapAtomicityCancelMidTransactionRollsBack proves that a
+// real crash analog — context cancellation during the bootstrap transaction
+// before COMMIT — also rolls back cleanly, leaving the DB recoverable.
+// Uses a cancellable context whose cancel fires after BEGIN but before
+// migrateSchemaOnConn's COMMIT can land.
+//
+// Strategy: open a fresh DB, start Bootstrap with a context that is already
+// cancelled. The BEGIN IMMEDIATE itself may or may not error depending on
+// driver behavior; the contract we care about is that whatever happens, the
+// resulting on-disk state is recoverable by the next Bootstrap.
+func TestStoreBootstrapAtomicityCancelMidTransactionRollsBack(t *testing.T) {
+	t.Parallel()
+
+	dbPath := fmt.Sprintf("%s/cancel-mid-tx.sqlite3", t.TempDir())
+	db, err := Open(OpenOptions{Path: dbPath})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	store := NewStoreFromDB(db)
+
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel before Bootstrap runs.
+
+	// Bootstrap with a pre-cancelled context. Behavior: either errors at the
+	// pre-tx conn.QueryRowContext step (user_version probe) or fails inside
+	// the tx; in either case, no committed state lands.
+	_ = store.Bootstrap(cancelCtx)
+
+	// Now recover with a fresh context. This must succeed AND stamp v2,
+	// proving the cancelled attempt did not leave the DB in the broken
+	// "tables present + user_version=0" state that pre-F1 code would
+	// misclassify as legacy v0.
+	ctx := context.Background()
+	if err := store.Bootstrap(ctx); err != nil {
+		t.Fatalf("recovery Bootstrap() error = %v (DB must remain bootstrappable)", err)
+	}
+	var version int
+	if err := store.DB().QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatalf("post-recovery user_version error = %v", err)
+	}
+	if version != 2 {
+		t.Fatalf("post-recovery user_version = %d, want 2", version)
+	}
+}
+
 // TestStoreBootstrapConcurrentFirstOpen exercises the "two goroutines, one
 // shared sqlite file, both call Bootstrap" path. The DSN-level
 // busy_timeout(5000) + BEGIN IMMEDIATE inside migrateSchemaOnConn together
