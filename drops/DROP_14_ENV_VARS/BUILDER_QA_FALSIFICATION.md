@@ -16,3 +16,26 @@ Verdict: FAIL
 
 - `Bootstrap` now depends on an implicit invariant: the very first bootstrap must survive long enough to reach `migrateSchemaOnConn` once. That dependency is hidden behind `hasAnyCoreTable` (`internal/adapters/sqlite/store.go:152-169`) instead of a durable marker, which is why a partially initialized fresh DB is indistinguishable from legacy v0 on restart.
 - I did not find `init()` side effects, package-level mutable state, or test-order coupling in the changed files. The shipped two-connection race test is real: it launches two goroutines, gates them on a shared start channel, waits with `sync.WaitGroup`, and uses a shared file-backed database (`internal/adapters/sqlite/store_test.go:951-1015`).
+
+## Unit 14.1 — Round 2
+
+Verdict: FAIL
+
+### Counterexamples
+
+1. The legacy-v0 rejection is still bypassable in the unlocked gap between the read-only probe and `BEGIN IMMEDIATE`. `Bootstrap` reads `PRAGMA user_version` and runs `hasAnyCoreTable` before taking any write lock (`internal/adapters/sqlite/store.go:132-156`). `migrateSchemaOnConn` later begins the transaction and decides the v0 path solely from the locked `user_version` value (`internal/adapters/sqlite/store.go:200-245`); it does **not** re-check `sqlite_master` under lock. Concrete trace:
+   - Connection A on a fresh DB executes the same pre-check as `Bootstrap`: `PRAGMA user_version` returns `0`, `hasAnyCoreTable` sees no core tables.
+   - Before A reaches line 201, connection B commits `CREATE TABLE projects (...)`, leaving the exact unsupported fingerprint this code means to reject: core tables present, `user_version=0`.
+   - A then enters `BEGIN IMMEDIATE`; inside the tx `PRAGMA user_version` is still `0`, so lines 223-244 take the "fresh database" branch and stamp `user_version = 2` instead of returning `domain.ErrUnsupportedSchema`.
+   I verified separately that the transactional assumptions themselves are sound on this runtime: with the default `PRAGMA journal_mode=delete` from `Open` (`internal/adapters/sqlite/open.go:37-52`), `BEGIN IMMEDIATE; PRAGMA user_version = 2; ROLLBACK; PRAGMA user_version;` returns `0`, and rolled-back `CREATE TABLE` state is absent afterward. The remaining bug is the stale classification window, not rollback semantics. Narrow fix: after `BEGIN IMMEDIATE`, if `userVersion == 0`, re-run `hasAnyCoreTable` under the reserved lock before taking the fresh-init branch, or move the legacy/fresh classification under the same lock acquisition entirely.
+
+2. `TestStoreBootstrapAtomicityCancelMidTransactionRollsBack` does not establish the condition in its own name. The test cancels the context **before** calling `Bootstrap` (`internal/adapters/sqlite/store_test.go:1099-1105`). But `Bootstrap` first does `s.db.Conn(ctx)` and a pre-transaction `PRAGMA user_version` read before it ever attempts `BEGIN IMMEDIATE` (`internal/adapters/sqlite/store.go:125-156`). So the test can pass even if cancellation never reaches an open transaction at all. That is a build/test bypass counterexample against the claimed evidence for "ctx-cancel mid-tx rolls back," not necessarily a production bug in the rollback path itself. Narrow fix: introduce a deterministic blocking point after `BEGIN IMMEDIATE` but before `COMMIT`, cancel only after that point is reached, and assert the first call actually entered the transaction rather than discarding its error.
+
+### YAGNI check
+
+- The new compile-assert is justified. `var _ domain.AccountEnvRepository = (*Store)(nil)` (`internal/adapters/sqlite/store.go:17-21`) buys concrete drift detection against the four-method interface in `internal/domain/repository.go:43-55`; I did not find a new unnecessary abstraction in the Round 2 delta.
+
+### Hidden dep check
+
+- The correctness of the "legacy v0 probe stays outside the tx" design now depends on an unstated environmental assumption: no other writer may create core-schema tables between the unlocked probe and `BEGIN IMMEDIATE`. That assumption is not enforced by the code and is the root cause of counterexample 1.
+- `coreSchemaDDL` and `coreSchemaTables` are package-level mutable vars (`internal/adapters/sqlite/store.go:53-123`). Nothing in-tree mutates them today, so I am not filing a separate failure on test-order coupling, but the bootstrap path and the new rollback test both implicitly depend on those vars remaining immutable and ordered.
