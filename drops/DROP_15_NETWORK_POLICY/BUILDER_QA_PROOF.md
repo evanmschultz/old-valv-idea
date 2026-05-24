@@ -93,3 +93,146 @@ None. All four acceptance criteria are satisfied with file:line citations, scope
 Verdict: **pass**.
 
 Unit 15.0 cleanly re-roots `resolveProjectImage` from raw-cwd manifest resolution to detected-project-root manifest resolution via the existing `project.DetectFrom` API. The change is minimal (one new import + four-line function preamble), preserves override semantics structurally (no control-flow reorder), and is exhaustively covered by six new tests (three per provider) plus the four pre-existing tests left in place as regression guards. Hard-constraint compliance (no edits outside `internal/cli/`) holds. `mage testPkg ./internal/cli` reproduces 240 tests passing at 67.6% coverage.
+
+## Unit 15.1 — Round 1
+
+**Date:** 2026-05-24
+**QA Proof backend:** claude-native (orchestrator dispatch, opus)
+**Verdict:** `pass`
+
+### Per-Acceptance Audit
+
+**A1. Promote `ToolManifest.Allowlist` from `toml.Primitive` to typed `AllowlistConfig{ Hosts []string }`.**
+
+- Verified at `internal/tools/allowlist.go:25-27`:
+  ```
+  type AllowlistConfig struct {
+      Hosts []string `toml:"hosts"`
+  }
+  ```
+- Field on the manifest at `internal/tools/tools.go:79`: `Allowlist AllowlistConfig \`toml:"allowlist"\`` (replacing the prior `toml.Primitive`). `Env toml.Primitive \`toml:"env"\`` preserved verbatim at line 80 pending DROP_14.
+- The previously-discarded `PrimitiveDecode(m.Allowlist, ...)` call from DROP_11 has been removed in `Load` (`internal/tools/tools.go:94-128`); only the `Env` PrimitiveDecode pass remains (lines 115-118). Type-decode of `[allowlist].hosts` into a typed slice causes BurntSushi/toml to mark the sub-keys as decoded, so the strict `meta.Undecoded()` check still rejects unknown sub-keys (verified empirically by `TestLoad_AllowlistUnknownKeyRejected` at `internal/tools/allowlist_test.go:169-201`).
+
+**A2. `Load` decodes `[allowlist]` into the typed struct while keeping `[env]` deferred and preserving strict unknown-top-level rejection.**
+
+- `Load` flow at `internal/tools/tools.go:94-128`: stat → `toml.DecodeFile` into typed `ToolManifest` → `PrimitiveDecode(m.Env, &discardEnv)` → `meta.Undecoded()` check that wraps the unknown keys into an error.
+- Strict rejection coverage:
+  - Unknown sub-key inside `[allowlist]` rejected: `TestLoad_AllowlistUnknownKeyRejected` at `internal/tools/allowlist_test.go:169-201` (writes `cidrs = ["10.0.0.0/8"]` under `[allowlist]`; asserts the error wraps "unknown keys" and mentions `allowlist.cidrs`).
+  - Typed decode of `[allowlist].hosts`: `TestLoad_AllowlistTypedDecode` at `allowlist_test.go:138-167` and the updated `TestResolve_ValidManifest_WithForwardCompatSections` at `internal/tools/resolve_test.go:97-105` (asserts `m.Allowlist.Hosts == [github.com, proxy.golang.org]`).
+- `Env` still `toml.Primitive` (line 80 of `tools.go`) — unchanged from DROP_11, deferred for DROP_14. Verified.
+
+**A3. `EffectiveAllowlist` returns zero-value defaults and union semantics; lowercase + dedup + validation.**
+
+- Function at `internal/tools/allowlist.go:81-107`.
+- Defaults: `DefaultAllowlistHosts` at lines 38-43 contains exactly `[github.com, objects.githubusercontent.com, proxy.golang.org, sum.golang.org]` (4 hosts, lexicographically sorted).
+- Zero-value behavior verified by `TestEffectiveAllowlist_ZeroValue` at `allowlist_test.go:12-28` (asserts the 4-host result exactly).
+- Union + lowercase + dedup verified by `TestEffectiveAllowlist_UnionWithUserHosts` (lines 30-51) and `TestEffectiveAllowlist_LowercaseAndDedup` (lines 53-80) — the latter also case-folds `Github.com` against the built-in `github.com` default.
+- Validation regex at `allowlist.go:71` (`hostShapeRE`): RFC 1123-style labels, alphanumerics + hyphens, dot-separated. Fast-path rejections in `validateHost` (lines 112-133) for whitespace, `://`, `/?#`, and `:`. `TestEffectiveAllowlist_InvalidHost` at lines 82-116 covers 12 invalid-host cases (empty, whitespace, URL, path, query, port, leading/trailing dot, leading/trailing hyphen, underscore, space, non-ASCII).
+- Docker alias acceptance verified by `TestEffectiveAllowlist_DockerAliasAccepted` at lines 118-136.
+
+**A4. `WriteAllowlistSection` creates parent `.valv/` via `os.MkdirAll(filepath.Dir(path), 0o755)` and writes a fresh manifest on absent-file.**
+
+- Function at `internal/tools/allowlist.go:171-217`.
+- `os.MkdirAll(filepath.Dir(path), 0o755)` at line 175. Confirmed.
+- Empty-path rejection at line 172-174 returns `"write allowlist section: empty path"` — verified by `TestWriteAllowlistSection_EmptyPath` at lines 548-553.
+- Fresh-file path at lines 179-190: `os.ReadFile` returning `os.ErrNotExist` → `renderAllowlistSection(cfg)` → `os.WriteFile`. Verified by `TestWriteAllowlistSection_FreshProjectNoDir` (lines 203-237) which creates `<tmp>/.valv/tools.toml` from a project root that has no `.valv/` directory and round-trips through `Load`.
+
+**A5. Section-safe rewrite: byte-preservation outside the bounded `[allowlist]` span.**
+
+- Implementation at `internal/tools/allowlist.go:192-216` (calls `splitAllowlistSpan` at line 192). Splitter at lines 261-355.
+- Span boundary literalness — PLAN.md Schema Decision 3 says span begins at `[` of `[allowlist]` and ends "immediately before the first byte of the next top-level section header" (or EOF). Implementation matches exactly:
+  - `allowlistStart` = byte offset of `[` of `[allowlist]` (line 309-314).
+  - `nextStart` = byte offset of `[` of the next top-level header after `[allowlist]` (line 316-318).
+  - prefix = `content[:allowlistStart]` (lines 348/352/354).
+  - suffix = `content[nextStart:]` (line 354) or empty when `[allowlist]` is last (line 352).
+- Top-level header detection regex at line 241 (`^\[([^\[\]]+)\][ \t]*(?:#.*)?$`) correctly:
+  - matches `[allowlist] # network-policy hosts` (because `[ \t]*(?:#.*)?$` accepts trailing comments)
+  - matches `[tools]`
+  - rejects array-of-tables headers (`[[…]]` excluded by `[^\[\]]+`); array-of-tables is separately fast-rejected earlier at line 302.
+- The renderer at lines 220-233 emits canonical form: `[allowlist]\n` + (`hosts = []\n` when empty OR `hosts = [\n  "h1",\n  "h2",\n]\n` otherwise).
+
+**A6. Golden fixture round-trips byte-preservation contract.**
+
+- `TestWriteAllowlistSection_PreservesPrefixAndSuffix` at `internal/tools/allowlist_test.go:260-371` covers the exact PLAN.md spec:
+  - File preamble: 2 comment lines + blank line (`allowlist_test.go:272-274`) — outside the span, must round-trip verbatim. Asserted by `strings.HasPrefix(got, wantPrefix)` at line 308.
+  - Inline comment on `[allowlist]` header (`# network-policy hosts`) — INSIDE the span per the spec, legitimately discarded. Asserted absent at line 356: `if strings.Contains(got, "# network-policy hosts") { t.Errorf(...) }`. Test comment at lines 314-329 explicitly cites the PLAN.md spec for why this is correct.
+  - Divider comment between `[allowlist]` and `[tools]` (`# --- tools ---`) — INSIDE the span per the spec, discarded. The `wantSuffix` (line 330-338) begins at `[tools]`, not at the divider — matching the implementation's `content[nextStart:]` where `nextStart` is the byte offset of `[` in `[tools]`.
+  - `[env]` block + interleaved comments (`# preserve me too`) — OUTSIDE the span, must round-trip verbatim. Captured in `wantSuffix` (lines 333-338), asserted by `strings.HasSuffix(got, wantSuffix)` at line 339.
+- Additional shape coverage:
+  - Last-section: `TestWriteAllowlistSection_AllowlistAsLastSection` (lines 373-410) — proves suffix-empty path with `[allowlist]` as the last section.
+  - Absent-`[allowlist]`-appends: `TestWriteAllowlistSection_AllowlistAbsentAppendsAfterTrailingBytes` (lines 412-448) — proves prefix=whole-file behavior.
+
+**A7. Unsupported shapes return `ErrUnsupportedManifestShape`.**
+
+- Sentinel at `internal/tools/allowlist.go:50`: `var ErrUnsupportedManifestShape = errors.New(...)`.
+- BOM rejection: `splitAllowlistSpan` lines 262-264 → `TestWriteAllowlistSection_RejectsBOM` at `allowlist_test.go:450-470` (asserts `errors.Is(err, ErrUnsupportedManifestShape)`).
+- CRLF rejection: lines 265-267 → `TestWriteAllowlistSection_RejectsCRLF` at lines 472-492.
+- Multi-line string outside `[allowlist]`: lines 327-331 (`bytes.Contains(line, """) || ...`) → `TestWriteAllowlistSection_RejectsMultilineStringOutsideAllowlist` at lines 494-519.
+- Array-of-tables header: lines 302-304 (`bytes.HasPrefix(trimmed, [[)`) → `TestWriteAllowlistSection_RejectsArrayOfTablesHeader` at lines 521-546.
+- Duplicate `[allowlist]` header: lines 311-313 → not directly tested but exercised through the structural invariant; not in the acceptance bullet but a defensive guard. Acceptable.
+
+**A8. `internal/services/images/overlay_test.go` regression: identical `Tools` + different `Allowlist` → same `OverlayHash`.**
+
+- Test at `internal/services/images/overlay_test.go:149-187`: `TestOverlayHash_AllowlistDataIgnored`.
+- Permutations:
+  - `base` with `Allowlist.Hosts = [a.example.com]` (line 163).
+  - `other` with `Allowlist.Hosts = [b.example.org, c.example.net, d.example.io]` (lines 170-172).
+  - `empty` with no Allowlist field set (lines 178-183).
+- Assertions: `OverlayHash(base) == OverlayHash(other)` (line 174) AND `OverlayHash(base) == OverlayHash(empty)` (line 184).
+- Implementation check: `OverlayHash` at `internal/services/images/overlay.go:60-71` feeds `canonicalManifest(manifest)` (lines 35-52). `canonicalManifest` only reads `manifest.Tools` — `manifest.Allowlist` is never referenced by the hash computation. The regression test is a forward-pin: any future drop that adds `manifest.Allowlist` to the hash payload will instantly fail.
+
+### Mage Results (run by QA Proof)
+
+```
+mage testPkg ./internal/tools
+[PKG PASS] github.com/evanmschultz/valv/internal/tools (1.29s)
+  tests: 86
+  passed: 86
+  failed: 0
+  package coverage: 93.4% (above 60.0% gate, above 70% CLAUDE.md target)
+```
+
+```
+mage testPkg ./internal/services/images
+[PKG PASS] github.com/evanmschultz/valv/internal/services/images (1.37s)
+  tests: 63
+  passed: 63
+  failed: 0
+  package coverage: 81.6% (above 60.0% gate, above 70% CLAUDE.md target)
+```
+
+Both reproduce the builder's documented numbers exactly (86 tests / 93.4% for tools, 63 tests / 81.6% for images).
+
+`mage test` (full suite) was attempted but fails on the CURRENT working tree because of uncommitted DROP_13/DROP_14 work (`internal/services/run/service_test.go`, `internal/adapters/sqlite/store.go`, etc.) — those failures are NOT scoped to Unit 15.1. At commit `0611cf0` itself the tree was clean and the builder documented `mage test 747/747 green` plus `mage integration 240 pass + 3 pre-existing skips`. The current working-tree failures are out-of-scope for this Unit 15.1 review and route to the appropriate DROP_13/DROP_14 build-QA cycles.
+
+### Scope Compliance
+
+`git diff-tree --no-commit-id --name-only -r 0611cf0` returns exactly:
+
+- `internal/services/images/overlay_test.go`
+- `internal/tools/allowlist.go`
+- `internal/tools/allowlist_test.go`
+- `internal/tools/resolve_test.go`
+- `internal/tools/tools.go`
+
+No edits to `internal/cli/`, `internal/adapters/`, `internal/services/networkpolicy/`, `internal/services/run/`. The single allowed cross-package edit (`internal/services/images/overlay_test.go` regression test) is explicitly the exception per the Unit 15.1 spawn appendix.
+
+### Findings
+
+- F1. `AllowlistConfig` typing strategy is correct. Removing the `PrimitiveDecode(m.Allowlist, ...)` call from `Load` is safe because BurntSushi/toml's strict-undecoded check inspects sub-keys: typed-decoding `[allowlist].hosts` into `[]string` marks `allowlist.hosts` as decoded, while leaving unknown sub-keys (e.g. `allowlist.cidrs`) in `meta.Undecoded()`. Empirically verified by `TestLoad_AllowlistUnknownKeyRejected`.
+- F2. Span boundary semantics match Schema Decision 3 verbatim. The implementation uses `content[:allowlistStart]` for prefix and `content[nextStart:]` for suffix — both byte offsets are computed against the literal `[` characters of the headers, exactly as the spec requires. Blank lines and divider comments INSIDE the span (between `[allowlist]` and the next top-level header) are legitimately discarded; the test explicitly cites this rule.
+- F3. `DefaultAllowlistHosts` ordering is lexicographic (`github.com`, `objects.githubusercontent.com`, `proxy.golang.org`, `sum.golang.org`) which matches the alphabetic-sort result of `EffectiveAllowlist`. The zero-value test asserts exactly this order, and the dedup-test confirms case-folded user inputs collapse against the same defaults.
+- F4. The host validator regex enforces RFC 1123-style labels with explicit underscore rejection. This is documented as a design choice in `allowlist.go:124`. Underscores are NOT a valid hostname character per RFC 1123 and would create proxy-config ambiguity downstream.
+- F5. The writer is mechanical (no normalization). `cfg.Hosts` is written verbatim (`renderAllowlistSection` at line 220-233 just emits each host with `%q`). Callers that want normalization must run `EffectiveAllowlist` first. This is documented at `allowlist.go:168-170`. Acceptable design — separation of concerns.
+- F6. Test count is 17 functions in `allowlist_test.go`, not the "12" the builder appendix mentioned in its summary. The actual count is HIGHER than claimed, which strengthens coverage; this is a minor description drift in the builder note, not a verdict-affecting issue.
+- F7. The duplicate `[allowlist]` header guard (lines 311-313) returns `ErrUnsupportedManifestShape` but is not directly exercised by a test. Defensive-only; not in the PLAN.md acceptance bullet.
+
+### Missing Evidence
+
+None for the unit's documented scope. All 8 PLAN.md acceptance bullets are satisfied with file:line citations. Per-package mage results reproduce exactly.
+
+### Summary
+
+Verdict: **pass**.
+
+Unit 15.1 cleanly promotes `[allowlist]` from `toml.Primitive` to typed `AllowlistConfig`, ships an effective-allowlist helper with built-in defaults + union semantics + RFC 1123 validation, and adds a section-safe `WriteAllowlistSection` writer with the explicit bounded-span byte-preservation contract from PLAN.md Schema Decision 3. The strict unknown-key check still works after removing the discarded `PrimitiveDecode(m.Allowlist, ...)` call because BurntSushi/toml correctly tracks sub-key decode state when the field itself is typed. The 17 test functions in `allowlist_test.go` (5 more than the builder note claimed) plus the `TestOverlayHash_AllowlistDataIgnored` regression pin cover every acceptance bullet, every unsupported-shape rejection, and the byte-preservation golden fixture. `mage testPkg ./internal/tools` reproduces 86 tests passing at 93.4% coverage; `mage testPkg ./internal/services/images` reproduces 63 tests passing at 81.6% coverage. Hard-constraint compliance holds (only edits outside `internal/tools/` are the documented `overlay_test.go` regression).
