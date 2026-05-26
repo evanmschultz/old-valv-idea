@@ -944,3 +944,188 @@ func mustReadFile(t *testing.T, path string) string {
 	}
 	return string(content)
 }
+
+// ----------------------------------------------------------------------------
+// Unit 14.3 — account env CLI tests
+// ----------------------------------------------------------------------------
+
+// TestAccountEnvListJSONRedactedByDefault verifies that `account env list
+// <name> --format json` returns top-level key "env" with redacted:true and
+// value "***" entries, sorted alphabetically by key. Entries are returned in
+// alpha order because the store layer enforces ORDER BY env_key ASC.
+func TestAccountEnvListJSONRedactedByDefault(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	runManage(t, paths, []string{"account", "add", "codex", "alpha-json", "--skip-login", "--no-bind"})
+	runManage(t, paths, []string{"account", "env", "set", "alpha-json", "ZZZ_KEY=zzz-value"})
+	runManage(t, paths, []string{"account", "env", "set", "alpha-json", "AAA_KEY=aaa-value"})
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	opts := &rootOptions{format: "json"}
+	cmd := newManageAccountCommand(paths, opts)
+	cmd.PersistentFlags().StringVar(&opts.format, "format", "json", "output format: auto, human, plain, json")
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--format", "json", "env", "list", "alpha-json"})
+	installStubCodexAccountAuth(t, cmd, true)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v\nstderr=%s", err, stderr.String())
+	}
+
+	got := stdout.String()
+	// Top-level key must be "env".
+	if !strings.Contains(got, `"env"`) {
+		t.Fatalf("JSON output missing top-level key \"env\": %q", got)
+	}
+	// Entries must be redacted.
+	if !strings.Contains(got, `"redacted": true`) {
+		t.Fatalf("JSON output missing redacted:true: %q", got)
+	}
+	if strings.Contains(got, "aaa-value") || strings.Contains(got, "zzz-value") {
+		t.Fatalf("JSON output must not contain raw values when --reveal is absent: %q", got)
+	}
+	if !strings.Contains(got, `"value": "***"`) {
+		t.Fatalf("JSON output missing redacted sentinel \"***\": %q", got)
+	}
+	// AAA_KEY must appear before ZZZ_KEY (alphabetical order).
+	aaaIdx := strings.Index(got, "AAA_KEY")
+	zzzIdx := strings.Index(got, "ZZZ_KEY")
+	if aaaIdx < 0 || zzzIdx < 0 || aaaIdx > zzzIdx {
+		t.Fatalf("JSON output not sorted alphabetically: %q", got)
+	}
+}
+
+// TestAccountEnvListJSONReveal verifies that `account env list <name> --reveal
+// --format json` returns redacted:false and raw values.
+func TestAccountEnvListJSONReveal(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	runManage(t, paths, []string{"account", "add", "codex", "alpha-reveal", "--skip-login", "--no-bind"})
+	runManage(t, paths, []string{"account", "env", "set", "alpha-reveal", "MY_KEY=my-secret-value"})
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	opts := &rootOptions{format: "json"}
+	cmd := newManageAccountCommand(paths, opts)
+	cmd.PersistentFlags().StringVar(&opts.format, "format", "json", "output format: auto, human, plain, json")
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--format", "json", "env", "list", "alpha-reveal", "--reveal"})
+	installStubCodexAccountAuth(t, cmd, true)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v\nstderr=%s", err, stderr.String())
+	}
+
+	got := stdout.String()
+	if !strings.Contains(got, `"redacted": false`) {
+		t.Fatalf("JSON --reveal output missing redacted:false: %q", got)
+	}
+	if !strings.Contains(got, "my-secret-value") {
+		t.Fatalf("JSON --reveal output missing raw value: %q", got)
+	}
+	if strings.Contains(got, `"***"`) {
+		t.Fatalf("JSON --reveal output must not contain redacted sentinel: %q", got)
+	}
+}
+
+// TestAccountEnvListJSONRevealFlagBeforePositional verifies that
+// `account env list --reveal <name>` (flag before positional) resolves
+// identically to `account env list <name> --reveal`. This pins cobra's
+// standard flag-vs-positional precedence for the --reveal flag.
+func TestAccountEnvListJSONRevealFlagBeforePositional(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	runManage(t, paths, []string{"account", "add", "codex", "alpha-flagorder", "--skip-login", "--no-bind"})
+	runManage(t, paths, []string{"account", "env", "set", "alpha-flagorder", "FLAG_KEY=flag-value"})
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	opts := &rootOptions{format: "json"}
+	cmd := newManageAccountCommand(paths, opts)
+	cmd.PersistentFlags().StringVar(&opts.format, "format", "json", "output format: auto, human, plain, json")
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	// Flag before positional: --reveal <name>
+	cmd.SetArgs([]string{"--format", "json", "env", "list", "--reveal", "alpha-flagorder"})
+	installStubCodexAccountAuth(t, cmd, true)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() --reveal before positional error = %v\nstderr=%s", err, stderr.String())
+	}
+
+	got := stdout.String()
+	if !strings.Contains(got, "flag-value") {
+		t.Fatalf("--reveal before positional: raw value missing from output: %q", got)
+	}
+	if !strings.Contains(got, `"redacted": false`) {
+		t.Fatalf("--reveal before positional: redacted:false missing: %q", got)
+	}
+}
+
+// TestAccountEnvListJSONEmpty verifies that listing an account with no env vars
+// returns {"env": []} — not null and not an error.
+func TestAccountEnvListJSONEmpty(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	runManage(t, paths, []string{"account", "add", "codex", "alpha-empty", "--skip-login", "--no-bind"})
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	opts := &rootOptions{format: "json"}
+	cmd := newManageAccountCommand(paths, opts)
+	cmd.PersistentFlags().StringVar(&opts.format, "format", "json", "output format: auto, human, plain, json")
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--format", "json", "env", "list", "alpha-empty"})
+	installStubCodexAccountAuth(t, cmd, true)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v\nstderr=%s", err, stderr.String())
+	}
+
+	got := stdout.String()
+	if !strings.Contains(got, `"env"`) {
+		t.Fatalf("empty env JSON missing top-level key \"env\": %q", got)
+	}
+	// Should contain empty array — either [] or null depending on nil/empty slice handling.
+	// writeEnvListJSON uses make([]envListEntry, 0) for empty so it will encode as [].
+	if !strings.Contains(got, `"env": []`) {
+		t.Fatalf("empty env JSON should have empty array: %q", got)
+	}
+}
+
+// TestAccountEnvSameKeyAcrossTwoAccounts verifies that the same env key with
+// different values on two accounts are isolated — neither account sees the other's
+// value, and listing each account returns only that account's entry.
+func TestAccountEnvSameKeyAcrossTwoAccounts(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	runManage(t, paths, []string{"account", "add", "codex", "acct-a", "--skip-login", "--no-bind"})
+	runManage(t, paths, []string{"account", "add", "codex", "acct-b", "--skip-login", "--no-bind"})
+	runManage(t, paths, []string{"account", "env", "set", "acct-a", "SHARED_KEY=value-for-a"})
+	runManage(t, paths, []string{"account", "env", "set", "acct-b", "SHARED_KEY=value-for-b"})
+
+	outA := runManage(t, paths, []string{"account", "env", "list", "acct-a", "--reveal"})
+	outB := runManage(t, paths, []string{"account", "env", "list", "acct-b", "--reveal"})
+
+	if !strings.Contains(outA, "SHARED_KEY=value-for-a") {
+		t.Fatalf("acct-a list: want SHARED_KEY=value-for-a in %q", outA)
+	}
+	if strings.Contains(outA, "value-for-b") {
+		t.Fatalf("acct-a list: must not contain acct-b's value: %q", outA)
+	}
+	if !strings.Contains(outB, "SHARED_KEY=value-for-b") {
+		t.Fatalf("acct-b list: want SHARED_KEY=value-for-b in %q", outB)
+	}
+	if strings.Contains(outB, "value-for-a") {
+		t.Fatalf("acct-b list: must not contain acct-a's value: %q", outB)
+	}
+}

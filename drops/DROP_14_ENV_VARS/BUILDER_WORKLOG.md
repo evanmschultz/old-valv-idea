@@ -78,6 +78,34 @@ No Hylla miss this round — Context7's `/modernc-org/sqlite` entry covered DSN 
 - **ROLLBACK uses context.Background().** Discovered during test run: when the rollback `conn.ExecContext(ctx, ROLLBACK)` is called with a cancelled ctx, the modernc driver short-circuits the exec before sending the SQL, leaving the in-flight transaction to be handled by `conn.Close()`'s cleanup path — which on this driver retains the staged write state in the visible database depending on internal sequencing. Switching the rollback to `context.Background()` makes the rollback exec reach the driver unconditionally and the COMMIT-less tx is rolled back cleanly. Verified by test failure → fix → test pass: the cancel test failed with `user_version = 2, want 0` until the rollback ctx was switched.
 - **Hidden-dep removed.** Round 2 falsif's hidden-dep note about "no other writer may create core-schema tables between the unlocked probe and BEGIN IMMEDIATE" is now closed: the assumption is enforced by code (the under-lock re-check) instead of relying on caller discipline.
 
+## Unit 14.3 — Round 1
+
+### Files Touched
+
+- `internal/cli/manage.go` — added `"io"` to stdlib import group. Added `cmd.AddCommand(newManageAccountEnvCommand(paths, opts))` inside `newManageAccountCommand`. Appended at end of file: `newManageAccountEnvCommand` (parent branch with `Short`, `Long`, `Example`), `newManageAccountEnvSetCommand` + `runManageAccountEnvSet` (parses `KEY=VALUE` by splitting at first `'='`; user-facing error on missing `=` or empty key; service errors bubble as-is), `newManageAccountEnvUnsetCommand` + `runManageAccountEnvUnset`, `newManageAccountEnvListCommand` + `runManageAccountEnvList` (`--reveal bool` flag; dispatches to `writeEnvListJSON` for json mode, `writeEnvListLines` for human/plain), `envListEntry` struct (json tags: `key`, `value`, `redacted`), `redactedValue` const (`***`), `writeEnvListJSON` (dedicated formatter — NOT `output.WriteListWithKey` — producing `{"env":[...]}` with `make([]envListEntry, len(entries))` so empty list encodes as `[]` not `null`), `writeEnvListLines` (outputs `(none)` for empty; otherwise `KEY=***` or `KEY=value` per line, no envelope), `resolveEnvProvider` (defaults to `ProviderCodex` when flag empty).
+- `internal/cli/manage_test.go` — appended 8 new table-driven/behavior tests: `TestAccountEnvSetAndListHumanRedacted` (set two keys out of alpha order, list shows `KEY=***` sorted), `TestAccountEnvListHumanReveal` (`--reveal` shows raw values), `TestAccountEnvListPlainRedacted` (`--format plain`, `KEY=***`, alpha), `TestAccountEnvListPlainReveal` (`--format plain --reveal`, raw), `TestAccountEnvSetMalformedKeyValue` (no `=` in arg → error containing `KEY=VALUE`), `TestAccountEnvSetReservedKeyPropagatesServiceError` (`HOME` reserved key), `TestAccountEnvOperationsMissingAccountError` (ghost account → `ErrNotFound`), `TestAccountEnvUnsetRemovesKey` (unset removes from subsequent list).
+- `internal/cli/extended_test.go` — appended 5 new JSON-key tests: `TestAccountEnvListJSONRedactedByDefault` (top-level `"env"` key, `redacted:true`, `***`, alpha order), `TestAccountEnvListJSONReveal` (`redacted:false`, raw values), `TestAccountEnvListJSONRevealFlagBeforePositional` (`--reveal` before positional arg resolves identically — cobra standard flag parsing), `TestAccountEnvListJSONEmpty` (`{"env":[]}` for empty account, never `null`), `TestAccountEnvSameKeyAcrossTwoAccounts` (env isolation across two accounts in JSON).
+
+### Mage Targets Run
+
+- `mage testPkg ./internal/cli` — 296 tests passed; coverage 69.5%; race detector clean; SUCCESS (coverage gate met — project gate is 60% floor for the full suite).
+- `mage test` (full suite smoke check) — 904 tests passed across 23 packages; all green; race detector clean.
+
+### Design Notes
+
+- **Dedicated JSON formatter, NOT `output.WriteListWithKey`.** The generic `WriteListWithKey` envelope uses `{title, fields}` per entry. Machine-readable consumers needing `redacted:bool` would have to infer policy from the literal `"***"` string — fragile and undocumented. The dedicated `writeEnvListJSON` function produces `{"env":[{"key":"FOO","value":"***","redacted":true},...]}` so the redaction state is a first-class boolean per entry. No ambiguity for automation.
+- **Top-level key `"env"` (not `"entries"`, not `"items"`).** Follows the command-owned JSON key convention established by Unit 14.2's tests (`TestManageAccountListJSONUsesCommandKey` in extended_test.go pins this convention). `"env"` is the command-specific noun, stable, not derived from human heading copy.
+- **`make([]envListEntry, len(entries))` not nil slice.** A nil slice in Go encodes as JSON `null`. Using `make` initializes an empty slice even for zero entries, which encodes as `[]`. The `TestAccountEnvListJSONEmpty` test pins this invariant.
+- **`--reveal` works in both positions.** `cobra.ExactArgs(1)` + a bool flag registered on the list subcommand means cobra's standard flag-vs-positional parsing handles `list --reveal <name>` and `list <name> --reveal` identically. No custom arg reordering needed. Pinned by `TestAccountEnvListJSONRevealFlagBeforePositional`.
+- **`resolveEnvProvider` defaults to `ProviderCodex`.** No provider flag wiring in the acceptance scope. The helper exists as an extension point for when `--provider` lands; today it always returns `ProviderCodex`.
+- **Service-layer errors bubble as-is from CLI.** `runManageAccountEnvSet` and `runManageAccountEnvUnset` call the manage service and return errors unwrapped. Reserved-key rejection and regex-validation messages come verbatim from the service layer (Unit 14.2). The CLI does NOT re-validate.
+
+### Hylla Feedback
+
+- `mcp__hylla__hylla_search` — used to locate `newManageAccountCommand` and `commandOutputMode` in manage.go. Found: matched. No miss.
+- `mcp__hylla__hylla_search_keyword` — used to locate `openManageService` and `WriteListWithKey`. Found: matched. No miss.
+- `Read` fallback used for `internal/cli/codex_test.go` to find `testCodexPaths` definition (bash_deny blocked grep/find). Hylla would not surface unexported test helpers — expected miss, not a Hylla limitation.
+
 ## Unit 14.2 — Round 1
 
 ### Files Touched

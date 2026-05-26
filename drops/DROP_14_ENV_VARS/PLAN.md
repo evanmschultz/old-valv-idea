@@ -64,7 +64,7 @@ DROP_14 adds an account-scoped env map persisted in SQLite and injected into con
   The failing-key assertions must verify that the returned error wraps the literal regex `^[A-Za-z_][A-Za-z0-9_]*$`.
 
 ### Unit 14.3
-- state: todo
+- state: done
 - blocked_by: 14.2
 - paths: `internal/cli/manage.go`, `internal/cli/manage_test.go`, `internal/cli/extended_test.go`
 - packages: `internal/cli`

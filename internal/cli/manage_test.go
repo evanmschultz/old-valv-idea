@@ -1171,3 +1171,205 @@ func testJWT(t *testing.T, claims map[string]string) string {
 	}
 	return base64.RawURLEncoding.EncodeToString(header) + "." + base64.RawURLEncoding.EncodeToString(payload) + ".signature"
 }
+
+// ----------------------------------------------------------------------------
+// Unit 14.3 — account env CLI tests (human/plain output + error paths)
+// ----------------------------------------------------------------------------
+
+// TestAccountEnvSetAndListHumanRedacted verifies the full set→list human-output
+// cycle. Default list output redacts values as KEY=***. Multiple keys are sorted
+// alphabetically regardless of insertion order.
+func TestAccountEnvSetAndListHumanRedacted(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	runManage(t, paths, []string{"account", "add", "codex", "env-human", "--skip-login", "--no-bind"})
+	runManage(t, paths, []string{"account", "env", "set", "env-human", "ZEBRA_VAR=zebra-secret"})
+	runManage(t, paths, []string{"account", "env", "set", "env-human", "ALPHA_VAR=alpha-secret"})
+
+	out := runManage(t, paths, []string{"account", "env", "list", "env-human"})
+
+	// Values must be redacted in default output.
+	if strings.Contains(out, "zebra-secret") || strings.Contains(out, "alpha-secret") {
+		t.Fatalf("default list must redact values: %q", out)
+	}
+	if !strings.Contains(out, "ALPHA_VAR=***") {
+		t.Fatalf("default list missing ALPHA_VAR=***: %q", out)
+	}
+	if !strings.Contains(out, "ZEBRA_VAR=***") {
+		t.Fatalf("default list missing ZEBRA_VAR=***: %q", out)
+	}
+	// Alpha before Zebra (alphabetical sort).
+	if strings.Index(out, "ALPHA_VAR") > strings.Index(out, "ZEBRA_VAR") {
+		t.Fatalf("default list not sorted alphabetically: %q", out)
+	}
+}
+
+// TestAccountEnvListHumanReveal verifies that --reveal shows raw values.
+func TestAccountEnvListHumanReveal(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	runManage(t, paths, []string{"account", "add", "codex", "env-reveal", "--skip-login", "--no-bind"})
+	runManage(t, paths, []string{"account", "env", "set", "env-reveal", "MY_SECRET=raw-value-123"})
+
+	out := runManage(t, paths, []string{"account", "env", "list", "env-reveal", "--reveal"})
+
+	if !strings.Contains(out, "MY_SECRET=raw-value-123") {
+		t.Fatalf("--reveal list missing raw value: %q", out)
+	}
+	if strings.Contains(out, "***") {
+		t.Fatalf("--reveal list must not contain redacted sentinel: %q", out)
+	}
+}
+
+// TestAccountEnvListPlainRedacted verifies that --format plain output shows
+// KEY=*** per entry with no envelope, sorted alphabetically.
+func TestAccountEnvListPlainRedacted(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	runManage(t, paths, []string{"account", "add", "codex", "env-plain", "--skip-login", "--no-bind"})
+	runManage(t, paths, []string{"account", "env", "set", "env-plain", "BETA_VAR=beta-secret"})
+	runManage(t, paths, []string{"account", "env", "set", "env-plain", "ALPHA_VAR=alpha-secret"})
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	opts := &rootOptions{format: "plain"}
+	cmd := newManageAccountCommand(paths, opts)
+	cmd.PersistentFlags().StringVar(&opts.format, "format", "plain", "output format")
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--format", "plain", "env", "list", "env-plain"})
+	installStubCodexAccountAuth(t, cmd, true)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() plain list error = %v\nstderr=%s", err, stderr.String())
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "ALPHA_VAR=***") {
+		t.Fatalf("plain list missing ALPHA_VAR=***: %q", out)
+	}
+	if !strings.Contains(out, "BETA_VAR=***") {
+		t.Fatalf("plain list missing BETA_VAR=***: %q", out)
+	}
+	if strings.Contains(out, "alpha-secret") || strings.Contains(out, "beta-secret") {
+		t.Fatalf("plain list must redact values: %q", out)
+	}
+	if strings.Index(out, "ALPHA_VAR") > strings.Index(out, "BETA_VAR") {
+		t.Fatalf("plain list not sorted alphabetically: %q", out)
+	}
+}
+
+// TestAccountEnvListPlainReveal verifies --format plain --reveal shows raw values.
+func TestAccountEnvListPlainReveal(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	runManage(t, paths, []string{"account", "add", "codex", "env-plain-rev", "--skip-login", "--no-bind"})
+	runManage(t, paths, []string{"account", "env", "set", "env-plain-rev", "PLAIN_KEY=plain-raw-value"})
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	opts := &rootOptions{format: "plain"}
+	cmd := newManageAccountCommand(paths, opts)
+	cmd.PersistentFlags().StringVar(&opts.format, "format", "plain", "output format")
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--format", "plain", "env", "list", "--reveal", "env-plain-rev"})
+	installStubCodexAccountAuth(t, cmd, true)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() plain --reveal list error = %v\nstderr=%s", err, stderr.String())
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "PLAIN_KEY=plain-raw-value") {
+		t.Fatalf("plain --reveal missing raw value: %q", out)
+	}
+	if strings.Contains(out, "***") {
+		t.Fatalf("plain --reveal must not contain redacted sentinel: %q", out)
+	}
+}
+
+// TestAccountEnvSetMalformedKeyValue verifies that a positional argument that
+// does not contain '=' returns a clear user-facing error.
+func TestAccountEnvSetMalformedKeyValue(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	runManage(t, paths, []string{"account", "add", "codex", "env-malformed", "--skip-login", "--no-bind"})
+
+	errMsg := runManageExpectError(t, paths, []string{"account", "env", "set", "env-malformed", "NO_EQUALS_SIGN"})
+	if !strings.Contains(errMsg, "KEY=VALUE") {
+		t.Fatalf("malformed key=value error %q should mention KEY=VALUE form", errMsg)
+	}
+}
+
+// TestAccountEnvSetReservedKeyPropagatesServiceError verifies that setting a
+// runtime-reserved key surfaces the service-layer rejection. The CLI does NOT
+// re-validate; the service error bubbles up as-is.
+func TestAccountEnvSetReservedKeyPropagatesServiceError(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	runManage(t, paths, []string{"account", "add", "codex", "env-reserved", "--skip-login", "--no-bind"})
+
+	errMsg := runManageExpectError(t, paths, []string{"account", "env", "set", "env-reserved", "HOME=anything"})
+	if !strings.Contains(errMsg, "HOME") {
+		t.Fatalf("reserved key error %q should mention HOME", errMsg)
+	}
+	// Service uses the word "reserved" in the rejection message.
+	if !strings.Contains(errMsg, "reserved") {
+		t.Fatalf("reserved key error %q should mention 'reserved'", errMsg)
+	}
+}
+
+// TestAccountEnvOperationsMissingAccountError verifies that set/unset/list on
+// a nonexistent account all return an error containing the unknown account name.
+func TestAccountEnvOperationsMissingAccountError(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	// Do NOT create any accounts — "ghost-account" does not exist.
+
+	for _, args := range [][]string{
+		{"account", "env", "set", "ghost-account", "FOO=bar"},
+		{"account", "env", "unset", "ghost-account", "FOO"},
+		{"account", "env", "list", "ghost-account"},
+	} {
+		args := args
+		t.Run(strings.Join(args[2:4], "_"), func(t *testing.T) {
+			t.Parallel()
+			errMsg := runManageExpectError(t, paths, args)
+			if !strings.Contains(errMsg, "ghost-account") {
+				t.Fatalf("%v error %q should mention ghost-account", args, errMsg)
+			}
+		})
+	}
+}
+
+// TestAccountEnvUnsetRemovesKey verifies that unset removes the key so a
+// subsequent list no longer shows it.
+func TestAccountEnvUnsetRemovesKey(t *testing.T) {
+	t.Parallel()
+
+	paths := testCodexPaths(t)
+	runManage(t, paths, []string{"account", "add", "codex", "env-unset", "--skip-login", "--no-bind"})
+	runManage(t, paths, []string{"account", "env", "set", "env-unset", "REMOVE_ME=gone"})
+
+	// Key present before unset.
+	before := runManage(t, paths, []string{"account", "env", "list", "env-unset"})
+	if !strings.Contains(before, "REMOVE_ME") {
+		t.Fatalf("before unset: REMOVE_ME should be in list: %q", before)
+	}
+
+	runManage(t, paths, []string{"account", "env", "unset", "env-unset", "REMOVE_ME"})
+
+	// Key absent after unset.
+	after := runManage(t, paths, []string{"account", "env", "list", "env-unset"})
+	if strings.Contains(after, "REMOVE_ME") {
+		t.Fatalf("after unset: REMOVE_ME should not be in list: %q", after)
+	}
+}

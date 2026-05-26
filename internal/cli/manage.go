@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -60,6 +61,7 @@ valv account delete hylla
 	cmd.AddCommand(newManageAccountCleanupCommand(paths, opts))
 	cmd.AddCommand(newManageAccountDeleteCommand(paths, opts))
 	cmd.AddCommand(newManageAccountSwitchCommand(paths, opts))
+	cmd.AddCommand(newManageAccountEnvCommand(paths, opts))
 	return cmd
 }
 
@@ -1998,4 +2000,305 @@ func runImageInspect(cmd *cobra.Command, paths config.Paths, opts *rootOptions, 
 		{Label: "image ref", Value: state.InstalledImageRef, Identifier: true},
 		{Label: "checked at", Value: checkedAt, Muted: checkedAt == ""},
 	})
+}
+
+// newManageAccountEnvCommand constructs the `account env` branch with three
+// subcommands: set, unset, list. Provider defaults to codex for now; a future
+// drop may add a --provider flag when multi-provider env maps diverge in UX.
+func newManageAccountEnvCommand(paths config.Paths, opts *rootOptions) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "env",
+		Short: "Manage per-account environment variables",
+		Long: strings.TrimSpace(`
+Manage per-account environment variables that are injected into container launches alongside provider-owned env vars.
+
+Each account maintains its own independent env-var map. The same variable name can hold different values across accounts. Runtime-owned keys (CODEX_HOME, CLAUDE_CONFIG_DIR, HOME, LOGNAME, TERM, USER) are reserved and cannot be set per account.
+
+Subcommands:
+  set   <account> <KEY=VALUE>   Add or update one env var for the account.
+  unset <account> <KEY>         Remove one env var from the account.
+  list  <account>               List all env vars for the account (redacted by default).
+`),
+		Example: strings.TrimSpace(`
+valv account env set personal ANTHROPIC_API_KEY=sk-...
+valv account env unset personal ANTHROPIC_API_KEY
+valv account env list personal
+valv account env list personal --reveal
+valv account env list personal --format json
+`),
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return cmd.Help()
+		},
+	}
+	cmd.AddCommand(newManageAccountEnvSetCommand(paths, opts))
+	cmd.AddCommand(newManageAccountEnvUnsetCommand(paths, opts))
+	cmd.AddCommand(newManageAccountEnvListCommand(paths, opts))
+	return cmd
+}
+
+// newManageAccountEnvSetCommand constructs `account env set <account> <KEY=VALUE>`.
+// The single positional `<KEY=VALUE>` is split at the first `=`; CLI returns a
+// clear user-facing error if the arg is malformed (no `=`, empty key).
+// Service-layer validation (reserved-key, key-regex) is NOT duplicated here —
+// those errors surface as-is from the service.
+func newManageAccountEnvSetCommand(paths config.Paths, opts *rootOptions) *cobra.Command {
+	var providerFlag string
+	cmd := &cobra.Command{
+		Use:   "set <account> <KEY=VALUE>",
+		Short: "Set one env var for a provider account",
+		Long: strings.TrimSpace(`
+Set one environment variable for a named provider account.
+
+The value is stored in plaintext in the Valv database (v0.1 — at-rest encryption is planned for a future drop). Values are only disclosed in container launch env, never in logs.
+
+Reserved keys (CODEX_HOME, CLAUDE_CONFIG_DIR, HOME, LOGNAME, TERM, USER) cannot be set per account — they are owned by the Valv runtime.
+`),
+		Example: strings.TrimSpace(`
+valv account env set personal ANTHROPIC_API_KEY=sk-ant-api-...
+valv account env set work OPENAI_API_KEY=sk-...
+valv account env set personal ANTHROPIC_API_KEY=sk-ant-api-... --provider codex
+`),
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runManageAccountEnvSet(cmd, paths, opts, args, providerFlag)
+		},
+	}
+	cmd.Flags().StringVar(&providerFlag, "provider", "", "explicit provider override (defaults to codex)")
+	return cmd
+}
+
+func runManageAccountEnvSet(cmd *cobra.Command, paths config.Paths, opts *rootOptions, args []string, providerFlag string) error {
+	mode, err := commandOutputMode(cmd, opts)
+	if err != nil {
+		return fmt.Errorf("resolve output policy: %w", err)
+	}
+	accountName := args[0]
+	keyValue := args[1]
+
+	// Parse KEY=VALUE: split at the first '=' only.
+	eqIdx := strings.IndexByte(keyValue, '=')
+	if eqIdx < 0 {
+		return fmt.Errorf("account env set: argument %q is not in KEY=VALUE form", keyValue)
+	}
+	envKey := keyValue[:eqIdx]
+	envValue := keyValue[eqIdx+1:]
+	if envKey == "" {
+		return fmt.Errorf("account env set: key is empty in %q", keyValue)
+	}
+
+	provider, err := resolveEnvProvider(providerFlag)
+	if err != nil {
+		return err
+	}
+
+	service, closeStore, err := openManageService(cmd, paths)
+	if err != nil {
+		return fmt.Errorf("account env set: %w", err)
+	}
+	defer closeStore()
+
+	entry, err := service.SetAccountEnv(cmd.Context(), provider, accountName, envKey, envValue)
+	if err != nil {
+		return fmt.Errorf("account env set: %w", err)
+	}
+	return output.WriteRecord(cmd.OutOrStdout(), mode, "Account env set", []output.Field{
+		{Label: "account", Value: accountName, Identifier: true},
+		{Label: "provider", Value: string(provider), Muted: true},
+		{Label: "key", Value: entry.EnvKey, Identifier: true},
+	})
+}
+
+// newManageAccountEnvUnsetCommand constructs `account env unset <account> <KEY>`.
+func newManageAccountEnvUnsetCommand(paths config.Paths, opts *rootOptions) *cobra.Command {
+	var providerFlag string
+	cmd := &cobra.Command{
+		Use:   "unset <account> <KEY>",
+		Short: "Remove one env var from a provider account",
+		Long: strings.TrimSpace(`
+Remove one environment variable from a named provider account.
+
+Returns an error if the key does not exist for this account.
+`),
+		Example: strings.TrimSpace(`
+valv account env unset personal ANTHROPIC_API_KEY
+valv account env unset work OPENAI_API_KEY --provider codex
+`),
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runManageAccountEnvUnset(cmd, paths, opts, args, providerFlag)
+		},
+	}
+	cmd.Flags().StringVar(&providerFlag, "provider", "", "explicit provider override (defaults to codex)")
+	return cmd
+}
+
+func runManageAccountEnvUnset(cmd *cobra.Command, paths config.Paths, opts *rootOptions, args []string, providerFlag string) error {
+	mode, err := commandOutputMode(cmd, opts)
+	if err != nil {
+		return fmt.Errorf("resolve output policy: %w", err)
+	}
+	accountName := args[0]
+	envKey := args[1]
+
+	provider, err := resolveEnvProvider(providerFlag)
+	if err != nil {
+		return err
+	}
+
+	service, closeStore, err := openManageService(cmd, paths)
+	if err != nil {
+		return fmt.Errorf("account env unset: %w", err)
+	}
+	defer closeStore()
+
+	if err := service.UnsetAccountEnv(cmd.Context(), provider, accountName, envKey); err != nil {
+		return fmt.Errorf("account env unset: %w", err)
+	}
+	return output.WriteRecord(cmd.OutOrStdout(), mode, "Account env unset", []output.Field{
+		{Label: "account", Value: accountName, Identifier: true},
+		{Label: "provider", Value: string(provider), Muted: true},
+		{Label: "key", Value: envKey, Identifier: true},
+	})
+}
+
+// newManageAccountEnvListCommand constructs `account env list <account>`.
+// The --reveal flag disables default redaction. It can appear before or after
+// the positional account name arg (standard cobra flag-vs-positional behavior).
+func newManageAccountEnvListCommand(paths config.Paths, opts *rootOptions) *cobra.Command {
+	var reveal bool
+	var providerFlag string
+	cmd := &cobra.Command{
+		Use:   "list <account>",
+		Short: "List env vars for a provider account",
+		Long: strings.TrimSpace(`
+List all environment variables stored for a named provider account.
+
+By default, values are redacted as *** to prevent accidental disclosure in terminal scrollback, shell capture, or redirected output. Use --reveal to show raw values when needed.
+
+Output fields (JSON):
+- env: list of entries; each entry has key, value, and redacted (bool)
+
+Output (human/plain):
+- one KEY=*** or KEY=value line per entry, sorted alphabetically by key
+`),
+		Example: strings.TrimSpace(`
+valv account env list personal
+valv account env list personal --reveal
+valv account env list personal --format json
+valv account env list personal --format json --reveal
+valv account env list --reveal personal
+`),
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runManageAccountEnvList(cmd, paths, opts, args[0], reveal, providerFlag)
+		},
+	}
+	cmd.Flags().BoolVar(&reveal, "reveal", false, "show raw env values instead of redacting with ***")
+	cmd.Flags().StringVar(&providerFlag, "provider", "", "explicit provider override (defaults to codex)")
+	return cmd
+}
+
+// envListEntry is the dedicated JSON shape for one env-var entry in `account env list`.
+// It uses a named struct rather than the generic output.ListItem so machine-readable
+// consumers get explicit redacted: bool metadata and do not have to infer policy
+// from the literal string "***".
+type envListEntry struct {
+	Key      string `json:"key"`
+	Value    string `json:"value"`
+	Redacted bool   `json:"redacted"`
+}
+
+// redactedValue is the sentinel used in human and JSON output when --reveal is not set.
+const redactedValue = "***"
+
+func runManageAccountEnvList(cmd *cobra.Command, paths config.Paths, opts *rootOptions, accountName string, reveal bool, providerFlag string) error {
+	mode, err := commandOutputMode(cmd, opts)
+	if err != nil {
+		return fmt.Errorf("resolve output policy: %w", err)
+	}
+
+	provider, err := resolveEnvProvider(providerFlag)
+	if err != nil {
+		return err
+	}
+
+	service, closeStore, err := openManageService(cmd, paths)
+	if err != nil {
+		return fmt.Errorf("account env list: %w", err)
+	}
+	defer closeStore()
+
+	entries, err := service.ListAccountEnv(cmd.Context(), provider, accountName)
+	if err != nil {
+		return fmt.Errorf("account env list: %w", err)
+	}
+
+	// Service guarantees ORDER BY env_key ASC; no re-sort needed.
+	switch mode.Format {
+	case domain.OutputFormatJSON:
+		return writeEnvListJSON(cmd.OutOrStdout(), entries, reveal)
+	default:
+		// Human (auto/human) and plain both emit one KEY=value per line.
+		return writeEnvListLines(cmd.OutOrStdout(), entries, reveal)
+	}
+}
+
+// writeEnvListJSON writes the dedicated env-list JSON payload with top-level key "env".
+// This is intentionally NOT routed through output.WriteListWithKey because:
+//   - env values need an explicit "redacted" bool per entry so consumers do not
+//     have to infer policy from the literal sentinel string "***".
+//   - The generic list envelope uses {title, fields} which leaks the internal
+//     output.ListItem shape into the machine-readable contract.
+func writeEnvListJSON(out io.Writer, entries []domain.AccountEnvEntry, reveal bool) error {
+	list := make([]envListEntry, len(entries))
+	for i, e := range entries {
+		if reveal {
+			list[i] = envListEntry{Key: e.EnvKey, Value: e.EnvValue, Redacted: false}
+		} else {
+			list[i] = envListEntry{Key: e.EnvKey, Value: redactedValue, Redacted: true}
+		}
+	}
+	payload := struct {
+		Env []envListEntry `json:"env"`
+	}{Env: list}
+	enc := json.NewEncoder(out)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(payload); err != nil {
+		return fmt.Errorf("account env list: write json output: %w", err)
+	}
+	return nil
+}
+
+// writeEnvListLines writes one KEY=*** (or KEY=value with --reveal) line per
+// entry, sorted alphabetically. Used for human and plain formats. There is no
+// heading or envelope; the lines are the output.
+func writeEnvListLines(out io.Writer, entries []domain.AccountEnvEntry, reveal bool) error {
+	if len(entries) == 0 {
+		if _, err := fmt.Fprintln(out, "(none)"); err != nil {
+			return fmt.Errorf("account env list: write empty state: %w", err)
+		}
+		return nil
+	}
+	for _, e := range entries {
+		value := redactedValue
+		if reveal {
+			value = e.EnvValue
+		}
+		if _, err := fmt.Fprintf(out, "%s=%s\n", e.EnvKey, value); err != nil {
+			return fmt.Errorf("account env list: write entry: %w", err)
+		}
+	}
+	return nil
+}
+
+// resolveEnvProvider parses an explicit --provider flag value or defaults to
+// codex. Env commands default to codex for backward-compat with DROP_14's
+// initial scope; a future drop may add interactive provider resolution.
+func resolveEnvProvider(providerFlag string) (domain.Provider, error) {
+	if strings.TrimSpace(providerFlag) == "" {
+		return domain.ProviderCodex, nil
+	}
+	return domain.ParseProvider(providerFlag)
 }
