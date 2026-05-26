@@ -39,6 +39,7 @@ PROMPT_STRING=""
 DRY_RUN=0
 MODEL_OVERRIDE=""
 HELD_LOCK=""
+GATE_JSON=""
 
 usage() {
   cat >&2 <<'USAGE'
@@ -98,6 +99,7 @@ while [[ $# -gt 0 ]]; do
     --prompt)       PROMPT_STRING="$2";  shift 2 ;;
     --prompt-file)  PROMPT_FILE="$2";    shift 2 ;;
     --model)        MODEL_OVERRIDE="$2"; shift 2 ;;
+    --gate)         GATE_JSON="$2";      shift 2 ;;
     --dry-run)      DRY_RUN=1;           shift ;;
     -h|--help)      usage ;;
     *)              echo "Unknown arg: $1" >&2; usage ;;
@@ -159,6 +161,34 @@ elif [[ -n "${PROMPT_FILE}" ]]; then
 else
   TASK_PROMPT="$(cat)"
 fi
+
+# --- Gate contract (--gate '{"edit":[...],"writable_dirs":[...],"bash_deny":[...],"network":bool}') ---
+# ONE JSON gate spec → per-backend translation (codex: execpolicy rules + -C; claude -p:
+# --allowedTools(//abs) + --disallowedTools). Empty => ungated. The orchestrator owns the spec;
+# this is the bin/sh proof-of-concept the sand MCP will replace.
+GATE_EDIT_FILES=()
+GATE_BASH_DENY=()
+GATE_WRITABLE_DIRS=()
+if [[ -n "${GATE_JSON}" ]]; then
+  while IFS= read -r line; do [[ -n "$line" ]] && GATE_EDIT_FILES+=("$line"); done < <(printf '%s' "${GATE_JSON}" | python3 -c "import sys,json;d=json.loads(sys.stdin.read() or '{}');print(chr(10).join(x for x in d.get('edit',[]) if isinstance(x,str)))")
+  while IFS= read -r line; do [[ -n "$line" ]] && GATE_BASH_DENY+=("$line"); done < <(printf '%s' "${GATE_JSON}" | python3 -c "import sys,json;d=json.loads(sys.stdin.read() or '{}');print(chr(10).join(x for x in d.get('bash_deny',[]) if isinstance(x,str)))")
+  while IFS= read -r line; do [[ -n "$line" ]] && GATE_WRITABLE_DIRS+=("$line"); done < <(printf '%s' "${GATE_JSON}" | python3 -c "import sys,json;d=json.loads(sys.stdin.read() or '{}');print(chr(10).join(x for x in d.get('writable_dirs',[]) if isinstance(x,str)))")
+fi
+
+# --- Per-run audit capture (veracity + sand reference corpus) --------------
+# The bin/sh model must persist the FULL trace of every dispatch so (a) an
+# orchestrator can AUDIT that an agent's self-report matches what actually ran
+# (no silent off-scope action), and (b) sand has real reference data to build
+# from. Per tier we capture the backend's stdout (the response +, for codex,
+# the tool-call stream) and stderr (codex execpolicy "Rejected(...)" lines,
+# diagnostics) to .claude/agent-runs/ (gitignored — transient artifacts). The
+# `-p`/ollama JSON envelope's permission_denials + tool_use and the codex
+# stream are the ground truth the orchestrator checks claims against. (Built-in
+# Agent-tool gate decisions live separately in .claude/hooks/ta_gate_debug.log,
+# since that channel does not route through this dispatcher.)
+AUDIT_DIR="${REPO_ROOT}/.claude/agent-runs"
+mkdir -p "${AUDIT_DIR}" 2>/dev/null || true
+AUDIT_BASE="${AUDIT_DIR}/$(date +%Y%m%d-%H%M%S)-${ROLE}-$$"
 
 ANTI_RECURSION='
 
@@ -289,8 +319,36 @@ dispatch_ollama() {
     --no-session-persistence
     --append-system-prompt "${PERSONA_BODY}${ANTI_RECURSION}"
   )
+  # NON-OAuth `-p` path (ollama via ANTHROPIC_BASE_URL below). `--bare` strips
+  # plugins (Playwright) + LSP (gopls), so to be TOOL-COMPLETE this must inject
+  # the role's tools via --mcp-config, mirroring dispatch_codex's
+  # role-conditional set: ta always; hylla(read-only) for planning/plan-qa;
+  # context7 always; @playwright/mcp for *-fe-*; a gopls MCP for *-go-*;
+  # WebSearch via --allowedTools. TODO(ollama-return): build a per-role
+  # mcp-config JSON. Ollama is currently REMOVED from the chains, so this path
+  # is dormant; today it loads only the project .mcp.json (ta + hylla).
   [[ -f "${REPO_ROOT}/.mcp.json" ]] && cmd+=( --mcp-config "${REPO_ROOT}/.mcp.json" )
-  [[ -n "${TOOLS_LINE}" ]] && cmd+=( --allowedTools "${TOOLS_LINE}" )
+  # GATE (consensus 2026-05-25, hylla T2 / sand E2 / ta R1 / tillsyn C-2): `--bare` disables hooks,
+  # so the gate on this path is `--allowedTools` + `--disallowedTools`. Per-file edit-scope DOES work
+  # with the `//` DOUBLE-SLASH absolute form (single-slash denies everything). Scope the FULL edit-tool
+  # set per file (models pick Edit vs Write vs MultiEdit inconsistently), omit bare `Bash` (else an
+  # agent's `echo > forbidden` bypasses the Edit gate), keep the persona's MCP tools, and deny the
+  # gate's bash_deny patterns. `--bare` gives the clean small-model context for free.
+  if [[ "${#GATE_EDIT_FILES[@]}" -gt 0 || "${#GATE_BASH_DENY[@]}" -gt 0 ]]; then
+    local allow=( Read Glob Grep "Bash(mage *)" "Bash(go doc:*)" "Bash(git diff:*)" "Bash(git status:*)" "Bash(git log:*)" "Bash(git show:*)" )
+    local ef mt
+    for ef in "${GATE_EDIT_FILES[@]:-}"; do
+      [[ -z "${ef}" ]] && continue
+      allow+=( "Edit(//${ef#/})" "Write(//${ef#/})" "MultiEdit(//${ef#/})" )
+    done
+    while IFS= read -r mt; do [[ -n "${mt}" ]] && allow+=( "${mt}" ); done < <(printf '%s' "${TOOLS_LINE}" | tr ',' '\n' | sed 's/^ *//;s/ *$//' | grep '^mcp__' || true)
+    cmd+=( --allowedTools "${allow[@]}" )
+    local deny=() bp
+    for bp in "${GATE_BASH_DENY[@]:-}"; do [[ -n "${bp}" ]] && deny+=( "Bash(${bp}:*)" ); done
+    [[ "${#deny[@]}" -gt 0 ]] && cmd+=( --disallowedTools "${deny[@]}" )
+  else
+    [[ -n "${TOOLS_LINE}" ]] && cmd+=( --allowedTools "${TOOLS_LINE}" )
+  fi
 
   if [[ "${DRY_RUN}" -eq 1 ]]; then
     printf '  ANTHROPIC_BASE_URL=http://localhost:11434 ANTHROPIC_API_KEY=ollama \\\n' >&2
@@ -316,48 +374,125 @@ dispatch_codex() {
 
 ${TASK_PROMPT}"
 
+  # -C confines writes to the gate's writable dir (editing roles) else the project cwd.
+  local codex_cwd="${CWD}"
+  [[ "${#GATE_WRITABLE_DIRS[@]}" -gt 0 ]] && codex_cwd="${GATE_WRITABLE_DIRS[0]}"
+  # NOTE: --ignore-rules REMOVED (2026-05-25 4-way consensus). We WANT our hermetic
+  # CODEX_HOME/rules/default.rules execpolicy to apply — it is the RELIABLE, OS-independent
+  # git/command block (native .git-ro is geometry-/`/tmp`-dependent: sand E5, hylla T3clean vs
+  # T3v3). --ignore-user-config + the hermetic CODEX_HOME still exclude the dev's global rules.
   local cmd=( codex exec
     --ephemeral
-    --ignore-rules
+    --ignore-user-config
     --skip-git-repo-check
-    -C "${CWD}"
+    -C "${codex_cwd}"
     -m "${model}"
   )
+  # workspace-write sandbox is INERT in exec without an approval policy (sand E3); `-a` is not a
+  # valid `codex exec` flag (sand E4) — the knob is `-c approval_policy="never"`.
+  cmd+=( -c "approval_policy=\"never\"" )
 
-  # Codex MCP injection. Background:
-  #   (1) --ignore-user-config NOT set — codex loads ~/.codex/config.toml
-  #       + overlays our -c overrides.
-  #   (2) ta is NOT in user codex config (Claude-Code-only MCP today). Inject
-  #       ta server definition + per-tool approval explicitly.
-  #   (3) Approval syntax: per-tool `approval_mode = "approve"` is the
-  #       form that ACTUALLY pre-approves under --ephemeral (approval:
-  #       never). Server-level `default_tools_approval_mode = "auto"` is
-  #       documented but NOT implemented for raw mcp_servers per upstream
-  #       issue #16501 — verified empirically: hylla calls still cancel
-  #       with that setting. Per-tool form mirrors user's working gopls
-  #       config in ~/.codex/config.toml and is the pattern codex docs
-  #       show. "approve" in codex's per-tool config = pre-approved,
-  #       NOT requires-TTY (the docs are inconsistent; empirical
-  #       behavior confirms pre-approval).
+  # Codex MCP injection — HERMETIC (mirrors dispatch_claude_native's
+  # "--bare + explicit MCP" pattern). --ignore-user-config (set above) means
+  # codex does NOT read ~/.codex/config.toml, so ALL its HOME state is
+  # ignored: the conflicting hylla url= entry, the tillsyn server, HOME
+  # gopls/context7, agents.md, everything. We inject ONLY what each role
+  # needs inline, per the persona tool matrix (2026-05-24):
+  #   ta       — always (cascade substrate).
+  #   hylla    — planning + plan-qa only, READ-ONLY; NOT build-qa (just-
+  #              shipped code isn't in the Hylla snapshot yet — build-qa
+  #              relies on git diff + LSP/Read).
+  #   context7 — always (library / tooling docs). HTTP remote; header maps
+  #              to the CONTEXT7_API_KEY env var (must be exported here).
+  #   gopls    — Go roles only (live Go symbol semantics).
+  #   web_search — re-enabled per-run (HOME web_search="live" is ignored).
+  # Approval syntax: per-tool `approval_mode = "approve"` is the form that
+  # ACTUALLY pre-approves under --ephemeral (approval: never). Server-level
+  # default_tools_approval_mode is documented but NOT implemented for raw
+  # mcp_servers (upstream #16501) — verified empirically. Per-tool form
+  # mirrors the user's working ~/.codex/config.toml.
+  cmd+=( -c "web_search=\"live\"" )
+
+  # Ignore ALL AGENTS.md instruction docs (global ~/.codex/AGENTS.md AND any
+  # project AGENTS.md walked root->cwd). --ignore-user-config skips config.toml
+  # but NOT AGENTS.md; codex has no dedicated disable flag, so we cap the
+  # instruction-doc budget to 0 bytes. The persona body (--append via the
+  # prompt) is the agent's ONLY instruction source — fully hermetic.
+  cmd+=( -c "project_doc_max_bytes=0" )
+
+  # Disable codex's BUNDLED skills (imagegen / openai-docs / plugin-creator /
+  # skill-creator / skill-installer) so the agent's world is ONLY the persona +
+  # the injected MCP — nothing ambient. (--ignore-user-config skips config.toml
+  # but NOT the runtime-bundled skills; this knob does. Verified 2026-05-25:
+  # SKILLS=NONE under this flag.)
+  cmd+=( -c "skills.bundled.enabled=false" )
+
   local ta_tools_toml="" tool
   for tool in get update list_sections search schema create delete move init; do
     [[ -n "${ta_tools_toml}" ]] && ta_tools_toml+=","
     ta_tools_toml+="${tool}={approval_mode=\"approve\"}"
   done
-  cmd+=( -c "mcp_servers.ta={command=\"ta\",args=[\"--project\",\"${CWD}\"],tools={${ta_tools_toml}}}" )
+  cmd+=( -c "mcp_servers.ta={command=\"ta\",args=[\"--project\",\"${CWD}\"],startup_timeout_sec=15,tools={${ta_tools_toml}}}" )
 
-  # Hylla MCP injection (stdio transport — hylla CLI added stdio support
-  # 2026-05-21). Tool names are the canonical names hylla MCP server
-  # registers (queried directly via tools/list JSON-RPC — see hylla
-  # source). All read-only; excludes write tools (hylla.config.refresh,
-  # hylla.ingest). Per-tool quoted keys required because dots inside an
-  # inline-table key otherwise create nested structure.
-  local hylla_tools_toml="" hylla_tool
-  for hylla_tool in hylla.artifact.list hylla.artifact.metadata hylla.artifact.overview hylla.dql.query hylla.graph.list hylla.graph.nav hylla.node.full hylla.refs.find hylla.run.get hylla.run.list hylla.search hylla.search.keyword hylla.search.vector hylla.task.get; do
-    [[ -n "${hylla_tools_toml}" ]] && hylla_tools_toml+=","
-    hylla_tools_toml+="\"${hylla_tool}\"={approval_mode=\"approve\"}"
-  done
-  cmd+=( -c "mcp_servers.hylla={command=\"/Users/evanschultz/go/bin/hylla\",args=[\"mcp\"],tools={${hylla_tools_toml}}}" )
+  # Hylla MCP injection (stdio). READ-ONLY tool set (excludes hylla.ingest /
+  # hylla.config.refresh). Tool names are the canonical names the hylla MCP
+  # server registers. SKIPPED for build-qa roles per the persona tool matrix.
+  # Per-tool quoted keys required because dots inside an inline-table key
+  # otherwise create nested structure.
+  if [[ "${ROLE}" != *build-qa* ]]; then
+    local hylla_tools_toml="" hylla_tool
+    for hylla_tool in hylla.artifact.list hylla.artifact.metadata hylla.artifact.overview hylla.dql.query hylla.graph.list hylla.graph.nav hylla.node.full hylla.refs.find hylla.run.get hylla.run.list hylla.search hylla.search.keyword hylla.search.vector hylla.task.get; do
+      [[ -n "${hylla_tools_toml}" ]] && hylla_tools_toml+=","
+      hylla_tools_toml+="\"${hylla_tool}\"={approval_mode=\"approve\"}"
+    done
+    cmd+=( -c "mcp_servers.hylla={command=\"/Users/evanschultz/go/bin/hylla\",args=[\"mcp\"],startup_timeout_sec=15,tools={${hylla_tools_toml}}}" )
+  fi
+
+  # Context7 MCP injection (HTTP remote — mirrors the user's HOME
+  # context7-mcp def). env_http_headers maps the CONTEXT7_API_KEY header to
+  # the same-named env var, which must be exported where this dispatcher
+  # runs. Injected for every codex role EXCEPT build-qa: build-qa is a
+  # reading-based axis (it inspects shipped code + reads library source
+  # directly), and the HTTP context7 server is a startup network call that
+  # intermittently hangs codex MCP-init (SAND_E2E_PROOF §4 flagged MCP
+  # injection as never-asserted-green) — so the leanest reliable MCP set
+  # for build-qa codex is ta only.
+  if [[ "${ROLE}" != *build-qa* ]]; then
+    cmd+=( -c "mcp_servers.context7={url=\"https://mcp.context7.com/mcp\",env_http_headers={CONTEXT7_API_KEY=\"CONTEXT7_API_KEY\"},startup_timeout_sec=15}" )
+  fi
+
+  # gopls MCP injection (Go roles only, EXCEPT build-qa). gopls `mcp` indexes
+  # the module at startup — a heavy MCP-init that intermittently hangs codex
+  # for build-qa, which only needs to READ (not resolve live symbols). Keep
+  # gopls for go planning/plan-qa; strip it from build-qa for reliable startup.
+  if [[ "${ROLE}" == *-go-* && "${ROLE}" != *build-qa* ]]; then
+    local gopls_tools_toml="" gopls_tool
+    for gopls_tool in go_diagnostics go_file_context go_package_api go_search go_symbol_references go_workspace; do
+      [[ -n "${gopls_tools_toml}" ]] && gopls_tools_toml+=","
+      gopls_tools_toml+="${gopls_tool}={approval_mode=\"approve\"}"
+    done
+    cmd+=( -c "mcp_servers.gopls={command=\"gopls\",args=[\"mcp\"],cwd=\"${CWD}\",startup_timeout_sec=15,tools={${gopls_tools_toml}}}" )
+  fi
+
+  # Playwright MCP injection (FE roles only). @playwright/mcp is npx-cached
+  # and the Playwright browsers are installed (~/Library/Caches/ms-playwright,
+  # incl. the MCP's own mcp-chrome) — no extra install needed. Like the
+  # context7 HTTP server, the MCP runs as a codex SUBPROCESS, not under the
+  # shell --sandbox, so it launches a headless browser + reaches the live
+  # Wails dev server (localhost:34917) regardless of read-only/workspace-write
+  # mode. --isolated keeps each dispatch's browser profile ephemeral so
+  # parallel FE dispatches don't contend on a shared user-data-dir. Tool
+  # names are the @playwright/mcp browser_* set (the same tools the Claude
+  # Code playwright plugin wraps). This is what lets FE qa-falsification run
+  # on codex with mandatory Playwright, not only on claude-native.
+  if [[ "${ROLE}" == *-fe-* ]]; then
+    local pw_tools_toml="" pw_tool
+    for pw_tool in browser_navigate browser_navigate_back browser_click browser_type browser_press_key browser_hover browser_select_option browser_fill_form browser_file_upload browser_handle_dialog browser_drag browser_snapshot browser_take_screenshot browser_console_messages browser_network_requests browser_evaluate browser_resize browser_wait_for browser_tabs browser_close browser_install; do
+      [[ -n "${pw_tools_toml}" ]] && pw_tools_toml+=","
+      pw_tools_toml+="${pw_tool}={approval_mode=\"approve\"}"
+    done
+    cmd+=( -c "mcp_servers.playwright={command=\"/opt/homebrew/bin/playwright-mcp\",args=[\"--headless\",\"--isolated\"],startup_timeout_sec=15,tools={${pw_tools_toml}}}" )
+  fi
 
   if [[ -n "${opts}" ]]; then
     # shellcheck disable=SC2206  # intentional word-split on opts
@@ -366,53 +501,67 @@ ${TASK_PROMPT}"
   fi
 
   if [[ "${DRY_RUN}" -eq 1 ]]; then
+    printf '  CODEX_HOME=<hermetic tmp: only auth.json/version.json/installation_id/models_cache.json symlinked> \\\n' >&2
     printf '  ' >&2
     printf '%q ' "${cmd[@]}" >&2
     printf '\n  <<< <persona + task>\n' >&2
     return 0
   fi
 
-  "${cmd[@]}" <<<"${full_prompt}"
+  # Hermetic CODEX_HOME. ~/.codex holds ALL global surfaces codex would load:
+  # skills/, rules/, hooks, plugins/, memories/, ambient-suggestions/,
+  # AGENTS.md, config.toml. There is no single flag to disable skills (codex
+  # issue #14316) or all hooks, so we point CODEX_HOME at a throwaway dir that
+  # contains ONLY the auth + identity files (symlinked) codex needs to run.
+  # Everything global is therefore ABSENT — the persona body + the -c MCP
+  # injections are the agent's entire world. --ephemeral means no session
+  # state is written back. (--ignore-user-config + project_doc_max_bytes=0 +
+  # --ignore-rules remain as belt-and-suspenders, incl. for PROJECT-level
+  # AGENTS.md/.rules that live in the repo, not under CODEX_HOME.)
+  local hermetic_home rc f
+  hermetic_home="$(mktemp -d "${TMPDIR:-/tmp}/codex-hermetic.XXXXXX")"
+  for f in auth.json version.json installation_id models_cache.json; do
+    [[ -e "${HOME}/.codex/${f}" ]] && ln -s "${HOME}/.codex/${f}" "${hermetic_home}/${f}"
+  done
+  # Execpolicy git/command denylist — the RELIABLE block (CreateProcess-level, geometry/OS-
+  # independent). git mutations ALWAYS forbidden (orchestrator is sole committer); plus the gate's
+  # non-git bash_deny patterns (e.g. "mage install", "go get", "go mod"). Loaded because we do NOT
+  # pass --ignore-rules; the hermetic CODEX_HOME keeps the dev's global rules out.
+  mkdir -p "${hermetic_home}/rules"
+  {
+    local gv
+    for gv in commit push add reset rebase merge checkout branch tag stash restore cherry-pick am clean switch rm mv update-ref gc prune worktree submodule init clone fetch pull remote apply; do
+      printf 'prefix_rule(pattern=["git", "%s"], decision="forbidden")\n' "${gv}"
+    done
+    local pat toks
+    for pat in "${GATE_BASH_DENY[@]:-}"; do
+      [[ -z "${pat}" ]] && continue
+      case "${pat}" in git\ *|git) continue ;; esac
+      toks="$(printf '%s' "${pat}" | python3 -c "import sys;print(', '.join('\"%s\"'%t for t in sys.stdin.read().split()))")"
+      [[ -n "${toks}" ]] && printf 'prefix_rule(pattern=[%s], decision="forbidden")\n' "${toks}"
+    done
+  } > "${hermetic_home}/rules/default.rules"
+  CODEX_HOME="${hermetic_home}" "${cmd[@]}" <<<"${full_prompt}" && rc=0 || rc=$?
+  rm -rf "${hermetic_home}" 2>/dev/null || true
+  return "${rc}"
 }
 
 dispatch_claude_native() {
-  local model=$1
-  # --bare + --mcp-config mirror dispatch_ollama: the persona body IS the
-  # role's complete spec, so we skip CLAUDE.md auto-discovery, hooks, plugin
-  # context, and auto-memory (saves ~30-50K input tokens per call). The
-  # persona body in --append-system-prompt + the tools allowlist + the
-  # project's MCP servers cover everything the role needs.
-  local cmd=( claude -p
-    --bare
-    --model "${model}"
-    --output-format json
-    --no-session-persistence
-    --append-system-prompt "${PERSONA_BODY}${ANTI_RECURSION}"
-  )
-  [[ -f "${REPO_ROOT}/.mcp.json" ]] && cmd+=( --mcp-config "${REPO_ROOT}/.mcp.json" )
-  [[ -n "${TOOLS_LINE}" ]] && cmd+=( --allowedTools "${TOOLS_LINE}" )
-
-  if [[ "${DRY_RUN}" -eq 1 ]]; then
-    printf '  (env -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY) \\\n' >&2
-    printf '  cd %q && \\\n' "${CWD}" >&2
-    printf '  ' >&2
-    printf '%q ' "${cmd[@]}" >&2
-    printf '\n  <<< <stdin task prompt>\n' >&2
-    return 0
-  fi
-
-  # Subshell unsets Ollama redirect vars (ANTHROPIC_BASE_URL / AUTH_TOKEN)
-  # AND ANTHROPIC_API_KEY so claude-native cannot bill against an API key.
-  # The intended auth path is the Claude Code subscription (OAuth in the
-  # local keychain). 2026-05-21 hardening: chain_planning + chain_qa_falsif
-  # no longer list claude-native rows, so this function is reachable only
-  # via chain_qa_proof / chain_closeout (which use agent-tool dispatch in
-  # practice) or manual --backend overrides. Strict env-var hygiene is the
-  # belt-and-suspenders guarantee that an API-key bill can never appear.
-  (
-    unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY
-    "${cmd[@]}" <<<"${TASK_PROMPT}"
-  )
+  # RETIRED / FORBIDDEN (dev directive 2026-05-24). `claude -p` must NEVER run
+  # against OAuth/subscription auth. OAuth claude-native roles (builder,
+  # qa-proof, closeout) are dispatched EXCLUSIVELY via Claude Code's built-in
+  # Agent tool (Agent subagent_type=<role>) by the orchestrator — that path
+  # keeps billing on the subscription and applies the persona `tools:`
+  # allowlist as the isolation boundary (the subagent still has the orch's
+  # plugins like Playwright, but can only call allowlisted tools). `claude -p`
+  # is reserved for NON-OAuth endpoints ONLY (ollama via ANTHROPIC_BASE_URL, or
+  # an explicit API key) — see dispatch_ollama, which injects the role's tools
+  # via --mcp-config since --bare strips plugins + LSP. We refuse loudly here
+  # so a misroute can NEVER silently run `-p` against the OAuth subscription.
+  echo "[disp] REFUSED: claude-native (OAuth) role '${ROLE}' cannot dispatch via bin/agent-dispatch.sh." >&2
+  echo "[disp]   OAuth claude-native roles MUST use the built-in Agent tool: Agent(subagent_type=${ROLE}, model=<tier>)." >&2
+  echo "[disp]   '-p' is reserved for NON-OAuth endpoints (ollama / API-key); see dispatch_ollama." >&2
+  return 1
 }
 
 # --- Chain walk -----------------------------------------------------------
@@ -462,28 +611,40 @@ while IFS='|' read -r backend model opts wait_max slots; do
   # is part of a compound conditional).
   DISPATCH_OK=1
   DISPATCH_EXIT=0
+  # Capture this tier's stdout (response/stream) + stderr (tool stream, codex
+  # execpolicy rejections) to the per-run audit files, then pass both through to
+  # the dispatcher's real stdout/stderr so the orchestrator still receives them.
+  TIER_OUT="${AUDIT_BASE}.tier${TIER_NUM}.${backend}.out"
+  TIER_ERR="${AUDIT_BASE}.tier${TIER_NUM}.${backend}.err"
   case "$backend" in
     ollama-local|ollama-cloud)
-      dispatch_ollama "$model" && DISPATCH_EXIT=0 || DISPATCH_EXIT=$?
+      dispatch_ollama "$model" > "${TIER_OUT}" 2> "${TIER_ERR}" && DISPATCH_EXIT=0 || DISPATCH_EXIT=$?
       ;;
     codex-exec)
-      dispatch_codex "$model" "$opts" && DISPATCH_EXIT=0 || DISPATCH_EXIT=$?
+      dispatch_codex "$model" "$opts" > "${TIER_OUT}" 2> "${TIER_ERR}" && DISPATCH_EXIT=0 || DISPATCH_EXIT=$?
       ;;
     claude-native)
-      dispatch_claude_native "$model" && DISPATCH_EXIT=0 || DISPATCH_EXIT=$?
+      dispatch_claude_native "$model" > "${TIER_OUT}" 2> "${TIER_ERR}" && DISPATCH_EXIT=0 || DISPATCH_EXIT=$?
       ;;
   esac
+  [[ -s "${TIER_OUT}" ]] && cat "${TIER_OUT}"
+  [[ -s "${TIER_ERR}" ]] && cat "${TIER_ERR}" >&2
   [[ "${DISPATCH_EXIT}" -ne 0 ]] && DISPATCH_OK=0
 
   release_ollama_slot "${HELD_LOCK}"
   HELD_LOCK=""
 
   if [[ "${DISPATCH_OK}" -eq 1 ]]; then
+    printf '{"run":"%s","role":"%s","backend":"%s","model":"%s","tier":%d,"exit":0,"served_by":"%s:%s","cwd":"%s","gate":%s,"ts":"%s","stdout":"%s","stderr":"%s"}\n' \
+      "$(basename "${AUDIT_BASE}")" "${ROLE}" "${backend}" "${model}" "${TIER_NUM}" "${backend}" "${model}" "${CWD}" \
+      "${GATE_JSON:-null}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      "$(basename "${TIER_OUT}")" "$(basename "${TIER_ERR}")" > "${AUDIT_BASE}.meta.json" 2>/dev/null || true
     if [[ "${TIER_NUM}" -eq 1 ]]; then
       echo "[disp] served_by=${backend}:${model}" >&2
     else
       echo "[disp] served_by=${backend}:${model} originally_requested=${PRIMARY_BACKEND}:${PRIMARY_MODEL} FALLBACK" >&2
     fi
+    echo "[disp] audit=${AUDIT_BASE}.*" >&2
     exit 0
   fi
 

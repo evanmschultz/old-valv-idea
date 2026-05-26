@@ -48,3 +48,6 @@ cover.out
 # Ephemeral per-session lock written by Claude Code's scheduled-task /
 # ScheduleWakeup mechanism. Session-PID-bound; never commit.
 .claude/scheduled_tasks.lock
+# Per-run dispatch audit traces + hook bytecode — transient, never tracked.
+.claude/agent-runs/
+.claude/hooks/__pycache__/
