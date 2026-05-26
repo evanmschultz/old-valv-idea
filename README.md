@@ -1,13 +1,39 @@
 # Valv
 
-Valv is a macOS-first control plane for running AI CLIs inside Valv-managed Docker runtimes.
+Valv is a macOS-first control plane for per-account isolated, containerized agentic-dev workloads. Each workload runs in a Docker container with its own provider credential home, project bindings, and mounts, so multiple identities (for example `personal` and `work`) stay isolated per project.
+
+Launching AI coding CLIs is the first shipped case — not the whole product. `valv codex` and `valv claude` are containerized pass-through launchers, and both are thin adapters over a generic per-account run primitive, `valv run`, which carries the same isolation model: per-account credential homes, sibling-path-aware mounts, per-project overlay images, and cross-provider in-container routing.
 
 Current scope:
 
 - macOS only
-- Docker required
-- Codex is the first primary provider target
-- `valv codex` stays a pass-through containerized Codex launcher
+- Docker required (Docker Desktop)
+- Provider launchers shipped: `valv codex` (the first primary target) and `valv claude`
+- `valv run --account <name> [--provider <provider>] <command>` is the generic primitive the launchers are derived from
+
+## Usage
+
+Launch a provider CLI inside its isolated container. When the project has a single account for that provider, Valv auto-binds it; with several, it shows a picker:
+
+```bash
+valv codex
+valv claude
+```
+
+Run an arbitrary command in a named account's isolated container — the generic primitive the launchers are built on:
+
+```bash
+valv run --account personal bash
+valv run --account work --provider claude claude --version
+```
+
+`valv run` resolves the account across providers and does not mutate project bindings; `--provider` disambiguates when the same account name exists for both providers. `valv codex` and `valv claude` are first-class adapters over this same launch path.
+
+The isolation model is shared by `valv run`, `valv codex`, and `valv claude`:
+
+- Each managed account has its own provider credential home; the selected account's home is bind-mounted into the container, so identities stay isolated per project.
+- When both a Codex and a Claude account are bound to a project, the other provider's credential home is cross-mounted, so an in-container agent can invoke the other CLI (for example a `valv claude` session running `codex exec`).
+- A per-project toolchain declared in `.valv/tools.toml` composes a per-project overlay image on top of the base provider image.
 
 ## Prerequisites
 

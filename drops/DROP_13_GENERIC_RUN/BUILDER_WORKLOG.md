@@ -567,3 +567,27 @@ None — all evidence gathered via Read tool on live source files before editing
 ## Verdict
 
 **Unit 13.4 DONE (R3)**: F2 — wrapper `emitNotices` deleted from both providers; runservice is the sole warning emitter. F1 — silent-skip codex test case added (wantErr=false, wantClaudeMount=false, wantClaudeEnv=false). Both mage gates green: claude 21/21, codex 15/15, race-clean, coverage floors met.
+
+## Unit 13.5 — Round 1
+
+**Author:** orchestrator (docs unit — `README.md` only, no Go; the Go builder does not author README. Orchestrator owns markdown per CLAUDE.md role boundaries).
+
+### Change
+
+Rewrote `README.md` intro/scope around the generic-run product direction and added a `## Usage` section.
+
+- Files touched: `README.md` (intro/scope block + new `## Usage` section). `PLAN.md` Unit 13.5 state flipped `todo` → `done`.
+- Intro now frames Valv as a control plane for per-account isolated, containerized agentic-dev workloads, with AI-CLI launching as the first shipped case — not the whole product.
+- `## Usage` shows `valv codex` / `valv claude` as adapter launchers and `valv run --account <name> [--provider <provider>] <command>` as the generic primitive they derive from, plus the shared isolation model (per-account credential homes, cross-provider cross-mount, per-project `.valv/tools.toml` overlay images).
+
+### Self-verification against acceptance (PLAN.md:167-171)
+
+This is a docs unit; no `mage` gate applies. Verified by the orchestrator against the three acceptance bullets:
+
+- AC1 (intro = per-account isolated containerized workload runner, AI CLIs as first shipped case) — MET (intro paragraph).
+- AC2 (examples include `valv run --account <name> <command>` and still show `valv codex` / `valv claude` as adapters) — MET (`## Usage` code blocks).
+- AC3 (no contradiction with shipped DROP_5/7/8/10/12 behavior — per-account homes, cross-provider routing, overlay images, provider adapters over the generic primitive) — MET. Only shipped behavior is described; still-building DROP_14 (env vars) and DROP_15 (network policy) are deliberately NOT advertised as working.
+
+### Verdict
+
+**Unit 13.5 DONE**: README reframed around the generic primitive; three acceptance bullets met; no over-claiming of unshipped behavior.

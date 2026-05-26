@@ -156,7 +156,7 @@ Blocked by: `13.2`
 
 #### Unit 13.5 — Rewrite README around the generic primitive
 
-State: `todo`
+State: `done`
 
 Paths: `README.md`
 
