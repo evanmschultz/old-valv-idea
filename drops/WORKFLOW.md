@@ -62,6 +62,21 @@ refer to till_*, capture_state, attention_item, handoff, capability_lease, or
 auth_request. Read main/drops/WORKFLOW.md before acting. Edit only the files
 your phase owns (see WORKFLOW.md "File Lifecycle" table).
 
+Git discipline (LOAD-BEARING): you are NOT the committer. You may run
+READ-ONLY git only — git diff, git status, git log, git show, git
+rev-parse. You are FORBIDDEN from running ANY git command that mutates repo,
+index, working-tree, or remote state: no git add, commit, push, restore,
+reset, checkout, switch, stash, rm, mv, merge, rebase, cherry-pick, tag,
+branch, or config. The ORCHESTRATOR is the sole actor that stages, commits,
+and pushes. If your phase appears to need a commit, STOP and return that to
+the orchestrator — do not commit yourself.
+
+Hylla artifact_ref: when your tools allow mcp__hylla__* and you query valv's
+own code, use artifact_ref=github.com/evanmschultz/valv@main (pinned to
+branch, no float) exactly as the orchestrator passes it in this prompt. Do
+NOT hardcode or invent a different ref; if no ref was passed and you need
+Hylla, ask the orchestrator.
+
 Render your response beginning with a `# Section 0 — SEMI-FORMAL REASONING`
 block containing `## Planner`, `## Builder`, `## QA Proof`, `## QA
 Falsification`, and `## Convergence` passes (or the 4-pass subagent variant
