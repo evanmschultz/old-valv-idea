@@ -511,3 +511,59 @@ AC5 (PLAN.md line ~130): "Tests explicitly cover the status-quo silent-skip bran
 ## Verdict
 
 **Unit 13.3 DONE**: All tests pass including the new AC5 case. Silent-skip behavior is now explicitly tested. Unit 13.3 remains `done` in PLAN.md (state unchanged from Round 1).
+
+## Unit 13.4 — Round 3 (QA-fix round closing F1 + F2)
+
+### Task
+
+Close two HARD findings from Round 1 QA:
+
+- **F2 (duplicate runtime-warning emission)**: The thin-adapter refactor left each provider wrapper calling its own local `emitNotices(...)` AND the shared runservice also calling `s.emitNotices(request.Prepared.Warnings)` at line 187 of `run/service.go`. This caused every non-TTY runtime warning to be printed twice. Fix: delete the wrapper-local `emitNotices` call and method from both provider wrappers; runservice becomes the sole emitter.
+- **F1 (missing AC-152 test case, codex only)**: `TestRunCrossProviderMountWhenClaudeBound` had 3 cases but was missing the silent-skip branch (Claude binding found but `ProfileByID` fails). Fix: add a 4th case asserting wantErr=false, wantClaudeMount=false, wantClaudeEnv=false.
+
+### Files touched
+
+- `internal/services/codex/service.go` — removed `s.emitNotices(resolved.profile, prepared.Warnings, codexArgs)` call (line 181) and the entire `func (s Service) emitNotices(...)` method (lines 310-323). `Warnings: prepared.Warnings` in the runPrepared struct is retained. Trailing blank line also removed for gofumpt.
+- `internal/services/claude/service.go` — removed `s.emitNotices(resolved.profile, prepared.Warnings, claudeArgs)` call (line 190) and the entire `func (s Service) emitNotices(...)` method (lines 307-320). `Warnings: prepared.Warnings` in the runPrepared struct is retained. Trailing blank line also removed for gofumpt.
+- `internal/services/codex/service_test.go` — deleted `TestEmitNoticesSuppressesWarningsOnTTY` and `TestEmitNoticesWritesWarningsWithoutTTY` (both called the now-deleted `emitNotices` method). Added 4th case to `TestRunCrossProviderMountWhenClaudeBound` (F1 fix). Fixed trailing double blank line (gofumpt).
+- `internal/services/claude/service_test.go` — deleted `TestEmitNoticesSuppressesWarningsOnTTY` and `TestEmitNoticesWritesWarningsWithoutTTY` (both called the now-deleted `emitNotices` method). Fixed double blank line left by deletion (gofumpt).
+
+### F2 fix: wrapper emitNotices deleted, runservice is sole emitter
+
+The deleted wrapper methods in both providers were structurally identical to the runservice's `emitNotices` implementation (debug log + TTY suppression + `<NoticePrefix>: <warning>` format). The `runservice.emitNotices` at `run/service.go:300-317` fully subsumes the wrapper behavior and is already called at `run/service.go:187`. Keeping `Warnings: prepared.Warnings` in the runPrepared adapter ensures the shared service receives and emits warnings exactly once.
+
+Warning-isolation tests (`TestEmitNoticesSuppressesWarningsOnTTY`, `TestEmitNoticesWritesWarningsWithoutTTY`) existed in BOTH provider test files and both directly tested the now-deleted method. These were removed; the corresponding coverage lives at the runservice level (`TestRunPropagatesWarningsToNotices` + the TTY-suppression test in `internal/services/run/service_test.go`).
+
+### F1 fix: AC-152 silent-skip case added (codex)
+
+The new 4th case in `TestRunCrossProviderMountWhenClaudeBound`:
+- `crossBinding: claudeBinding` — Claude binding exists.
+- `crossProfile: domain.Profile{ID: claudeProfile.ID}` — profile with matching ID so fakeStore's `if f.crossProfile.ID != "" && id == f.crossProfile.ID` check triggers.
+- `crossProfileErr: errors.New("profile lookup failed")` — ProfileByID fails.
+- `wantErr: false, wantClaudeMount: false, wantClaudeEnv: false` — launch succeeds, no cross-mount.
+
+The `fakeStore.ProfileByID` routing was verified before adding: it returns `(crossProfile, crossProfileErr)` when `crossProfile.ID != "" && id == crossProfile.ID`, otherwise falls back to `(profile, profileErr)`. Setting `crossProfile.ID = claudeProfile.ID = "profile-claude-1"` ensures the cross-profile error path triggers when `ProfileByID` is called with `claudeBinding.ProfileID`.
+
+### Mage targets run
+
+- `mage testPkg ./internal/services/claude` — **21 tests passed**, 82.6% coverage, race-detector clean.
+- `mage testPkg ./internal/services/codex` — **15 tests passed**, 73.7% coverage, race-detector clean.
+
+Both packages are above the 60% mage floor (and the 70% per-package CLAUDE.md floor).
+
+### Constraints honored
+
+- Touched only the four allowlisted files + this worklog.
+- Did NOT remove `Warnings: prepared.Warnings` from either provider's runPrepared struct.
+- Did NOT touch `internal/services/run/service.go`.
+- Did NOT add a contrived warning-injection test at the provider level (YAGNI — no fakeable PrepareRuntime warning seam; runservice already owns and tests single emission).
+- Did NOT run raw `go test`, `go build`, `go vet`, or `gofumpt` — only `mage testPkg`.
+- Did NOT set `GOCACHE`, `GOMODCACHE`, or any other Go-env override.
+
+### Hylla Feedback
+
+None — all evidence gathered via Read tool on live source files before editing. Hylla not queried (build was local-only, all needed context was in the allowlisted files).
+
+## Verdict
+
+**Unit 13.4 DONE (R3)**: F2 — wrapper `emitNotices` deleted from both providers; runservice is the sole warning emitter. F1 — silent-skip codex test case added (wantErr=false, wantClaudeMount=false, wantClaudeEnv=false). Both mage gates green: claude 21/21, codex 15/15, race-clean, coverage floors met.

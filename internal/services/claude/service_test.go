@@ -505,32 +505,6 @@ func TestRunBuildsNonInteractiveDockerRequestWhenTTYDisabled(t *testing.T) {
 	}
 }
 
-// TestEmitNoticesSuppressesWarningsOnTTY verifies warnings are suppressed when
-// TTY is enabled.
-func TestEmitNoticesSuppressesWarningsOnTTY(t *testing.T) {
-	t.Parallel()
-
-	var notices strings.Builder
-	service := Service{tty: true, notices: &notices}
-	service.emitNotices(domain.Profile{}, []string{"runtime warning"}, nil)
-	if notices.String() != "" {
-		t.Fatalf("emitNotices() wrote %q, want no interactive notices", notices.String())
-	}
-}
-
-// TestEmitNoticesWritesWarningsWithoutTTY verifies warnings are written to the
-// notices writer when TTY is disabled.
-func TestEmitNoticesWritesWarningsWithoutTTY(t *testing.T) {
-	t.Parallel()
-
-	var notices strings.Builder
-	service := Service{notices: &notices}
-	service.emitNotices(domain.Profile{}, []string{"runtime warning"}, nil)
-	if !strings.Contains(notices.String(), "runtime warning") {
-		t.Fatalf("emitNotices() output = %q, want warning text", notices.String())
-	}
-}
-
 // TestRunRejectsOverrideProfileWithWrongProvider verifies that Run returns an
 // error containing "provider mismatch" when OverrideProfile has a provider
 // that is not ProviderClaude.

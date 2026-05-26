@@ -325,3 +325,57 @@ FAIL on the missing explicit AC5 test — the same finding the proof pass reache
 - Confirmed counterexamples blocking PASS: 0. The R1 blocker (AC5 test absent) is closed; mage gate green (23/23, 84.2%, race clean).
 
 **Verdict: pass.**
+
+## Unit 13.4 — Round 1
+
+**Verdict:** FAIL
+**Reviewer:** ta-go-build-qa-falsification (codex gpt-5.5, `--sandbox read-only`, network=false; static analysis only — no mage, no edits); recorded by orchestrator from the captured run + independently verified against source. Audit: `.claude/agent-runs/20260526-154311-ta-go-build-qa-falsification-2800.tier1.codex-exec.out`.
+**Reviewed at:** 2026-05-26
+
+### Scope
+
+Static counterexample review of commit `d7a7cf8` (codex `Service.Run` slimmed to a thin wrapper over `internal/services/run`, -162 lines). `git show d7a7cf8` + targeted reads.
+
+### Counterexamples / Attacks
+
+- **F1 (HARD) — AC-152 silent-skip test absent.** `TestRunCrossProviderMountWhenClaudeBound` (`service_test.go`) has only three cases: "claude bound", "claude not bound (ErrNotFound)", "claude store error". None sets the Claude binding FOUND together with `crossProfileErr != nil`. The implementation silently skips the cross-mount when `ProfileByID` fails (`service.go:161-164` leaves `otherProfileHome` empty), but the acceptance-required test (PLAN.md:152) locking that behavior is missing — the exact mirror of the 13.3 AC5 gap. Required row:
+  ```go
+  {
+      name:            "claude profile lookup error skips cross mount",
+      crossBinding:    claudeBinding,
+      crossProfileErr: errors.New("profile lookup failed"),
+      wantErr:         false,
+      wantClaudeMount: false,
+      wantClaudeEnv:   false,
+  }
+  ```
+- **F2 (HARD, behavior regression) — duplicate notice emission introduced by the thin-adapter refactor.** Orchestrator-verified against source: the codex wrapper calls `s.emitNotices(resolved.profile, prepared.Warnings, codexArgs)` (`codex/service.go:181`) AND copies `Warnings: prepared.Warnings` into `runPrepared` (`codex/service.go:190`); `runservice.Run` then emits `request.Prepared.Warnings` again (`run/service.go:187`). Both `emitNotices` paths produce `Valv MCP note: <warning>` per warning, suppressed on TTY — so a non-TTY runtime warning is written **twice**. The wrapper's `emitNotices(_ domain.Profile, warnings, _ []string)` (`codex/service.go:310-323`) discards profile+args and is fully subsumed by `runservice.emitNotices` (`run/service.go:300-317`: same debug-log + TTY-suppression + prefixed emit). This is behavior drift from the pre-refactor single-emission path.
+- **Cross-unit:** the IDENTICAL F2 regression exists in Unit 13.3 (claude) — `claude/service.go:190` local emit + `:199` Warnings copy + runservice re-emit. 13.3's QA passes missed it (they did not probe the emit path); it is folded into the fix.
+- Contract drift — mitigated. `func (s Service) Run(ctx, cwd, codexArgs []string) error` unchanged.
+- Shared-home derivation — mitigated. `sharedCodexStateHome` still derives from `realHome` via `codexruntime.DefaultHostProfile`.
+- Cross-mount silent-skip / request-build/exec/cleanup delegation — mitigated (delegated to `internal/services/run` per the 13.1 design).
+
+### Falsification summary
+
+- Confirmed counterexamples blocking PASS: 2 — F1 (AC-152 test absent) + F2 (duplicate notice emission, a real non-TTY behavior regression in BOTH codex 13.4 and claude 13.3). Routes to a builder fix round covering both wrappers + the missing codex test row + a one-warning-emit regression test.
+
+**Verdict: FAIL.**
+
+## Unit 13.4 — Round 2
+
+**Verdict:** pass
+**Reviewed at:** 2026-05-26
+**Reviewer:** orchestrator-verified closure (full diff inspection + independent mage re-run), per Rule 6.
+
+### Falsification of the closure
+
+- **F2 attack — is the double-emit actually gone?** Yes. `git diff` confirms BOTH wrapper `emitNotices` call sites AND method bodies deleted; the only remaining `emitNotices` is `runservice`'s, invoked once via `request.Prepared.Warnings`. A warning can no longer be emitted twice because there is exactly one emitter on the path. Mitigated.
+- **F2 attack — did deleting the wrapper tests hide a regression?** No. The deleted tests (`TestEmitNoticesSuppressesWarningsOnTTY`, `TestEmitNoticesWritesWarningsWithoutTTY`) exercised the wrapper's own method, which no longer exists. The identical behavior contract (suppress-on-TTY, prefixed emit) is held by `runservice`'s `TestRunSuppressesNoticesOnTTY` + `TestRunPropagatesWarningsToNotices`. Behavior coverage moved to the owner, not lost.
+- **F1 attack — vacuous pass?** No. The codex row asserts `wantClaudeMount=false` positively against `executor.got.Mounts`; a regression that stopped skipping (mounted claude on profile-error) would fail it. The row passes ⇒ the silent-skip branch is exercised.
+- No new counterexample. Scope: claude+codex `service.go` (behavior fix) + both `service_test.go` (test add/delete); `internal/services/run` untouched.
+
+### Falsification summary
+
+- Confirmed counterexamples blocking PASS: 0. Both Round-1 HARD findings (F1 AC-152, F2 duplicate emission across claude 13.3 + codex 13.4) closed; gates green.
+
+**Verdict: pass.**

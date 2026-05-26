@@ -178,7 +178,6 @@ func (s Service) Run(ctx context.Context, cwd string, codexArgs []string) error 
 	if err != nil {
 		return fmt.Errorf("run codex launch service: prepare runtime: %w", err)
 	}
-	s.emitNotices(resolved.profile, prepared.Warnings, codexArgs)
 
 	// Adapt Codex's PreparedRuntime to the shared run service contract.
 	// The shared run service will invoke the Cleanup func via defer on both
@@ -305,19 +304,4 @@ func (s Service) debug(msg string, keyvals ...any) {
 		return
 	}
 	s.logger.Debug(msg, keyvals...)
-}
-
-func (s Service) emitNotices(_ domain.Profile, warnings, _ []string) {
-	if len(warnings) == 0 {
-		return
-	}
-	for _, warning := range warnings {
-		s.debug("codex runtime warning", "warning", warning)
-	}
-	if s.notices == nil || s.tty {
-		return
-	}
-	for _, warning := range warnings {
-		_, _ = fmt.Fprintf(s.notices, "Valv MCP note: %s\n", warning)
-	}
 }

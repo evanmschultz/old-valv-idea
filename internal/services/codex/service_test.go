@@ -702,6 +702,15 @@ func TestRunCrossProviderMountWhenClaudeBound(t *testing.T) {
 			wantClaudeMount: false,
 			wantClaudeEnv:   false,
 		},
+		{
+			name:            "claude bound but profile lookup fails (silent skip)",
+			crossBinding:    claudeBinding,
+			crossProfile:    domain.Profile{ID: claudeProfile.ID},
+			crossProfileErr: errors.New("profile lookup failed"),
+			wantErr:         false,
+			wantClaudeMount: false,
+			wantClaudeEnv:   false,
+		},
 	}
 
 	for _, tc := range cases {
@@ -771,27 +780,5 @@ func TestRunCrossProviderMountWhenClaudeBound(t *testing.T) {
 				t.Errorf("Run() CLAUDE_CONFIG_DIR = %q, want empty", claudeConfigDir)
 			}
 		})
-	}
-}
-
-func TestEmitNoticesSuppressesWarningsOnTTY(t *testing.T) {
-	t.Parallel()
-
-	var notices strings.Builder
-	service := Service{tty: true, notices: &notices}
-	service.emitNotices(domain.Profile{}, []string{"bridge warning"}, nil)
-	if notices.String() != "" {
-		t.Fatalf("emitNotices() wrote %q, want no interactive notices", notices.String())
-	}
-}
-
-func TestEmitNoticesWritesWarningsWithoutTTY(t *testing.T) {
-	t.Parallel()
-
-	var notices strings.Builder
-	service := Service{notices: &notices}
-	service.emitNotices(domain.Profile{}, []string{"bridge warning"}, nil)
-	if !strings.Contains(notices.String(), "Valv MCP note: bridge warning") {
-		t.Fatalf("emitNotices() output = %q, want warning text", notices.String())
 	}
 }

@@ -362,3 +362,57 @@ Unit 13.3 — re-derive `valv claude` + Claude service as thin adapters. Commit 
 - `mage testPkg ./internal/services/claude` — 23/23 pass (was 22), 84.2% coverage, `-race` clean. GREEN.
 
 **Verdict: pass** — AC5 now covered; gate green; R1 FAIL closed.
+
+## Unit 13.4 — Round 1
+
+**Verdict:** FAIL
+**Reviewed at:** 2026-05-26
+**Reviewer:** `ta-go-build-qa-proof` (built-in, sonnet, read-only persona — verdict transcribed by orchestrator; the persona has no Edit/Write tool).
+
+### Scope
+
+Commit `d7a7cf8` (codex thin adapter over `internal/services/run`). Touched: `internal/services/codex/service.go` (+41/-121), `internal/services/codex/service_test.go` (-27), `PLAN.md` (state flip), `BUILDER_WORKLOG.md`. Acceptance: `PLAN.md:148-153`. `internal/cli/` untouched (`git show --stat d7a7cf8`).
+
+### Mage gate (proof-agent run, independent)
+
+- `mage testPkg ./internal/services/codex` — 16/16 pass, 76.0% coverage (above 60% floor and 70% target), `-race` clean. GREEN.
+
+### Per-acceptance audit
+
+- AC-148 (keep `newCodexCommand`/`codexArgsSkipProjectBinding`/`codexArgsSkipAccountReady`/`runCodexImageOnlyCommand`) — MET (`internal/cli/codex.go` untouched).
+- AC-149 (main launch delegates to shared primitive) — MET (`service.go:183-227`: `runservice` adapter + `New` + `sharedService.Run`; old `buildRequest`/`runAttached`/`containerName`/`sanitizeContainerPart`/`withinProjectRoot` deleted).
+- AC-150 (thin wrapper; public `Run(ctx,cwd,args)` preserved; no third copy of generic orchestration) — MET.
+- AC-151 (Codex-specific behavior: shared-home `service.go:229-238`, cross-mount `155-167`, auth/image/help in untouched CLI files) — MET.
+- AC-152 (HARD — test for silent-skip when Claude binding found but `ProfileByID` fails) — **NOT MET**. `TestRunCrossProviderMountWhenClaudeBound` (`service_test.go:637`) has only 3 cases; no row sets `crossBinding=claudeBinding` + `crossProfileErr!=nil`. `fakeStore.ProfileByID` already supports it (unused). HARD FAIL.
+- AC-153 (existing tests green) — MET (16/16).
+
+### Failure (routes to builder fix)
+
+**F1 (HARD): AC-152 silent-skip test absent.** Add the mirror row to `TestRunCrossProviderMountWhenClaudeBound`: `crossBinding=claudeBinding`, `crossProfile=domain.Profile{ID: claudeProfile.ID}`, `crossProfileErr=errors.New(...)`, `wantErr=false`, `wantClaudeMount=false`, `wantClaudeEnv=false`. No `service.go` change for F1 (`service.go:160-164` already silently skips).
+
+### Note
+
+Proof scope is evidence-completeness against acceptance; it did not probe the notice-emission path. The parallel falsification pass found a second HARD issue (F2 — duplicate notice emission) recorded in `BUILDER_QA_FALSIFICATION.md` Unit 13.4 Round 1. Both fold into one builder fix round.
+
+**Verdict: FAIL** — AC-152 test absent; gate green at floor; F2 (duplicate notices) raised by falsification.
+
+## Unit 13.4 — Round 2
+
+**Verdict:** pass
+**Reviewed at:** 2026-05-26
+**Reviewer:** orchestrator-verified closure (full diff inspection + independent mage re-run). Both Round-1 HARD findings had determined mechanical fixes; per CLAUDE.md § Cascade Methodology Rule 6 the verification is the diff + the mage gate, not a re-dispatched LLM pair.
+
+### What changed (builder fix round)
+
+- **F1 closed (codex):** `TestRunCrossProviderMountWhenClaudeBound` gained the 4th row `"claude bound but profile lookup fails (silent skip)"` (`crossBinding=claudeBinding`, `crossProfile=domain.Profile{ID: claudeProfile.ID}`, `crossProfileErr=errors.New(...)`, `wantErr=false`, `wantClaudeMount=false`, `wantClaudeEnv=false`). Verified present in `git diff`.
+- **F2 closed (claude + codex):** the redundant wrapper `s.emitNotices(...)` call and the dead `emitNotices` method were deleted from BOTH `internal/services/claude/service.go` and `internal/services/codex/service.go` (16 lines each). `runPrepared.Warnings: prepared.Warnings` retained → `runservice.emitNotices` (`run/service.go:300-317`) is the sole emitter. Single emission restored.
+- **Stale tests removed:** `TestEmitNoticesSuppressesWarningsOnTTY` + `TestEmitNoticesWritesWarningsWithoutTTY` deleted from both packages — they called the now-removed wrapper method directly. Their behavior (TTY-suppression + prefixed warning write) is owned/tested by `internal/services/run` (`TestRunSuppressesNoticesOnTTY`, `TestRunPropagatesWarningsToNotices`). No real-behavior coverage lost.
+
+### Mage gates (orchestrator-run, independent)
+
+- `mage testPkg ./internal/services/claude` — 21/21 pass, 82.6% coverage, `-race` clean. GREEN.
+- `mage testPkg ./internal/services/codex` — 15/15 pass, 73.7% coverage, `-race` clean. GREEN.
+
+Both ≥70% CLAUDE.md target. Coverage dipped (84.2→82.6, 76.0→73.7) from removing the wrapper method + its tests; expected and within floor.
+
+**Verdict: pass** — F1 + F2 closed; gates green; diff audited.
