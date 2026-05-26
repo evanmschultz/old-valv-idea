@@ -1,13 +1,13 @@
 # DROP_13 — GENERIC_RUN
 
-**State:** building
+**State:** done
 **Blocked by:** DROP_12 (done)
 **Paths (expected):** `cmd/valv/` (new `run` cobra command), `internal/cli/` (new `run.go`), `internal/services/` (possible new `run` service or reuse of existing claude/codex services), `internal/adapters/providers/` (potential generic provider adapter or refactor of claude/codex into shared core)
 **Packages (expected):** `internal/cli/`, possibly `internal/services/run/` (new), possibly refactors to `internal/adapters/providers/claude/`, `internal/adapters/providers/codex/`
 **PLAN.md ref:** main/PLAN.md → DROP_13_GENERIC_RUN row
 **Workflow:** main/drops/WORKFLOW.md
 **Started:** 2026-05-22
-**Closed:** —
+**Closed:** 2026-05-26
 
 ## Scope
 
