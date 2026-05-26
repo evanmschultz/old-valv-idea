@@ -153,3 +153,32 @@ Nine attack vectors attempted; none produced a confirmed counterexample.
 No init() side effects beyond `regexp.MustCompile` (valid RE2, confirmed by suite). `reservedAccountEnvKeys` literal map, effectively immutable. No shared mutable state.
 
 Verdict: pass.
+
+## Unit 14.3 — Round 1
+
+**Verdict:** pass-with-findings
+**Reviewer:** ta-go-build-qa-falsification (codex gpt-5.5, `--sandbox read-only`, network=false; static analysis only); recorded by orchestrator. Audit: `.claude/agent-runs/20260526-163917-ta-go-build-qa-falsification-46543.tier1.codex-exec.out`.
+**Reviewed at:** 2026-05-26
+
+### Scope
+
+Static counterexample review of commit `fe88a0d` (CLI `account env` subtree). `git show fe88a0d -- internal/cli/manage.go` + targeted test/service/store reads.
+
+### Counterexamples / Attacks (all mitigated)
+
+- **Default-path value leak:** mitigated. `writeEnvListJSON` + `writeEnvListLines` emit `***` unless `reveal` is true — human, plain, and JSON defaults all redact.
+- **Generic JSON fallback:** mitigated. `runManageAccountEnvList` routes JSON to the dedicated `writeEnvListJSON` (top-level `env` + `redacted` bool), not `output.WriteListWithKey`.
+- **Embedded `=` parsing:** mitigated. `strings.IndexByte` splits at the FIRST `=` only → `FOO=a=b` ⇒ key `FOO`, value `a=b`. No-`=` and empty-key rejected CLI-side before the service call.
+- **Sort nondeterminism:** mitigated. CLI does not sort; the store query (`internal/adapters/sqlite/account_env.go`) uses `ORDER BY env_key ASC`, inherited by all three formats.
+- **Leading `--reveal` (`list --reveal <name>`):** mitigated. Local cobra bool flag on `list`; the leading-position case is pinned by a test.
+- **Empty list:** mitigated. Encodes as `{"env":[]}` (non-nil slice), not `null`.
+
+### NIT (accepted — no fix round)
+
+- N: reserved-key/key-regex service errors are double-context-wrapped — `runManageAccountEnvSet` wraps as `account env set: %w` while `Service.SetAccountEnv` already wraps as `set account env: %w`, giving `account env set: set account env: … HOME … reserved …`. `%w` identity is preserved (`errors.Is` works) and the error is not swallowed; the doubled prefix is cosmetic. Noted for DROP_17 polish.
+
+### Falsification summary
+
+- Confirmed counterexamples blocking PASS: 0. Core acceptance (redaction, dedicated JSON shape, first-`=` split, alpha sort, `--reveal` positions, empty-list) all hold.
+
+**Verdict: pass-with-findings.**

@@ -259,3 +259,34 @@ manage-service account-env CRUD (`SetAccountEnv` / `UnsetAccountEnv` / `ListAcco
 NIT only: `AccountEnvEntryView` type alias (`service.go:641`) has zero consumers yet (documented forward-stub for Unit 14.3). Zero-cost alias. Not a bug.
 
 Verdict: pass.
+
+## Unit 14.3 — Round 1
+
+**Verdict:** pass-with-nits
+**Reviewer:** `ta-go-build-qa-proof` (built-in, sonnet, read-only persona — verdict transcribed by orchestrator).
+**Reviewed at:** 2026-05-26
+
+### Scope
+
+Commit `fe88a0d` — CLI `account env` set/unset/list subtree. Touched `internal/cli/{manage.go +303, manage_test.go +202, extended_test.go +185}`, PLAN.md (state flip), BUILDER_WORKLOG.md. Acceptance: `PLAN.md:66-83`. Path discipline clean (no out-of-scope edits).
+
+### Mage gate (proof-agent run, independent)
+
+- `mage testPkg ./internal/cli` — 296/296 pass, 69.5% coverage, `-race` clean. GREEN at the 60% project floor.
+
+### Per-acceptance audit (all MET, file:line)
+
+- `account env` branch wired at `manage.go:64`; `set`/`unset`/`list` at `manage.go:2034-2036`.
+- set/unset call `service.SetAccountEnv`/`UnsetAccountEnv` (`manage.go:2101,2155`); no CLI re-validation.
+- `set` splits at first `=` via `strings.IndexByte` (`manage.go:2080-2088`); malformed / empty-key → clear errors.
+- `list` human/plain via `writeEnvListLines`; JSON via DEDICATED `writeEnvListJSON` (`manage.go:2253`, NOT `output.WriteListWithKey`) → top-level `"env"`, entries `{key,value,redacted}`, `***`+`redacted:true` default / raw+`redacted:false` with `--reveal`. Empty → `make([]…,0)` → `{"env":[]}` not null.
+- `--format plain` redacts identically, no envelope; alpha order from store `ORDER BY env_key ASC`.
+- `--reveal` is a `list` BoolVar; both positions bind (test `extended_test.go:1040`).
+- All 12 required test scenarios present (human/JSON/plain × default/reveal, both flag positions, malformed, reserved-key propagation, missing-account, cross-account, empty-list) — mapped to test names at `manage_test.go:1182-1375` + `extended_test.go:956-1131`.
+
+### NITs (accepted — no fix round)
+
+- N1: coverage 69.5% < CLAUDE.md's 70% aspiration; magefile gate is 60% (documented TODO `magefile.go:23`). Pre-existing `internal/cli` debt tracked for DROP_17, not a 14.3 regression.
+- N2: empty-list human/plain emits a `(none)` sentinel (`manage.go:2279`) not documented in the command `Long` help. Trivial doc gap.
+
+**Verdict: pass-with-nits** — all 12 acceptance bullets met; gate green; NITs are pre-existing/cosmetic.
