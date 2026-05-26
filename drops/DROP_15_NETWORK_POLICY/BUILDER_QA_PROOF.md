@@ -511,3 +511,31 @@ None that is verdict-affecting. All three R1 findings have code-level fixes with
 Verdict: **pass**.
 
 All three Round 1 falsification findings are fixed with narrow, correctly-bounded validation guards in `NetworkCreateRequest.Valid()` and `NetworkRemoveRequest.Valid()`. New tests cover the label-key whitespace (4 sub-tests including tab), label-key `=` injection (3 sub-tests), and network name 64-byte limit (boundary accept + 65- and 256-byte rejection). The mage gate independently confirms 64 tests / 65.7% coverage with `-race` enabled. Scope is limited to the declared paths (`network.go` + `network_test.go` + drop worklog). Unit 15.2 is ready to close.
+
+## Unit 15.2 — Round 3
+
+**Verdict:** pass-with-nits
+**Reviewer:** `ta-go-build-qa-proof` (built-in, sonnet, read-only persona — verdict transcribed by orchestrator).
+**Reviewed at:** 2026-05-26
+
+### Scope
+
+Commit `d4ca96a` — additive network-connect surface for the proxy sidecar (after the `ce8e02c` re-plan reset 15.2 from its R2-green create/remove state). Touched: `internal/adapters/docker/network.go` (+74), `executor.go` (+11), `network_test.go` (+194), PLAN.md (state flip), BUILDER_WORKLOG.md. Acceptance: `PLAN.md:127-132`.
+
+### Mage gate (proof-agent run, independent)
+
+- `mage testPkg ./internal/adapters/docker` — 82/82 pass, 67.9% coverage, `-race` clean. GREEN at the 60% project floor.
+
+### Per-acceptance audit (all five bullets MET, file:line)
+
+- R2 surface UNCHANGED: `NetworkCreateRequest`/`BuildNetworkCreateArgs`/`NetworkRemoveRequest`/`BuildNetworkRemoveArgs` (`network.go:16-114`), `Executor.CreateNetwork`/`RemoveNetwork`/`ListNetworks` (`executor.go:50-88`); `BuildNetworkCreateArgs` still emits `--internal`. (One obsolete doc-comment sentence trimmed — cosmetic.)
+- `NetworkConnectRequest{Network (req), Container (req), Aliases []string (opt)}` — `network.go:120-128`.
+- `BuildNetworkConnectArgs` (`network.go:164-185`): `["network","connect"]`, `sort.Strings` alias order, one `--alias <a>` per alias, positional `TrimSpace(Network), TrimSpace(Container)` last. Validation (`network.go:131-158`) mirrors create/remove: non-empty + pattern + length on network; non-empty container (no pattern — correct, container IDs are SHA hashes); each alias non-empty + pattern.
+- `Executor.ConnectNetwork` (`executor.go:72-78`) mirrors `CreateNetwork`: build args → return err → `e.runner.Run`.
+- Tests: 14-case `TestBuildNetworkConnectArgs` (missing network, missing container, empty/whitespace/invalid alias, single + sorted-multiple emission, positional tail, trim, 64-byte limit) + `TestExecutorConnectNetworkForwardsArgs` + `TestExecutorConnectNetworkReturnsBuildError`.
+
+### NIT (pre-existing, non-blocking)
+
+- N1: package coverage 67.9% < CLAUDE.md's 70% aspiration. The mage gate is set to 60% via a documented TODO (`magefile.go:23`); this is pre-existing project debt tracked for DROP_17 / Unit 11.5 (coverage-floor bump), not introduced by 15.2-R3. Gate is green.
+
+**Verdict: pass-with-nits** — all five acceptance bullets met; gate green; sole NIT is tracked pre-existing coverage debt.

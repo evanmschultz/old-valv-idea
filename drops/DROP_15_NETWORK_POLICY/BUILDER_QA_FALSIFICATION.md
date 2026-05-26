@@ -303,3 +303,32 @@ No error swallowing. `Valid()` returns errors wrapped with `fmt.Errorf` (no `%w`
 - Path discipline: `git show --stat HEAD` → 3 files only (`BUILDER_WORKLOG.md`, `network.go` +14, `network_test.go` +144).
 - R1 falsification report at `BUILDER_QA_FALSIFICATION.md` — Unit 15.2 Round 1 section (the 3 source findings).
 - No raw `go test` / `GOCACHE=...` invocations.
+
+## Unit 15.2 — Round 3
+
+**Verdict:** pass
+**Reviewer:** ta-go-build-qa-falsification (codex gpt-5.5, `--sandbox read-only`, network=false; static analysis only); recorded by orchestrator. Audit: `.claude/agent-runs/20260526-160357-ta-go-build-qa-falsification-16946.tier1.codex-exec.out`.
+**Reviewed at:** 2026-05-26
+
+### Scope
+
+Static counterexample review of commit `d4ca96a` (additive network-connect surface for the proxy sidecar): `internal/adapters/docker/{network.go (+74), executor.go (+11), network_test.go (+194)}`. Context: 15.2 was QA-green at R2 (create/remove helpers); the sidecar re-plan (`ce8e02c`) added the connect surface; R3 is that additive build.
+
+### Counterexamples / Attacks (all mitigated)
+
+- **Alias ordering nondeterminism:** mitigated. `BuildNetworkConnectArgs` copies `Aliases` into `sortedAliases` and `sort.Strings(...)` — deterministic lexicographic order, NOT map iteration. The test "multiple aliases sorted deterministically" feeds `["zulu","alpha","bravo"]` and expects `alpha,bravo,zulu`.
+- **Empty / whitespace alias bypass:** mitigated. `Valid()` `TrimSpace`-checks each alias and rejects empty; pattern-checks reject `bad/name`-style.
+- **Swapped / mis-placed positionals:** mitigated. Args end with `TrimSpace(Network)` then `TrimSpace(Container)` — positional tail, after the `--alias` flags.
+- **R2 create/remove/list regression:** mitigated. All R2 symbols present and unchanged; `BuildNetworkCreateArgs` still emits `--internal`. (One obsolete doc-comment sentence on `NetworkCreateRequest` trimmed — cosmetic.)
+- **`ConnectNetwork` runner invoked on invalid request:** mitigated. `Executor.ConnectNetwork` returns the `BuildNetworkConnectArgs` error before `e.runner.Run`.
+- No goroutines/channels introduced; no error swallowing on the new path.
+
+### Note
+
+The codex run spent a few calls probing for a ta cascade record (its shared persona references ta tooling); valv does not use ta — its QA record is this drop-dir file. Harmless; the code review itself is grounded in `git show` + targeted reads.
+
+### Falsification summary
+
+- Confirmed counterexamples blocking PASS: 0.
+
+**Verdict: pass.**
