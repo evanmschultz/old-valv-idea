@@ -282,3 +282,46 @@ Verdict: **pass-with-findings**.
 - `Read` — `internal/cli/run.go`, `internal/cli/run_test.go`, `internal/cli/root.go`, `internal/cli/account_auth.go`, `internal/cli/operator_helpers.go`, `internal/services/run/service.go`, `internal/adapters/docker/command.go`, `internal/adapters/docker/types.go`, `PLAN.md`, `BUILDER_WORKLOG.md`
 - `Bash` — `mage testPkg ./internal/cli`, `mage build`, `git show --stat 95a2604`, `git diff 95a2604~1..95a2604 -- internal/cli/root.go`, `git log --oneline -8`, `git status`, `wc -l`
 - `LSP` — `goToDefinition` on `installFakeDocker`, `installStubCodexAccountAuth`, `openManageService`, `ensureManagedAccountReady`, `applyCommandOverride`; `documentSymbol` on `run_test.go`; `findReferences`
+
+## Unit 13.3 — Round 1
+
+**Verdict:** FAIL
+**Reviewer:** ta-go-build-qa-falsification (codex gpt-5.5, `--sandbox read-only`, effort low; static analysis); recorded by orchestrator (read-only agent, no file write). Audit: `.claude/agent-runs/20260525-020848-ta-go-build-qa-falsification-8925.*`.
+**Reviewed at:** 2026-05-25
+
+### Scope
+
+Static counterexample review of commit `b55d5fd` (Claude `Service.Run` slimmed to a thin wrapper over `internal/services/run`). codex read-only: no mage runs, no edits — `git show b55d5fd` + targeted reads only.
+
+### Counterexamples / Attacks
+
+- **AC5 silently-dropped acceptance test — FAILURE.** `TestRunCrossProviderMountWhenCodexBound` (`service_test.go:646`) covers cases `codex bound`, `codex not bound (ErrNotFound)`, `codex store error`. None set the Codex binding FOUND together with `crossProfileErr != nil`. The implementation silently skips the cross-mount when `ProfileByID` fails (`service.go:168`), but the acceptance-required test locking that behavior is absent. Counterexample row to add: `{crossBinding: codexBinding, crossProfile: codexProfile, crossProfileErr: errors.New("profile lookup failed"), wantErr: false, wantCodexMount: false, wantCodexEnv: false}`.
+- **Contract drift — mitigated.** `func (s Service) Run(ctx, cwd, claudeArgs []string) error` unchanged (`service.go:127`).
+- **Behavior drop — mitigated (delegated by design, per Unit 13.1).** Cross-provider Codex lookup + `OtherProviderProfileHome` handoff retained (`service.go:161,179`); `prepared.Warnings`→`emitNotices` retained locally (`service.go:190,195`); within-project-root guard + `Close()`/cleanup now delegated to `runservice.Run` (`service.go:226`) rather than local — correct for the thin-wrapper design; the shared-run tests own that coverage.
+
+### Falsification summary
+
+FAIL on the missing explicit AC5 test — the same finding the proof pass reached independently. No runtime-behavior counterexample found; the wrapper delegation is sound. Adds nothing beyond proof F1; both passes route 13.3 to builder Round 3 for the one missing test.
+
+### Tools Used
+
+- `Bash` — `git show b55d5fd -- internal/services/claude/service.go internal/services/claude/service_test.go`, targeted `rg`, `nl -ba`/`sed -n` reads.
+
+## Unit 13.3 — Round 2
+
+**Verdict:** pass
+**Reviewed at:** 2026-05-26
+**Reviewer:** orchestrator-verified closure (mage gate + source inspection). Per CLAUDE.md § Cascade Methodology Rule 6, a one-row test addition closing a precisely-prescribed gap is verified by the mage gate + orchestrator inspection, not a re-dispatched falsification pass.
+
+### Falsification of the closure
+
+- **Attack: false green via wrong skip reason.** Could the codex mount be absent for a reason OTHER than the `ProfileByID` failure? No — `crossBindingErr` is unset (binding IS found) and `crossProfile.ID` matches `codexBinding.ProfileID`, so `fakeStore.ProfileByID` returns the explicit `crossProfileErr`. The only path to `wantCodexMount=false` here is the silent-skip-on-profile-error branch. Mitigated.
+- **Attack: test passes vacuously.** No — `wantErr=false` requires `Run` to succeed AND `wantCodexMount=false`/`wantCodexEnv=false` are positively asserted against `executor.got.Mounts` / `executor.got.Env`. A regression that stopped skipping (mounted codex anyway) would fail the row. Mitigated.
+- **Scope:** test-only change; `service.go` untouched (the R1 falsification already confirmed the wrapper delegation sound). No new counterexample.
+- **Pre-existing `forvar` lint hints** (`tc := tc` at lines 212, 680) are not enforced by `mage` and are out of scope for an AC5 test-addition round — accepted, not introduced here.
+
+### Falsification summary
+
+- Confirmed counterexamples blocking PASS: 0. The R1 blocker (AC5 test absent) is closed; mage gate green (23/23, 84.2%, race clean).
+
+**Verdict: pass.**

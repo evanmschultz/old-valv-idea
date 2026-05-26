@@ -304,3 +304,61 @@ All 11 acceptance bullets pass. Two findings: one minor test-coverage gap (mirro
 - `Read` — `internal/cli/run.go`, `internal/cli/run_test.go`, `internal/cli/root.go`, `PLAN.md`, `BUILDER_WORKLOG.md`, `account_auth.go`, `operator_helpers.go`, `internal/services/run/service.go`, `internal/adapters/docker/command.go`, `internal/adapters/docker/types.go`
 - `Bash` — `mage testPkg ./internal/cli`, `mage build`, `git show --stat 95a2604`, `git diff 95a2604~1..95a2604 -- internal/cli/root.go`, `git log --oneline -8`, `git status`, `wc -l`
 - `LSP` — `goToDefinition` on `installFakeDocker`, `installStubCodexAccountAuth`, `openManageService`, `ensureManagedAccountReady`; `documentSymbol` on `run_test.go`; `findReferences`
+
+## Unit 13.3 — Round 1
+
+**Verdict:** FAIL
+**Reviewed at:** 2026-05-25
+**Reviewer:** `ta-go-build-qa-proof` (built-in, sonnet, read-only-gated via `<TA_ALLOWLIST>`); recorded by orchestrator (QA agents are read-only under the gate model).
+
+### Scope
+
+Unit 13.3 — re-derive `valv claude` + Claude service as thin adapters. Commit `b55d5fd` touched `internal/services/claude/service.go` (+ `service_test.go`) only; `internal/cli/claude.go` untouched. Reviewed against acceptance bullets at `PLAN.md:125-131`.
+
+### Mage gates (independent — run by the proof agent)
+
+- `mage testPkg ./internal/services/claude` — 22/22 pass, 84.2% coverage, race clean. GREEN.
+- `mage testPkg ./internal/cli` — 280/280 pass, 68.6% coverage (above 60% mage floor; below CLAUDE.md 70% target — pre-existing, `magefile.go:23` TODO). GREEN at enforced floor.
+
+### Per-acceptance
+
+- AC1 keep `newClaudeCommand`/`claudeArgsSkipProjectBinding`/`runClaudeImageOnlyCommand` — MET (`claude.go:21/183/143`, untouched).
+- AC2 thin adapter delegates container launch to shared primitive — MET transitively: `claude.go:120-138` → `claudeservice.Service.Run` → `service.go:207-235` delegates to `runservice`. No CLI change required.
+- AC3 `service.go` reduced to thin wrapper; public `Service.Run(ctx,cwd,args)` preserved — MET (signature `service.go:127` unchanged; `buildRequest`/`runAttached`/`withinProjectRoot`/`containerName`/`sanitizeContainerPart` removed).
+- AC4 Claude-specific behavior preserved (cross-mount, auth, labels, image) — MET (`service.go:166-203` + Provider descriptor `216-220`).
+- AC5 silent-skip TEST (Codex binding found but `ProfileByID` fails → launch succeeds, no codex mount/`CODEX_HOME`) — **NOT MET**. `TestRunCrossProviderMountWhenCodexBound` (`service_test.go:601-738`) has 3 cases: binding+profile found; binding `ErrNotFound`; binding non-`ErrNotFound` error. None set binding-found + `crossProfileErr != nil`. Implementation (`service.go:167-174`) is correct; the test the acceptance *explicitly* requires is absent. `fakeStore` (`service_test.go:56-61`) already supports wiring it.
+- AC6 existing tests green — MET.
+- Scope (`claude.go` clause) — resolved: `claude.go` already delegated to `Service.Run` pre-refactor; no CLI change required; clause satisfied.
+- R2 stale-test fix — verified: deleted `TestContainerNameContainsClaude` behavior re-covered by `run/service_test.go` `TestRunPropagatesProviderLabels` (container-name prefix for both providers). Not silently dropped.
+
+### Failure (routes to builder R3)
+
+**F1 (HARD): AC5 test absent.** Add a table row to `TestRunCrossProviderMountWhenCodexBound` where `crossBinding=codexBinding` (found) AND `crossProfileErr=errors.New(...)` (ProfileByID fails), asserting `wantErr=false`, `wantCodexMount=false`, `wantCodexEnv=false`.
+
+### NITs
+
+- N1 `internal/cli` 68.6% < CLAUDE.md 70% target (pre-existing; mage floor 60%).
+- N2 `crossProfileErr` field wired in the test harness but no table row uses it.
+
+**Verdict: FAIL** — AC5 explicitly-required test missing; all other criteria met; gates green.
+
+## Unit 13.3 — Round 2
+
+**Verdict:** pass
+**Reviewed at:** 2026-05-26
+**Reviewer:** orchestrator-verified closure (mage gate + source inspection). Per CLAUDE.md § Cascade Methodology Rule 6, a one-row test addition that closes a previously-identified, precisely-prescribed gap is verified by the automated mage gate plus orchestrator file inspection rather than a re-dispatched LLM proof/falsification pair — the R1 pair already performed the analysis and prescribed the exact row.
+
+### What changed (builder Round 2, test-only)
+
+`internal/services/claude/service_test.go` — added a 4th case to `TestRunCrossProviderMountWhenCodexBound`: `"codex bound but profile lookup fails (silent skip)"` with `crossBinding=codexBinding` (binding FOUND), `crossProfile=domain.Profile{ID: codexBinding.ProfileID}` (matching ID so `fakeStore.ProfileByID` routes to the error), `crossProfileErr=errors.New("profile lookup failed")`, asserting `wantErr=false`, `wantCodexMount=false`, `wantCodexEnv=false`. No `service.go` change — the implementation was already correct (`service.go:167-174` silently skips on `ProfileByID` failure).
+
+### AC5 closure evidence
+
+- The R1 FAIL was solely "AC5 test absent." The new row is exactly the counterexample both R1 passes prescribed (binding-found + `ProfileByID`-fails → launch succeeds, no codex mount, no `CODEX_HOME`).
+- Soundness: the row would FAIL if silent-skip did not fire (the codex mount would be present, breaking `wantCodexMount=false`). It passes, so the silent-skip branch is genuinely exercised — not a false green.
+
+### Mage gate (orchestrator-run, independent)
+
+- `mage testPkg ./internal/services/claude` — 23/23 pass (was 22), 84.2% coverage, `-race` clean. GREEN.
+
+**Verdict: pass** — AC5 now covered; gate green; R1 FAIL closed.

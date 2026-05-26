@@ -665,6 +665,15 @@ func TestRunCrossProviderMountWhenCodexBound(t *testing.T) {
 			wantCodexMount:  false,
 			wantCodexEnv:    false,
 		},
+		{
+			name:            "codex bound but profile lookup fails (silent skip)",
+			crossBinding:    codexBinding,
+			crossProfile:    domain.Profile{ID: codexBinding.ProfileID}, // must set a profile with matching ID so fakeStore triggers the error
+			crossProfileErr: errors.New("profile lookup failed"),
+			wantErr:         false,
+			wantCodexMount:  false,
+			wantCodexEnv:    false,
+		},
 	}
 
 	for _, tc := range cases {

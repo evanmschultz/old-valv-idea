@@ -468,6 +468,46 @@ This test runs for both `Provider{Name: "claude", ...}` and `Provider{Name: "cod
 
 None — the stale test reference was identified via direct inspection of `service_test.go` (Read tool) at line 465 and confirmed by reading the shared run service's corresponding test (Read tool) to verify the behavior was already covered. The grounding for deleting the test was: (a) `buildRequest` method is gone (refactored away), (b) the shared service tests verify the replacement behavior, (c) all four related packages (claude, codex, run, cli) pass their test suites.
 
+## Unit 13.3 — Round 2
+
+### Task
+
+Add missing test case AC5 to `TestRunCrossProviderMountWhenCodexBound` (Unit 13.3 acceptance criterion): cover the silent-skip branch where a Codex binding exists but `ProfileByID` for that binding fails. The implementation was already correct; only the test coverage was missing.
+
+### Files touched
+
+- `internal/services/claude/service_test.go` — added fourth test case to `TestRunCrossProviderMountWhenCodexBound.cases` (lines 668-675).
+- `drops/DROP_13_GENERIC_RUN/BUILDER_WORKLOG.md` — this entry.
+
+### Mage targets run
+
+- `mage testPkg ./internal/services/claude` — 23 tests pass (22 pre-existing + 1 new case for AC5), 84.2% coverage (well above the 70% per-package floor), race-detector clean.
+
+### New test case
+
+The new case sets:
+- `crossBinding: codexBinding` — a Codex binding exists for the project.
+- `crossProfile: domain.Profile{ID: codexBinding.ProfileID}` — a profile with the matching ID (required so fakeStore's ID check triggers the error).
+- `crossProfileErr: errors.New("profile lookup failed")` — ProfileByID fails with a non-nil error.
+- `wantErr: false, wantCodexMount: false, wantCodexEnv: false` — launch succeeds without the cross-mount or env var (silent skip).
+
+This case verifies the silent-skip behavior at lines 167-171 of `internal/services/claude/service.go`, where `ProfileByID` error is caught and `otherProfileHome` remains empty (leading to no cross-mount).
+
+### Verification of AC5
+
+AC5 (PLAN.md line ~130): "Tests explicitly cover the status-quo silent-skip branch where a Codex binding exists but `ProfileByID` for that binding fails: Claude launch still succeeds, without the Codex mount or `CODEX_HOME` env."
+
+✓ New case name: `"codex bound but profile lookup fails (silent skip)"` — explicit, unambiguous.
+✓ Scenario: binding found, ProfileByID fails, launch succeeds without cross-mount.
+✓ Assertions: wantErr=false (launch succeeds), wantCodexMount=false (no mount), wantCodexEnv=false (no env var).
+
+### Hard constraints honored
+
+- Only touched `internal/services/claude/service_test.go` (added one test case).
+- Did **not** modify the production code `service.go` (the implementation is already correct).
+- Did **not** run raw `go test`, `go build`, `go vet`, `gofumpt` — only `mage testPkg`.
+- Did **not** set `GOCACHE`, `GOMODCACHE`, or any other Go-env override.
+
 ## Verdict
 
-**Unit 13.4 DONE**: All tests pass. The refactored Codex thin adapter successfully delegates to the shared run service. The blocker from Round 1 is resolved. Unit 13.4 state flipped to `done` in PLAN.md.
+**Unit 13.3 DONE**: All tests pass including the new AC5 case. Silent-skip behavior is now explicitly tested. Unit 13.3 remains `done` in PLAN.md (state unchanged from Round 1).
