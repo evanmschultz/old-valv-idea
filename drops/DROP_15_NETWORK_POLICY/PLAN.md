@@ -135,114 +135,203 @@ Ship DROP_15 as a closed-by-default, macOS-compatible network policy layer acros
 
 ---
 
-#### Unit 15.2.5 — Shared networkpolicy service: proxy-sidecar lifecycle + image-build egress enforcement
+#### Unit 15.2.5 — Networkpolicy sidecar lifecycle + image-build egress (decomposed Round 1)
 
-**State:** todo
+**State:** todo (sub-decomposed)
+**Blocked by:** Unit 15.0 (done), Unit 15.1 (done), Unit 15.2 (done)
 
-**Paths:**
-- `internal/services/networkpolicy/service.go`
-- `internal/services/networkpolicy/service_test.go`
-- `internal/services/images/service.go`
-- `internal/services/images/service_test.go`
-- `internal/services/images/service_integration_test.go`
+The prior single-unit spec (Round 0, commit `1c25df8`) is OVER BUDGET per the measured-atomic-sizing rule (`aa130dd`). Round 1 codex planner decomposed into 5 atomic droplets + 3 sub-planners. Locked design (do not re-litigate): sidecar-proxy topology with workload attached ONLY to `--internal` net (V7 per-project naming `sha256(projectRoot+allowlist)`), proxy sidecar attached to both `--internal` + `bridge` via `docker network connect --alias valv-proxy`, `NO_PROXY` carries only loopback + sidecar alias (NOT allowlist), allowlist enforced inside the proxy filter (HTTPS via SNI/CONNECT), `valv=network-policy` label on net AND container, concurrency-safe Provision with reclaim-on-collision.
 
-**Packages:** `internal/services/networkpolicy`, `internal/services/images`
+##### Unit 15.2.5.A — Detached-run Executor seam
 
-**Evidence:** `internal/services/networkpolicy/service.go:55-272` currently provisions a single `--internal` network + `PolicyMaterial{HTTPProxyURL,HTTPSProxyURL,NoProxy,NetworkName}` with `ProxyEndpoint` example `host.docker.internal:18080` and `NO_PROXY = allowlist` — the host-local-proxy + `host.docker.internal` design DROP_15.2.5 proved unreachable from `--internal` on Docker Desktop macOS; `internal/adapters/docker/executor.go:47-102` provides `CreateNetwork`/`RemoveNetwork`/`ListNetworks` and (Unit 15.2 additive) `ConnectNetwork`; `internal/adapters/docker/types.go:43-60,133-218` provides `ContainerRunRequest{Detached,Labels,Network,Extra}` + `BuildRunArgs` for launching a detached labeled sidecar; `internal/services/images/overlay.go:84-146` emits overlay install `RUN` lines that execute at image-build time; `internal/services/images/service.go:769-849` builds overlays through `BuildOverlayDockerfile` + the rebuild path; `internal/adapters/docker/ops.go:9-21,38-92` supports `ImageBuildRequest.BuildArgs` (map) + `Network`; `internal/services/images/service_test.go:1535-1595` proves `EnsureProjectImage` has a working `NoCache` rebuild seam. Context7 `/docker/docs` confirms predefined proxy build args apply to build `RUN` steps without Dockerfile `ARG`, `--internal` networks have no external connectivity, and multi-network attach via `docker network connect --alias`. This is the A2 blocker: DROP_12 tool installs run outside runtime network policy.
+- state: todo
+- blocked_by: none
+- paths: `internal/adapters/docker/executor.go`, `internal/adapters/docker/network.go`
+- packages: `./internal/adapters/docker`, `./internal/services/networkpolicy`
+- change: Add `Executor.RunContainerDetached(ctx, docker.ContainerRunRequest) (string, error)` (new — not yet in tree); extend the networkpolicy consumer-side executor interface with this method (new — not yet in tree). Reuse existing `BuildRunArgs` + `ContainerRunRequest.Detached` + `Executor.RemoveContainer`.
+- acceptance: `mage testPkg ./internal/adapters/docker` + `mage testPkg ./internal/services/networkpolicy` GREEN. Tests prove detached run returns container id via runner output path; command errors wrap; networkpolicy fake executor compiles.
+- measurement: 2 production symbols, ~45 prod LOC, 2 prod files. Under budget.
 
-**Acceptance (sidecar-proxy redesign):**
-- The `internal/services/networkpolicy` service manages a **proxy SIDECAR CONTAINER lifecycle**, not just a network. `Provision` MUST:
-  1. Create (or idempotently reclaim) the single `--internal` Docker network with the managed label `valv=network-policy` (existing committed behavior — keep).
-  2. Launch the proxy sidecar as a detached container (`ContainerRunRequest{Detached:true, Labels:{valv:network-policy}, Network:<internal-net>, ...}`) running an HTTP/HTTPS allowlist filter configured from the effective allowlist, attached FIRST to the `--internal` network.
-  3. `docker network connect` the sidecar to `bridge` (its external egress) AND ensure a stable alias on the `--internal` network (e.g. `valv-proxy`) via `--alias` (Unit 15.2 `ConnectNetwork`). The alias is what the workload's proxy env points at.
-  4. Return policy material: the sidecar internal-network alias + port, the composed `HTTP_PROXY`/`HTTPS_PROXY` URLs (`http://<sidecar-alias>:<port>`), a corrected `NO_PROXY` (loopback + sidecar alias only — NOT the allowlist; see Decision 5 NO_PROXY correction), the internal-network name, and a cleanup handle.
-- **NO_PROXY inversion correction (required):** the committed `PolicyMaterial.NoProxy = buildNoProxy(allowlist)` is WRONG for an internal-only workload. The allowlist is enforced INSIDE the proxy filter; `NO_PROXY` must carry only loopback/sidecar-internal exclusions so that ALL external HTTP/HTTPS egress is routed through the sidecar. Revise `Provision`/`PolicyMaterial`/`buildNoProxy` accordingly and prove the new semantics in tests.
-- **Detached-container-run seam (new, not yet in tree):** the `networkpolicy` service currently depends only on `CreateNetwork`/`RemoveNetwork`/`ListNetworks` via the consumer-side `NetworkExecutor` interface. Extend that interface (and `docker.Executor`) with a detached-container run capability (e.g. `RunContainerDetached(ctx, docker.ContainerRunRequest) (containerID string, err error)` backed by `BuildRunArgs`) plus `ConnectNetwork` and a container-remove path, so the service can launch + dual-attach + tear down the sidecar. Define the new methods consumer-side on the interface so tests inject a fake.
-- `internal/services/images/service.go` reuses the service for overlay builds. When policy is active, the overlay `docker buildx build` request injects predefined proxy build args `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` (pointing at the sidecar alias) and sets `ImageBuildRequest.Network = <internal-network>` so build `RUN` steps reach the sidecar (Decision 6). The same provisioned sidecar serves both runtime and build callers.
-- The build-policy seam consumes the manifest and effective allowlist already resolved at the detected project root (Unit 15.0); do not add any new raw-cwd `.valv/tools.toml` lookup in `internal/services/images` or `internal/services/networkpolicy`.
-- The effective allowlist includes the built-in defaults from Unit 15.1, so plain `go install github.com/x/y` works without extra user allowlist entries.
-- Build-policy injection must not change `OverlayHash`, project-overlay tags, or the existing freshness-label contract from DROP_12.
-- `internal/services/images/service_test.go` remains table-driven and proves build args now include `--network <internal-net>` plus proxy build args (pointing at the sidecar alias) while preserving existing overlay labels and `--no-cache` behavior.
-- `internal/services/images/service_integration_test.go` gains a tagged integration test proving a `.valv/tools.toml`-driven `go install` during overlay build reaches the sidecar proxy and is filtered. To prevent a false green from overlay reuse, the test MUST set `EnsureProjectRequest.NoCache = true` or use a unique repository/tag per run. The test must prove one allowlisted path succeeds and one blocked path fails via the sidecar. The test MUST use the sidecar topology the product ships; a passing workload/build bridge attachment is NOT valid evidence.
-- **Docker Desktop macOS validation (A1 RESOLVED by sidecar):** the sidecar internal-network alias is reachable from an `--internal` network because both containers share the internal subnet — unlike `host.docker.internal`. The integration test validates the SIDECAR reachability path on Docker Desktop macOS. If buildx build-RUN steps cannot reach the sidecar on the internal network (ephemeral build-container attach semantics), adopt the Decision 6 build-specific equivalent that still routes through the sidecar filter; do NOT attach the workload/build to bridge.
-- **Orphan-cleanup contract (covers the proxy CONTAINER now):** the service MUST handle a prior Valv invocation SIGKILLed after sidecar setup but before deferred cleanup. Tag the managed network AND the proxy sidecar container with `valv=network-policy`. On every `Provision` (and `CleanupStale`), scan for stale labeled networks AND stale labeled proxy containers; reclaim a matching live sidecar/network or deterministically remove stale ones (stop+rm the proxy container, rm the network) before creating fresh. Tests prove: a stale labeled network AND a stale labeled proxy container from a prior killed process are detected and cleaned/reused; the next launch does not fail on name/port/network collision.
-- Error wrapping boundaries are explicit for: network provision, sidecar launch, network connect, policy material assembly, image-build request assembly, docker build execution, and cleanup (network + sidecar container).
+##### Unit 15.2.5.B — Proxy image/binary (SUB-PLANNER)
 
-**Blocked by:** Unit 15.0, Unit 15.1, Unit 15.2
+- state: todo (kind=plan)
+- blocked_by: none
+- scope: minimal Go HTTP CONNECT proxy + SNI/CONNECT host filter from effective allowlist + Dockerfile/image build wiring. Expected child droplets: B.1 (allowlist matcher / CONNECT decision), B.2 (proxy server main/handler), B.3 (Dockerfile/build wiring).
+- expected paths: new proxy package + Dockerfile.
+- measurement: estimated ≥3 prod symbols, >80 LOC, likely >3 files → emit sub-planner.
+- consumer: D.1 sidecar launch.
+
+##### Unit 15.2.5.C — PolicyMaterial NO_PROXY inversion
+
+- state: todo
+- blocked_by: none
+- paths: `internal/services/networkpolicy/service.go`
+- packages: `./internal/services/networkpolicy`
+- change: Change existing `buildNoProxy` to return only loopback entries + sidecar alias `valv-proxy`. Allowlist hosts NEVER appear in `NO_PROXY`.
+- acceptance: `mage testPkg ./internal/services/networkpolicy` GREEN. Table-driven tests cover empty allowlist, non-empty allowlist, existing loopback entries.
+- measurement: 1 prod symbol, ~20 prod LOC, 1 prod file. Under budget.
+
+##### Unit 15.2.5.D.1 — Provision sidecar core lifecycle
+
+- state: todo
+- blocked_by: 15.2.5.A, 15.2.5.B, 15.2.5.C
+- paths: `internal/services/networkpolicy/service.go`
+- packages: `./internal/services/networkpolicy`
+- change: Change existing `Service.Provision` to create/reuse V7 internal network → call `RunContainerDetached` for proxy sidecar → connect proxy to bridge → attach `valv-proxy` alias on internal network → return `PolicyMaterial` with sidecar-alias proxy URLs.
+- acceptance: `mage testPkg ./internal/services/networkpolicy` GREEN. Tests assert operation order: net create/reuse, detached run, bridge connect, internal alias, returned `PolicyMaterial.NetworkName` + proxy URLs + `NO_PROXY`.
+- measurement: 1 changed prod symbol (`Service.Provision`), ~75 prod LOC, 1 prod file. Near LOC ceiling but under budget.
+
+##### Unit 15.2.5.D.2 — Provision readiness probe
+
+- state: todo
+- blocked_by: 15.2.5.D.1
+- paths: `internal/services/networkpolicy/service.go`
+- packages: `./internal/services/networkpolicy`
+- change: Add readiness wait/probe helper (new — not yet in tree) called before returning `PolicyMaterial`. Wait until sidecar is listening (e.g. TCP connect to proxy port).
+- acceptance: `mage testPkg ./internal/services/networkpolicy` GREEN. Tests cover ready/timeout/probe-error propagation without real Docker.
+- measurement: 1 prod symbol, ~55 prod LOC, 1 prod file. Under budget.
+
+##### Unit 15.2.5.E — Orphan cleanup + concurrency-safe Provision (SUB-PLANNER)
+
+- state: todo (kind=plan)
+- blocked_by: 15.2.5.D.1
+- scope: label `valv=network-policy` on net AND proxy container; startup sweep + reclaim-on-collision; teardown stops/removes proxy THEN removes network. Expected children: E.1 (label material propagation), E.2 (reclaim-on-collision + stale sweep), E.3 (cleanup ordering).
+- expected paths: `internal/services/networkpolicy/service.go`, possibly `internal/adapters/docker` types if labels are missing.
+- measurement: expected ≥3 prod symbols, >80 LOC → emit sub-planner.
+
+##### Unit 15.2.5.F — Image-build egress wiring
+
+- state: todo
+- blocked_by: 15.2.5.D.1
+- paths: `internal/services/images/service.go`
+- packages: `./internal/services/images`
+- change: Change existing overlay-build path (`Service` / `EnsureProjectImage` seam) to inject `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` build args from provisioned `PolicyMaterial` + set `ImageBuildRequest.Network = <internal-net>`. MUST NOT change `OverlayHash`, tags, or freshness labels.
+- acceptance: `mage testPkg ./internal/services/images` GREEN. Tests assert buildx args include proxy build args + `--network` only when policy material exists. `TestOverlayHash_AllowlistDataIgnored` stays GREEN (regression).
+- measurement: 1 changed prod seam, ~65 prod LOC, 1 prod file. Under budget.
+
+##### Unit 15.2.5.G — Shipped topology integration test (SUB-PLANNER)
+
+- state: todo (kind=plan)
+- blocked_by: 15.2.5.D.2, 15.2.5.F (+ 15.2.5.E for stable repeated runs)
+- scope: `//go:build integration` test with `EnsureProjectRequest.NoCache=true` + `.valv/tools.toml` `go install`; prove workload is internal-only and reaches sidecar on `valv-proxy`; proxy is on internal+bridge. Empirical Docker Desktop macOS validation. Expected children: G.1 (fixture + Docker availability harness), G.2 (topology assertion), G.3 (successful proxy egress during overlay `go install`).
+- expected paths: integration test files under `internal/services/images` and/or `internal/services/networkpolicy`.
+- measurement: integration test scope spans multiple behavioral assertions → emit sub-planner.
+
+##### Build order
+
+- **Level 0** (parallel): 15.2.5.A, 15.2.5.B (sub-planner), 15.2.5.C
+- **Level 1**: 15.2.5.D.1 (after A, B, C)
+- **Level 2** (parallel): 15.2.5.D.2, 15.2.5.E (sub-planner), 15.2.5.F
+- **Level 3**: 15.2.5.G (sub-planner) after D.2 + F (+ E for stable repeated runs)
 
 ---
 
-#### Unit 15.3 — Generic-run closed-default runtime policy (workload internal-only + sidecar proxy env)
+#### Unit 15.3 — Generic-run closed-default runtime policy (decomposed Round 1)
 
-**State:** todo
+**State:** todo (sub-decomposed)
+**Blocked by:** Unit 15.0 (done), Unit 15.1 (done), Unit 15.2 (done), Unit 15.2.5 (todo — all 15.2.5.* must close before any 15.3.* builds), DROP_13 (done), DROP_14 (done)
 
-**Paths:**
-- `internal/services/run/service.go` (new, not yet in tree)
-- `internal/services/run/service_test.go` (new, not yet in tree)
-- `internal/services/run/service_integration_test.go` (new, not yet in tree; `//go:build integration`)
+The prior single-unit spec was OVER BUDGET as one droplet. Round 1 codex planner decomposed into 4 atomic droplets, all serialized on `internal/services/run` package. DROP_14 already shipped `LaunchRequest.AccountEnv` + run-service env merge — confirmed via Hylla; 15.3 doesn't need to re-home env work.
 
-**Packages:** `internal/services/run`
+##### Unit 15.3.A — Network policy mode inputs
 
-**Evidence:** `drops/DROP_13_GENERIC_RUN/PLAN.md:36-43,59-96` already chooses `internal/services/run` as the shared runtime seam; `internal/services/claude/service.go:194-220,298-329` and `internal/services/codex/service.go:185-212,302-332` show today's duplicated launch/request-building path; provider runtimes still supply the base env maps (`internal/adapters/providers/claude/runtime.go:124-149`, `internal/adapters/providers/codex/runtime.go:111-132,178-219`); `internal/services/networkpolicy/service.go` (Unit 15.2.5 redesign) supplies the sidecar alias + proxy material; `internal/adapters/docker/types.go:43-60,171-173` shows `ContainerRunRequest.Network` emits a single `--network`.
+- state: todo
+- blocked_by: ALL 15.2.5.* closed (cross-unit dep on the 15.2.5 sidecar API)
+- paths: `internal/services/run/service.go`, `internal/services/run/service_test.go`
+- packages: `./internal/services/run`
+- change: Add `NetworkPolicyMode` type + constants `NetworkPolicyOpen` and `NetworkPolicyClosed` (new — not yet in tree). Add policy-selector field to `LaunchRequest` or `Options` matching existing run-service style.
+- acceptance: `mage testPkg ./internal/services/run` GREEN. Table-driven tests: zero-value default is open, explicit open preserves current request shape, invalid mode errors before Docker execution.
+- measurement: 2 prod symbols (struct cluster + enum cluster), ~45 prod LOC, 1 prod file. Under budget.
 
-**Acceptance:**
-- The shared run service supports both open and closed policy modes. DROP_15 wires `valv run` to closed mode by default: it provisions the sidecar + internal network through Unit 15.2.5, attaches the WORKLOAD to the `--internal` network ONLY (`ContainerRunRequest.Network = <internal-network>`, no second network on the workload), and injects `HTTP_PROXY`/`HTTPS_PROXY` pointing at the sidecar alias plus the corrected `NO_PROXY` (loopback + sidecar alias only). `valv claude` / `valv codex` remain open-mode callers in this drop and are not flipped here.
-- Open mode preserves current behavior: no proxy env injection, no internal network, no sidecar provision, default Docker egress.
-- The runtime policy is exact-host allowlist only, enforced inside the sidecar proxy. Non-HTTP/HTTPS traffic remains blocked by the workload's lack of any default external route (internal-only). No SOCKS, no raw TCP allowlisting, no CIDR support in DROP_15.
-- Error wrapping boundaries are explicit for: policy/sidecar provision, runtime preparation, request build, docker run/create, and cleanup teardown (sidecar container + network).
-- `service_test.go` is table-driven and proves:
-  - closed-mode path attaches the workload to the internal network ONLY and injects proxy env at the sidecar alias
-  - open-mode path injects neither and attaches no internal network
-  - **open-mode path does NOT invoke `internal/services/networkpolicy` setup, does NOT create a managed Docker network, and does NOT launch a proxy sidecar container** (assert via mocked policy service that `Provision`/setup methods are NOT called when `mode == open`)
-  - the workload `ContainerRunRequest` never attaches to `bridge` or any second network (safety invariant: only the proxy is multi-homed)
-  - cleanup runs on both success and failure paths
-  - DROP_14 env vars are merged, not overwritten
-- **Cross-drop env-merge gate (F1):** this unit depends on DROP_14 having re-homed env-var merging into `internal/services/run` per `drops/DROP_14_ENV_VARS/PLAN.md:69-70`; if DROP_14 still has env merging in `internal/services/claude` and `internal/services/codex` when build starts, Unit 15.3 must include that re-home or block on a DROP_14 amendment.
-- `service_integration_test.go` uses `testcontainers-go` and no real-internet dependency to prove:
-  - an allowlisted host service is reachable from closed mode through the sidecar proxy via the sidecar alias
-  - a non-allowlisted hostname is denied by the sidecar proxy before external egress
-- The integration proof MUST use the sidecar topology the product ships (workload internal-only; proxy on internal+bridge). Do NOT attach the workload to bridge or any second Docker network.
-- **Docker Desktop macOS validation (A1 resolved):** the integration test validates the sidecar-alias reachability path on Docker Desktop macOS; the sidecar alias is reachable from `--internal` (shared subnet), unlike `host.docker.internal`. Automate macOS-runner coverage if available; otherwise mark manual-validation-required on Docker Desktop macOS and confirm before unit close.
-- This unit remains the ship gate for `valv run` closed-default runtime behavior.
+##### Unit 15.3.B — Wire closed-mode provisioning into Run
 
-**Blocked by:** Unit 15.1, Unit 15.2, Unit 15.2.5, DROP_13, DROP_14
+- state: todo
+- blocked_by: 15.3.A; ALL 15.2.5.* closed
+- paths: `internal/services/run/service.go`, `internal/services/run/service_test.go`
+- packages: `./internal/services/run`
+- change: Extend `Service` dependencies to accept the 15.2.5 policy/sidecar provisioner (likely a new field on `Options` like `Policy networkpolicy.Provisioner`). Change `Run` to call `Policy.Provision(ctx, req)` only in closed mode and defer cleanup after successful provision.
+- acceptance: `mage testPkg ./internal/services/run` GREEN. Tests: closed mode invokes provisioning with expected allowlist/proxy inputs, open mode does NOT invoke provisioning, provision errors wrap with run-service context without calling Docker.
+- measurement: 2 prod symbols (Service/Options deps cluster + Run flow), ~60 prod LOC, 1 prod file. Under budget.
+
+##### Unit 15.3.C — Apply PolicyMaterial to workload request
+
+- state: todo
+- blocked_by: 15.3.B; ALL 15.2.5.* closed
+- paths: `internal/services/run/service.go`, `internal/services/run/service_test.go`
+- packages: `./internal/services/run`
+- change: Change `buildRequest` (or small helper) to merge `PolicyMaterial` into `ContainerRunRequest.Env` and set `ContainerRunRequest.Network = PolicyMaterial.NetworkName`.
+- acceptance: `mage testPkg ./internal/services/run` GREEN. Tests: closed-mode injects `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`; existing account/prepared env precedence preserved (`Prepared.Env` wins); workload `Network == material.NetworkName` (single-network safety invariant); open mode keeps empty `Network` + no proxy env.
+- measurement: 2 prod symbols (changed buildRequest + optional helper), ~50 prod LOC, 1 prod file. Under budget.
+
+##### Unit 15.3.D — Integration proof for closed-mode reachability
+
+- state: todo
+- blocked_by: 15.3.C; ALL 15.2.5.* closed
+- paths: `internal/services/run/service_integration_test.go` (new — not yet in tree; `//go:build integration`)
+- packages: `./internal/services/run`
+- change: Integration tests ONLY (no production symbols). Uses testcontainers-go: start 15.2.5 sidecar, launch workload on internal-net only, verify allowed host reaches through proxy, denied host blocked, workload inspection proves single-network attachment.
+- acceptance: `mage integration` GREEN.
+- measurement: 0 prod symbols, 0 prod LOC, 0 prod files. Test-only droplet.
+
+##### Build order
+
+All 15.3.* droplets serialize on `internal/services/run` package. No intra-15.3 parallelism. Sequence: A → B → C → D. ALL blocked_by closure of 15.2.5.
 
 ---
 
-#### Unit 15.4 — CLI network management and open-egress opt-out
+#### Unit 15.4 — CLI network management + open-egress opt-out (decomposed Round 1)
 
-**State:** todo
+**State:** todo (sub-decomposed)
+**Blocked by:** Unit 15.0 (done), Unit 15.1 (done), Unit 15.3 (todo — only the SUB-PLANNER 15.4.D actually waits for 15.3 built; 15.4.A/B/C only need 15.3 plan accepted)
 
-**Paths:**
-- `internal/cli/network.go` (new, not yet in tree)
-- `internal/cli/network_test.go` (new, not yet in tree)
-- `internal/cli/root.go`
-- `internal/cli/run.go` (new, not yet in tree; expected from DROP_13)
+Round 1 codex planner decomposed into 3 atomic droplets (network list / allow / deny — serialized on shared file) + 1 sub-planner (`valv run --network open` blocked on 15.3 built since the runtime API isn't verified yet). Confirmed live symbols via Hylla + targeted source reads:
+- `tools.WriteAllowlistSection(path string, cfg AllowlistConfig) error`
+- `tools.EffectiveAllowlist(cfg AllowlistConfig) ([]string, error)` (NOT `LoadEffectiveAllowlist`)
+- `tools.DefaultAllowlistHosts() []string` (the 4 built-ins)
+- `project.Detect()` / `project.DetectFrom(start string) (Result, error)`
+- `internal/cli/run.go newRunCommand` (existing — flag parsing via `stripRunLocalFlags` → `parsedRunFlags`)
 
-**Packages:** `internal/cli`
+##### Unit 15.4.A — `valv network list`
 
-**Evidence:** `internal/cli/tools.go:17-40,43-97` is the existing project-scoped manifest command pattern; `internal/cli/root.go:108-139` is the root registration/grouping point; `internal/cli/operator_helpers.go:421-464` is the existing overlay/image-policy manifest seam; `drops/DROP_13_GENERIC_RUN/PLAN.md:78-96` already places `valv run` in `internal/cli/run.go`.
+- state: todo
+- blocked_by: 15.0 (done), 15.1 (done), 15.3 plan accepted (NOT 15.3 built)
+- paths: `internal/cli/network.go` (new — not yet in tree), `internal/cli/network_test.go` (new — not yet in tree)
+- packages: `./internal/cli`
+- change: Create `newNetworkCommand` (new) + `runNetworkList` (new). Register `list` initially; root-command registration touch included as cohesive cluster.
+- acceptance: `mage testPkg ./internal/cli` GREEN. Tests: list includes built-ins; subdir project detection; fresh project with no `.valv/` reports built-in effective allowlist.
+- measurement: 2 prod symbols, ~70 prod LOC, 2 prod files. Under budget.
 
-**Acceptance:**
-- Add `valv network allow <host>`, `valv network deny <host>`, and `valv network list`, all project-scoped via `project.Detect()` so they work from subdirectories.
-- Every CLI read/write of `.valv/tools.toml` in this unit uses the detected project root (matching `tools validate` and Unit 15.0); never join against raw cwd. Repo-subdir invocations must mutate and report the root manifest.
-- `allow` creates `.valv/tools.toml` when absent and updates only the `[allowlist]` section through `WriteAllowlistSection`.
-- `deny` is idempotent for missing user-added hosts but MUST return a deterministic error when the target is one of the built-in default hosts, because the effective policy would remain unchanged. Built-in default hosts remain effective and are not subtractable in DROP_15.
-- `list` reports the effective allowlist for the current project, including built-in defaults and user additions.
-- Add `--network open` to `valv run` (new, not yet in tree). Default remains closed when the flag is omitted.
-- Do not add duplicated flag parsing to today's pre-DROP_13 `claude.go` / `codex.go`; those launchers remain open-mode callers in DROP_15 and do not flip default egress here.
-- `network_test.go` is table-driven and proves:
-  - subdirectory project detection
-  - fresh project root with no `.valv/` directory
-  - create-from-absent-file behavior
-  - lowercase normalization and dedupe
-  - deny-no-op on missing user hosts
-  - deterministic error on denying one of the four built-in defaults
-  - preservation of existing `[tools]` / `[env]` block text for the supported manifest shape
-  - `list` includes the four built-in defaults even when no user hosts are present
-  - `valv run --network open` toggles the open-mode request path
+##### Unit 15.4.B — `valv network allow <host>`
 
-**Blocked by:** Unit 15.0, Unit 15.1, Unit 15.3, DROP_13
+- state: todo
+- blocked_by: 15.4.A
+- paths: `internal/cli/network.go`, `internal/cli/network_test.go`
+- packages: `./internal/cli`
+- change: Extend `newNetworkCommand` with `allow` subcommand + `runNetworkAllow` (new). Use `project.Detect()`, load existing user allowlist via tools manifest parsing, normalize lowercase/dedupe using `tools.EffectiveAllowlist` semantics, persist user section via `tools.WriteAllowlistSection`.
+- acceptance: `mage testPkg ./internal/cli` GREEN. Tests: create from absent manifest; lowercase normalization; dedupe; preserve `[tools]` + `[env]` block bytes outside `[allowlist]`.
+- measurement: 2 prod symbols, ~70 prod LOC, 2 prod files (same files as A). Under budget. Serialized on shared file.
+
+##### Unit 15.4.C — `valv network deny <host>`
+
+- state: todo
+- blocked_by: 15.4.B
+- paths: `internal/cli/network.go`, `internal/cli/network_test.go`
+- packages: `./internal/cli`
+- change: Extend `newNetworkCommand` with `deny` subcommand + `runNetworkDeny` (new). Remove only user-added hosts; return deterministic error for built-in defaults from `tools.DefaultAllowlistHosts()`.
+- acceptance: `mage testPkg ./internal/cli` GREEN. Tests: no-op on missing user host; deterministic error on built-in default; preserve `[tools]` + `[env]` block bytes outside `[allowlist]`.
+- measurement: 2 prod symbols, ~60 prod LOC, 2 prod files (same files). Under budget.
+
+##### Unit 15.4.D — `valv run --network open` (SUB-PLANNER)
+
+- state: todo (kind=plan)
+- blocked_by: 15.3 BUILT (D droplet must verify 15.3's runtime API exists), 15.4.C
+- scope: Add `--network open` flag wiring on `valv run`. Default remains closed when flag omitted. Decompose after 15.3 lands because the target open-mode API/symbol is not verified yet — forcing it into this round risks ≥3 prod-symbol changes across `parsedRunFlags`, `stripRunLocalFlags`, `runRunCommand`.
+- expected paths: `internal/cli/run.go`, `internal/cli/run_test.go`, plus 15.3 runtime integration paths.
+- measurement: prod symbols unknown until 15.3 API exists → emit sub-planner.
+
+##### Build order
+
+15.4.A → 15.4.B → 15.4.C (all serialized on `internal/cli/network.go`) → 15.4.D sub-planner (after 15.3 built + 15.4.C).
 
 ### Notes For Builder Agents
 
