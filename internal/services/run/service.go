@@ -125,6 +125,11 @@ type LaunchRequest struct {
 	ProfileID   string
 	ProjectName string
 	Prepared    *PreparedRuntime
+	// AccountEnv is an optional per-account environment variable map that is
+	// merged into the container environment. When a key exists in both
+	// AccountEnv and Prepared.Env, Prepared.Env wins (runtime-owned keys are
+	// set by the provider runtime adapter and must not be overridden).
+	AccountEnv map[string]string
 	// Args are passed as container args after the image token, mirroring how
 	// the provider-baked entrypoint receives its CLI arguments today.
 	Args []string
@@ -257,11 +262,21 @@ func (s Service) buildRequest(launch LaunchRequest) (docker.ContainerRunRequest,
 
 	args, extra := s.applyCommandOverride(launch.Command, launch.Args)
 
+	// Merge account env with prepared env, with prepared env winning on collision
+	// to preserve runtime-owned keys set by the provider runtime adapter.
+	merged := make(map[string]string, len(launch.AccountEnv)+len(launch.Prepared.Env))
+	for k, v := range launch.AccountEnv {
+		merged[k] = v
+	}
+	for k, v := range launch.Prepared.Env {
+		merged[k] = v
+	}
+
 	request := docker.ContainerRunRequest{
 		Name:           s.containerName(launch),
 		Image:          s.image,
 		WorkingDir:     canonicalWorkingDir,
-		Env:            launch.Prepared.Env,
+		Env:            merged,
 		EnvPassthrough: launch.Prepared.EnvPassthrough,
 		Labels: map[string]string{
 			"io.valv.managed":    "true",

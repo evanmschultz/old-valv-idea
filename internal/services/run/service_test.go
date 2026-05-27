@@ -870,3 +870,138 @@ func TestRunValidatesLaunchRequest(t *testing.T) {
 		})
 	}
 }
+
+// TestRunMergesAccountEnvIntoContainerEnv verifies that when AccountEnv is
+// populated with ordinary environment variables, they appear in the container
+// request environment.
+func TestRunMergesAccountEnvIntoContainerEnv(t *testing.T) {
+	t.Parallel()
+
+	for _, provider := range providerDescriptors() {
+		provider := provider
+		t.Run(provider.Name, func(t *testing.T) {
+			t.Parallel()
+
+			executor := &fakeExecutor{}
+			service := newServiceForTest(t, provider, executor, nil)
+
+			prepared := newPreparedFixture(
+				map[string]string{"HOME": "/home/valv"},
+				nil,
+				nil,
+				nil,
+			)
+
+			accountEnv := map[string]string{"API_KEY": "secret"}
+
+			err := service.Run(context.Background(), LaunchRequest{
+				ProjectRoot: "/tmp/project",
+				WorkingDir:  "/tmp/project",
+				ProjectID:   "proj-1",
+				ProfileID:   "profile-1",
+				Prepared:    &prepared.runtime,
+				AccountEnv:  accountEnv,
+				Args:        nil,
+			})
+			if err != nil {
+				t.Fatalf("Run() error = %v", err)
+			}
+
+			if executor.got.Env["API_KEY"] != "secret" {
+				t.Fatalf("Run() Env[API_KEY] = %q, want %q", executor.got.Env["API_KEY"], "secret")
+			}
+			if executor.got.Env["HOME"] != "/home/valv" {
+				t.Fatalf("Run() Env[HOME] = %q, want %q", executor.got.Env["HOME"], "/home/valv")
+			}
+		})
+	}
+}
+
+// TestRunPreservesRuntimeOwnedEnvOnAccountEnvCollision verifies that when
+// AccountEnv and Prepared.Env both define the same key (especially the
+// runtime-owned keys CODEX_HOME, CLAUDE_CONFIG_DIR, HOME, LOGNAME, TERM, USER),
+// Prepared.Env wins.
+func TestRunPreservesRuntimeOwnedEnvOnAccountEnvCollision(t *testing.T) {
+	t.Parallel()
+
+	runtimeKeys := []string{"CODEX_HOME", "CLAUDE_CONFIG_DIR", "HOME", "LOGNAME", "TERM", "USER"}
+
+	for _, provider := range providerDescriptors() {
+		provider := provider
+		t.Run(provider.Name, func(t *testing.T) {
+			t.Parallel()
+
+			for _, key := range runtimeKeys {
+				key := key
+				t.Run(key, func(t *testing.T) {
+					t.Parallel()
+
+					executor := &fakeExecutor{}
+					service := newServiceForTest(t, provider, executor, nil)
+
+					prepared := newPreparedFixture(
+						map[string]string{key: "runtime"},
+						nil,
+						nil,
+						nil,
+					)
+
+					accountEnv := map[string]string{key: "account"}
+
+					err := service.Run(context.Background(), LaunchRequest{
+						ProjectRoot: "/tmp/project",
+						WorkingDir:  "/tmp/project",
+						ProjectID:   "proj-1",
+						ProfileID:   "profile-1",
+						Prepared:    &prepared.runtime,
+						AccountEnv:  accountEnv,
+						Args:        nil,
+					})
+					if err != nil {
+						t.Fatalf("Run() error = %v", err)
+					}
+
+					if executor.got.Env[key] != "runtime" {
+						t.Fatalf("Run() Env[%s] = %q, want %q (prepared must win on collision)", key, executor.got.Env[key], "runtime")
+					}
+				})
+			}
+		})
+	}
+}
+
+// TestRunHandlesNilAccountEnv verifies that when AccountEnv is nil, the
+// resulting container environment equals Prepared.Env (existing behavior).
+func TestRunHandlesNilAccountEnv(t *testing.T) {
+	t.Parallel()
+
+	for _, provider := range providerDescriptors() {
+		provider := provider
+		t.Run(provider.Name, func(t *testing.T) {
+			t.Parallel()
+
+			executor := &fakeExecutor{}
+			service := newServiceForTest(t, provider, executor, nil)
+
+			preparedEnv := map[string]string{"HOME": "/home/valv", "USER": "valv"}
+			prepared := newPreparedFixture(preparedEnv, nil, nil, nil)
+
+			err := service.Run(context.Background(), LaunchRequest{
+				ProjectRoot: "/tmp/project",
+				WorkingDir:  "/tmp/project",
+				ProjectID:   "proj-1",
+				ProfileID:   "profile-1",
+				Prepared:    &prepared.runtime,
+				AccountEnv:  nil,
+				Args:        nil,
+			})
+			if err != nil {
+				t.Fatalf("Run() error = %v", err)
+			}
+
+			if !reflect.DeepEqual(executor.got.Env, preparedEnv) {
+				t.Fatalf("Run() Env = %v, want exact match with Prepared.Env %v", executor.got.Env, preparedEnv)
+			}
+		})
+	}
+}
