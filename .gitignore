@@ -16,6 +16,7 @@ Thumbs.db
 
 # Logs and debug
 *.log
+.hylla/logs/
 
 # Environment and local overrides
 .env
