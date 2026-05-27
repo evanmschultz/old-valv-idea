@@ -135,22 +135,24 @@ Ship DROP_15 as a closed-by-default, macOS-compatible network policy layer acros
 
 ---
 
-#### Unit 15.2.5 — Networkpolicy sidecar lifecycle + image-build egress (decomposed Round 1)
+#### Unit 15.2.5 — Networkpolicy sidecar lifecycle + image-build egress (decomposed Round 1, R2 fold)
 
 **State:** todo (sub-decomposed)
 **Blocked by:** Unit 15.0 (done), Unit 15.1 (done), Unit 15.2 (done)
 
-The prior single-unit spec (Round 0, commit `1c25df8`) is OVER BUDGET per the measured-atomic-sizing rule (`aa130dd`). Round 1 codex planner decomposed into 5 atomic droplets + 3 sub-planners. Locked design (do not re-litigate): sidecar-proxy topology with workload attached ONLY to `--internal` net (V7 per-project naming `sha256(projectRoot+allowlist)`), proxy sidecar attached to both `--internal` + `bridge` via `docker network connect --alias valv-proxy`, `NO_PROXY` carries only loopback + sidecar alias (NOT allowlist), allowlist enforced inside the proxy filter (HTTPS via SNI/CONNECT), `valv=network-policy` label on net AND container, concurrency-safe Provision with reclaim-on-collision.
+The prior single-unit spec (Round 0, commit `1c25df8`) is OVER BUDGET per `aa130dd`. Round 1 codex planner decomposed into 5 atomic droplets + 3 sub-planners. R1 plan-QA found 2 material findings; R2 orch-direct folds them: **(a) DELETE 15.2.5.F** — its production scope (proxy build-args + `policyMaterial.NetworkName` Network injection at `images/service.go:850-908`) is already committed in HEAD `6ddf5d7`; the future "swap external `proxyEndpoint` for sidecar-supplied alias" work absorbs into 15.2.5.D.1's `Service.Provision` rewrite. **(b) EXPAND 15.2.5.A** to add BOTH `RunContainerDetached` AND `ConnectNetwork` to the consumer-side `NetworkExecutor` interface (D.1 calls `ConnectNetwork`; no prior droplet owned that interface extension).
 
-##### Unit 15.2.5.A — Detached-run Executor seam
+Locked design (do not re-litigate): sidecar-proxy topology with workload attached ONLY to `--internal` net (V7 per-project naming `sha256(projectRoot+allowlist)`), proxy sidecar attached to both `--internal` + `bridge` via `docker network connect --alias valv-proxy`, `NO_PROXY` carries only loopback + sidecar alias (NOT allowlist), allowlist enforced inside the proxy filter (HTTPS via SNI/CONNECT), `valv=network-policy` label on net AND container, concurrency-safe Provision with reclaim-on-collision.
+
+##### Unit 15.2.5.A — Detached-run Executor seam + ConnectNetwork interface extension
 
 - state: todo
 - blocked_by: none
-- paths: `internal/adapters/docker/executor.go`, `internal/adapters/docker/network.go`
+- paths: `internal/adapters/docker/executor.go`, `internal/services/networkpolicy/service.go` (interface extension)
 - packages: `./internal/adapters/docker`, `./internal/services/networkpolicy`
-- change: Add `Executor.RunContainerDetached(ctx, docker.ContainerRunRequest) (string, error)` (new — not yet in tree); extend the networkpolicy consumer-side executor interface with this method (new — not yet in tree). Reuse existing `BuildRunArgs` + `ContainerRunRequest.Detached` + `Executor.RemoveContainer`.
-- acceptance: `mage testPkg ./internal/adapters/docker` + `mage testPkg ./internal/services/networkpolicy` GREEN. Tests prove detached run returns container id via runner output path; command errors wrap; networkpolicy fake executor compiles.
-- measurement: 2 production symbols, ~45 prod LOC, 2 prod files. Under budget.
+- change: (1) Add `Executor.RunContainerDetached(ctx, docker.ContainerRunRequest) (string, error)` (new — not yet in tree). Reuse existing `BuildRunArgs` + `ContainerRunRequest.Detached` + `Executor.RemoveContainer`. (2) Extend the networkpolicy consumer-side `NetworkExecutor` interface (currently `CreateNetwork`/`RemoveNetwork`/`ListNetworks` at service.go:58-65) with BOTH `RunContainerDetached` AND `ConnectNetwork` methods (both new — not yet on the interface; `ConnectNetwork` already exists on `docker.Executor` at executor.go:72, just absent from the consumer-side interface). Extend `fakeNetworkExecutor` (test-side, excluded from prod budget) with stubs for both new methods.
+- acceptance: `mage testPkg ./internal/adapters/docker` + `mage testPkg ./internal/services/networkpolicy` GREEN. Tests prove detached run returns container id via runner output path; command errors wrap; networkpolicy fake executor compiles with both new methods.
+- measurement: 3 production symbols (`Executor.RunContainerDetached` + 2 interface method additions on `NetworkExecutor`). At the 3-symbol ceiling but at the boundary — interface method additions are 1-line embeddings and the cohesive purpose is "expose Docker primitives needed by D.1's sidecar lifecycle". ~50 prod LOC, 2 prod files. **At-ceiling under budget**; if builder measures actual diff over 80 LOC, split into A.1 (Executor method) + A.2 (interface extension).
 
 ##### Unit 15.2.5.B — Proxy image/binary (SUB-PLANNER)
 
@@ -199,15 +201,9 @@ The prior single-unit spec (Round 0, commit `1c25df8`) is OVER BUDGET per the me
 - expected paths: `internal/services/networkpolicy/service.go`, possibly `internal/adapters/docker` types if labels are missing.
 - measurement: expected ≥3 prod symbols, >80 LOC → emit sub-planner.
 
-##### Unit 15.2.5.F — Image-build egress wiring
+##### Unit 15.2.5.F — DELETED (already-shipped work)
 
-- state: todo
-- blocked_by: 15.2.5.D.1
-- paths: `internal/services/images/service.go`
-- packages: `./internal/services/images`
-- change: Change existing overlay-build path (`Service` / `EnsureProjectImage` seam) to inject `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` build args from provisioned `PolicyMaterial` + set `ImageBuildRequest.Network = <internal-net>`. MUST NOT change `OverlayHash`, tags, or freshness labels.
-- acceptance: `mage testPkg ./internal/services/images` GREEN. Tests assert buildx args include proxy build args + `--network` only when policy material exists. `TestOverlayHash_AllowlistDataIgnored` stays GREEN (regression).
-- measurement: 1 changed prod seam, ~65 prod LOC, 1 prod file. Under budget.
+R2 plan-QA finding CF-1: `internal/services/images/service.go:850-908` already contains the complete proxy build-args + Network-field injection F claimed to add (committed in a prior round alongside the initial networkpolicy skeleton). F is removed from the build plan. The future "swap external `proxyEndpoint` for sidecar-supplied alias" work absorbs into 15.2.5.D.1's `Service.Provision` rewrite (which sets `PolicyMaterial.HTTPProxyURL` from the sidecar alias instead of `request.ProxyEndpoint`). Test coverage for the post-D.1 PolicyMaterial shape lives in D.1's existing test scope. If `s.proxyEndpoint` becomes obsolete post-D.1, that field-removal is captured by D.1's test that asserts the new PolicyMaterial uses the internal alias.
 
 ##### Unit 15.2.5.G — Shipped topology integration test (SUB-PLANNER)
 
@@ -217,51 +213,64 @@ The prior single-unit spec (Round 0, commit `1c25df8`) is OVER BUDGET per the me
 - expected paths: integration test files under `internal/services/images` and/or `internal/services/networkpolicy`.
 - measurement: integration test scope spans multiple behavioral assertions → emit sub-planner.
 
-##### Build order
+##### Build order (R2 fold — F removed)
 
 - **Level 0** (parallel): 15.2.5.A, 15.2.5.B (sub-planner), 15.2.5.C
 - **Level 1**: 15.2.5.D.1 (after A, B, C)
-- **Level 2** (parallel): 15.2.5.D.2, 15.2.5.E (sub-planner), 15.2.5.F
-- **Level 3**: 15.2.5.G (sub-planner) after D.2 + F (+ E for stable repeated runs)
+- **Level 2** (parallel): 15.2.5.D.2, 15.2.5.E (sub-planner)
+- **Level 3**: 15.2.5.G (sub-planner) after D.2 (+ E for stable repeated runs)
 
 ---
 
-#### Unit 15.3 — Generic-run closed-default runtime policy (decomposed Round 1)
+#### Unit 15.3 — Generic-run closed-default runtime policy (decomposed Round 1, R2 fold)
 
 **State:** todo (sub-decomposed)
-**Blocked by:** Unit 15.0 (done), Unit 15.1 (done), Unit 15.2 (done), Unit 15.2.5 (todo — all 15.2.5.* must close before any 15.3.* builds), DROP_13 (done), DROP_14 (done)
+**Blocked by:** Unit 15.0 (done), Unit 15.1 (done), Unit 15.2 (done), Unit 15.2.5 (todo — see per-droplet blockers; A unblocked, B.1/B.2/C/D blocked by 15.2.5 close), DROP_13 (done), DROP_14 (done)
 
-The prior single-unit spec was OVER BUDGET as one droplet. Round 1 codex planner decomposed into 4 atomic droplets, all serialized on `internal/services/run` package. DROP_14 already shipped `LaunchRequest.AccountEnv` + run-service env merge — confirmed via Hylla; 15.3 doesn't need to re-home env work.
+R1 plan-QA FAILED on 15.3.B (4-5 prod symbols, not 2) and flagged 15.3.A as over-blocked. R2 orch-direct folds: **(a) SPLIT 15.3.B into B.1 (DI wiring) + B.2 (Run flow)**; **(b) DROP 15.3.A's blocked_by to "15.2.5 plan accepted"** (A has zero functional dep on 15.2.5 — only B/C/D do); **(c) commit to `LaunchRequest.NetworkPolicy` placement** (per-launch, not Options-wide); **(d) clarify the new consumer-side `Policy` interface as `[NEW: emerges from 15.2.5.D.1]`**; **(e) fix D's mage target** (`mage integration` covers only `./internal/cli` — D's integration test in `./internal/services/run` needs the mage target extended OR use a per-package integration invocation).
+
+DROP_14 already shipped `LaunchRequest.AccountEnv` + run-service env merge — 15.3 doesn't need to re-home env work.
 
 ##### Unit 15.3.A — Network policy mode inputs
 
 - state: todo
-- blocked_by: ALL 15.2.5.* closed (cross-unit dep on the 15.2.5 sidecar API)
+- blocked_by: 15.2.5 plan accepted (NOT all 15.2.5.* closed — A has zero import dep on `networkpolicy`); cross-unit: DROP_14 (done)
 - paths: `internal/services/run/service.go`, `internal/services/run/service_test.go`
 - packages: `./internal/services/run`
-- change: Add `NetworkPolicyMode` type + constants `NetworkPolicyOpen` and `NetworkPolicyClosed` (new — not yet in tree). Add policy-selector field to `LaunchRequest` or `Options` matching existing run-service style.
-- acceptance: `mage testPkg ./internal/services/run` GREEN. Table-driven tests: zero-value default is open, explicit open preserves current request shape, invalid mode errors before Docker execution.
-- measurement: 2 prod symbols (struct cluster + enum cluster), ~45 prod LOC, 1 prod file. Under budget.
+- change: Add `NetworkPolicyMode` type + constants `NetworkPolicyOpen` and `NetworkPolicyClosed` (new — not yet in tree). Add `NetworkPolicy NetworkPolicyMode` field to **`LaunchRequest`** (NOT `Options` — per-launch state per repo idiom; matches `Args`/`Command` placement).
+- acceptance: `mage testPkg ./internal/services/run` GREEN. Table-driven tests: zero-value default is open (`NetworkPolicyOpen == ""` or zero-value), explicit open preserves current request shape, explicit closed sets the mode value but does NOT yet trigger provisioning (that wires in B.2).
+- measurement: 2 prod symbols (type+const cluster + `LaunchRequest` field), ~30 prod LOC, 1 prod file. Under budget. **A can fire in parallel with 15.2.5 building** since it imports no 15.2.5 symbols.
 
-##### Unit 15.3.B — Wire closed-mode provisioning into Run
+##### Unit 15.3.B.1 — DI wiring: Policy provisioner injection
 
 - state: todo
-- blocked_by: 15.3.A; ALL 15.2.5.* closed
+- blocked_by: 15.3.A; ALL 15.2.5.* closed (B.1 references the new consumer-side `Policy` interface whose shape depends on 15.2.5.D.1's final `Service.Provision` signature)
 - paths: `internal/services/run/service.go`, `internal/services/run/service_test.go`
 - packages: `./internal/services/run`
-- change: Extend `Service` dependencies to accept the 15.2.5 policy/sidecar provisioner (likely a new field on `Options` like `Policy networkpolicy.Provisioner`). Change `Run` to call `Policy.Provision(ctx, req)` only in closed mode and defer cleanup after successful provision.
-- acceptance: `mage testPkg ./internal/services/run` GREEN. Tests: closed mode invokes provisioning with expected allowlist/proxy inputs, open mode does NOT invoke provisioning, provision errors wrap with run-service context without calling Docker.
-- measurement: 2 prod symbols (Service/Options deps cluster + Run flow), ~60 prod LOC, 1 prod file. Under budget.
+- change: (1) Define new consumer-side interface `Policy` in `services/run` (e.g. `type Policy interface { Provision(ctx context.Context, req networkpolicy.ProvisionRequest) (networkpolicy.PolicyMaterial, networkpolicy.Cleanup, error) }` — exact shape from 15.2.5.D.1's signature; new — not yet in tree). (2) Add `Policy Policy` field to existing `Options` struct. (3) Add corresponding unexported mirror field on `Service` struct. (4) Extend `New` constructor with field validation (`Policy` may be nil only when no closed-mode launches occur).
+- acceptance: `mage testPkg ./internal/services/run` GREEN. Tests cover: `New` rejects/accepts the new field per validation rules; `Service` struct holds the policy reference; existing constructor tests still pass.
+- measurement: 3 prod symbols (`Policy` interface + `Options` field-add cluster + `Service` field-add cluster + `New` validation as cohesive DI cluster — counted as 2 distinct top-level symbol clusters since they share the "DI plumbing" purpose). ~30 prod LOC, 1 prod file. **At ceiling**; if builder measures >3 distinct symbols on the actual diff, split off the interface type to its own file `services/run/policy.go`.
+
+##### Unit 15.3.B.2 — Run flow: closed-mode provisioning call + cleanup defer
+
+- state: todo
+- blocked_by: 15.3.B.1; ALL 15.2.5.* closed
+- paths: `internal/services/run/service.go`, `internal/services/run/service_test.go`
+- packages: `./internal/services/run`
+- change: Edit existing `Service.Run` (service.go:181-219) to add closed-mode branch: when `launch.NetworkPolicy == NetworkPolicyClosed`, call `s.policy.Provision(ctx, req)` → defer cleanup on success → propagate provision-error with run-service context (NO Docker call). Open mode unchanged.
+- acceptance: `mage testPkg ./internal/services/run` GREEN. Tests: closed mode invokes provisioning with the expected `ProvisionRequest` shape (allowlist sourced from somewhere reasonable — see open-question below); open mode does NOT invoke provisioning; provision errors wrap with run-service context without calling Docker; deferred cleanup runs on both success and failure paths.
+- measurement: 1 prod symbol (`Service.Run` method edit cluster), ~30 prod LOC, 1 prod file. Under budget.
+- open question (route to dev or B.2 builder): where does the `ProvisionRequest.Allowlist` come from? `LaunchRequest` doesn't currently carry it. Possible sources: (a) wire allowlist into `LaunchRequest` via a new field (would push A's spec — likely defer to B.2); (b) inject an allowlist resolver into `Options`; (c) caller passes effective allowlist via `LaunchRequest.NetworkPolicyAllowlist []string` (new field, additive to A's enum). B.2 builder must surface this before coding.
 
 ##### Unit 15.3.C — Apply PolicyMaterial to workload request
 
 - state: todo
-- blocked_by: 15.3.B; ALL 15.2.5.* closed
+- blocked_by: 15.3.B.2; ALL 15.2.5.* closed
 - paths: `internal/services/run/service.go`, `internal/services/run/service_test.go`
 - packages: `./internal/services/run`
-- change: Change `buildRequest` (or small helper) to merge `PolicyMaterial` into `ContainerRunRequest.Env` and set `ContainerRunRequest.Network = PolicyMaterial.NetworkName`.
-- acceptance: `mage testPkg ./internal/services/run` GREEN. Tests: closed-mode injects `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`; existing account/prepared env precedence preserved (`Prepared.Env` wins); workload `Network == material.NetworkName` (single-network safety invariant); open mode keeps empty `Network` + no proxy env.
-- measurement: 2 prod symbols (changed buildRequest + optional helper), ~50 prod LOC, 1 prod file. Under budget.
+- change: Change `buildRequest` (service.go:234-298) to merge `PolicyMaterial` into the existing env-merge cluster: inject `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` as account-env-style entries that `Prepared.Env` STILL wins over on collision (preserves 14.4.B's invariant); set `ContainerRunRequest.Network = PolicyMaterial.NetworkName` (single-network safety invariant — workload attaches ONLY to internal-net).
+- acceptance: `mage testPkg ./internal/services/run` GREEN. Tests: closed-mode injects `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` at expected map keys; existing account/prepared env precedence preserved (`Prepared.Env` wins on collision per 14.4 invariant); workload `Network == material.NetworkName` (single-network); open mode keeps empty `Network` + no proxy env.
+- measurement: 2 prod symbols (`buildRequest` body edit + optional helper for proxy-env injection if extracted), ~25 NET-ADDED prod LOC (existing `buildRequest` is 64 LOC, after edit ≤85 LOC TOTAL but only ~25 of that is new). 1 prod file. Under budget (net-added measurement).
 
 ##### Unit 15.3.D — Integration proof for closed-mode reachability
 
@@ -270,12 +279,16 @@ The prior single-unit spec was OVER BUDGET as one droplet. Round 1 codex planner
 - paths: `internal/services/run/service_integration_test.go` (new — not yet in tree; `//go:build integration`)
 - packages: `./internal/services/run`
 - change: Integration tests ONLY (no production symbols). Uses testcontainers-go: start 15.2.5 sidecar, launch workload on internal-net only, verify allowed host reaches through proxy, denied host blocked, workload inspection proves single-network attachment.
-- acceptance: `mage integration` GREEN.
-- measurement: 0 prod symbols, 0 prod LOC, 0 prod files. Test-only droplet.
+- acceptance: D's mage target needs amendment — `mage integration` currently runs `go test -tags=integration -count=1 ./internal/cli` only. D requires EITHER (a) extending `magefile.go`'s `Integration` target to also cover `./internal/services/run`, OR (b) running `mage testPkg ./internal/services/run -- -tags=integration` (if mage supports build-tag passthrough). Builder must add option (a) — extend the existing `Integration` target — as part of D's commit, so `mage integration` covers both packages. New mage-target line is a magefile-side production edit (one symbol in `magefile.go`) — D becomes 1 prod symbol via this magefile extension. Tests themselves are 0 prod-symbol integration coverage.
+- measurement: 1 prod symbol (magefile.go `Integration` target extension), ~3 prod LOC, 1 prod file. Under budget.
 
-##### Build order
+##### Build order (R2 fold)
 
-All 15.3.* droplets serialize on `internal/services/run` package. No intra-15.3 parallelism. Sequence: A → B → C → D. ALL blocked_by closure of 15.2.5.
+- **Level 0** (parallel with 15.2.5 building): 15.3.A
+- **Level 1** (after ALL 15.2.5.* closed): 15.3.B.1
+- **Level 2**: 15.3.B.2 (after B.1)
+- **Level 3**: 15.3.C (after B.2)
+- **Level 4**: 15.3.D (after C)
 
 ---
 
@@ -295,11 +308,15 @@ Round 1 codex planner decomposed into 3 atomic droplets (network list / allow / 
 
 - state: todo
 - blocked_by: 15.0 (done), 15.1 (done), 15.3 plan accepted (NOT 15.3 built)
-- paths: `internal/cli/network.go` (new — not yet in tree), `internal/cli/network_test.go` (new — not yet in tree)
+- paths: `internal/cli/network.go` (new — not yet in tree), `internal/cli/network_test.go` (new — not yet in tree), `internal/cli/root.go` (edit — add `cmd.AddCommand(newNetworkCommand(paths, opts))` to existing AddCommand list at root.go:141)
 - packages: `./internal/cli`
-- change: Create `newNetworkCommand` (new) + `runNetworkList` (new). Register `list` initially; root-command registration touch included as cohesive cluster.
-- acceptance: `mage testPkg ./internal/cli` GREEN. Tests: list includes built-ins; subdir project detection; fresh project with no `.valv/` reports built-in effective allowlist.
-- measurement: 2 prod symbols, ~70 prod LOC, 2 prod files. Under budget.
+- change: Create `newNetworkCommand` (new) + `runNetworkList` (new). The new command sets `networkCmd.GroupID = "runtime"` matching the pattern at root.go:131 (`runCmd.GroupID = "runtime"`). Root registration is a single-line additive edit to existing `cmd.AddCommand(...)` list, not a new symbol. Use `tools.Load` (or current manifest accessor — `internal/cli/operator_helpers.go` for pattern) to read the existing manifest, then `tools.EffectiveAllowlist` to compute the merged built-in + user host set for output.
+- acceptance: `mage testPkg ./internal/cli` GREEN. Tests:
+  - **Cobra-tree wiring proof (R2 added per plan-QA finding):** `cmd.SetArgs([]string{"network", "list"}); cmd.Execute()` succeeds without error and stdout contains all 4 built-in hosts (`github.com`, `objects.githubusercontent.com`, `proxy.golang.org`, `sum.golang.org`). This catches root.go registration omissions that handler-only tests would miss.
+  - List includes built-ins for fresh project with no `.valv/`.
+  - Subdir project detection: invoking from a nested directory finds the root-level manifest.
+  - User-added hosts appear unioned with built-ins.
+- measurement: 2 prod symbols (`newNetworkCommand` + `runNetworkList` — the root.go AddCommand edit is an existing-symbol body edit, not a new symbol), ~70 prod LOC, **3 prod files** (network.go new + network_test.go new + root.go edited). Under budget (≤3 files at boundary).
 
 ##### Unit 15.4.B — `valv network allow <host>`
 
@@ -307,9 +324,9 @@ Round 1 codex planner decomposed into 3 atomic droplets (network list / allow / 
 - blocked_by: 15.4.A
 - paths: `internal/cli/network.go`, `internal/cli/network_test.go`
 - packages: `./internal/cli`
-- change: Extend `newNetworkCommand` with `allow` subcommand + `runNetworkAllow` (new). Use `project.Detect()`, load existing user allowlist via tools manifest parsing, normalize lowercase/dedupe using `tools.EffectiveAllowlist` semantics, persist user section via `tools.WriteAllowlistSection`.
-- acceptance: `mage testPkg ./internal/cli` GREEN. Tests: create from absent manifest; lowercase normalization; dedupe; preserve `[tools]` + `[env]` block bytes outside `[allowlist]`.
-- measurement: 2 prod symbols, ~70 prod LOC, 2 prod files (same files as A). Under budget. Serialized on shared file.
+- change: Extend `newNetworkCommand` with `allow` subcommand + `runNetworkAllow` (new). Use `project.Detect()`, load existing user allowlist via `tools.Load` (the manifest reader at `internal/tools/`), normalize lowercase/dedupe per `tools.EffectiveAllowlist` semantics, persist user section via `tools.WriteAllowlistSection`.
+- acceptance: `mage testPkg ./internal/cli` GREEN. Tests: create from absent manifest; lowercase normalization; dedupe. Byte-preservation outside `[allowlist]` is already guaranteed by 15.1's `WriteAllowlistSection` (test coverage exists in `internal/tools/allowlist_test.go`); 15.4.B's tests rely on that helper rather than re-proving it.
+- measurement: 2 prod symbols, ~70 prod LOC, 2 prod files (same files as A — file lock forces serialization on B blocked_by A). Under budget.
 
 ##### Unit 15.4.C — `valv network deny <host>`
 
@@ -325,7 +342,7 @@ Round 1 codex planner decomposed into 3 atomic droplets (network list / allow / 
 
 - state: todo (kind=plan)
 - blocked_by: 15.3 BUILT (D droplet must verify 15.3's runtime API exists), 15.4.C
-- scope: Add `--network open` flag wiring on `valv run`. Default remains closed when flag omitted. Decompose after 15.3 lands because the target open-mode API/symbol is not verified yet — forcing it into this round risks ≥3 prod-symbol changes across `parsedRunFlags`, `stripRunLocalFlags`, `runRunCommand`.
+- scope: Add `--network open` flag wiring on `valv run`. Default remains closed when flag omitted. Sub-planner is justified by the **measured ≥3 prod symbols** required across `parsedRunFlags` + `stripRunLocalFlags` + `runRunCommand` (single droplet would breach `aa130dd`'s 3-symbol budget). The "15.3 API not yet verified" timing concern is a secondary consideration — decomposition can run against 15.3.A's spec'd shape (`LaunchRequest.NetworkPolicy`) per Rule 4, but build must wait for 15.3 BUILT.
 - expected paths: `internal/cli/run.go`, `internal/cli/run_test.go`, plus 15.3 runtime integration paths.
 - measurement: prod symbols unknown until 15.3 API exists → emit sub-planner.
 
