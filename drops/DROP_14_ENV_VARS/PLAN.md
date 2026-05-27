@@ -81,42 +81,102 @@ DROP_14 adds an account-scoped env map persisted in SQLite and injected into con
   - missing-account errors;
   - same env-key separation across two accounts.
 
-### Unit 14.4 (decomposed Round 2 — Round 1 was over-budget as a single droplet)
+### Unit 14.4 (Round 3 — orch-direct edit folding Round 1 plan-QA findings)
 
-DROP_13 closed with `internal/services/run` owning `ContainerRunRequest.Env` and a Store-FREE `Options{Executor,Image,User,TTY,Stdin,Logger,Notices,Now,Provider}`. **Design decision (resolved Round 2):** the provider wrappers (`internal/services/claude` + `internal/services/codex`) own Store; they load the account-env map via the 14.1 accessor (`manage.Service.ListAccountEnv` → ordered `[]domain.AccountEnvEntry`) and pass it to the run service through a new `LaunchRequest.AccountEnv map[string]string` field. The run service stays Store-free. Decomposed into 14.4.1 (shared-run field + merge) + 14.4.2 (wrapper load + pass) per the measured-atomic-sizing rule (committed `aa130dd`).
+Round 1 plan-QA (commit `ec96e8a`) FAILED on two concrete counterexamples that the Round-2 two-droplet decomposition (commit `21e402b`) missed:
 
-Evidence (Hylla `@main` Round-2 planner pass): `run.LaunchRequest{ProjectRoot,WorkingDir,ProjectID,ProfileID,ProjectName,Prepared,Args,Command}` has no AccountEnv field today; `run.Options` has no Store; `manage.Service.ListAccountEnv` returns ordered slices; `manage.reservedAccountEnvKeys = {CODEX_HOME,CLAUDE_CONFIG_DIR,HOME,LOGNAME,TERM,USER}`; provider runtime owners at `adapters/providers/{claude,codex}/runtime.go` set those keys.
+- **CF-1**: `claude.Store` (services/claude/service.go:23-27) and `codex.Store` (services/codex/service.go:22-26) do not embed `domain.AccountEnvRepository`. For wrappers to call `s.store.ListAccountEnv(...)` they must widen both interfaces — 2 uncounted production symbols pushing 14.4.2 from 2 → 4 prod symbols (≥3 = FAIL per `aa130dd`).
+- **CF-2** (orch grep resolved falsif OQ-1): `internal/cli/run.go:202` is a THIRD `runservice.LaunchRequest{}` construction site beyond the two wrapper `Service.Run` methods. The Round-2 plan never edited cli/run.go, so `valv run --account` would silently skip env merge.
 
-#### Unit 14.4.1 — Shared run request accepts and merges account env
+Round 3 splits into **5 atomic droplets** with a small domain helper (NIT-3 fold) to eliminate triplicate `[]AccountEnvEntry`→map copy-paste across the 3 call sites. `internal/cli/run.go` uses the full `*sqlite.Store` directly (verified at run.go:123) plus `manage.Service` (run.go:93-99) — it does NOT use the narrow wrapper Store interfaces, so 14.4.E is not blocked on the Store widening (14.4.C).
+
+**Design (unchanged from dev's prior ruling):** wrappers own Store; AccountEnv flows through a new `LaunchRequest.AccountEnv map[string]string` field; `internal/services/run` stays Store-free. The 6 runtime-owned keys (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `HOME`, `LOGNAME`, `TERM`, `USER`) win on collision in the run service's merge.
+
+**Build parallelization:**
+- **Level 0** (no intra-14.4 blockers; 3 droplets parallel): 14.4.A (domain helper), 14.4.B (run-svc field+merge), 14.4.C (Store widening).
+- **Level 1** (2 droplets, can fire in parallel; E does NOT wait for C): 14.4.D `blocked_by` A+B+C; 14.4.E `blocked_by` A+B.
+
+#### Unit 14.4.A — Domain helper `AccountEnvEntriesToMap`
 
 - state: todo
-- blocked_by: none (intra-14.4); cross-unit: 14.1 (done)
-- paths: `internal/services/run/service.go`
+- blocked_by: none
+- paths: `internal/domain/account_env.go` (new — not yet in tree)
+- packages: `./internal/domain`
+- change: Add `domain.AccountEnvEntriesToMap(entries []AccountEnvEntry) map[string]string` (new — not yet in tree). Iterates the slice once, writes each `EnvKey`→`EnvValue` into a freshly allocated map (nil-safe: nil/empty slice returns nil). Single tiny helper consumed by 14.4.D (both wrappers) and 14.4.E (cli/run.go) to avoid triplicate inline conversion.
+- acceptance: `mage testPkg ./internal/domain` passes. Add `internal/domain/account_env_test.go` (new — not yet in tree) with table-driven coverage:
+  - `TestAccountEnvEntriesToMap` (new — not yet in tree): nil slice → nil map; empty slice → nil map; single entry → single-key map; two entries → two-key map; duplicate-key last-wins semantics (documented behavior; entries are pre-deduped by the SQLite UNIQUE constraint but the helper does not panic on hypothetical duplicates).
+- measurement: distinct new/changed production symbols = 1 (`AccountEnvEntriesToMap`); production LOC ≈ 8; production files = 1 (new file). Under budget.
+- commit subject (orchestrator): `feat(domain): unit 14.4.a account-env entries-to-map helper`.
+
+#### Unit 14.4.B — Run service `LaunchRequest.AccountEnv` field + buildRequest merge
+
+- state: todo
+- blocked_by: none
+- paths: `internal/services/run/service.go`, `internal/services/run/service_test.go`
 - packages: `./internal/services/run`
-- change: Extend existing top-level `LaunchRequest` with field `AccountEnv map[string]string` (new — not yet in tree). In the existing run-request assembly edit cluster, merge `LaunchRequest.AccountEnv` into `ContainerRunRequest.Env` before/around prepared-runtime env assembly, with the six runtime-owned keys (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `HOME`, `LOGNAME`, `TERM`, `USER`) winning on collision. Do NOT add a Store dep to `run.Options`.
-- acceptance: `mage testPkg ./internal/services/run` passes. Table-driven tests in `internal/services/run/service_test.go` cover:
-  - `TestRunMergesAccountEnvIntoContainerEnv` (new — not yet in tree): an ordinary account env key reaches `ContainerRunRequest.Env`.
-  - `TestRunPreservesRuntimeOwnedEnvOnAccountEnvCollision` (new — not yet in tree): each of the six reserved keys is preserved when also present in `LaunchRequest.AccountEnv`.
-  - nil/empty `AccountEnv` does not fail launch and produces the prior Env exactly.
-- measurement (planner Round 2): distinct new/changed production symbols = 1 (`LaunchRequest`); production LOC ≈ 25; production files = 1. Under budget.
-- commit subject (orchestrator): `feat(run): unit 14.4 merge account env into launch`.
+- change: One cohesive same-purpose edit cluster on `internal/services/run/service.go`:
+  - Add field `AccountEnv map[string]string` to existing `LaunchRequest` struct (currently service.go:121-136).
+  - Edit `buildRequest` (service.go:229-283, env-assembly at line 264 `Env: launch.Prepared.Env`) so the assembled env is the merge of `launch.AccountEnv` ⊕ `launch.Prepared.Env` with **`Prepared.Env` winning on collision** (runtime-owned keys are set by the provider runtime adapter into `Prepared.Env`, so this preserves them automatically).
+  - Implementation pattern: `merged := make(map[string]string, len(launch.AccountEnv)+len(launch.Prepared.Env)); for k,v := range launch.AccountEnv { merged[k]=v }; for k,v := range launch.Prepared.Env { merged[k]=v }; <ContainerRunRequest>.Env = merged` (account env first, prepared overrides). Nil/empty `AccountEnv` and nil/empty `Prepared.Env` both handled without panic.
+- acceptance: `mage testPkg ./internal/services/run` passes. Add to `internal/services/run/service_test.go`:
+  - `TestRunMergesAccountEnvIntoContainerEnv` (new — not yet in tree): table-driven with one ordinary key (`API_KEY=secret`) seeded in `launch.AccountEnv`; assert it appears in `ContainerRunRequest.Env` exactly.
+  - `TestRunPreservesRuntimeOwnedEnvOnAccountEnvCollision` (new — not yet in tree): table-driven over each of the 6 keys (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `HOME`, `LOGNAME`, `TERM`, `USER`); each row seeds `Prepared.Env[K]="runtime"` AND `launch.AccountEnv[K]="account"`; assert `ContainerRunRequest.Env[K]=="runtime"`. The test seeds `Prepared.Env` directly via test fixture — does NOT depend on the cross-mount conditional in the adapter (per Round-1 NIT 3.3).
+  - nil/empty `AccountEnv` case: `ContainerRunRequest.Env` equals `Prepared.Env` exactly (existing-behavior regression).
+- measurement: distinct new/changed production symbols = 1 effective (LaunchRequest field add + buildRequest body edit form one cohesive same-purpose cluster — "add field, merge it"); production LOC ≈ 25; production files = 1. Under budget. NIT-1 from Round 1 falsif: the cohesive-cluster interpretation is explicit here, not inferred.
+- commit subject (orchestrator): `feat(run): unit 14.4.b merge account env into launch`.
 
-#### Unit 14.4.2 — Provider wrappers load account env and pass it into LaunchRequest
+#### Unit 14.4.C — Widen wrapper Store interfaces to embed `AccountEnvRepository`
 
 - state: todo
-- blocked_by: 14.4.1 (real dep — `LaunchRequest.AccountEnv` must exist); cross-unit: 14.1 (done)
-- paths: `internal/services/claude/service.go`, `internal/services/codex/service.go`
+- blocked_by: none
+- paths: `internal/services/claude/service.go`, `internal/services/codex/service.go`, `internal/services/claude/service_test.go`, `internal/services/codex/service_test.go`
 - packages: `./internal/services/claude`, `./internal/services/codex`
-- change: Edit existing methods `claude.Service.Run` and `codex.Service.Run` only. After resolving the launch profile/account, call the account-env accessor available in Store scope, convert ordered `[]domain.AccountEnvEntry` to `map[string]string`, and set `runservice.LaunchRequest.AccountEnv`. Do NOT add a new top-level production helper symbol — keeping the conversion as an inline edit cluster in each wrapper preserves the 2-symbol budget. If the same conversion logic appears verbatim in both wrappers, the builder MAY introduce a test-only helper but NEVER a production helper in this droplet.
-- acceptance: `mage testPkg ./internal/services/claude` and `mage testPkg ./internal/services/codex` pass. Tests with fake-store seeded `AccountEnvEntry`s cover:
-  - `TestRunPassesAccountEnvToSharedRunService` (new — not yet in tree, one per wrapper): seeded entries reach `runservice.LaunchRequest.AccountEnv` in the expected map shape.
-  - no-entries case: nil/empty `AccountEnv` from Store does not fail launch.
-- measurement (planner Round 2): distinct new/changed production symbols = 2 (`claude.Service.Run`, `codex.Service.Run` methods, edit clusters); production LOC ≈ 50; production files = 2. Under budget.
-- commit subject (orchestrator): `feat(services): unit 14.4 pass account env from wrappers`.
+- change: Two parallel interface widenings (no behavior, no logic):
+  - `internal/services/claude/service.go:23-27` — add `domain.AccountEnvRepository` to the `claude.Store` interface embed list (currently `domain.ProjectRepository`, `domain.BindingRepository`, `domain.ProfileRepository`).
+  - `internal/services/codex/service.go:22-26` — same widening on `codex.Store`.
+  - Test-side: extend the existing `fakeStore` (or equivalent test-double) in each package's `service_test.go` with the `AccountEnvRepository` methods (`ListAccountEnv`, `SetAccountEnv`, `UnsetAccountEnv` per `internal/domain/repository.go:43-56`) — return empty/nil by default so no existing test changes behavior. Test-side additions are NOT counted toward the production-symbol budget per `aa130dd` (tests excluded).
+- acceptance: `mage testPkg ./internal/services/claude` and `mage testPkg ./internal/services/codex` both pass with no behavioral change. Existing tests must continue to pass with the widened fakeStore. No new production tests in this droplet (the interface change has no behavior to exercise; behavior tests land in 14.4.D).
+- measurement: distinct new/changed production symbols = 2 (`claude.Store` interface widening + `codex.Store` interface widening); production LOC ≈ 2 (one embed line per interface); production files = 2. Under budget.
+- commit subject (orchestrator): `feat(services): unit 14.4.c widen wrapper store with account env repository`.
+
+#### Unit 14.4.D — Provider wrappers load account env and pass it into LaunchRequest
+
+- state: todo
+- blocked_by: 14.4.A (domain helper), 14.4.B (LaunchRequest field), 14.4.C (Store widening)
+- paths: `internal/services/claude/service.go`, `internal/services/codex/service.go`, `internal/services/claude/service_test.go`, `internal/services/codex/service_test.go`
+- packages: `./internal/services/claude`, `./internal/services/codex`
+- change: Edit existing methods `claude.Service.Run` (service.go:127) and `codex.Service.Run` (service.go:120) only. After the existing profile/project resolution and before the `runservice.LaunchRequest{...}` construction (claude:225, codex:216):
+  - call `entries, err := s.store.ListAccountEnv(ctx, resolved.profile.ID)` (or equivalent variable names matching the existing context naming in each file);
+  - wrap any error with `fmt.Errorf("load account env for profile %q: %w", resolved.profile.ID, err)`;
+  - convert via `domain.AccountEnvEntriesToMap(entries)` from 14.4.A;
+  - set `AccountEnv:` on the existing `runservice.LaunchRequest{...}` literal.
+- acceptance: `mage testPkg ./internal/services/claude` and `mage testPkg ./internal/services/codex` pass. Tests with fake-store seeded `AccountEnvEntry`s:
+  - `TestRunPassesAccountEnvToSharedRunService` (new — not yet in tree, one per wrapper package): seed `fakeStore` with 2 entries (`FOO=bar`, `BAZ=qux`) for the resolved profile; assert the `runservice.LaunchRequest` reaching the executor has `AccountEnv == {"FOO":"bar","BAZ":"qux"}`.
+  - No-entries case: `fakeStore.ListAccountEnv` returns nil; assert `LaunchRequest.AccountEnv` is nil and launch succeeds.
+  - Store-error case: `fakeStore.ListAccountEnv` returns an error; assert `Service.Run` returns the wrapped error and does not call the executor.
+- measurement: distinct new/changed production symbols = 2 (`claude.Service.Run`, `codex.Service.Run` method edit clusters); production LOC ≈ 40 (~20 per wrapper for load + convert + field set + error wrap); production files = 2. Under budget.
+- commit subject (orchestrator): `feat(services): unit 14.4.d pass account env from claude+codex wrappers`.
+
+#### Unit 14.4.E — CLI `valv run` loads account env and passes it into LaunchRequest
+
+- state: todo
+- blocked_by: 14.4.A (domain helper), 14.4.B (LaunchRequest field). NOT blocked by 14.4.C: `cli/run.go` uses `*sqlite.Store` directly (run.go:123) + `manage.Service` (run.go:93-99); it does NOT use the narrow wrapper Store interfaces being widened in 14.4.C.
+- paths: `internal/cli/run.go`, `internal/cli/run_test.go`
+- packages: `./internal/cli`
+- change: Edit existing `runRunCommand` in `internal/cli/run.go`. After the profile resolution (run.go:99) and before the `runservice.LaunchRequest{...}` construction (run.go:202-210):
+  - call `entries, err := store.ListAccountEnv(cmd.Context(), profile.ID)` (the `store` ref from run.go:123 is `*sqlite.Store` which already implements `AccountEnvRepository`);
+  - wrap any error with `fmt.Errorf("run run command: load account env for profile %q: %w", profile.ID, err)`;
+  - convert via `domain.AccountEnvEntriesToMap(entries)` from 14.4.A;
+  - set `AccountEnv:` on the existing `launch := runservice.LaunchRequest{...}` literal (run.go:202).
+- acceptance: `mage testPkg ./internal/cli` passes. Add to `internal/cli/run_test.go`:
+  - `TestRunCommandPassesAccountEnvToLaunchRequest` (new — not yet in tree): with seeded `AccountEnvEntry`s for the resolved profile, assert the constructed `LaunchRequest.AccountEnv` matches; via the existing test stub `runRunFunc` injection seam (run.go:23-26) or by intercepting at the store level if a smaller seam exists.
+  - No-entries case: nil `AccountEnv` does not fail; launch proceeds.
+- measurement: distinct new/changed production symbols = 1 (`runRunCommand` method edit cluster); production LOC ≈ 15; production files = 1. Under budget.
+- commit subject (orchestrator): `feat(cli): unit 14.4.e pass account env from valv run`.
 
 #### Cross-drop note
 
-This two-droplet sequence is the cascade group that closes DROP_14. Drop-end gate (orchestrator's job): `mage test` + **`mage integration`** (required — env merge touches Docker-backed launch paths) + `git push` + `gh run watch --exit-status` + `mage build` + Hylla reingest from remote pinned to the final commit hash.
+This 5-droplet sequence is the cascade group that closes DROP_14. Drop-end gate (orchestrator's job): `mage test` + **`mage integration`** (required — env merge touches Docker-backed launch paths) + `git push` + `gh run watch --exit-status` + `mage build` + Hylla reingest from remote pinned to the final commit hash.
 
 ### Notes For Builder Agents
 
