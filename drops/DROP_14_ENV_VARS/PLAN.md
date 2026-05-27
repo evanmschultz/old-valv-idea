@@ -81,18 +81,42 @@ DROP_14 adds an account-scoped env map persisted in SQLite and injected into con
   - missing-account errors;
   - same env-key separation across two accounts.
 
-### Unit 14.4
+### Unit 14.4 (decomposed Round 2 — Round 1 was over-budget as a single droplet)
+
+DROP_13 closed with `internal/services/run` owning `ContainerRunRequest.Env` and a Store-FREE `Options{Executor,Image,User,TTY,Stdin,Logger,Notices,Now,Provider}`. **Design decision (resolved Round 2):** the provider wrappers (`internal/services/claude` + `internal/services/codex`) own Store; they load the account-env map via the 14.1 accessor (`manage.Service.ListAccountEnv` → ordered `[]domain.AccountEnvEntry`) and pass it to the run service through a new `LaunchRequest.AccountEnv map[string]string` field. The run service stays Store-free. Decomposed into 14.4.1 (shared-run field + merge) + 14.4.2 (wrapper load + pass) per the measured-atomic-sizing rule (committed `aa130dd`).
+
+Evidence (Hylla `@main` Round-2 planner pass): `run.LaunchRequest{ProjectRoot,WorkingDir,ProjectID,ProfileID,ProjectName,Prepared,Args,Command}` has no AccountEnv field today; `run.Options` has no Store; `manage.Service.ListAccountEnv` returns ordered slices; `manage.reservedAccountEnvKeys = {CODEX_HOME,CLAUDE_CONFIG_DIR,HOME,LOGNAME,TERM,USER}`; provider runtime owners at `adapters/providers/{claude,codex}/runtime.go` set those keys.
+
+#### Unit 14.4.1 — Shared run request accepts and merges account env
+
 - state: todo
-- blocked_by: 14.1, DROP_13
-- paths: `internal/services/run/service.go` (new after DROP_13, not yet in the current tree), `internal/services/run/service_test.go` (new after DROP_13, not yet in the current tree), optionally `internal/services/codex/service_test.go` and `internal/services/claude/service_test.go` if thin-wrapper assertions are needed after the re-home
-- packages: `internal/services/run`, optionally `internal/services/codex`, optionally `internal/services/claude`
-- change: Add account-env loading and merge at the shared launch owner that constructs `ContainerRunRequest.Env` after DROP_13 lands. The shared launch path must resolve the bound or override profile ID, load that account's env map from the new repository contract, clone the provider-prepared env map, merge account env without overriding the runtime-owned keys, and pass the merged result into `ContainerRunRequest.Env`. This is the acceptance gate that makes `valv run --account <name> ...`, `valv codex`, and `valv claude` behave identically once DROP_13's shared launch owner exists. If DROP_13 closes without `internal/services/run` owning `ContainerRunRequest.Env`, this unit must stop and hand control back for re-planning; provider-specific fallback edits are out of scope for DROP_14. Evidence: `drops/DROP_13_GENERIC_RUN/PLAN.md:36-37,72-82,113-143` makes `internal/services/run` the shared owner; current committed provider services still pass `prepared.Env` straight into `ContainerRunRequest.Env` at `internal/services/codex/service.go:302-332` and `internal/services/claude/service.go:298-329`; `internal/adapters/docker/types.go:43-60` defines the target `ContainerRunRequest.Env` field; `internal/adapters/providers/codex/runtime.go:117-132` and `internal/adapters/providers/claude/runtime.go:127-142` define the runtime-owned keys that must win on merge.
-- acceptance: `mage testPkg ./internal/services/run` passes after DROP_13 lands, and any thin wrapper packages touched by the re-home still pass their existing launch-package tests. Coverage must prove:
-  - the shared launch owner used by `valv run --account <name>` receives and forwards the account env map into `ContainerRunRequest.Env`;
-  - provider-owned runtime keys (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `HOME`, `LOGNAME`, `TERM`, `USER`) are preserved exactly as prepared by the runtime adapters;
-  - directly seeded reserved-key rows in storage do not override runtime-owned values even when CLI/service-layer validation is bypassed;
-  - the same merged path is exercised for both generic run and provider-wrapper launches once DROP_13's shared owner exists.
-  If build-time ownership differs from DROP_13's `internal/services/run`, the unit remains blocked and no provider-specific substitute implementation is accepted.
+- blocked_by: none (intra-14.4); cross-unit: 14.1 (done)
+- paths: `internal/services/run/service.go`
+- packages: `./internal/services/run`
+- change: Extend existing top-level `LaunchRequest` with field `AccountEnv map[string]string` (new — not yet in tree). In the existing run-request assembly edit cluster, merge `LaunchRequest.AccountEnv` into `ContainerRunRequest.Env` before/around prepared-runtime env assembly, with the six runtime-owned keys (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `HOME`, `LOGNAME`, `TERM`, `USER`) winning on collision. Do NOT add a Store dep to `run.Options`.
+- acceptance: `mage testPkg ./internal/services/run` passes. Table-driven tests in `internal/services/run/service_test.go` cover:
+  - `TestRunMergesAccountEnvIntoContainerEnv` (new — not yet in tree): an ordinary account env key reaches `ContainerRunRequest.Env`.
+  - `TestRunPreservesRuntimeOwnedEnvOnAccountEnvCollision` (new — not yet in tree): each of the six reserved keys is preserved when also present in `LaunchRequest.AccountEnv`.
+  - nil/empty `AccountEnv` does not fail launch and produces the prior Env exactly.
+- measurement (planner Round 2): distinct new/changed production symbols = 1 (`LaunchRequest`); production LOC ≈ 25; production files = 1. Under budget.
+- commit subject (orchestrator): `feat(run): unit 14.4 merge account env into launch`.
+
+#### Unit 14.4.2 — Provider wrappers load account env and pass it into LaunchRequest
+
+- state: todo
+- blocked_by: 14.4.1 (real dep — `LaunchRequest.AccountEnv` must exist); cross-unit: 14.1 (done)
+- paths: `internal/services/claude/service.go`, `internal/services/codex/service.go`
+- packages: `./internal/services/claude`, `./internal/services/codex`
+- change: Edit existing methods `claude.Service.Run` and `codex.Service.Run` only. After resolving the launch profile/account, call the account-env accessor available in Store scope, convert ordered `[]domain.AccountEnvEntry` to `map[string]string`, and set `runservice.LaunchRequest.AccountEnv`. Do NOT add a new top-level production helper symbol — keeping the conversion as an inline edit cluster in each wrapper preserves the 2-symbol budget. If the same conversion logic appears verbatim in both wrappers, the builder MAY introduce a test-only helper but NEVER a production helper in this droplet.
+- acceptance: `mage testPkg ./internal/services/claude` and `mage testPkg ./internal/services/codex` pass. Tests with fake-store seeded `AccountEnvEntry`s cover:
+  - `TestRunPassesAccountEnvToSharedRunService` (new — not yet in tree, one per wrapper): seeded entries reach `runservice.LaunchRequest.AccountEnv` in the expected map shape.
+  - no-entries case: nil/empty `AccountEnv` from Store does not fail launch.
+- measurement (planner Round 2): distinct new/changed production symbols = 2 (`claude.Service.Run`, `codex.Service.Run` methods, edit clusters); production LOC ≈ 50; production files = 2. Under budget.
+- commit subject (orchestrator): `feat(services): unit 14.4 pass account env from wrappers`.
+
+#### Cross-drop note
+
+This two-droplet sequence is the cascade group that closes DROP_14. Drop-end gate (orchestrator's job): `mage test` + **`mage integration`** (required — env merge touches Docker-backed launch paths) + `git push` + `gh run watch --exit-status` + `mage build` + Hylla reingest from remote pinned to the final commit hash.
 
 ### Notes For Builder Agents
 
