@@ -96,6 +96,22 @@ func (f fakeStore) ListBindings(context.Context) ([]domain.ProjectBinding, error
 	panic("unexpected call")
 }
 
+func (f fakeStore) ListAccountEnv(context.Context, string) ([]domain.AccountEnvEntry, error) {
+	return nil, nil
+}
+
+func (f fakeStore) SetAccountEnv(context.Context, string, string, string) (domain.AccountEnvEntry, error) {
+	return domain.AccountEnvEntry{}, nil
+}
+
+func (f fakeStore) GetAccountEnv(context.Context, string, string) (domain.AccountEnvEntry, error) {
+	return domain.AccountEnvEntry{}, nil
+}
+
+func (f fakeStore) UnsetAccountEnv(context.Context, string, string) error {
+	return nil
+}
+
 type fakeExecutor struct {
 	got       docker.ContainerRunRequest
 	createID  string

@@ -20,9 +20,10 @@ import (
 )
 
 type Store interface {
-	domain.ProjectRepository
+	domain.AccountEnvRepository
 	domain.BindingRepository
 	domain.ProfileRepository
+	domain.ProjectRepository
 }
 
 type Executor interface {

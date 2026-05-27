@@ -21,9 +21,10 @@ import (
 
 // Store aggregates the repository interfaces required by the Claude launch service.
 type Store interface {
-	domain.ProjectRepository
+	domain.AccountEnvRepository
 	domain.BindingRepository
 	domain.ProfileRepository
+	domain.ProjectRepository
 }
 
 // Executor runs and manages Docker containers for the Claude launch service.
