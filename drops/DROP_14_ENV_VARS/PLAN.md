@@ -1,13 +1,13 @@
 # DROP_14 — ENV_VARS
 
-**State:** building
-**Blocked by:** DROP_13 (building)
+**State:** done
+**Blocked by:** DROP_13 (done)
 **Paths (expected):** `internal/domain/` (env-var domain type), `internal/adapters/sqlite/` (env-var schema migration + DSN busy policy), `internal/services/manage/` (account-scoped CRUD), `internal/cli/` (new `valv account env` subcommand tree), `internal/services/run/` (shared launch owner after DROP_13)
 **Packages (expected):** `internal/domain/`, `internal/adapters/sqlite/`, `internal/services/manage/`, `internal/cli/`, `internal/services/run/`
 **PLAN.md ref:** main/PLAN.md → DROP_14_ENV_VARS row
 **Workflow:** main/drops/WORKFLOW.md
 **Started:** 2026-05-22
-**Closed:** —
+**Closed:** 2026-05-26
 
 ## Scope
 
