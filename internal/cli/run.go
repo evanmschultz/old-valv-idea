@@ -199,6 +199,13 @@ func runRunCommand(cmd *cobra.Command, paths config.Paths, args []string) error 
 		return fmt.Errorf("run run command: initialize launcher: %w", err)
 	}
 
+	// Fetch account env entries and convert to map for LaunchRequest.
+	envEntries, err := store.ListAccountEnv(cmd.Context(), profile.ID)
+	if err != nil {
+		return fmt.Errorf("run run command: load account env for profile %q: %w", profile.ID, err)
+	}
+	accountEnv := domain.AccountEnvEntriesToMap(envEntries)
+
 	launch := runservice.LaunchRequest{
 		ProjectRoot: projectRecord.Root,
 		WorkingDir:  workingDir,
@@ -207,6 +214,7 @@ func runRunCommand(cmd *cobra.Command, paths config.Paths, args []string) error 
 		ProjectName: projectRecord.Name,
 		Prepared:    prepared,
 		Command:     append([]string(nil), remaining...),
+		AccountEnv:  accountEnv,
 	}
 
 	if err := service.Run(cmd.Context(), launch); err != nil {
