@@ -1,192 +1,77 @@
-# DROP_15 Plan-QA — FALSIFICATION pass
+# DROP_15 Round-1 Plan-QA Falsification — 15.2.5 + 15.3 + 15.4
 
-**Verdict: pass-with-findings** (no unmitigated FAIL-trigger counterexample; several
-under-specifications routed as accepted-risk + recommendations for the builder/dev.)
+Round 1 falsification verdicts on the R1 sub-decompositions (committed at `9d22c25`). Orch transcribed (QA personas are READ-ONLY). Replaces the prior sidecar-re-plan artifact at this path. Codex falsifications skipped per documented 10-min SIGTERM failure mode at scale; all 3 ran via Agent-tool sonnet fallback (the established `CODEX_EXHAUSTED` substitute).
 
-Sidecar-proxy redesign attacked along the 7 named vectors plus added vectors. Each is
-mitigated / accepted-risk / FAILURE.
+## §15.2.5 — PASS-WITH-FINDINGS
 
-## Named attack vectors
+Agent: `ta-go-plan-qa-falsification` (Agent tool, model=sonnet). Tool-call audit ✓ (11 tool uses, Read × 7 + Bash ls, no Edit/Write/git-mutate/mage).
 
-### V1 — buildx build-RUN reachability to sidecar on `--internal` — ACCEPTED-RISK (mitigated by hedge)
-- Counterexample attempt: buildx ephemeral build containers attach via
-  `--network=<name>` differently than `docker run`; on Docker Desktop macOS the
-  build container's bridge-vs-internal routing may not see the sidecar alias.
-- Context7 `/docker/docs` confirms buildx `--network=<named>` IS a supported mode
-  (named network for RUN steps) — so the path is real, not invented. But it does NOT
-  prove a sidecar alias on an `--internal` net is DNS-resolvable from the
-  buildkit build container on Docker Desktop macOS specifically.
-- Mitigation: Decision 6 + AC6 + Unit 15.2.5 flag this as "empirical-validation
-  required" with a concrete integration test (`NoCache=true`, one allowlisted path
-  succeeds + one blocked fails, MUST use shipped sidecar topology). Fallback
-  ("build-specific equivalent that still routes through the sidecar filter") is
-  NOT fully concrete — it names a constraint (no workload/build bridge attach) but
-  not a mechanism. This is acceptable for a plan (the empirical result determines the
-  mechanism) but the builder should be told the fallback is undefined until the
-  empirical result lands. NOT a FAIL: the plan correctly refuses to commit to an
-  unvalidated mechanism. RECOMMENDATION: if the empirical test fails, that becomes a
-  blocking re-plan, not a builder-discretion patch.
+### CF-1 — 15.2.5.F production scope already committed
 
-### V2 — sidecar startup ordering / bridge-connect race — FINDING (under-specified) — accepted-risk
-- Counterexample: workload (or build) starts before the sidecar's `docker network
-  connect bridge` completes → first egress attempts fail or hang.
-- Plan says (Decision 6, 15.2.5 step 3) "The sidecar MUST be running before the build
-  starts" but specifies NO readiness check — only ordering of calls. `docker run -d`
-  returning a container ID does NOT mean the in-container proxy process is listening,
-  nor that the bridge interface has an IP.
-- Mitigation present? Partial: Provision is synchronous and ordered (create net →
-  launch sidecar → connect bridge → return material), so the call sequence is correct.
-  But "running" != "ready to proxy". RECOMMENDATION: 15.2.5 acceptance should add a
-  proxy readiness probe (e.g. poll the proxy port from the host bridge side, or a
-  short retry loop) before returning PolicyMaterial. Routed as a dev/builder decision.
-  accepted-risk for plan approval; flag for the builder.
+`internal/services/images/service.go:850-908` (committed at HEAD `6ddf5d7`, verified by orch direct Read) contains the complete proxy build-args + Network-field injection F claims to add as new work:
+- :861-866 — `tools.EffectiveAllowlist` + `s.networkPolicy.Provision` call
+- :881-892 — `buildArgs["HTTP_PROXY"]/["HTTPS_PROXY"]/["NO_PROXY"]` set from `policyMaterial` + `buildNetwork = policyMaterial.NetworkName`
+- :894-908 — `docker.ImageBuildRequest{BuildArgs, Network, ...}`
 
-### V3 — sidecar alias DNS resolution timing — accepted-risk (subsumed by V2)
-- Docker embedded DNS registers the alias at `network connect` time; there can be a
-  brief window before the alias resolves on the internal net. Same class as V2 —
-  covered by the same readiness-probe recommendation. No separate FAIL.
+**Orch ruling (2026-05-26 dev call): DELETE 15.2.5.F entirely.** The future "swap external `proxyEndpoint` for sidecar-supplied endpoint" work absorbs into 15.2.5.D.1's `Service.Provision` rewrite (which now sets `PolicyMaterial.HTTPProxyURL` from the sidecar alias, not from `request.ProxyEndpoint`). Any test-coverage gap for the new PolicyMaterial shape lives in D.1's existing test scope.
 
-### V4 — proxy filter implementation gap (image/binary unspecified; HTTPS CONNECT SNI-only) — FINDING — accepted-risk
-- The plan says "HTTP/HTTPS allowlist filter" and "running an HTTP/HTTPS allowlist
-  filter configured from the effective allowlist" but does NOT name the proxy
-  image/binary. Two real consequences:
-  1. Builder-decision vs plan-named: the plan leaves the proxy implementation to the
-     15.2.5 builder. Given Valv is Go + "smallest concrete design", a minimal Go
-     CONNECT proxy in a slim image is the natural choice, but the plan does not say
-     so. RECOMMENDATION: name it (Go-based filtering CONNECT proxy in a minimal
-     image) so the builder does not pull a third-party proxy image (tinyproxy/squid)
-     that adds a non-Go dependency surface inconsistent with CLAUDE.md "no Go Docker
-     SDK / pure-Go" ethos. Routed as dev decision.
-  2. HTTPS CONNECT can only filter by SNI/host, NOT full URL/path — exactly what the
-     allowlist needs (exact-host). The plan's Decision 1 allowlist semantics are
-     EXACT-HOST (no path/scheme/port), which ALIGNS with CONNECT/SNI host-only
-     filtering — so this is actually consistent. But the plan never explicitly states
-     "HTTPS is filtered by CONNECT host / SNI, not URL". A builder could wrongly try
-     MITM/URL inspection. RECOMMENDATION: state the host-only HTTPS filtering
-     mechanism explicitly. NOT a FAIL (semantics happen to align) but a real
-     clarity gap. accepted-risk.
+### CF-2 — `ConnectNetwork` interface extension orphaned
 
-### V5 — orphan cleanup race under concurrent `valv run` — FINDING — accepted-risk
-- Counterexample: two concurrent `valv run` both call Provision; both `ListNetworks`
-  the managed label, both see the same desiredName, one creates it, the other's
-  `CreateNetwork` fails on name collision (or both try to remove the other's
-  "stale" proxy container). The committed `Provision` (service.go:169-222) is NOT
-  concurrency-safe: the list→reconcile→create sequence has a TOCTOU window. The
-  redesign ADDS a proxy container to that same unsynchronized sequence, widening it.
-- Plan coverage: 15.2.5 orphan-cleanup acceptance covers SEQUENTIAL stale reclaim
-  (prior killed process) but says nothing about CONCURRENT provision. The deterministic
-  network name is per-allowlist (sha256), so two runs with the same allowlist target
-  the same network/sidecar — reuse is intended, but the reclaim-or-remove branch could
-  race (run A removes a "stale" container that run B just launched).
-- Mitigation: none in plan. RECOMMENDATION: 15.2.5 should either (a) make reclaim
-  idempotent-on-collision (treat "already exists" create errors as reuse) or (b)
-  document per-invocation isolation removes the shared-name race (see V7). accepted-risk
-  for plan approval; this is a real concurrency gap to route to the builder/dev. Does
-  not block because DROP_15 ships `valv run` single-invocation; concurrent runs are an
-  edge the dev can accept as out-of-scope for the drop.
+`networkpolicy.NetworkExecutor` (`networkpolicy/service.go:58-65`) lists only `CreateNetwork`/`RemoveNetwork`/`ListNetworks`. 15.2.5.A spec adds `RunContainerDetached` to this interface, but 15.2.5.D.1's `Provision` rewrite ALSO calls `ConnectNetwork` (which exists on `docker.Executor` at executor.go:72 but is NOT in the consumer-side `NetworkExecutor` interface). No droplet explicitly owns adding `ConnectNetwork` to `NetworkExecutor`.
 
-### V6 — cleanup completeness (SIGKILL after sidecar, before workload) + network-rm blocked by live proxy — FINDING — mitigated-partially
-- Counterexample: process SIGKILLed after sidecar launch but before workload start →
-  next run must remove BOTH the proxy container AND the network; a live proxy holding
-  the network blocks `docker network rm`.
-- Plan coverage: 15.2.5 orphan-cleanup acceptance explicitly extends cleanup to "stop+rm
-  the proxy container, rm the network" and requires a test that a stale labeled network
-  AND stale labeled proxy container are both reclaimed/cleaned. Ordering (stop+rm
-  container THEN rm network) is correctly implied by the listed sequence — addresses the
-  "live proxy blocks network rm" footgun. GOOD. Residual: the plan should make the
-  container-before-network teardown ORDER explicit in acceptance (currently order is
-  inferable but not asserted). Minor. Largely mitigated.
+**Orch fix:** expand 15.2.5.A's scope to add BOTH `RunContainerDetached` AND `ConnectNetwork` to the `NetworkExecutor` interface.
 
-### V7 — per-invocation vs shared sidecar+network — FINDING (UNDER-SPECIFIED) — accepted-risk, recommend resolve before build
-- The plan is INTERNALLY AMBIGUOUS here:
-  - Decision 6 + 15.2.5: "the networkpolicy service provisions it ONCE and both runtime
-    and build callers REUSE the same sidecar + network" → implies SHARED.
-  - networkName is sha256(allowlist) → same allowlist = same network = shared across
-    invocations/projects with identical allowlists; DIFFERENT allowlists = different
-    networks. So isolation is per-allowlist, NOT per-project and NOT per-invocation.
-- Consequence: two different projects with identical allowlists share one sidecar+network.
-  That is fine for egress filtering (same policy) but means cross-project workloads share
-  an internal L2 segment — a workload could reach a sibling project's workload on the same
-  internal net by IP. For a closed-network SECURITY feature this is a real isolation
-  question. Conversely per-invocation would multiply teardown cost.
-- Plan coverage: the plan picks SHARED-by-allowlist implicitly via the deterministic name
-  but never discusses the cross-project same-net exposure. RECOMMENDATION (route to dev):
-  decide explicitly — (a) accept shared-by-allowlist (document the same-policy-same-net
-  exposure as acceptable since policy is identical), or (b) make the network name
-  per-project (incorporate project root into the hash) to isolate L2 even under identical
-  allowlists. This is the single most load-bearing unrouted decision. accepted-risk for
-  plan structure (no acyclic/atomicity violation) but SHOULD be resolved before 15.2.5
-  build. Closest thing to a smart-default footgun in this re-plan.
+### NITs
+- N1 — 15.2.5.E scope overlaps committed code (network labels already exist via `Provision` at :197-203). E's NEW scope is sidecar-container labels + stop/remove ordering + container-scoped sweep. Tighten E's spec.
+- N2 — Proxy port coordination between B and D.1 unresolved (B defines port; D.1 builds proxy URL). Route as open question for B's sub-planner.
+- N3 — 15.2.5.G as sub-planner is arguably over-decomposed (0 prod symbols — test-only). Kept as sub-planner pending its own decomposition pass.
+- N4 — `fakeNetworkExecutor` test-side updates are implicit in A's scope — test-side so excluded from prod budget.
 
-## Added vectors
+## §15.3 — **FAIL**
 
-### V8 — shipped-but-not-wired — MITIGATED
-- 15.2 ConnectNetwork has a concrete consumer (15.2.5 sidecar dual-attach) — not built
-  in isolation. 15.2.5 sidecar is consumed by 15.3 (runtime proxy env) and images
-  service (build egress). 15.3 is the `valv run` ship gate. 15.4 wires CLI + `--network
-  open`. Every built thing has an end-to-end consumer + integration test. No orphan.
+Agent: `ta-go-plan-qa-falsification` (Agent tool, model=sonnet). Tool-call audit ✓ (10 tool uses, Read × 3 + Bash ls/rg × 7).
 
-### V9 — hallucinated symbols — MITIGATED
-- All cited committed symbols verified to exist (PROOF P3). All new symbols
-  (`NetworkConnectRequest`, `BuildNetworkConnectArgs`, `ConnectNetwork`,
-  `RunContainerDetached`, `WriteAllowlistSection`, `AllowlistConfig`,
-  `internal/services/run`, `internal/cli/run.go`, `internal/cli/network.go`) are marked
-  "new, not yet in tree". `RemoveContainer` already exists (executor.go:25) — the plan's
-  "container-remove path (new)" phrasing slightly overclaims; see PROOF NIT-1. No
-  hallucination.
+### CF-1 — 15.3.B claims 2 production symbols but touches 4-5
 
-### V10 — methodology drift (CLAUDE.md hard rules) — MITIGATED
-- No Go Docker SDK introduced (shell-out preserved). No CGO. macOS-only (Docker Desktop
-  macOS is the validation target). Consumer-side interface (`NetworkExecutor`) for test
-  injection matches "interfaces near the consumer". `testcontainers-go` integration tests
-  required. Real-Docker-over-mocks honored. No drift. NOTE: proxy-image choice (V4) must
-  not smuggle in a non-Go/3rd-party dependency without a CLAUDE.md rule — flag for builder.
+Concrete symbol re-count for B's spec:
+1. `Options` — add `Policy` field to existing struct
+2. `Service` — add unexported mirror field
+3. `New` — add validation + assignment in constructor (`service.go:145-175`)
+4. `Service.Run` — add closed-mode branch + defer cleanup (`service.go:181-219`)
+5. New consumer-side `Policy` interface type in `services/run` (not yet in tree; `networkpolicy` exports `Service` as concrete value, not `Provisioner`)
 
-### V11 — under-decomposition: 15.2.5 over the 2-block atomic budget — FINDING — accepted-risk
-- 15.2.5 spans TWO packages (`networkpolicy` + `images`) and does ~6 distinct things:
-  redesign Provision to launch+dual-attach+teardown a sidecar; invert NO_PROXY; add a
-  detached-run seam to the docker Executor + interface; reuse for image builds; orphan
-  cleanup of containers; integration test. By the strict cascade "1-2 small blocks ≤80
-  LOC" droplet budget this is OVERSIZE and would normally trigger a "convert to
-  sub-planner" directive.
-- WHY NOT A FAIL HERE: Valv's CLAUDE.md/WORKFLOW.md define "atomic" as "one builder can
-  finish a single unit cleanly, acceptance is yes/no-verifiable, paths/packages clear" —
-  a looser per-project budget than the generic cascade 2-block rule, and explicitly says
-  "add more units inside PLAN.md rather than stretching one unit". 15.2.5 IS stretched.
-  RECOMMENDATION: split 15.2.5 into 15.2.5a (docker Executor detached-run seam +
-  ConnectNetwork wiring — pure adapter) and 15.2.5b (networkpolicy sidecar lifecycle +
-  NO_PROXY inversion + images reuse + integration). The detached-run seam is an adapter
-  concern cleanly separable from the service redesign, and the split would let the
-  adapter unit land + be QA'd before the heavier service rework. accepted-risk: the plan
-  is shippable as-is but decomposition discipline favors the split. Route to dev.
+That's 4-5 changed/new top-level production symbols, exceeding the ≥3-symbol FAIL threshold per `aa130dd`. The "Service/Options deps cluster" labeling is the documented "one coherent concern" rationalization the rule prohibits.
 
-### V12 — `ProvisionRequest.ProxyEndpoint` / `Valid()` redesign coherence — MITIGATED
-- Current `ProvisionRequest` requires a `ProxyEndpoint` (host-local-proxy design) and
-  `Valid()` rejects empty allowlist with "use open mode". Under the sidecar redesign the
-  ENDPOINT is no longer caller-supplied (the sidecar alias is service-internal). The plan's
-  15.2.5 "Return policy material: the sidecar internal-network alias + port..." implies
-  ProxyEndpoint becomes service-derived, but the plan does NOT explicitly say to remove/
-  repurpose the `ProxyEndpoint` input field. Minor: the redesign acceptance is broad
-  enough to cover it ("Revise Provision/PolicyMaterial/buildNoProxy accordingly"), but the
-  ProvisionRequest input contract change is left implicit. RECOMMENDATION: state that
-  `ProvisionRequest.ProxyEndpoint` is removed/replaced by a service-chosen sidecar port.
-  accepted-risk.
+**Orch fix:** split B into:
+- **15.3.B.1** (DI wiring): `Options` field add + `Service` mirror + `New` validation + the new consumer-side `Policy` interface type. 2-3 symbols, ~30 prod LOC, 1 prod file. Under budget.
+- **15.3.B.2** (Run flow): `Service.Run` closed-mode branch + defer cleanup. 1 symbol, ~30 prod LOC, 1 prod file. blocked_by B.1.
 
-## Convergence
-- (a) No unmitigated counterexample produces a hard FAIL: safety invariant holds
-  structurally (single Network field), NO_PROXY inversion is flagged, cites resolve,
-  chain acyclic.
-- (b) Proof confirmed evidence completeness for the 6 proof properties.
-- (c) Routed Unknowns: V1 fallback undefined-until-empirical; V2/V3 sidecar readiness
-  probe; V4 proxy image + HTTPS-host-only filtering statement; V5 concurrent-provision
-  TOCTOU; V7 shared-by-allowlist L2 exposure (load-bearing dev decision); V11 split
-  15.2.5; V12 ProvisionRequest field cleanup. None block plan approval; all are
-  builder/dev directives for the build phase.
+### CF-2 — 15.3.A over-serialized
 
-## Tools Used
-- Read: WORKFLOW.md; DROP_15/13/14 PLAN.md; network.go; networkpolicy/service.go;
-  executor.go; types.go; ops.go; overlay.go.
-- LSP documentSymbol: executor.go (no run/connect method present).
-- mcp__hylla__hylla_search_keyword: run/network/proxy symbol grounding (snapshot 8).
-- mcp__plugin_context7_context7__query-docs `/docker/docs`: internal-network isolation,
-  multi-network connect + --alias, buildx --network named-network RUN, gw-priority.
+A's `blocked_by: ALL 15.2.5.* closed` is wrong. A adds only `NetworkPolicyMode` type + 2 constants + a selector field on `LaunchRequest`. A has ZERO import dependency on `internal/services/networkpolicy`.
+
+**Orch fix:** drop A's `blocked_by` to `15.2.5 plan accepted` (per Rule 4 — blocked_by gates BUILDS on real dependencies; A has none).
+
+### NITs
+- N1 — LOC ambiguity on C ("~50 prod LOC" — net-added vs total `buildRequest` body). Clarify as net-added.
+- N2 — `mage integration` target does NOT cover `./internal/services/run`. D's acceptance must either add it to the magefile integration target OR specify `mage testPkg ./internal/services/run` with integration build tag.
+
+## §15.4 — PASS-WITH-FINDINGS
+
+Agent: `ta-go-plan-qa-falsification` (Agent tool, model=sonnet). Tool-call audit ✓ (8 tool uses).
+
+### Finding — 15.4.A acceptance gap on root-cmd registration
+
+A's spec mentions "root-command registration touch included as cohesive cluster" but A's acceptance criteria test `runNetworkList` handler logic ONLY — not the cobra tree wiring. Builder could create `newNetworkCommand` and forget to add it to `root.go:141`'s `AddCommand` list; all 3 acceptance bullets still pass.
+
+**Orch fix:** tighten A's acceptance to require one cobra-tree-execute test: `cmd.SetArgs([]string{"network", "list"}); cmd.Execute()` succeeds and stdout contains expected built-in hosts.
+
+### NITs
+- N1 — A's "2 prod files" is wrong (actual: 3 — `network.go` new, `network_test.go` new, `root.go` edit). Fix to "3 prod files". Under `>3` threshold so not a budget fail.
+- N2 — `networkCmd` `GroupID` unspecified. Explicitly state `networkCmd.GroupID = "runtime"` per `root.go:131` pattern.
+- N3 — 15.4.D sub-planner rationale mixes "API not verified yet" (weak per Rule 4) with "≥3 prod symbols" (correct trigger). Clarify trigger is budget.
+- N4 — B's "preserve `[tools]` + `[env]` block bytes" acceptance bullet is redundant (15.1's `WriteAllowlistSection` proves it).
+
+## Cross-cutting: G's sub-planner status
+
+`15.2.5.G` kept as sub-planner pending its own decomposition pass; the sub-planner itself may legitimately return "1 droplet sufficient".
