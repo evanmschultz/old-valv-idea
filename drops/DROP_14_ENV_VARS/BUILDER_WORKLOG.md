@@ -128,3 +128,97 @@ No Hylla miss this round — Context7's `/modernc-org/sqlite` entry covered DSN 
 - **Control-character + newline cases.** The invalid-keys table includes `FOO\x00BAR` (NUL byte) and `FOO\nBAR` (newline). The regex character class `[A-Za-z0-9_]` already excludes both, so these cases prove the regex is applied character-by-character rather than as a multi-line or DOTALL pattern. Go's `regexp` is RE2 and `^`/`$` anchor to the start/end of the string by default (not line), which makes the newline case meaningfully different from the other invalid cases — without `(?m)` mode, an embedded `\n` is not a line boundary and the whole string must match the pattern.
 - **Same-key-across-accounts proof.** Test `TestSetAccountEnvSeparatesValuesAcrossAccounts` asserts both that the values are independent AND that the two persisted rows have distinct `ProfileID` values. Without the `ProfileID` distinctness check, a buggy implementation that always wrote to the first-resolved account would still produce two list calls with one value each (if the test happened to read each account's list before the next set). Asserting `ProfileID` distinctness is the direct proof that the two rows actually live under different account IDs.
 - **Rename-stability proof.** Test `TestAccountEnvSurvivesAccountRename` is the load-bearing test for the "ownership keyed by Profile.ID" invariant Unit 14.1 established. It (a) asserts `renamed.ID == created.ID` (rename does NOT change the ID — Unit 14.1's invariant), (b) asserts the old account name now returns `ErrNotFound`, (c) asserts the new name returns the original entry's `ProfileID` unchanged. If a future refactor accidentally keyed env rows by name instead of ID, (c) would fail.
+
+## Unit 14.4.A — Round 1
+
+### Files Touched
+
+- `internal/domain/account_env.go` — new file. Added `AccountEnvEntriesToMap(entries []AccountEnvEntry) map[string]string` function with Go-doc comment. Nil-safe: nil or empty slice returns nil. Non-empty slice returns a freshly allocated map with each `entry.EnvKey` → `entry.EnvValue`. Last-wins semantics on duplicate keys (documented behavior; entries pre-deduped by SQLite UNIQUE constraint).
+- `internal/domain/account_env_test.go` — new file. Added `TestAccountEnvEntriesToMap(t *testing.T)` table-driven test with 5 cases: nil slice → nil map, empty slice → nil map, single entry → single-key map, two entries → two-key map, duplicate keys → last-wins (second entry with same EnvKey overrides first).
+
+### Mage Targets Run
+
+- `mage testPkg ./internal/domain` — 32 tests passed (was 26 in prior units; +5 from TestAccountEnvEntriesToMap); coverage 86.7%; race detector clean.
+
+### Design Notes
+
+- **Nil-safe without allocating empty map.** The function checks `len(entries) == 0` first. Only non-empty slices allocate; nil and empty both return nil per the acceptance spec. This avoids the caller disambiguation cost of "was the map empty or was the account missing env?".
+- **Capacity-pre-allocated map.** `make(map[string]string, len(entries))` reserves capacity for all entries upfront. Zero-allocation path for nil/empty (returns nil). Single allocation for any non-empty list.
+- **Last-wins on duplicates.** The implementation uses a naive for loop that overwrites on duplicate key. The test includes a duplicate-keys case (two entries with the same `EnvKey` but different `EnvValue`s) to verify the last write wins. In practice SQLite's UNIQUE constraint prevents duplicates, but the function does not assume that and does not panic on dups — it just silently overwrites, which is safe and matches the acceptance spec's documented behavior.
+
+### Hylla Feedback
+
+None — Hylla MCP unavailable in this session. Used `Read` to examine `internal/domain/types.go` and `repository.go` for the `AccountEnvEntry` type definition and `AccountEnvRepository` interface. No external library semantics needed.
+
+## Unit 14.4.B — Round 1
+
+### Files Touched
+
+- `internal/services/run/service.go` — added `AccountEnv map[string]string` field to `LaunchRequest` struct (between `Prepared` and `Args`) with Go doc comment explaining the merge semantics and collision behavior. Modified `buildRequest` to merge `launch.AccountEnv` with `launch.Prepared.Env` using a three-statement pattern: create merged map, loop account env first (lower priority), loop prepared env second (overwrites on collision). Assigned merged map to `ContainerRunRequest.Env`.
+- `internal/services/run/service_test.go` — added three table-driven test functions appended at file end: `TestRunMergesAccountEnvIntoContainerEnv` verifies ordinary keys from `AccountEnv` appear in container request; `TestRunPreservesRuntimeOwnedEnvOnAccountEnvCollision` table-driven over all 6 runtime keys (CODEX_HOME, CLAUDE_CONFIG_DIR, HOME, LOGNAME, TERM, USER), asserts `Prepared.Env` wins on collision; `TestRunHandlesNilAccountEnv` verifies nil `AccountEnv` results in container env exactly matching `Prepared.Env`.
+
+### Mage Targets Run
+
+- `mage testPkg ./internal/services/run` — 72 tests passed (was 69 in prior state; +3 new tests); coverage 86.9% (was 86.5%); race detector clean.
+
+### Design Notes
+
+- **One cohesive cluster.** The two edits (field addition + merge logic in buildRequest) form a single same-purpose cluster: add the ability to receive account env from callers and thread it into the container. Per PLAN.md Unit 14.4.B, this counts as 1 production symbol.
+- **Account env first, prepared overrides.** The merge explicitly favors `Prepared.Env` on collision because the provider runtime adapters set 6 non-negotiable keys (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `HOME`, `LOGNAME`, `TERM`, `USER`) into `Prepared.Env` that must not be overridden by user-supplied account env. The loop order (account first, then prepared) naturally implements this priority.
+- **Nil-safe merge.** The implementation handles nil `AccountEnv` without special-case checks. `for range nil` is a no-op in Go; `make(map[string]string, 0)` allocates an empty map. The result is correct for all combinations: nil/nil, nil/empty, nil/populated, etc. Test `TestRunHandlesNilAccountEnv` explicitly verifies nil behavior matches existing (no accounting for the field).
+- **Capacity pre-allocation.** The merged map reserves capacity for both map sizes upfront using `len(launch.AccountEnv)+len(launch.Prepared.Env)`. This is both safe (Go allows capacity >= count) and efficient (single allocation even in the collision case).
+
+### Hylla Feedback
+
+None — Hylla MCP unavailable in this session. Used `Read` to examine existing service.go structure, LaunchRequest struct shape, buildRequest function, and existing test patterns (newServiceForTest, fakeExecutor, newPreparedFixture). All evidence local to Valv repo.
+
+### Tools Used
+
+- `Read` — examined service.go (lines 116–137, 229–283) and service_test.go (full file) to understand LaunchRequest struct, buildRequest function, existing test patterns, and the fakeExecutor / newServiceForTest / newPreparedFixture fixtures.
+- `Edit` — added AccountEnv field to LaunchRequest struct; rewrote buildRequest env assembly to merge account env + prepared env with prepared winning on collision; appended three table-driven test functions to service_test.go.
+- `Bash` / `mage testPkg` — ran `mage testPkg ./internal/services/run` twice (after Edit 1, after Edit 3) and `mage test` once at end to verify all 931 tests pass across 23 packages, 86.9% coverage on run service, no race detector issues.
+
+### Atomicity Confirmation
+
+Distinct new/changed production symbols: 1 (cohesive same-purpose cluster: LaunchRequest.AccountEnv field + buildRequest merge logic).
+Production LOC: ≈25 (1 field line + 2-line comment + variable + 2 for loops + blank line + 1 line change from Prepared.Env to merged).
+Production files: 1 (internal/services/run/service.go).
+**Under measured budget per aa130dd: ≤3 symbols, ≤80 LOC, ≤3 files. PASS.**
+
+## Unit 14.4.C — Round 1
+
+### Files Touched
+
+- `internal/services/claude/service.go` — widened `claude.Store` interface (lines 23–27) to embed `domain.AccountEnvRepository` in addition to `domain.ProjectRepository`, `domain.BindingRepository`, and `domain.ProfileRepository`. Alphabetical order applied per interface convention: `AccountEnvRepository` first, then `BindingRepository`, then `ProfileRepository`, then `ProjectRepository`.
+- `internal/services/codex/service.go` — widened `codex.Store` interface (lines 22–26) identically to `claude.Store`.
+- `internal/services/claude/service_test.go` — extended `fakeStore` with four stub methods: `ListAccountEnv(context.Context, string) ([]domain.AccountEnvEntry, error)` → nil, nil; `SetAccountEnv(context.Context, string, string, string) (domain.AccountEnvEntry, error)` → empty entry, nil; `GetAccountEnv(context.Context, string, string) (domain.AccountEnvEntry, error)` → empty entry, nil; `UnsetAccountEnv(context.Context, string, string) error` → nil. All stubs use no-op default behavior. Existing tests remain GREEN (21 tests pass; no behavioral change).
+- `internal/services/codex/service_test.go` — extended `fakeStore` with identical four stub methods. Existing tests remain GREEN (15 tests pass; no behavioral change).
+
+### Mage Targets Run
+
+- `mage testPkg ./internal/services/claude` — 21 tests passed; coverage 82.6%; race detector clean; SUCCESS.
+- `mage testPkg ./internal/services/codex` — 15 tests passed; coverage 73.7%; race detector clean; SUCCESS.
+
+### Design Notes
+
+- **Interface widening (no behavior change).** The interface embeds require no implementation change in the existing `claude.Service` and `codex.Service` — they already delegate all repository calls to the injected `Store` interface, and widening the interface does NOT require changes to the delegation paths. Existing callers of `Service.Run` see no signature change. The interface widen is purely about exposing additional repository methods that will be called by 14.4.D (the provider-wrapper callers that load account env).
+- **Alphabetical embed order.** New `AccountEnvRepository` is sorted first alphabetically among the five embeds. This matches Go conventions for long interface groups (sort by name for readability, not by logical grouping).
+- **Test-side stubs match existing fakeStore pattern.** Both `fakeStore` implementations use simple field-less methods that return typed zero values by default. No panic, no panic("unexpected call"). This pattern is consistent with the rest of the fake interface implementations in each test file. Stubs are not counted toward production-symbol budget per `aa130dd`.
+- **No new tests in this droplet.** Interface changes have no behavior to exercise; behavior tests land in 14.4.D when the wrappers actually call `ListAccountEnv(...)`.
+
+### Atomicity Confirmation
+
+- Distinct new/changed production symbols: 2 (claude.Store interface widening + codex.Store interface widening; both one-line embed additions).
+- Production LOC: ~2 (one added embed line per interface).
+- Production files: 2 (claude/service.go + codex/service.go).
+- **Measurement: Under measured budget per aa130dd (≤3 symbols, ≤80 LOC, ≤3 files). PASS.**
+
+### Hylla Feedback
+
+None — Hylla MCP unavailable. Used `Read` to examine `internal/domain/repository.go:43-56` for exact `AccountEnvRepository` method signatures and to read both service.go interface definitions and both service_test.go fakeStore implementations to confirm existing embed style and method-stub pattern. All evidence from local file reads.
+
+### Tools Used
+
+- `Read` — `internal/domain/repository.go` (lines 43–56), `internal/services/claude/service.go` (lines 20–27), `internal/services/codex/service.go` (lines 19–26), both service_test.go files (full read to find fakeStore definition and existing method pattern).
+- `Edit` — four edits: widen claude.Store interface, widen codex.Store interface, add four stub methods to claude fakeStore, add four stub methods to codex fakeStore.
+- `Bash` / `mage testPkg` — ran `mage testPkg ./internal/services/claude` and `mage testPkg ./internal/services/codex` to verify both packages remain GREEN with no test regressions and coverage ≥70%.

@@ -98,7 +98,7 @@ Round 3 splits into **5 atomic droplets** with a small domain helper (NIT-3 fold
 
 #### Unit 14.4.A — Domain helper `AccountEnvEntriesToMap`
 
-- state: todo
+- state: done
 - blocked_by: none
 - paths: `internal/domain/account_env.go` (new — not yet in tree)
 - packages: `./internal/domain`
@@ -110,7 +110,7 @@ Round 3 splits into **5 atomic droplets** with a small domain helper (NIT-3 fold
 
 #### Unit 14.4.B — Run service `LaunchRequest.AccountEnv` field + buildRequest merge
 
-- state: todo
+- state: done
 - blocked_by: none
 - paths: `internal/services/run/service.go`, `internal/services/run/service_test.go`
 - packages: `./internal/services/run`
@@ -127,7 +127,7 @@ Round 3 splits into **5 atomic droplets** with a small domain helper (NIT-3 fold
 
 #### Unit 14.4.C — Widen wrapper Store interfaces to embed `AccountEnvRepository`
 
-- state: todo
+- state: done
 - blocked_by: none
 - paths: `internal/services/claude/service.go`, `internal/services/codex/service.go`, `internal/services/claude/service_test.go`, `internal/services/codex/service_test.go`
 - packages: `./internal/services/claude`, `./internal/services/codex`
