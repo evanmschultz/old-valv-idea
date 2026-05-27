@@ -35,6 +35,9 @@ type fakeStore struct {
 	// with crossProfile.ID. Falls back to the primary profile for any other ID.
 	crossProfile    domain.Profile
 	crossProfileErr error
+	// listAccountEnvFn, when non-nil, is called to return account env entries
+	// for the given profile ID. Allows tests to control the response.
+	listAccountEnvFn func(profileID string) ([]domain.AccountEnvEntry, error)
 }
 
 func (f fakeStore) CreateProject(context.Context, domain.Project) (domain.Project, error) {
@@ -95,7 +98,10 @@ func (f fakeStore) ListBindings(context.Context) ([]domain.ProjectBinding, error
 	panic("unexpected call")
 }
 
-func (f fakeStore) ListAccountEnv(context.Context, string) ([]domain.AccountEnvEntry, error) {
+func (f fakeStore) ListAccountEnv(_ context.Context, profileID string) ([]domain.AccountEnvEntry, error) {
+	if f.listAccountEnvFn != nil {
+		return f.listAccountEnvFn(profileID)
+	}
 	return nil, nil
 }
 
@@ -796,5 +802,172 @@ func TestRunUsesOverrideProfileHomePath(t *testing.T) {
 	}
 	if !foundOverrideMount {
 		t.Fatalf("Run() mounts = %+v, want mount with source %q (override home)", executor.got.Mounts, overrideHome)
+	}
+}
+
+// TestRunPassesAccountEnvToSharedRunService verifies that when the store
+// returns account env entries, they are converted to a map and passed to the
+// shared run service in the LaunchRequest.AccountEnv field.
+func TestRunPassesAccountEnvToSharedRunService(t *testing.T) {
+	t.Parallel()
+
+	project := domain.Project{ID: "project-1234567890", Root: "/tmp/project", Name: "project"}
+	profileID := "profile-abc123"
+	store := fakeStore{
+		project: project,
+		binding: domain.ProjectBinding{
+			ProjectID: project.ID,
+			ProfileID: profileID,
+			Provider:  domain.ProviderClaude,
+		},
+		profile: domain.Profile{
+			ID:       profileID,
+			Provider: domain.ProviderClaude,
+			HomePath: t.TempDir(),
+		},
+		crossBindingErr: domain.ErrNotFound,
+		listAccountEnvFn: func(id string) ([]domain.AccountEnvEntry, error) {
+			if id != profileID {
+				t.Errorf("ListAccountEnv called with id %q, want %q", id, profileID)
+			}
+			return []domain.AccountEnvEntry{
+				{ProfileID: id, EnvKey: "FOO", EnvValue: "bar"},
+				{ProfileID: id, EnvKey: "BAZ", EnvValue: "qux"},
+			}, nil
+		},
+	}
+	executor := &fakeExecutor{}
+
+	service, err := New(Options{
+		Store:    store,
+		Executor: executor,
+		Detect:   detectAlways(project.Root),
+		Image:    docker.NewImageRef("valv-claude", "dev"),
+		TTY:      true,
+		Stdin:    true,
+		TempRoot: t.TempDir(),
+		Logger:   log.NewWithOptions(io.Discard, log.Options{Level: log.DebugLevel}),
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if err := service.Run(context.Background(), "/tmp/project", []string{}); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	// Verify the container request includes the account env as part of Env
+	if got := executor.got.Env["FOO"]; got != "bar" {
+		t.Fatalf("Run() Env[\"FOO\"] = %q, want \"bar\"", got)
+	}
+	if got := executor.got.Env["BAZ"]; got != "qux" {
+		t.Fatalf("Run() Env[\"BAZ\"] = %q, want \"qux\"", got)
+	}
+}
+
+// TestRunWithNoAccountEnvEntries verifies that when the store returns no
+// account env entries (nil slice), the LaunchRequest.AccountEnv field is nil
+// and the launch succeeds.
+func TestRunWithNoAccountEnvEntries(t *testing.T) {
+	t.Parallel()
+
+	project := domain.Project{ID: "project-1234567890", Root: "/tmp/project", Name: "project"}
+	profileID := "profile-abc123"
+	store := fakeStore{
+		project: project,
+		binding: domain.ProjectBinding{
+			ProjectID: project.ID,
+			ProfileID: profileID,
+			Provider:  domain.ProviderClaude,
+		},
+		profile: domain.Profile{
+			ID:       profileID,
+			Provider: domain.ProviderClaude,
+			HomePath: t.TempDir(),
+		},
+		crossBindingErr: domain.ErrNotFound,
+		listAccountEnvFn: func(id string) ([]domain.AccountEnvEntry, error) {
+			return nil, nil
+		},
+	}
+	executor := &fakeExecutor{}
+
+	service, err := New(Options{
+		Store:    store,
+		Executor: executor,
+		Detect:   detectAlways(project.Root),
+		Image:    docker.NewImageRef("valv-claude", "dev"),
+		TTY:      true,
+		Stdin:    true,
+		TempRoot: t.TempDir(),
+		Logger:   log.NewWithOptions(io.Discard, log.Options{Level: log.DebugLevel}),
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if err := service.Run(context.Background(), "/tmp/project", []string{}); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	// Launch succeeded, which means the executor was called
+	if executor.got.Name == "" {
+		t.Fatalf("Run() executor.Run was not called")
+	}
+}
+
+// TestRunReturnsErrorWhenListAccountEnvFails verifies that when the store
+// returns an error loading account env, the error is wrapped and returned
+// without calling the executor.
+func TestRunReturnsErrorWhenListAccountEnvFails(t *testing.T) {
+	t.Parallel()
+
+	project := domain.Project{ID: "project-1234567890", Root: "/tmp/project", Name: "project"}
+	profileID := "profile-abc123"
+	storeErr := fmt.Errorf("database connection failed")
+	store := fakeStore{
+		project: project,
+		binding: domain.ProjectBinding{
+			ProjectID: project.ID,
+			ProfileID: profileID,
+			Provider:  domain.ProviderClaude,
+		},
+		profile: domain.Profile{
+			ID:       profileID,
+			Provider: domain.ProviderClaude,
+			HomePath: t.TempDir(),
+		},
+		crossBindingErr: domain.ErrNotFound,
+		listAccountEnvFn: func(id string) ([]domain.AccountEnvEntry, error) {
+			return nil, storeErr
+		},
+	}
+	executor := &fakeExecutor{}
+
+	service, err := New(Options{
+		Store:    store,
+		Executor: executor,
+		Detect:   detectAlways(project.Root),
+		Image:    docker.NewImageRef("valv-claude", "dev"),
+		Logger:   log.NewWithOptions(io.Discard, log.Options{Level: log.DebugLevel}),
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	err = service.Run(context.Background(), "/tmp/project", []string{})
+	if err == nil {
+		t.Fatalf("Run() error = nil, want non-nil")
+	}
+	if !strings.Contains(err.Error(), "load account env") {
+		t.Fatalf("Run() error = %v, want to contain \"load account env\"", err)
+	}
+	if !errors.Is(err, storeErr) {
+		t.Fatalf("Run() error chain does not contain storeErr: %v", err)
+	}
+
+	// Verify executor was not called
+	if executor.got.Name != "" {
+		t.Fatalf("Run() executor.Run was called despite ListAccountEnv error")
 	}
 }

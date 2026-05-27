@@ -202,6 +202,14 @@ func (s Service) Run(ctx context.Context, cwd string, claudeArgs []string) error
 		},
 	}
 
+	// Load account-specific environment variables for this profile and merge them
+	// into the LaunchRequest.
+	entries, err := s.store.ListAccountEnv(ctx, resolved.profile.ID)
+	if err != nil {
+		return fmt.Errorf("run claude launch service: load account env for profile %q: %w", resolved.profile.ID, err)
+	}
+	accountEnv := domain.AccountEnvEntriesToMap(entries)
+
 	// Delegate to the shared run service with no command override (Claude
 	// entrypoint is baked into the image).
 	sharedService, err := runservice.New(runservice.Options{
@@ -232,6 +240,7 @@ func (s Service) Run(ctx context.Context, cwd string, claudeArgs []string) error
 		Prepared:    runPrepared,
 		Args:        append([]string(nil), claudeArgs...),
 		Command:     nil, // No entrypoint override for Claude.
+		AccountEnv:  accountEnv,
 	})
 }
 
