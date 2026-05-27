@@ -141,7 +141,7 @@ Round 3 splits into **5 atomic droplets** with a small domain helper (NIT-3 fold
 
 #### Unit 14.4.D — Provider wrappers load account env and pass it into LaunchRequest
 
-- state: todo
+- state: done
 - blocked_by: 14.4.A (domain helper), 14.4.B (LaunchRequest field), 14.4.C (Store widening)
 - paths: `internal/services/claude/service.go`, `internal/services/codex/service.go`, `internal/services/claude/service_test.go`, `internal/services/codex/service_test.go`
 - packages: `./internal/services/claude`, `./internal/services/codex`
@@ -159,7 +159,7 @@ Round 3 splits into **5 atomic droplets** with a small domain helper (NIT-3 fold
 
 #### Unit 14.4.E — CLI `valv run` loads account env and passes it into LaunchRequest
 
-- state: todo
+- state: done
 - blocked_by: 14.4.A (domain helper), 14.4.B (LaunchRequest field). NOT blocked by 14.4.C: `cli/run.go` uses `*sqlite.Store` directly (run.go:123) + `manage.Service` (run.go:93-99); it does NOT use the narrow wrapper Store interfaces being widened in 14.4.C.
 - paths: `internal/cli/run.go`, `internal/cli/run_test.go`
 - packages: `./internal/cli`

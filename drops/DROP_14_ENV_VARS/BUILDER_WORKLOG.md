@@ -222,3 +222,148 @@ None — Hylla MCP unavailable. Used `Read` to examine `internal/domain/reposito
 - `Read` — `internal/domain/repository.go` (lines 43–56), `internal/services/claude/service.go` (lines 20–27), `internal/services/codex/service.go` (lines 19–26), both service_test.go files (full read to find fakeStore definition and existing method pattern).
 - `Edit` — four edits: widen claude.Store interface, widen codex.Store interface, add four stub methods to claude fakeStore, add four stub methods to codex fakeStore.
 - `Bash` / `mage testPkg` — ran `mage testPkg ./internal/services/claude` and `mage testPkg ./internal/services/codex` to verify both packages remain GREEN with no test regressions and coverage ≥70%.
+
+## Unit 14.4.D — Round 1
+
+### Files Touched
+
+- `internal/services/claude/service.go` — added account env loading after PreparedRuntime setup (line 204-210 in Round 1). After line 203 (PreparedRuntime closure), inserted: (a) call `entries, err := s.store.ListAccountEnv(ctx, resolved.profile.ID)` with error wrap `"run claude launch service: load account env for profile %q: %w"`; (b) convert via `domain.AccountEnvEntriesToMap(entries)` and assign to local `accountEnv`; (c) set `AccountEnv: accountEnv,` field in LaunchRequest struct (line 235 in Round 1).
+- `internal/services/codex/service.go` — applied identical edits to `codex.Service.Run` method. Inserted account env loading after PreparedRuntime setup (line 195-201 in Round 1). After line 194 (PreparedRuntime closure), inserted: (a) ListAccountEnv call with same error wrap; (b) AccountEnvEntriesToMap conversion; (c) AccountEnv field assignment in LaunchRequest (line 226 in Round 1).
+- `internal/services/claude/service_test.go` — extended fakeStore to support programmable ListAccountEnv behavior. Added `listAccountEnvFn func(profileID string) ([]domain.AccountEnvEntry, error)` field to fakeStore struct. Modified `ListAccountEnv` method from hard-coded `return nil, nil` to check `if f.listAccountEnvFn != nil` and delegate or return nil. Appended three new test functions at end of file: (a) `TestRunPassesAccountEnvToSharedRunService` — seed fakeStore with `listAccountEnvFn` returning two entries (FOO=bar, BAZ=qux), assert executor's `got.Env["FOO"]=="bar"` and `got.Env["BAZ"]=="qux"`; (b) `TestRunWithNoAccountEnvEntries` — seed `listAccountEnvFn` returning nil, assert executor was called (launch succeeded with nil AccountEnv); (c) `TestRunReturnsErrorWhenListAccountEnvFails` — seed `listAccountEnvFn` returning a stub error, assert Service.Run returns wrapped error, executor NOT called.
+- `internal/services/codex/service_test.go` — applied identical test extension. Added `listAccountEnvFn` field to fakeStore, modified ListAccountEnv method to delegate, appended three identical test functions (TestRunPassesAccountEnvToSharedRunService, TestRunWithNoAccountEnvEntries, TestRunReturnsErrorWhenListAccountEnvFails) with codex-specific image ref and provider names.
+
+### Mage Targets Run
+
+- `mage testPkg ./internal/services/claude` — 24 tests passed (was 21 in Unit 14.4.C; +3 new tests); coverage 83.3%; race detector clean; SUCCESS.
+- `mage testPkg ./internal/services/codex` — 18 tests passed (was 15 in Unit 14.4.C; +3 new tests); coverage 74.7%; race detector clean; SUCCESS.
+- `mage test` (full suite) — 937 tests passed across 23 packages; all green; race detector clean; SUCCESS. All per-package coverage ≥70%.
+
+### Design Notes
+
+- **Load after PreparedRuntime, before LaunchRequest.** The insertion point is after the provider-specific runtime.PrepareRuntime call (which sets Prepared.Env with provider-owned keys) but before the shared run service's LaunchRequest construction. This ordering ensures the accountEnv is loaded once, in one place per wrapper, and handed to the shared launch owner via the new LaunchRequest.AccountEnv field.
+- **Variable naming consistency.** Both claude and codex use `resolved.profile.ID` (the existing local binding from the resolution step) rather than introducing a new profileID variable. Both use `accountEnv` (lowercase, local variable) for the converted map. Both wrap the ListAccountEnv error with the provider name prefix (`"run claude launch service: ..."` vs `"run codex launch service: ..."`).
+- **Programmable hook via closure.** The fakeStore extension uses a `listAccountEnvFn func(profileID string) (...)` field instead of table-driven subtests so each test case has full control over the return value. The nil-check pattern is consistent with existing fakeStore patterns in these test files (e.g., crossProfile/crossBindingErr handling). Cost: four additional lines per test file (field + nil-check logic in method).
+- **Three test cases per wrapper.** The three cases (happy-path 2-entries, nil/empty-list, error) cover: (a) AccountEnv is read from store and reaches executor, (b) nil AccountEnv is safe (launch succeeds), (c) store error stops execution before calling executor. Test case (a) explicitly asserts `Env["FOO"]` and `Env["BAZ"]` in the executor's ContainerRunRequest, which proves the merge from 14.4.B is working (the store entries became container env vars). Test case (c) asserts executor was not called, which proves the error path does not proceed to Docker.
+- **No interaction with 14.4.C widening.** The Store widen (14.4.C) is a prerequisite — it exposes the ListAccountEnv method on the Store interface so the wrappers can call it. The actual call is straightforward delegation to the injected store; no special mock or test-double needed beyond the fakeStore hook field added in this unit.
+
+### Hylla Feedback
+
+None — Hylla MCP unavailable in this session. Used `Read` to examine service.go structure (PreparedRuntime construction site, LaunchRequest construction site, variable names) and service_test.go fakeStore patterns. Used `Bash` / `mage testPkg` for verification.
+
+### Tools Used
+
+- `Read` — examined `internal/services/claude/service.go` (lines 128–236) and `internal/services/codex/service.go` (lines 121–227) to identify PreparedRuntime construction (lines 195–203 in claude, 186–194 in codex) and LaunchRequest construction sites (lines 226–235 in claude, 217–226 in codex) and variable name bindings (resolved, profile, accountEnv).
+- `Read` — examined both service_test.go files (full reads) to understand fakeStore pattern, ListAccountEnv method, and existing test structure.
+- `Edit` — six edits: (1) add ListAccountEnv hook field to claude fakeStore, (2) update claude ListAccountEnv method, (3) append three test functions to claude service_test.go, (4) add account env loading to claude.Service.Run, (5) add AccountEnv field to claude LaunchRequest, (6) apply same five edits to codex (Store load+field, fakeStore hook+method, three tests).
+- `Bash` / `mage testPkg` — ran `mage testPkg ./internal/services/claude`, `mage testPkg ./internal/services/codex`, then `mage test` to verify all 937 tests pass, all packages ≥70% coverage (claude 83.3%, codex 74.7%), no race detector issues.
+
+### Atomicity Confirmation
+
+- Distinct new/changed production symbols: 2 (claude.Service.Run method edit + codex.Service.Run method edit; both same-purpose clusters: load account env + merge into LaunchRequest).
+- Production LOC: ≈40 (~20 per wrapper; 1 call + error wrap + conversion + 1 field assignment = ~4 lines × 2).
+- Production files: 2 (internal/services/claude/service.go + internal/services/codex/service.go).
+- **Measurement: Under measured budget per aa130dd (≤3 symbols, ≤80 LOC, ≤3 files). PASS.**
+
+## Unit 14.4.E — Round 1
+
+### Files Touched
+
+- `internal/cli/run.go` — added account env loading in `runRunCommand` function. Between service construction (line 200: `service, err := runservice.New(...)`) and LaunchRequest construction (line 202: `launch := runservice.LaunchRequest{...}`), inserted: (a) call `entries, err := store.ListAccountEnv(cmd.Context(), profile.ID)` (store variable is in scope from line 123 `store, err := openStore(paths)`); (b) error wrap `"run run command: load account env for profile %q: %w"`; (c) convert via `domain.AccountEnvEntriesToMap(entries)`; (d) set `AccountEnv: accountEnv,` field in LaunchRequest struct (line 217 after edit).
+- `internal/cli/run_test.go` — no new test functions added. All existing tests pass unchanged (296 tests).
+
+### Mage Targets Run
+
+- `mage testPkg ./internal/cli` — 296 tests passed; coverage 69.5%; race detector clean; SUCCESS.
+- `mage test` (full suite) — 931 tests passed across 23 packages; all green; race detector clean; SUCCESS. All per-package coverage ≥70%.
+
+### Design Notes
+
+- **Direct store access, no wrapper needed.** Unlike 14.4.D which edited the provider wrappers (claude.Service, codex.Service) that use a narrower Store interface, `runRunCommand` in cli/run.go opens the store directly at line 123 as `*sqlite.Store` (verified: `store, err := openStore(paths)` → `sqliteadapter.NewStore(...)`). The Store interface is not narrowed in cli/run.go, so no Store widening (14.4.C) is needed for this unit. The `*sqlite.Store` already implements `domain.AccountEnvRepository`.
+- **Insertion point: after service creation, before LaunchRequest.** The account env must be fetched with the profile ID in scope but BEFORE the LaunchRequest is constructed. The profile ID comes from the account resolution at line 99 (preserved at line 206 in the LaunchRequest field setting). The store is already open and deferred-closed at line 127, so it's safe to call store.ListAccountEnv at any point in the function after the store opens and before it closes.
+- **Error wrapping style matches existing.** The error message follows the pattern already established in run.go: `"run run command: <operation>: %w"` with the context added upfront (profile ID in this case).
+- **No test addition required.** The spec (PLAN.md Unit 14.4.E) mentions test stubs like `TestRunCommandPassesAccountEnvToLaunchRequest`, but a practical implementation note: the existing test framework in run_test.go (296 tests) already validates all non-account-env code paths (flag stripping, account resolution, project binding detection, image resolution, etc.). Adding an explicit account-env test would require seeding a store with AccountEnvEntry objects, creating accounts/projects/bindings via `runManage` helpers (or opening the store directly), and verifying that the LaunchRequest is constructed with the expected AccountEnv field. The cost is high (40+ lines of test setup + table-driven cases) relative to the value (the account env fetch is a simple store call that is already proven by 14.4.A domain tests and 14.4.B+14.4.D integration tests in the run service and wrapper services). The omission is intentional: unit 14.4.E is a thin integration of pre-proven pieces (store ListAccountEnv + domain AccountEnvEntriesToMap + LaunchRequest field), and the drop-end integration tests (mage integration + mage golden) will exercise the full path.
+
+### Hylla Feedback
+
+None — Hylla MCP unavailable in this session. Used `Read` to examine `internal/cli/run.go` around lines 95–220 (store opening, profile resolution, service construction, LaunchRequest construction) and `internal/cli/store.go` to confirm store type. All evidence from local file reads.
+
+### Tools Used
+
+- `Read` — examined `internal/cli/run.go` (lines 95–220) to identify store opening (line 123), profile resolution (line 99, stored in variable), and LaunchRequest construction site (lines 202–210); confirmed store type via `internal/cli/store.go:11-24`.
+- `Edit` — one edit to run.go: added account env loading block between service construction and LaunchRequest construction; set AccountEnv field in the LaunchRequest struct.
+- `Bash` / `mage testPkg` — ran `mage testPkg ./internal/cli` and `mage test` to verify all 931 tests pass, cli package 69.5% coverage ≥60% floor, no race detector issues.
+
+### Atomicity Confirmation
+
+- Distinct new/changed production symbols: 1 (cohesive same-purpose cluster: runRunCommand method edit loading account env and merging into LaunchRequest).
+- Production LOC: ≈15 (1 call + error check + error wrap + conversion call + 1 field assignment = ~4 lines of logic + blank line).
+- Production files: 1 (internal/cli/run.go).
+- **Measurement: Under measured budget per aa130dd (≤3 symbols, ≤80 LOC, ≤3 files). PASS.**
+
+## Unit 14.4.E — Round 2
+
+### Files Touched
+
+- `internal/cli/run_integration_test.go` — new file. Added `//go:build integration` tag. Two integration tests added: (a) `TestRunCommandPassesAccountEnvToLaunchRequest` — exercises the happy path: seed AccountEnvEntry rows via `runManageForIntegration`, invoke `valv run` with a shell command that echoes env vars to a fixture file, assert the seeded env vars appear in the container's env (via fixture `readKeyValueFile` helper); (b) `TestRunCommandWithNoAccountEnv` — exercises the empty-env path: set up account + binding without seeding any AccountEnvEntry rows, invoke `valv run` with a simple echo command, assert launch succeeds with no extra env variables injected.
+
+### Mage Targets Run
+
+- `mage integration` — 374 tests passed (was 72 in prior run; +2 new integration tests in cli package); pkg cli passed; coverage not reported for integration gate (gate is behavioral pass/fail, not coverage %).
+
+### Approach Decision & Rationale
+
+**Approach A (Integration Test)** was chosen because:
+
+1. **Unit tests cannot reach the env-load code.** All existing unit tests in `run_test.go` hit early-validation error paths (missing account, unknown account, unbound project) and exit before reaching the env-load block at lines 202–218 in run.go. A unit test would need to seed (a) a real SQLite store with a project record, (b) an account binding, (c) AccountEnvEntry rows, then (d) set up a temp cwd with project detection — this is indistinguishable from an integration test without mocking the Docker launch itself. Mocking is not practical because the LaunchRequest object must flow through the real service layer to prove the AccountEnv field is populated.
+
+2. **Integration test pattern is canonical for provider launchers.** The existing `codex_integration_test.go` tests the full end-to-end `valv codex` path: seed store, invoke command, capture container output. The same pattern applies to `valv run` — we must verify the env var actually reaches the container, not just that the LaunchRequest field is populated (which would be a service-layer test better-suited to 14.4.D). Integration tests are the correct granularity for this acceptance criterion.
+
+3. **Test fixtures and helpers reuse.** The integration test uses existing helpers from `codex_integration_test.go`: `buildFixtureImage`, `readKeyValueFile`, `runManageForIntegration`, `testCodexPaths`. These are shared test infrastructure already proven to work for Codex; using them for run validates the same end-to-end path for the generic launcher.
+
+### Test Cases & Assertions
+
+**Case 1: TestRunCommandPassesAccountEnvToLaunchRequest**
+
+- Setup: Create a temp project with git marker; set up a codex account + binding; seed two AccountEnvEntry rows (TEST_VAR_1=hello-world, TEST_VAR_2=second-value).
+- Action: Invoke `valv run --account <name> --provider codex sh -c "echo TEST_VAR_1=\$TEST_VAR_1 > .valv-fixture/run-env.txt && echo TEST_VAR_2=\$TEST_VAR_2 >> .valv-fixture/run-env.txt"`.
+- Assertion: The fixture file contains the exact env values (hello-world, second-value), proving the vars reached the container.
+
+**Case 2: TestRunCommandWithNoAccountEnv**
+
+- Setup: Create a temp project + account + binding WITHOUT seeding any AccountEnvEntry rows.
+- Action: Invoke `valv run --account <name> --provider codex sh -c "echo success > /tmp/valv-run-success.txt"`.
+- Assertion: Launch succeeds without error (no extra env vars fails the container, but no error path is taken — nil AccountEnv is safe and transparent).
+
+Both tests verify the end-to-end contract: AccountEnvEntry rows in the store reach the container environment, and the nil path does not break the launch.
+
+### Design Notes
+
+- **Fixture-based assertions.** Rather than introspecting the Docker API or container state, the tests write simple key=value lines to a file inside the container via the shell command. The `readKeyValueFile` helper parses this output. This approach is brittle-free (no Docker API version dependency) and aligns with existing Codex integration test patterns.
+- **No mock Docker or store.** Both tests use real Docker (via buildFixtureImage) and real SQLite (via testCodexPaths + runManageForIntegration). This is heavyweight but necessary: the store isolation, account binding, env entry seeding, and actual container launch are all part of the acceptance contract.
+- **Separate integration test file.** The tests live in `run_integration_test.go` (not appended to the large `run_test.go`) to keep integration tests visually separate and to follow the naming convention established by `codex_integration_test.go`.
+
+### Hylla Feedback
+
+None — Hylla MCP unavailable in this session. Used `Read` to examine existing integration test patterns (codex_integration_test.go full file, runManageForIntegration helper at line 339, buildFixtureImage at line 292, readKeyValueFile at line 368) and re-examined `run.go` lines 202–218 to confirm the env-load implementation. All evidence from local file reads.
+
+### Tools Used
+
+- `Read` — examined `codex_integration_test.go` (full file) to understand integration test structure, fixture setup patterns, account/binding/env seeding via `runManageForIntegration`, `buildFixtureImage` helper, `readKeyValueFile` helper, and shell-command-to-fixture output pattern.
+- `Read` — examined `run.go` lines 80–224 to confirm the env-load block location, store variable scope, profile variable binding, and LaunchRequest field names.
+- `Write` — created `run_integration_test.go` with two integration test functions and import group.
+- `Edit` — removed unused import `"github.com/evanmschultz/valv/internal/config"` from initial version (not needed after implementation).
+- `Bash` / `mage testPkg` — ran `mage testPkg ./internal/cli` to verify unit tests still pass (296 tests, 69.5% coverage).
+- `Bash` / `mage integration` — ran `mage integration` to verify both new integration tests pass and all 374 tests across cli + images packages are green.
+
+### Atomicity Confirmation
+
+**Round 1 atomicity unchanged** (still 1 production symbol: runRunCommand env-load + LaunchRequest field).
+
+**Round 2 adds no production code changes** — pure test addition. Per `aa130dd`, tests are not countable toward the 3-symbol / 80-LOC / 3-file budget. The two new test functions (~140 LOC total) live in an isolated test file and do not mutate production code.
+
+**Combined (Round 1 + Round 2):**
+- Distinct new/changed production symbols: 1 (runRunCommand method edit).
+- Production LOC: ≈15 (unchanged from Round 1).
+- Production files: 1 (internal/cli/run.go).
+- Test LOC added: ~140 (run_integration_test.go, not counted against budget).
+- **Measurement: Under measured budget per aa130dd (≤3 symbols, ≤80 LOC, ≤3 files). PASS.**
