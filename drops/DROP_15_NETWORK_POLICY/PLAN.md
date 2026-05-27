@@ -362,3 +362,70 @@ Round 1 codex planner decomposed into 3 atomic droplets (network list / allow / 
 - Keep the project-root contract literal: any `.valv/tools.toml` lookup that affects overlay/image policy must resolve against the detected project root, not raw cwd.
 - Respect package/file blocking strictly: `15.2.5` is ordered after `15.0`, `15.1`, and `15.2`; `15.4` is ordered after `15.0` and `15.3` because these units share `internal/cli` / the DROP_13 run seam.
 - Unit 15.2 reverses the Round-4 YAGNI cut of the `docker network connect` surface — the sidecar (which must attach to BOTH internal and bridge with a stable alias) is the now-concrete caller that justifies it.
+
+---
+
+## Round-2 Sub-decompositions (15.2.5.B/E/G + 15.4.D)
+
+Codex sub-planners returned (4 dispatches, each ≤4 hylla calls; most hit indexing failures and fell back to read-only rg/sed on committed source — fallback acceptable per evidence-order rule). Tool-call audits ✓ on all 4; no git/edit/mage out-of-scope.
+
+### 15.2.5.B — Proxy image/binary (4 droplets, serialized)
+
+New package `internal/cmd/valv-proxy/`. Env-injected runtime config: port via `VALV_PROXY_ADDR` (default `:8080`); allowlist via `VALV_PROXY_ALLOWLIST` (comma-sep exact hosts). Out of scope: wildcards, TLS interception, auth, config-file mounts.
+
+- **15.2.5.B.1** — `internal/cmd/valv-proxy/allowlist.go` + test: `parseAllowlist` + `hostAllowed` (exact-host matcher, case/port-normalized, no wildcards). 2 prod symbols, ~45 LOC, 1 file. blocked_by: none.
+- **15.2.5.B.2** — `internal/cmd/valv-proxy/main.go` + test: proxy `main` + HTTP/CONNECT handler. Reads `VALV_PROXY_ALLOWLIST` + `VALV_PROXY_ADDR`. 2 prod symbols, ~75 LOC, 1 file. blocked_by: B.1.
+- **15.2.5.B.3** — `internal/cmd/valv-proxy/Dockerfile`: image runs the binary with env-injected config. 0 Go prod symbols, ~20 LOC, 1 file. blocked_by: B.2.
+- **15.2.5.B.4** — `magefile.go` proxy-image build target. 1 build-target symbol, ~35 LOC, 1 file. blocked_by: B.3.
+- **Cross-drop:** 15.2.5.D.1 build is now ALSO blocked_by 15.2.5.B.4 (image must exist locally before sidecar integration tests).
+
+### 15.2.5.E — Orphan cleanup + concurrency-safe Provision (3 droplets, serialized)
+
+NEW work only — network labels already exist (committed at `Provision` :196-203); E adds proxy-container labels + container-scoped sweep + cleanup ordering.
+
+- **15.2.5.E.1** — Proxy container managed-label propagation (`Labels: {ManagedLabelKey: ManagedLabelValue}` on the sidecar `ContainerRunRequest` in D.1's Provision). 1 edit cluster, ~40 LOC including tests, 2 files (`networkpolicy/service.go` + test). blocked_by: 15.2.5.D.1.
+- **15.2.5.E.2** — Container-label sweep + reclaim. Adds `docker.Executor.ListContainersByLabel(ctx, label string) ([]string, error)` using existing `BuildContainerListArgs`; extends `NetworkExecutor` interface; extends `Provision` + `CleanupStale` to enumerate + remove stale managed sidecars before creating new. 2 prod symbols, ~70-80 LOC, 3 prod files (`adapters/docker/executor.go` + `networkpolicy/service.go` + tests). blocked_by: 15.2.5.D.1, E.1.
+- **15.2.5.E.3** — Cleanup ordering (Provision-returned `Cleanup` stops/removes proxy BEFORE rm network). 1 service edit cluster, ≤60 LOC, 1 prod file (+ test). blocked_by: 15.2.5.D.1, E.2. NOTE: if `docker.Executor` lacks an explicit stop-container method after E.2 lands, E.3 splits into E.3a (add stop) + E.3b (ordering); builder re-measures.
+
+### 15.2.5.G — Shipped topology integration test (1 droplet, COLLAPSED)
+
+Sub-planner concluded "1 droplet sufficient" (test-only, 0 prod symbols, file lock on `service_integration_test.go` makes split serialization pointless; existing pattern already keeps integration scenarios cohesive). Confirms R2 falsif NIT.
+
+- **15.2.5.G** — Complete the skipped placeholder `TestEnsureProjectImage_NetworkPolicyOverlayBuildReachesProxy_DockerDesktopMacOS` at `internal/services/images/service_integration_test.go`. 0 prod symbols, 150-250 test LOC, 1 file. `//go:build integration`. Proves: workload internal-only; reaches sidecar on `valv-proxy`; proxy on internal+bridge; allowed-host egress succeeds; non-allowed-host blocked. Acceptance: `mage integration` GREEN. blocked_by: 15.2.5.D.2, 15.2.5.E.3.
+
+### 15.4.D — `valv run --network open` (3 droplets, serialized)
+
+All 3 droplets share `internal/cli/run.go` + `internal/cli/run_test.go` (serialized). **Critical decision: CLI must EXPLICITLY set `NetworkPolicyClosed` as default** (do NOT rely on 15.3.A's open zero-value — DROP_15 scope requires closed-default for `valv run`).
+
+- **15.4.D.1** — Extend `parsedRunFlags` with `network string` + `networkExplicit bool` fields. Update `TestStripRunLocalFlags` existing rows to assert zero-value `network == ""`. 1 changed prod symbol (struct field-add cluster), ~15 prod LOC, 2 files. blocked_by: 15.3.A BUILT.
+- **15.4.D.2** — Parse prefix-only `--network` in `stripRunLocalFlags` (recognizes `--network=open` and `--network open` only in leading prefix; preserves trailing/malformed forms). New test rows for both forms + pass-through case. 1 changed prod symbol, ~45 prod LOC, 2 files. blocked_by: D.1, 15.3.A BUILT.
+- **15.4.D.3** — Wire CLI network policy into `runRunCommand`'s `LaunchRequest`: explicit `launch.NetworkPolicy = runservice.NetworkPolicyClosed` by default; `runservice.NetworkPolicyOpen` only when `--network open` parsed. Deterministic CLI error for invalid `--network <value>`. New tests: `TestRunCommandNetworkPolicyDefaultClosed` + `TestRunCommandNetworkPolicyOpenEquals` + `TestRunCommandNetworkPolicyOpenSpaceSeparated`. 1 changed prod symbol, ~60 prod LOC, 2 files. blocked_by: D.2, 15.4.C BUILT, 15.3.A BUILT.
+
+## Full DROP_15 Build Tree (R2 fold, all sub-decomps absorbed)
+
+23 atomic build droplets. **Level-by-level parallelism (siblings parallel within a level; serialized across levels):**
+
+- **L0 (parallel — no intra-DROP blockers):** 15.2.5.A, 15.2.5.C, 15.2.5.B.1, 15.3.A, 15.4.A
+  - 15.2.5.A + 15.2.5.C share `networkpolicy/service.go` → **C blocked_by A** (file lock).
+  - 15.4.A blocked_by 15.0/15.1 (done) + 15.3 plan accepted (now). Touches different files than 15.3.A (cli/network.go new vs services/run/service.go).
+- **L1:** 15.2.5.B.2 (after B.1), 15.4.B (after 15.4.A)
+- **L2:** 15.2.5.B.3 (after B.2), 15.4.C (after 15.4.B), 15.3.B.1 (after ALL 15.2.5.* closed — gated until L8+)
+- **L3:** 15.2.5.B.4 (after B.3)
+- **L4:** 15.2.5.D.1 (after 15.2.5.A, B.4, C — needs the image built + executor seam + NO_PROXY inversion)
+- **L5 (parallel):** 15.2.5.D.2, 15.2.5.E.1 (both after D.1)
+- **L6:** 15.2.5.E.2 (after E.1)
+- **L7:** 15.2.5.E.3 (after E.2)
+- **L8:** 15.2.5.G (after D.2, E.3) — closes all 15.2.5.*
+- **L9:** 15.3.B.1 (after ALL 15.2.5.* closed)
+- **L10:** 15.3.B.2 (after B.1)
+- **L11:** 15.3.C (after B.2)
+- **L12:** 15.3.D (after C)
+- **L13:** 15.4.D.1 (after 15.3.A BUILT — possible MUCH earlier in L9 since only needs 15.3.A built, not all 15.3.*)
+- **L14:** 15.4.D.2 (after D.1)
+- **L15:** 15.4.D.3 (after D.2, 15.4.C BUILT, 15.3.A BUILT)
+
+NOTE: 15.4.D.1/D.2/D.3 only need 15.3.A built (not the entire 15.3 chain). 15.3.A unblocks earlier in the L0 wave per the R2 fold. Once 15.3.A closes, 15.4.D.1 can fire in parallel with the deeper 15.3.B.1+ chain.
+
+## Cross-drop blockers (final)
+
+- DROP_15 close blocked_by ALL 15.2.5.* / 15.3.* / 15.4.* closed + drop-end gate (`mage test` + `mage integration` + push + CI + `mage build` + Hylla reingest from remote).
