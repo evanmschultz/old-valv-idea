@@ -45,6 +45,20 @@ type goTestRunOptions struct {
 	DisabledSections []gotestout.Section
 }
 
+// Aliases preserves the familiar hyphenated task names while keeping the visible target list small.
+var Aliases = map[string]interface{}{
+	"check":         CI,
+	"fmt":           Format,
+	"fmt-check":     FormatCheck,
+	"format-check":  FormatCheck,
+	"format-file":   FormatFile,
+	"test-func":     TestFunc,
+	"test-pkg":      TestPkg,
+	"race-pkg":      RacePkg,
+	"vet-pkg":       VetPkg,
+	"golden-update": GoldenUpdate,
+}
+
 // Build compiles the local valv binary.
 func Build() error {
 	printer := newMagePrinter(os.Stdout)
@@ -91,8 +105,12 @@ func Install() error {
 	return nil
 }
 
-// Test runs the canonical local verification gate.
-func Test() error {
+// CI is the canonical local verification gate: bootstrap check, FormatCheck,
+// Vet, Tests (race + coverage + per-package threshold), Tidy. Renamed from the
+// prior `Test` gate per the canonical 12-target shape (2026-05-30); the `check`
+// alias is preserved. Vet + Tidy are NEW stages (valv had neither before) —
+// they may surface preexisting issues on first run; see R_SHIP_HANDOFF.md.
+func CI() error {
 	printer := newMagePrinter(os.Stdout)
 	runStage := func(title string, fn func(*laslig.Printer) error) error {
 		if err := printer.Section(title); err != nil {
@@ -107,39 +125,122 @@ func Test() error {
 	if err := runStage("Format", func(*laslig.Printer) error { return checkRepoFormatting() }); err != nil {
 		return err
 	}
+	if err := runStage("Vet", func(*laslig.Printer) error { return runGo("vet", "./...") }); err != nil {
+		return err
+	}
 	if err := runStage("Tests", runRepoTests); err != nil {
+		return err
+	}
+	if err := runStage("Tidy", func(*laslig.Printer) error { return tidyCheck() }); err != nil {
 		return err
 	}
 	return nil
 }
 
-// TestPkg runs formatter checks and Go tests for one package pattern.
+// Test runs `go test -count=1 ./...` over every package (no race, no coverage).
+// Closeout/orchestrator surface — fastest all-package gate.
+func Test() error {
+	return runGoTest("-count=1", "./...")
+}
+
+// TestPkg runs `go test -count=1 <pkg>` for ONE package pattern (no race).
+// Plan-QA read-only surface — verifies a code claim against a single package.
 func TestPkg(pkg string) error {
 	pkg = strings.TrimSpace(pkg)
 	if pkg == "" {
 		return errors.New("testPkg requires one package pattern, for example: mage testPkg ./internal/output")
 	}
-	files, err := packageGoFiles(pkg)
-	if err != nil {
-		return err
+	return runGoTest("-count=1", pkg)
+}
+
+// TestFunc runs `go test -run "^<testName>$" -race -count=1 <pkg>` — ONE named
+// test function in ONE package with race detection. Builder + build-QA surface.
+func TestFunc(pkg, testName string) error {
+	pkg = strings.TrimSpace(pkg)
+	testName = strings.TrimSpace(testName)
+	if pkg == "" {
+		return errors.New("testFunc requires a package pattern, for example: mage testFunc ./internal/output TestMyThing")
 	}
-	if err := checkGofumpt(files); err != nil {
-		return err
+	if testName == "" {
+		return errors.New("testFunc requires a test function name, for example: mage testFunc ./internal/output TestMyThing")
 	}
+	return runGoTest("-run", "^"+testName+"$", "-race", "-count=1", pkg)
+}
+
+// Race runs `go test -race -count=1 ./...` over every package.
+// Closeout/orchestrator surface. Use RacePkg for one package.
+func Race() error {
+	return runGoTest("-race", "-count=1", "./...")
+}
+
+// RacePkg runs `go test -race -count=1 <pkg>` for ONE package. Build-QA surface.
+func RacePkg(pkg string) error {
+	pkg = strings.TrimSpace(pkg)
+	if pkg == "" {
+		return errors.New("racePkg requires one package pattern, for example: mage racePkg ./internal/output")
+	}
+	return runGoTest("-race", "-count=1", pkg)
+}
+
+// Cover runs the full suite with race + coverage and enforces the per-package
+// threshold. This is the CI gate's Tests stage exposed as a standalone target.
+func Cover() error {
 	printer := newMagePrinter(os.Stdout)
 	if err := printer.Section("Tests"); err != nil {
-		return fmt.Errorf("render testPkg stage: %w", err)
+		return fmt.Errorf("render cover stage: %w", err)
 	}
-	report, err := runGoTestWithOptions(goTestRunOptions{
-		CaptureCoverage: true,
-		DisabledSections: []gotestout.Section{
-			gotestout.SectionSkippedTests,
-		},
-	}, "-count=1", "-race", "-cover", pkg)
+	return runRepoTests(printer)
+}
+
+// Format rewrites tracked Go files in place with `go tool gofumpt -w`.
+// Closeout/orch surface. Use FormatFile for a single file or directory.
+func Format() error {
+	files, err := goFiles(".")
 	if err != nil {
 		return err
 	}
-	return renderCoverage(printer, report, coverageThreshold)
+	if len(files) == 0 {
+		return nil
+	}
+	args := append([]string{"tool", "gofumpt", "-w"}, files...)
+	return runGo(args...)
+}
+
+// FormatFile rewrites ONE file (or directory) with `go tool gofumpt -w`.
+// Builder + build-QA surface — formats only the file(s) just edited.
+func FormatFile(path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return errors.New("formatFile requires a path, for example: mage formatFile internal/output/foo.go")
+	}
+	if _, err := os.Stat(path); err != nil {
+		return fmt.Errorf("formatFile %q: %w", path, err)
+	}
+	return runGo("tool", "gofumpt", "-w", path)
+}
+
+// FormatCheck fails if any tracked Go file is not gofumpt-clean.
+func FormatCheck() error {
+	return checkRepoFormatting()
+}
+
+// Vet runs `go vet ./...`.
+func Vet() error {
+	return runGo("vet", "./...")
+}
+
+// VetPkg runs `go vet <pkg>` over ONE package. Builder + build-QA surface.
+func VetPkg(pkg string) error {
+	pkg = strings.TrimSpace(pkg)
+	if pkg == "" {
+		return errors.New("vetPkg requires one package pattern, for example: mage vetPkg ./internal/output")
+	}
+	return runGo("vet", pkg)
+}
+
+// Tidy runs `go mod tidy` and fails if go.mod or go.sum changed.
+func Tidy() error {
+	return tidyCheck()
 }
 
 // Integration runs the Docker-backed integration and external golden tests.
@@ -282,32 +383,6 @@ func checkRepoFormatting() error {
 	return checkGofumpt(files)
 }
 
-func packageGoFiles(pkg string) ([]string, error) {
-	out, err := outputWithEnv(goEnv(), "go", "list", "-f", "{{.Dir}}", pkg)
-	if err != nil {
-		return nil, fmt.Errorf("list package dirs for %q: %w", pkg, err)
-	}
-
-	seen := map[string]struct{}{}
-	var files []string
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		dir := strings.TrimSpace(line)
-		if dir == "" {
-			continue
-		}
-		if _, ok := seen[dir]; ok {
-			continue
-		}
-		seen[dir] = struct{}{}
-		dirFiles, err := goFiles(dir)
-		if err != nil {
-			return nil, err
-		}
-		files = append(files, dirFiles...)
-	}
-	return files, nil
-}
-
 func checkGofumpt(files []string) error {
 	if len(files) == 0 {
 		return nil
@@ -362,6 +437,46 @@ func goEnv() []string {
 
 func runGo(args ...string) error {
 	return runWithEnv(goEnv(), "go", args...)
+}
+
+// tidyCheck runs `go mod tidy` and fails if go.mod or go.sum drifted. Shared by
+// the Tidy target and the CI gate's Tidy stage.
+func tidyCheck() error {
+	before, err := snapshotFiles("go.mod", "go.sum")
+	if err != nil {
+		return err
+	}
+	if err := runGo("mod", "tidy"); err != nil {
+		return err
+	}
+	after, err := snapshotFiles("go.mod", "go.sum")
+	if err != nil {
+		return err
+	}
+	if before != after {
+		return errors.New("go.mod or go.sum changed; commit the tidy result")
+	}
+	return nil
+}
+
+// snapshotFiles concatenates the given files' contents for drift comparison.
+// Missing files (e.g. go.sum on a freshly-tidied module) are treated as empty.
+func snapshotFiles(paths ...string) (string, error) {
+	var b strings.Builder
+	for _, p := range paths {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return "", fmt.Errorf("snapshot %s: %w", p, err)
+		}
+		b.WriteString(p)
+		b.WriteByte('\n')
+		b.Write(data)
+		b.WriteByte('\n')
+	}
+	return b.String(), nil
 }
 
 func runValv(extraEnv []string, argsLine string) error {
