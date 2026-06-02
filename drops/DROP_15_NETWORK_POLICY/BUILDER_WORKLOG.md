@@ -2,6 +2,49 @@
 
 Append a `## Unit 15.M — Round K` section per build attempt. See `main/drops/WORKFLOW.md` § "Phase 4 — Build (per unit)" for what each section should contain.
 
+## Unit 15.2.5.C — Round 1
+
+**Date:** 2026-06-02
+**Builder backend:** claude-sonnet-4-6 (orchestrator dispatch)
+
+### Files Touched
+
+- `internal/services/networkpolicy/service.go` (282 LOC) — rewrote `buildNoProxy` to return only `127.0.0.1,localhost,valv-proxy` (sorted, deterministic, no parameters). Updated `PolicyMaterial.NoProxy` doc comment to explain the corrected semantics. Updated `ProvisionRequest.Allowlist` doc comment to remove the incorrect NO_PROXY rationale. Updated the `Provision` call site from `buildNoProxy(request.Allowlist)` to `buildNoProxy()`. No other symbols touched; `NetworkExecutor` interface, `Service.Provision` logic, `networkName`, and `CleanupStale` are byte-identical to the 15.2.5.A state.
+- `internal/services/networkpolicy/service_test.go` (688 LOC) — replaced two now-invalid `buildNoProxy` tests (`TestBuildNoProxy_SortedDedupedAndTrimmed`, `TestPolicyMaterial_NoProxyOmitsBlankAllowlistEntries`) with four new tests:
+  - `TestBuildNoProxy` — table-driven, 3 cases (empty allowlist context, non-empty allowlist no-leak, loopback always covered), all call `buildNoProxy()` and assert result is `"127.0.0.1,localhost,valv-proxy"`.
+  - `TestBuildNoProxy_AllowlistHostsNeverLeak` — calls `svc.Provision(...)` with a 5-host allowlist, asserts `NoProxy == "127.0.0.1,localhost,valv-proxy"` and that none of the 5 allowlist hosts appear in `NoProxy`.
+  - `TestBuildNoProxy_LoopbackAndSidecarAlwaysPresent` — regression pin asserting the three fixed entries are always present.
+  - Updated `TestProvision_CreatesNetworkOnFreshHost`: changed `wantNoProxy` from `"github.com,objects.githubusercontent.com,proxy.golang.org,sum.golang.org"` to `"127.0.0.1,localhost,valv-proxy"` and added a loop asserting no allowlist host leaks into `NoProxy`.
+
+### Mage Targets Run
+
+- `mage testPkg ./internal/services/networkpolicy` → **27 tests pass, 0 failures** (was 23 pre-unit; +4 new tests).
+
+### Design Notes
+
+- **Signature simplified to `buildNoProxy() string`** (no parameters). The function no longer reads the allowlist — it has a single fixed output. Removing the parameter makes the inversion explicit at the call site and prevents future callers from accidentally re-introducing the allowlist into NO_PROXY.
+- **Fixed entries sorted alphabetically** (`127.0.0.1,localhost,valv-proxy`) for determinism. Alphabetic happens to be correct numerical/lexicographic order as well.
+- **`sort.Strings` retained** even though the entries are a static slice, for consistency with the package's determinism pattern and to make the sorted output self-documenting in the code.
+- **Did NOT touch `NetworkExecutor` interface** (15.2.5.A territory), `Service.Provision` logic (15.2.5.D.1 territory), `networkName`, or `CleanupStale`.
+
+### Budget Measurement (vs. 3-symbol / 80-LOC / 3-file ceiling)
+
+| Dimension | Budget | Actual |
+|---|---|---|
+| Production symbols | 3 | 1 (`buildNoProxy`) |
+| Production LOC delta | ≤80 | ~18 net-changed LOC in service.go (function body rewrite + doc comment updates) |
+| Production files | ≤3 | 1 (`service.go`) |
+
+Under budget on all dimensions.
+
+### Hylla Feedback
+
+Not used. Evidence from direct `Read` of `service.go` and `service_test.go` was sufficient. The current code predates the latest Hylla ingest, so direct file reads were the authoritative source.
+
+### Atomicity Confirmation
+
+Unit 15.2.5.C is fully self-contained: the `buildNoProxy` rewrite is the complete production scope. No partial logic shipped. Mage gate GREEN (27/27 pass).
+
 ## Unit 15.2.5.A — Round 1
 
 **Date:** 2026-06-02

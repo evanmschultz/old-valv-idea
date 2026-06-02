@@ -165,7 +165,7 @@ Locked design (do not re-litigate): sidecar-proxy topology with workload attache
 
 ##### Unit 15.2.5.C — PolicyMaterial NO_PROXY inversion
 
-- state: todo
+- state: done
 - blocked_by: none
 - paths: `internal/services/networkpolicy/service.go`
 - packages: `./internal/services/networkpolicy`

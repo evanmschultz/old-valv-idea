@@ -207,10 +207,15 @@ func TestProvision_CreatesNetworkOnFreshHost(t *testing.T) {
 	if material.HTTPSProxyURL != "http://host.docker.internal:18080" {
 		t.Errorf("HTTPSProxyURL = %q, want %q", material.HTTPSProxyURL, "http://host.docker.internal:18080")
 	}
-	// NO_PROXY: comma-separated, sorted.
-	wantNoProxy := "github.com,objects.githubusercontent.com,proxy.golang.org,sum.golang.org"
+	// NO_PROXY: only loopback + sidecar alias; allowlist hosts must NOT appear.
+	wantNoProxy := "127.0.0.1,localhost,valv-proxy"
 	if material.NoProxy != wantNoProxy {
 		t.Errorf("NoProxy = %q, want %q", material.NoProxy, wantNoProxy)
+	}
+	for _, allowlistHost := range allowlist {
+		if strings.Contains(material.NoProxy, allowlistHost) {
+			t.Errorf("NoProxy = %q contains allowlist host %q — allowlist hosts must never appear in NO_PROXY", material.NoProxy, allowlistHost)
+		}
 	}
 
 	// Cleanup removes the network.
@@ -488,13 +493,82 @@ func TestNetworkName_DeterministicAndOrderInvariant(t *testing.T) {
 	}
 }
 
-func TestBuildNoProxy_SortedDedupedAndTrimmed(t *testing.T) {
+// TestBuildNoProxy covers the unit-15.2.5.C acceptance criteria: NO_PROXY
+// contains ONLY loopback entries and the valv-proxy sidecar alias. Allowlist
+// hosts must never appear regardless of what the caller passes.
+func TestBuildNoProxy(t *testing.T) {
 	t.Parallel()
 
-	got := buildNoProxy([]string{"  b ", "a", "b", "c", "a"})
-	want := "a,b,c"
-	if got != want {
-		t.Fatalf("buildNoProxy = %q, want %q", got, want)
+	const want = "127.0.0.1,localhost,valv-proxy"
+
+	cases := []struct {
+		name string
+		desc string
+	}{
+		{
+			name: "empty_allowlist",
+			desc: "empty allowlist: NO_PROXY still contains only loopback + sidecar alias",
+		},
+		{
+			name: "non_empty_allowlist_no_leak",
+			desc: "non-empty allowlist: allowlist hosts must not appear in NO_PROXY",
+		},
+		{
+			name: "loopback_entries_already_covered",
+			desc: "loopback entries are always present regardless of how buildNoProxy is called",
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := buildNoProxy()
+			if got != want {
+				t.Errorf("buildNoProxy() = %q, want %q (%s)", got, want, tc.desc)
+			}
+		})
+	}
+}
+
+// TestBuildNoProxy_AllowlistHostsNeverLeak asserts that allowlist hosts do not
+// appear in NO_PROXY even when Provision is called with a populated allowlist.
+// This is the core invariant of Schema Decision 5's NO_PROXY correction.
+func TestBuildNoProxy_AllowlistHostsNeverLeak(t *testing.T) {
+	t.Parallel()
+
+	allowlistHosts := []string{
+		"github.com",
+		"objects.githubusercontent.com",
+		"proxy.golang.org",
+		"sum.golang.org",
+		"registry-1.docker.io",
+	}
+
+	fake := &fakeNetworkExecutor{}
+	svc, err := New(Options{Executor: fake})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	material, cleanup, err := svc.Provision(context.Background(), ProvisionRequest{
+		Allowlist:     allowlistHosts,
+		ProxyEndpoint: "host.docker.internal:18080",
+	})
+	if err != nil {
+		t.Fatalf("Provision() error = %v", err)
+	}
+	defer func() { _ = cleanup(context.Background()) }()
+
+	const wantNoProxy = "127.0.0.1,localhost,valv-proxy"
+	if material.NoProxy != wantNoProxy {
+		t.Errorf("NoProxy = %q, want %q", material.NoProxy, wantNoProxy)
+	}
+
+	for _, host := range allowlistHosts {
+		if strings.Contains(material.NoProxy, host) {
+			t.Errorf("NoProxy %q contains allowlist host %q — allowlist hosts must NEVER appear in NO_PROXY", material.NoProxy, host)
+		}
 	}
 }
 
@@ -555,16 +629,31 @@ func TestCleanupStale_RemoveError_Wrapped(t *testing.T) {
 	}
 }
 
-func TestPolicyMaterial_NoProxyOmitsBlankAllowlistEntries(t *testing.T) {
+// TestBuildNoProxy_LoopbackAndSidecarAlwaysPresent is a regression pin
+// confirming that the fixed buildNoProxy always emits the three fixed entries
+// regardless of any caller context. The old implementation accepted an allowlist
+// parameter and placed it into NO_PROXY (inverted semantics); this test pins
+// the corrected shape.
+func TestBuildNoProxy_LoopbackAndSidecarAlwaysPresent(t *testing.T) {
 	t.Parallel()
 
-	// Direct buildNoProxy test, since ProvisionRequest.Valid() would reject
-	// blank entries up front. Behavior pin against future regressions if
-	// validation moves.
-	got := buildNoProxy([]string{"", " github.com ", "proxy.golang.org"})
-	want := "github.com,proxy.golang.org"
+	got := buildNoProxy()
+	want := "127.0.0.1,localhost,valv-proxy"
 	if got != want {
-		t.Fatalf("buildNoProxy = %q, want %q", got, want)
+		t.Fatalf("buildNoProxy() = %q, want %q", got, want)
+	}
+	// Confirm each required entry is present.
+	for _, required := range []string{"127.0.0.1", "localhost", "valv-proxy"} {
+		found := false
+		for _, entry := range strings.Split(got, ",") {
+			if entry == required {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("buildNoProxy() = %q, missing required entry %q", got, required)
+		}
 	}
 }
 

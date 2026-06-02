@@ -97,15 +97,15 @@ func New(opts Options) (Service, error) {
 type ProvisionRequest struct {
 	// Allowlist is the effective allowlist hosts (built-in defaults unioned
 	// with user-declared hosts). Callers compute this via
-	// tools.EffectiveAllowlist before invoking Provision. The service does
-	// not re-validate the entries — invalid hosts produce undefined NO_PROXY
-	// output downstream.
+	// tools.EffectiveAllowlist before invoking Provision. The service passes
+	// this to the network-name derivation (deterministic network naming) but
+	// does NOT place allowlist entries in NO_PROXY — the sidecar proxy
+	// enforces the allowlist internally (see buildNoProxy for rationale).
 	//
-	// At least one allowlist entry is required because a zero-length
-	// NO_PROXY tells curl/go HTTP clients "send everything through the
-	// proxy", which then would refuse non-allowlisted hosts. Callers that
-	// want truly empty allowlist semantics should not invoke Provision —
-	// they should run in open mode instead.
+	// At least one allowlist entry is required so that the proxy sidecar has
+	// a defined set of hosts to permit; a zero-length allowlist would make
+	// the proxy block all egress. Callers that want unrestricted egress should
+	// run in open mode instead of invoking Provision.
 	Allowlist []string
 
 	// ProxyEndpoint is the host:port the policy proxy daemon listens on.
@@ -144,9 +144,14 @@ type PolicyMaterial struct {
 	// or env var. Format: "http://<ProxyEndpoint>" — the proxy daemon
 	// receives CONNECT for HTTPS targets over plain HTTP.
 	HTTPSProxyURL string
-	// NoProxy is the comma-separated allowlist suitable for use as the
-	// NO_PROXY build arg or env var. The list is sorted and deduped (the
-	// caller's responsibility — Service uses the allowlist verbatim).
+	// NoProxy is the comma-separated value suitable for use as the NO_PROXY
+	// build arg or env var. It contains ONLY loopback addresses
+	// (localhost, 127.0.0.1) and the sidecar proxy alias (valv-proxy).
+	// Allowlist hosts are intentionally absent: the workload routes all
+	// HTTP/HTTPS egress through the sidecar, which enforces the allowlist
+	// internally. Including allowlist hosts in NO_PROXY would cause clients
+	// to attempt direct connections that fail because the internal-only
+	// network has no route to the outside.
 	NoProxy string
 	// NetworkName is the docker network name the container/build attaches
 	// to. Always non-empty on a successful Provision.
@@ -217,7 +222,7 @@ func (s Service) Provision(ctx context.Context, request ProvisionRequest) (Polic
 	material := PolicyMaterial{
 		HTTPProxyURL:  "http://" + strings.TrimSpace(request.ProxyEndpoint),
 		HTTPSProxyURL: "http://" + strings.TrimSpace(request.ProxyEndpoint),
-		NoProxy:       buildNoProxy(request.Allowlist),
+		NoProxy:       buildNoProxy(),
 		NetworkName:   desiredName,
 	}
 	cleanup := func(ctx context.Context) error {
@@ -258,23 +263,20 @@ func networkName(allowlist []string) string {
 	return networkNamePrefix + hex.EncodeToString(h[:6])
 }
 
-// buildNoProxy returns a deterministic NO_PROXY value: comma-separated,
-// sorted, deduped entries from the allowlist. Empty input yields an empty
-// string (caller is expected to have rejected that earlier via Valid()).
-func buildNoProxy(allowlist []string) string {
-	seen := make(map[string]struct{}, len(allowlist))
-	out := make([]string, 0, len(allowlist))
-	for _, h := range allowlist {
-		t := strings.TrimSpace(h)
-		if t == "" {
-			continue
-		}
-		if _, ok := seen[t]; ok {
-			continue
-		}
-		seen[t] = struct{}{}
-		out = append(out, t)
-	}
-	sort.Strings(out)
-	return strings.Join(out, ",")
+// buildNoProxy returns the NO_PROXY value for a closed-default workload
+// container. It contains only loopback exclusions and the sidecar proxy
+// alias so that:
+//
+//   - The sidecar itself is reached directly (no proxy-through-proxy loop).
+//   - Loopback traffic bypasses the proxy (standard no-proxy semantics).
+//   - ALL other egress — including allowlist hosts — flows through the
+//     sidecar, which enforces the allowlist internally.
+//
+// Allowlist hosts must NEVER appear in NO_PROXY: the internal-only network
+// has no direct route to the outside, so a client that bypasses the sidecar
+// for an allowlist host would get a connection failure instead of egress.
+func buildNoProxy() string {
+	entries := []string{"127.0.0.1", "localhost", "valv-proxy"}
+	sort.Strings(entries)
+	return strings.Join(entries, ",")
 }
