@@ -498,3 +498,72 @@ None — existing patterns in `internal/adapters/docker/network.go` provided suf
 - No edits to executor.go (Unit 15.2.5 already added ListNetworks there).
 - No edits to drop dir except PLAN.md state-bit flip and this worklog appendix.
 - No `NetworkConnectRequest` added (Schema Decision 5 cut respected).
+
+## Unit 15.2.5.B.1 — Round 1
+
+**Date:** 2026-06-02
+**Builder backend:** claude-sonnet-4-6 (orchestrator dispatch)
+
+### Files Touched
+
+- `internal/cmd/valv-proxy/allowlist.go` (new, 53 LOC) — `package main`. Two production symbols:
+  - `parseAllowlist(raw string) []string` — splits on comma, lowercases, trims whitespace, deduplicates (map-based O(n)), discards empty entries. First-appearance order preserved.
+  - `hostAllowed(target string, allowed []string) bool` — strips `:port` suffix via `strings.Cut(target, ":")`, lowercases, exact-matches against the provided slice. No wildcards, no CIDR, no scheme/path parsing.
+- `internal/cmd/valv-proxy/allowlist_test.go` (new, 188 LOC) — `package main`. Table-driven tests for both functions.
+- `drops/DROP_15_NETWORK_POLICY/PLAN.md` — Unit 15.2.5.B.1 inline state: `todo` → `in_progress` → `done`.
+
+### VALV_PROXY_ALLOWLIST Separator Choice
+
+**Comma (`,`)**. Rationale: standard for env-var lists in the Docker / Go ecosystem (matches `NO_PROXY` convention). Easy to set in Docker `--env` flags and container env blocks. B.2 and D.1 must honour this choice when building `VALV_PROXY_ALLOWLIST=host1,host2,...` strings.
+
+### Mage Targets Run
+
+- `mage testFunc ./internal/cmd/valv-proxy TestParseAllowlist` → **12 tests PASS** (11 sub-tests + parent).
+- `mage testFunc ./internal/cmd/valv-proxy TestHostAllowed` → **13 tests PASS** (12 sub-tests + parent).
+- `mage testFunc ./internal/cmd/valv-proxy TestHostAllowed_EmptyAllowedList` → **1 test PASS**.
+- `mage testFunc ./internal/cmd/valv-proxy TestHostAllowed_NilAllowedList` → **1 test PASS**.
+- `mage format` → clean (no output, no reformatting needed).
+
+All 4 new test functions GREEN. 27 total tests pass across all invocations. 0 failures.
+
+### Package Decision: `package main`
+
+`internal/cmd/valv-proxy/` is a `package main` package. B.1's symbols (`parseAllowlist`, `hostAllowed`) live in this package. Go's test runner does NOT require `func main()` to be present in the source when running `go test` on a `package main` package — the test binary provides its own entry point. B.2 will add `func main()` to `main.go` in the same package.
+
+### Budget Measurement
+
+| Dimension | Budget | Actual |
+|---|---|---|
+| Production symbols | ≤2 | 2 (`parseAllowlist` + `hostAllowed`) |
+| Production LOC | ≤80 | 53 LOC (`allowlist.go`) |
+| Production files | ≤1 | 1 (`allowlist.go`) |
+
+Under budget on all dimensions. The ~45 LOC estimate in the spec was for code-only; the 53-LOC actual includes fuller doc comments.
+
+### Test Coverage
+
+Table-driven tests cover all required cases from the spec:
+- exact match ✓
+- case-insensitivity (target upper/mixed) ✓
+- port-stripping (`github.com:443` → matches `github.com`) ✓
+- no wildcard (`*.github.com` → false) ✓
+- empty/blank input ✓
+- dedup (exact + case-folded) ✓
+- subdomain is NOT a match (`api.github.com` ≠ `github.com`) ✓
+- empty allowed list blocks all ✓
+- nil allowed list blocks all ✓
+
+### Hylla Feedback
+
+Not used. Unit creates a new package with zero prior committed code; Read/LSP/stdlib were the appropriate tools.
+
+### Atomicity Confirmation
+
+Unit 15.2.5.B.1 is fully self-contained: exactly 2 production symbols, 1 production file, no dependencies on other in-progress units. All 4 test function gates GREEN.
+
+### Notes for B.2
+
+- **Separator:** `VALV_PROXY_ALLOWLIST` is comma-separated. B.2 reads it as `parseAllowlist(os.Getenv("VALV_PROXY_ALLOWLIST"))`.
+- **Port on target:** CONNECT requests arrive as `host:port`; `hostAllowed` handles the port-stripping internally — B.2's handler may pass the raw CONNECT target directly.
+- **IPv6 out of scope:** `strings.Cut(target, ":")` is correct for `host:port` but would split on the first colon of an IPv6 literal (e.g. `[::1]:80`). IPv6 is not a use case per the spec (exact hostname / Docker alias only). B.2 should document this if needed.
+- **`package main`:** B.2 must use `package main` and add `func main()` in `main.go`.

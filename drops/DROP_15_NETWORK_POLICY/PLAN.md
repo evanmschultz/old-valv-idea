@@ -375,7 +375,7 @@ Codex sub-planners returned (4 dispatches, each ≤4 hylla calls; most hit index
 
 New package `internal/cmd/valv-proxy/`. Env-injected runtime config: port via `VALV_PROXY_ADDR` (default `:8080`); allowlist via `VALV_PROXY_ALLOWLIST` (comma-sep exact hosts). Out of scope: wildcards, TLS interception, auth, config-file mounts.
 
-- **15.2.5.B.1** — `internal/cmd/valv-proxy/allowlist.go` + test: `parseAllowlist` + `hostAllowed` (exact-host matcher, case/port-normalized, no wildcards). 2 prod symbols, ~45 LOC, 1 file. blocked_by: none.
+- **15.2.5.B.1** — state: done — `internal/cmd/valv-proxy/allowlist.go` + test: `parseAllowlist` + `hostAllowed` (exact-host matcher, case/port-normalized, no wildcards). 2 prod symbols, ~45 LOC, 1 file. blocked_by: none.
 - **15.2.5.B.2** — `internal/cmd/valv-proxy/main.go` + test: proxy `main` + HTTP/CONNECT handler. Reads `VALV_PROXY_ALLOWLIST` + `VALV_PROXY_ADDR`. 2 prod symbols, ~75 LOC, 1 file. blocked_by: B.1.
 - **15.2.5.B.3** — `internal/cmd/valv-proxy/Dockerfile`: image runs the binary with env-injected config. 0 Go prod symbols, ~20 LOC, 1 file. blocked_by: B.2.
 - **15.2.5.B.4** — `magefile.go` proxy-image build target. 1 build-target symbol, ~35 LOC, 1 file. blocked_by: B.3.
