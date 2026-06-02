@@ -182,6 +182,7 @@ Locked design (do not re-litigate): sidecar-proxy topology with workload attache
 - change: Change existing `Service.Provision` to create/reuse V7 internal network → call `RunContainerDetached` for proxy sidecar → connect proxy to bridge → attach `valv-proxy` alias on internal network → return `PolicyMaterial` with sidecar-alias proxy URLs.
 - acceptance: `mage testPkg ./internal/services/networkpolicy` GREEN. Tests assert operation order: net create/reuse, detached run, bridge connect, internal alias, returned `PolicyMaterial.NetworkName` + proxy URLs + `NO_PROXY`.
 - measurement: 1 changed prod symbol (`Service.Provision`), ~75 prod LOC, 1 prod file. Near LOC ceiling but under budget.
+- qa-routed precondition (from 15.2.5.C falsification, commit `da7ffb5`): promote the `valv-proxy` string literal to a shared `const ProxyAlias = "valv-proxy"` in the networkpolicy package and use it in BOTH `buildNoProxy` (already shipped with the literal — refactor it) AND this unit's `ConnectNetwork` alias, so the `NO_PROXY` exclusion and the real sidecar alias can never diverge. If this pushes D.1 over the LOC ceiling, split the const-introduction into its own micro-unit D.0.
 
 ##### Unit 15.2.5.D.2 — Provision readiness probe
 
@@ -212,6 +213,7 @@ R2 plan-QA finding CF-1: `internal/services/images/service.go:850-908` already c
 - scope: `//go:build integration` test with `EnsureProjectRequest.NoCache=true` + `.valv/tools.toml` `go install`; prove workload is internal-only and reaches sidecar on `valv-proxy`; proxy is on internal+bridge. Empirical Docker Desktop macOS validation. Expected children: G.1 (fixture + Docker availability harness), G.2 (topology assertion), G.3 (successful proxy egress during overlay `go install`).
 - expected paths: integration test files under `internal/services/images` and/or `internal/services/networkpolicy`.
 - measurement: integration test scope spans multiple behavioral assertions → emit sub-planner.
+- qa-routed (from 15.2.5.C falsification, commit `da7ffb5`): when wiring the images service to the real `networkpolicy.Service`, update the stale `NoProxy` fixture in `internal/services/images/service_test.go:1801,1862` — it still hardcodes the OLD inverted value (`github.com,objects.githubusercontent.com,proxy.golang.org,sum.golang.org`); the test passes only because the fake echoes its own input. Replace with `127.0.0.1,localhost,valv-proxy`.
 
 ##### Build order (R2 fold — F removed)
 
