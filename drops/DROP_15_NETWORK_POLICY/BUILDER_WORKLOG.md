@@ -609,3 +609,60 @@ Unit 15.2.5.B.1 is fully self-contained: exactly 2 production symbols, 1 product
 - **Port on target:** CONNECT requests arrive as `host:port`; `hostAllowed` handles the port-stripping internally — B.2's handler may pass the raw CONNECT target directly.
 - **IPv6 out of scope:** `strings.Cut(target, ":")` is correct for `host:port` but would split on the first colon of an IPv6 literal (e.g. `[::1]:80`). IPv6 is not a use case per the spec (exact hostname / Docker alias only). B.2 should document this if needed.
 - **`package main`:** B.2 must use `package main` and add `func main()` in `main.go`.
+
+## Unit 15.2.5.B.3 — Round 1
+
+**Date:** 2026-06-02
+**Builder backend:** claude-sonnet-4-6 (orchestrator dispatch)
+
+### Files Touched
+
+| File | Action | LOC |
+|---|---|---|
+| `internal/cmd/valv-proxy/Dockerfile` | created | 21 |
+| `drops/DROP_15_NETWORK_POLICY/PLAN.md` | state flip B.3 todo→done | — |
+| `drops/DROP_15_NETWORK_POLICY/BUILDER_WORKLOG.md` | append this section | — |
+
+### Dockerfile Design
+
+**Two-stage build:**
+
+- **Stage 1 (builder):** `golang:1.26.1-alpine` — matches `go.mod`'s `go 1.26.1`. Sets `CGO_ENABLED=0 GOOS=linux`, builds with `-trimpath` for reproducible output. Build context is the repo root; source path is `./internal/cmd/valv-proxy`.
+- **Stage 2 (runtime):** `gcr.io/distroless/static-debian12:nonroot` — chosen because (a) the binary is pure Go with no CGO so no libc is needed, (b) distroless/static is ~2 MB (provider images use bookworm-slim because they run apt + node + npm; the proxy sidecar needs none of that), (c) `:nonroot` tag sets UID/GID 65532 automatically without explicit `USER` instruction, satisfying the non-root requirement.
+- **ENV:** `VALV_PROXY_ADDR=:8080` baked as the default listen address. `VALV_PROXY_ALLOWLIST` is intentionally NOT baked — injected at `docker run` time by D.1's `Service.Provision` via `-e VALV_PROXY_ALLOWLIST=<csv>`.
+- **EXPOSE 8080** documents the default port.
+- **ENTRYPOINT ["/valv-proxy"]** — exec form, no shell.
+
+### Docker Build Verification
+
+Command run from `/Users/evanschultz/Documents/Code/hylla/valv/main`:
+
+```
+docker buildx build -f internal/cmd/valv-proxy/Dockerfile -t valv-proxy:test .
+```
+
+Result: **SUCCESS** — both stages completed cleanly. Key steps from build output:
+- Stage 1: `golang:1.26.1-alpine` pulled, `go build -trimpath` ran in 3.7s, no errors.
+- Stage 2: `distroless/static-debian12:nonroot` layers extracted, binary copied.
+- Final image exported as `valv-proxy:test`.
+
+**Cleanup:** `docker image rm valv-proxy:test` was BLOCKED by the hook (`ta_action_gate.py` denied Bash execution). The test image `valv-proxy:test` is left on the local Docker daemon. **Orchestrator action required:** run `docker image rm valv-proxy:test` after reviewing this unit.
+
+### Measured LOC
+
+`internal/cmd/valv-proxy/Dockerfile`: 21 lines (including blank/comment lines). Within the ~20 LOC budget.
+
+### D.1 Unknowns / Contracts D.1 Must Honor
+
+1. **Image name/tag:** The Dockerfile does not bake a tag. B.4 will add a `mage proxyImage` target that builds and tags with a deterministic name (e.g. `valv-proxy:latest` or a versioned label). D.1's `Service.Provision` must use the SAME tag that B.4 produces when calling `docker run`. The convention is not yet frozen — B.4 decides; D.1 must be blocked_by B.4 and reference the tag B.4 exports.
+2. **Exposed port:** The sidecar listens on the value of `VALV_PROXY_ADDR` (default `:8080`). D.1 must inject `-e VALV_PROXY_ADDR=:<port>` if it wants a non-default port, and must connect the workload container to the proxy via the Docker network using the sidecar's container hostname — not via a published host port. No `-p` flag is needed or expected.
+3. **`VALV_PROXY_ALLOWLIST` injection:** D.1 passes `-e VALV_PROXY_ALLOWLIST=<csv-hosts>` at `docker run` time. The format is comma-separated exact hosts (as defined in B.1's `parseAllowlist`). D.1 must construct this value from the project's network-policy allowlist before calling `docker run`.
+4. **Non-root UID:** The runtime user is UID 65532 (distroless nonroot). The sidecar does not write to disk; no volume mounts are needed for its operation.
+
+### Hylla Feedback
+
+Not applicable. No committed Go symbols were introduced in this unit. Dockerfile was authored using Read/Bash evidence only (go.mod version, main.go content, service.go Dockerfile patterns).
+
+### Atomicity Confirmation
+
+Unit 15.2.5.B.3 is fully self-contained: 0 Go production symbols, 1 file created, docker build green. No mage gate applies.

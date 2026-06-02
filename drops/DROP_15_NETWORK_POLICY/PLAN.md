@@ -377,7 +377,7 @@ New package `internal/cmd/valv-proxy/`. Env-injected runtime config: port via `V
 
 - **15.2.5.B.1** — state: done — `internal/cmd/valv-proxy/allowlist.go` + test: `parseAllowlist` + `hostAllowed` (exact-host matcher, case/port-normalized, no wildcards). 2 prod symbols, ~45 LOC, 1 file. blocked_by: none.
 - **15.2.5.B.2** — state: done — `internal/cmd/valv-proxy/main.go` + test: proxy `main` + HTTP/CONNECT handler. Reads `VALV_PROXY_ALLOWLIST` + `VALV_PROXY_ADDR`. 2 prod symbols, ~75 LOC, 1 file. blocked_by: B.1.
-- **15.2.5.B.3** — `internal/cmd/valv-proxy/Dockerfile`: image runs the binary with env-injected config. 0 Go prod symbols, ~20 LOC, 1 file. blocked_by: B.2.
+- **15.2.5.B.3** — state: done — `internal/cmd/valv-proxy/Dockerfile`: image runs the binary with env-injected config. 0 Go prod symbols, ~20 LOC, 1 file. blocked_by: B.2.
 - **15.2.5.B.4** — `magefile.go` proxy-image build target. 1 build-target symbol, ~35 LOC, 1 file. blocked_by: B.3.
 - **Cross-drop:** 15.2.5.D.1 build is now ALSO blocked_by 15.2.5.B.4 (image must exist locally before sidecar integration tests).
 
