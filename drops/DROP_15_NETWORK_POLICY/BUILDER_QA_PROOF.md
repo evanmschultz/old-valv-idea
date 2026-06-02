@@ -640,3 +640,46 @@ func buildNoProxy() string {
 ### Verdict
 
 `verdict: pass` — all three acceptance criteria proven against committed code at `4d20566` with file:line + quoted evidence; allowlist correctly retained for `networkName` hash and removed only from NO_PROXY; mage gate re-run GREEN (27/27); path discipline clean.
+
+## Unit 15.2.5.B.1 — Round 1
+
+`verdict: pass`
+
+Committed at `ea18fc5` (`feat(valv-proxy): allowlist matcher (parseAllowlist + hostAllowed)`). Scope: `internal/cmd/valv-proxy/allowlist.go` (53 LOC) + `allowlist_test.go` (188 LOC). Re-confirmed independently: `mage testPkg ./internal/cmd/valv-proxy` → 27/27 PASS, 0 fail.
+
+### Criterion 1 — parseAllowlist comma-split + lowercase + trim + dedup + discard-empty (Schema Decision 1: exact-host, lowercase, deduped)
+
+`allowlist.go:18-34`. `strings.Split(raw, ",")` (line 19) comma-splits; per entry `h := strings.ToLower(strings.TrimSpace(p))` (line 23) lowercases + trims; `if h == "" { continue }` (line 24) discards empties (leading/trailing/consecutive commas, whitespace-only); `seen` map (lines 20,27-30) dedups; `out` preserves first-appearance order. Matches Schema Decision 1 (PLAN.md:33 "exact-host, lowercase, deduped"). PROVEN.
+
+### Criterion 2 — hostAllowed strips :port, case-folds, EXACT-match (no wildcard/subdomain/CIDR)
+
+`allowlist.go:41-53`. `host, _, hasPort := strings.Cut(target, ":")` + `if !hasPort { host = target }` (lines 42-45) strips `:port`; `host = strings.ToLower(host)` (line 46) case-folds; loop `if a == host { return true }` (lines 47-51) is exact string equality only — no `strings.HasSuffix`, no wildcard glob, no `net.ParseCIDR`. So `api.github.com` ≠ `github.com` and `*.github.com` never matches. PROVEN.
+
+### Criterion 3 — test coverage of all required cases
+
+`allowlist_test.go`:
+- exact match — `TestHostAllowed` "exact match" (95-98) → true.
+- case-insensitivity — "case insensitive target upper" (110-113), "...mixed with port" (115-118); `TestParseAllowlist` "lowercases entries" (35-38).
+- port-stripping `github.com:443`→`github.com` — "exact match with port stripped" (100-103), "exact match port 80" (105-108).
+- wildcard NON-match — "wildcard pattern is not matched" `*.github.com`→false (130-133).
+- subdomain NON-match `api.github.com`≠`github.com` — "subdomain does not match parent" (120-123) + with port (125-128) → false.
+- empty/blank input — `TestParseAllowlist` "empty string" (15-18), "blank whitespace only" (20-23); `TestHostAllowed` "empty target" (145-148); empty-list `TestHostAllowed_EmptyAllowedList` (172-180) + nil `TestHostAllowed_NilAllowedList` (183-188).
+- dedup — "deduplicates exact entries" (45-48), "deduplicates case-folded entries" (50-53), "empty entries from consecutive commas discarded" (55-58).
+
+All required cases present and GREEN. PROVEN.
+
+### Path Discipline
+
+`git diff --stat ea18fc5^ ea18fc5 -- internal/cmd/valv-proxy/`: only `allowlist.go` + `allowlist_test.go` (declared `paths`). Full commit also touches PLAN.md (state flip todo→done) + BUILDER_WORKLOG.md. No out-of-scope code. CLEAN.
+
+### Tools Used
+
+- `git show --stat ea18fc5`; `git diff --stat ea18fc5^ ea18fc5 -- internal/cmd/valv-proxy/`
+- `Read` allowlist.go (53 LOC), allowlist_test.go (188 LOC), PLAN.md (Schema Decision 1 line 33, unit spec line 378), BUILDER_WORKLOG.md (502-570), WORKFLOW.md
+- `wc -l` allowlist.go=53, allowlist_test.go=188
+- `mage testPkg ./internal/cmd/valv-proxy` → 27/27 PASS
+- `grep` for unit refs + section headings
+
+### Verdict
+
+`verdict: pass` — all three acceptance criteria proven against committed code at `ea18fc5` with file:line + quoted evidence; matcher is exact-host/lowercase/port-stripped/no-wildcard per Schema Decision 1; all required test cases present; mage gate re-run GREEN (27/27); path discipline clean.

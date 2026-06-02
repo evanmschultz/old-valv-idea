@@ -677,3 +677,151 @@ None.
 | NIT: stale images fixture | NIT only — images test is internally consistent; misleading fixture for future readers; recommend fix in follow-up |
 
 **Verdict: pass** — no unmitigated counterexample found. Unit 15.2.5.C is correctly implemented and within budget.
+
+## Unit 15.2.5.B.1 — Round 1
+
+**Date:** 2026-06-02
+**QA Falsification backend:** claude-sonnet-4-6 (Build-QA agent, `ta-go-qa-falsification` persona)
+**Verdict:** pass — no unmitigated counterexample found. No CRITICAL bypass. All fail-closed invariants hold.
+
+### Attack 1 — Fail-closed invariant (highest priority)
+
+**Attack:** `hostAllowed` with nil/empty allowed list must return `false` for any target. Also: whitespace-only target, case-fold onto entry, trailing-dot FQDN, uppercase, leading/trailing spaces on target.
+
+**Traces:**
+
+- `hostAllowed("github.com", nil)`: loop iterates zero times over nil slice -> `false`. MITIGATED.
+- `hostAllowed("github.com", []string{})`: loop iterates zero times -> `false`. MITIGATED.
+- `hostAllowed("", []string{"github.com"})`: no `:` -> host = "" -> lowercase -> no match -> `false`. MITIGATED.
+- `hostAllowed("  ", []string{"github.com"})`: no `:` -> host = "  " -> lowercase -> no match -> `false`. `hostAllowed` does NOT trim the target's surrounding whitespace. A caller passing spaces around a hostname gets a false-deny (safe), not a bypass.
+- `hostAllowed("github.com.", []string{"github.com"})`: no `:` -> host = "github.com." -> "github.com." != "github.com" -> `false`. Trailing-dot FQDN is a safe deny. MITIGATED.
+- `hostAllowed("GitHub.COM", []string{"github.com"})`: no `:` -> lowercase -> "github.com" -> matches -> `true`. Correct allow. MITIGATED.
+- `hostAllowed("GitHub.COM:443", []string{"github.com"})`: strings.Cut -> before="GitHub.COM" -> lowercase -> "github.com" -> matches -> `true`. Correct allow with port-strip. MITIGATED.
+
+**Verdict: MITIGATED.** Fail-closed on nil, empty, and all whitespace-target inputs. No CRITICAL bypass.
+
+### Attack 2 — Port-strip parsing: IPv6 and edge cases
+
+**Attack:** `strings.Cut(target, ":")` finds the FIRST colon. For IPv6 literals this mangles the host portion. Does the mangling ever produce a false ALLOW (bypass)?
+
+**Traces:**
+
+- `hostAllowed("[::1]:443", allowed)`: first colon is at index 2 inside bracket -> before="[" -> host = "[" -> no match -> `false`. False-deny (safe). MITIGATED.
+- `hostAllowed("[2001:db8::1]:443", allowed)`: first `:` inside bracket -> before="[2001" -> host = "[2001" -> no match -> `false`. False-deny (safe). MITIGATED.
+- `hostAllowed("[::1]", allowed)`: no `:` -> host = "[::1]" -> no match -> `false`. MITIGATED.
+- `hostAllowed(":443", allowed)`: strings.Cut -> before="" -> host = "" -> no match -> `false`. MITIGATED.
+- `hostAllowed("github.com:", allowed)`: strings.Cut -> before="github.com" -> host = "github.com" -> MATCHES if in allowed -> `true`. Correct: empty port still strips colon and matches hostname. MITIGATED.
+- `hostAllowed("https://github.com", allowed)`: strings.Cut -> before="https" -> host = "https" -> no match -> `false`. Scheme-prefixed URL safely denied. MITIGATED.
+
+**Key finding on IPv6:** IPv6 literals are always false-denied, never false-allowed. The design spec (Schema Decision 1) says exact hostname / Docker alias only — no IP addresses. Builder worklog B.1 explicitly documents this accepted gap (line 568).
+
+**Verdict: MITIGATED.** No false-allow from any IPv6 or malformed input. Only false-denies — safe for closed-by-default policy.
+
+### Attack 3 — Subdomain/suffix bypass
+
+**Attack:** can `evil-github.com`, `github.com.evil.com`, `github.completer.com`, or `notgithub.com` match `"github.com"` via any looser predicate?
+
+**Trace:** The comparison in `hostAllowed` is strictly `a == host` (allowlist.go:48) after both sides have been lowercased. There is no `strings.Contains`, `strings.HasSuffix`, `strings.HasPrefix`, or regex match anywhere in the function. Every candidate:
+
+- "evil-github.com" != "github.com" -> `false`. MITIGATED.
+- "github.com.evil.com" != "github.com" -> `false`. MITIGATED.
+- "github.completer.com" != "github.com" -> `false`. MITIGATED.
+- "notgithub.com" != "github.com" -> `false`. MITIGATED.
+
+**Verdict: MITIGATED.** Exact-string equality is the only comparison path. No substring, suffix, or prefix match possible.
+
+### Attack 4 — parseAllowlist robustness: dedup + case-fold consistency
+
+**Attack:** is there a case-fold mismatch between `parseAllowlist` (lowercases entries) and `hostAllowed` (lowercases target)?
+
+**Trace:**
+
+- `parseAllowlist("GitHub.COM")` -> strings.ToLower(strings.TrimSpace(...)) -> "github.com". Stored as "github.com".
+- `hostAllowed("github.com:443", []string{"github.com"})` -> extracts "github.com" -> strings.ToLower -> "github.com" -> matches stored "github.com" -> `true`.
+
+Both normalize to lowercase with `strings.ToLower` before comparison. Symmetric and consistent. Dedup uses `map[string]struct{}` keyed on the lowercased+trimmed form — `GitHub.COM` and `github.com` hash to the same key and deduplicate correctly.
+
+**Verdict: MITIGATED.** No case-fold inconsistency. Dedup is correct.
+
+### Attack 5 — Budget re-measurement
+
+Builder claims: 2 prod symbols / 53 LOC (worklog; spec said ~45) / 1 prod file.
+
+Actual measurement:
+- `wc -l internal/cmd/valv-proxy/allowlist.go` -> 53. Matches worklog claim.
+- Production symbols: `parseAllowlist` (line 18) + `hostAllowed` (line 41). Exactly 2. Under the 3-symbol ceiling.
+- Production files: `allowlist.go` only. `allowlist_test.go` is test-only. 1 prod file vs 1-file ceiling.
+- LOC: 53 vs 80-line ceiling. Under budget. Builder worklog correctly notes spec's "~45 LOC" was code-only estimate excluding doc comments.
+
+**Verdict: CONFIRMED WITHIN BUDGET.** 2 symbols / 53 LOC / 1 file — under all ceilings.
+
+### Attack 6 — Coverage adequacy for the 70% drop-end floor
+
+The production code has 2 functions, 53 lines. All branches of both functions are exercised by the 27 tests (12 for `TestParseAllowlist`, 13 for `TestHostAllowed`, 1 for `TestHostAllowed_EmptyAllowedList`, 1 for `TestHostAllowed_NilAllowedList`):
+
+- `parseAllowlist`: empty-entry skip branch, dedup skip branch, and main append path all exercised. All branches covered.
+- `hostAllowed`: with-port branch, without-port branch, loop match returning `true`, loop falling through to `return false`, nil-list path, empty-list path. All branches covered.
+
+This package will comfortably clear the 70% floor at drop-end `mage test-func --cover`.
+
+**Verdict: MITIGATED.** All branches exercised. Coverage will exceed 70%.
+
+### YAGNI Check
+
+PASS. `parseAllowlist` and `hostAllowed` are the minimum symbols B.2 needs. No wildcard logic, no CIDR, no scheme/path parsing, no config-file support. Both are small, single-purpose, zero speculative surface.
+
+### Hidden Dep Check
+
+PASS. Both functions are pure (no I/O, no shared state, no init-time effects). Import: only `"strings"` (stdlib). No package-level mutable state. No goroutines.
+
+### Concurrency Check
+
+PASS. Both functions operate on local variables only. `parseAllowlist` creates a fresh `map` and slice on every call; `hostAllowed` reads its slice argument without mutation. No races possible. `-race` flag active in mage gate.
+
+### Confirmed Counterexamples
+
+None. No CRITICAL bypass found.
+
+### NITs
+
+1. **`hostAllowed` does not trim whitespace from the `target` parameter.** A target of "  github.com  " would produce host = "  github.com  " -> no match -> `false`. False-deny only (safe). The HTTP CONNECT target per spec has no surrounding spaces. B.2 passing the raw CONNECT target is safe. Document for B.2 review.
+
+2. **IPv6 literals are silently denied, not explicitly rejected.** An operator adding a bracket-form IPv6 address to `VALV_PROXY_ALLOWLIST` would find connections silently blocked. The design spec prohibits IP addresses (Schema Decision 1). Builder worklog B.1 documents this explicitly.
+
+### Unknowns (route to future units or orchestrator)
+
+1. **B.2 should pass raw CONNECT target to `hostAllowed`.** Per NIT 1, the standard HTTP CONNECT target is space-free per spec. Raw pass-through is correct.
+
+2. **IPv6 allowlist operator error.** If an operator adds "[::1]" to `VALV_PROXY_ALLOWLIST`, the bracket form would never match `[::1]:443` CONNECT requests (because `strings.Cut` extracts "[" not "[::1]"). Safe deny, but confusing. Unit 15.1's `EffectiveAllowlist` host validation should catch this at CLI-entry level.
+
+### Evidence
+
+- `git show ea18fc5 --stat` — confirmed files changed: `allowlist.go` (53 lines new) + `allowlist_test.go` (188 lines new) + `BUILDER_WORKLOG.md` + `PLAN.md`.
+- `Read /Users/evanschultz/Documents/Code/hylla/valv/main/internal/cmd/valv-proxy/allowlist.go` — full production file read.
+- `Read /Users/evanschultz/Documents/Code/hylla/valv/main/internal/cmd/valv-proxy/allowlist_test.go` — full test file read.
+- `Read /Users/evanschultz/Documents/Code/hylla/valv/main/drops/DROP_15_NETWORK_POLICY/BUILDER_WORKLOG.md:502-569` — B.1 builder worklog.
+- `Read /Users/evanschultz/Documents/Code/hylla/valv/main/drops/DROP_15_NETWORK_POLICY/PLAN.md:374-382` — B.1 spec.
+- `wc -l /Users/evanschultz/Documents/Code/hylla/valv/main/internal/cmd/valv-proxy/allowlist.go` -> 53.
+- `ls /Users/evanschultz/Documents/Code/hylla/valv/main/internal/cmd/valv-proxy/` -> only `allowlist.go` + `allowlist_test.go`.
+- `mage test-func ./internal/cmd/valv-proxy TestParseAllowlist` -> 12 tests PASS.
+- `mage test-func ./internal/cmd/valv-proxy TestHostAllowed` -> 13 tests PASS.
+- `mage test-func ./internal/cmd/valv-proxy TestHostAllowed_EmptyAllowedList` -> 1 test PASS.
+- `mage test-func ./internal/cmd/valv-proxy TestHostAllowed_NilAllowedList` -> 1 test PASS.
+- Manual code trace for IPv6, scheme-prefixed, trailing-dot, subdomain, and suffix bypass inputs.
+- `Read /Users/evanschultz/Documents/Code/hylla/valv/main/drops/DROP_15_NETWORK_POLICY/BUILDER_QA_FALSIFICATION.md` — prior rounds for cross-drop context.
+
+### Summary
+
+| Attack | Result |
+|---|---|
+| 1. Fail-closed: nil/empty/whitespace/trailing-dot/uppercase targets | MITIGATED — always returns false on nil/empty list; no bypass on any tested variant |
+| 2. Port-strip: IPv6, multi-colon, empty-host, scheme-prefix | MITIGATED — all produce false-deny (safe); no false-allow on any malformed input |
+| 3. Subdomain/suffix bypass | MITIGATED — exact `==` equality only; no Contains/HasSuffix path exists |
+| 4. Case-fold consistency between parse and match | MITIGATED — both normalize to lowercase via `strings.ToLower`; symmetric |
+| 5. Budget re-measurement | CONFIRMED — 2 symbols / 53 LOC / 1 file — under all ceilings |
+| 6. Coverage adequacy for 70% floor | MITIGATED — all branches exercised; will clear 70% floor |
+| YAGNI check | PASS — minimal; no speculative surface |
+| Hidden dep check | PASS — pure functions, no shared state, stdlib-only import |
+| Concurrency check | PASS — value-in/value-out; race detector clean |
+
+**Verdict: pass** — no unmitigated counterexample found. Unit 15.2.5.B.1 is correctly implemented, fail-closed on all tested inputs, and within budget.
