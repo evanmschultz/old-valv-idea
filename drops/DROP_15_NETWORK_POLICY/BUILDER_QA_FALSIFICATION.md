@@ -332,3 +332,168 @@ The codex run spent a few calls probing for a ta cascade record (its shared pers
 - Confirmed counterexamples blocking PASS: 0.
 
 **Verdict: pass.**
+
+## Unit 15.2.5.A — Round 1
+
+**Date:** 2026-06-02
+**QA Falsification backend:** claude-sonnet-4-6 (Build-QA agent, `ta-go-qa-falsification` persona)
+**Verdict:** `pass` — no unmitigated counterexample found.
+
+### Attack 1 — Interface-widening breakage (highest priority)
+
+**Attack:** `NetworkExecutor` widened with two new methods; `mage testPkg ./internal/services/networkpolicy` does NOT catch a compile break in any sibling package that constructs a `networkpolicy.Service` with a concrete executor or a local fake.
+
+**Evidence gathered (exhaustive search):**
+
+1. `find . -name "*.go" | xargs grep -l "NetworkExecutor|networkpolicy"` returns exactly 4 files:
+   - `internal/services/networkpolicy/service.go` — interface definition + `Options`
+   - `internal/services/networkpolicy/service_test.go` — `fakeNetworkExecutor` + compile-time guard
+   - `internal/services/images/service.go` — defines its own `NetworkPolicy` interface (NOT `NetworkExecutor`); references `networkpolicy` package name only in comments
+   - `internal/services/images/service_integration_test.go` — constructs `networkpolicy.New(networkpolicy.Options{Executor: dockerExec})` at line 257 where `dockerExec` is `docker.NewExecutor(...)` (i.e. a `docker.Executor` value)
+
+2. The compile-time guard `var _ NetworkExecutor = docker.Executor{}` at `service_test.go:573` explicitly confirms `docker.Executor` satisfies the widened interface. This is a build-time assertion; the package fails to compile if it does not hold.
+
+3. The integration test at `service_integration_test.go:257` passes `docker.Executor` as `Options.Executor`. This is the only non-`fakeNetworkExecutor` site that constructs `networkpolicy.Service` and it uses the production adapter. No other type in the codebase implements or is required to implement `NetworkExecutor`.
+
+4. `internal/services/run`, `internal/services/claude`, `internal/services/codex`, `internal/cli` and `internal/adapters/providers` all define their own distinct local `Executor` interfaces with narrower method sets. None reference `NetworkExecutor`.
+
+5. `grep -rn "NetworkExecutor" --include="*_test.go" . | grep -v "networkpolicy/service_test"` returns empty — no sibling-package test file defines a type that must satisfy `NetworkExecutor`.
+
+
+**Verdict: MITIGATED.** The interface is consumer-side in `internal/services/networkpolicy`. No sibling package implements `NetworkExecutor` directly; the only implementers are `docker.Executor` (covered by compile-time guard) and `fakeNetworkExecutor` (test-only in the same package). The widening cannot cause a cross-package compile break.
+
+### Attack 2 — Signature mismatch between interface and docker.Executor
+
+**Attack:** verify `RunContainerDetached` and `ConnectNetwork` signatures exactly match between `NetworkExecutor` (service.go) and `docker.Executor` (executor.go).
+
+Interface (`service.go:68,72`):
+- `RunContainerDetached(ctx context.Context, request docker.ContainerRunRequest) (string, error)`
+- `ConnectNetwork(ctx context.Context, request docker.NetworkConnectRequest) error`
+
+`docker.Executor` (`executor.go:75,96`):
+- `func (e Executor) RunContainerDetached(ctx context.Context, request ContainerRunRequest) (string, error)`
+- `func (e Executor) ConnectNetwork(ctx context.Context, request NetworkConnectRequest) error`
+
+After package-prefix expansion the signatures are byte-for-byte identical in all parameter types, return shapes, and context positions. `mage testFunc` runs confirmed PASS for both packages. The compile-time guard at `service_test.go:573` would break the package build on any drift.
+
+**Verdict: MITIGATED.**
+
+### Attack 3 — Consumer contract (D.1 seam fit)
+
+**Attack:** does the seam match what 15.2.5.D.1 will actually call?
+
+D.1 spec (PLAN.md line 182): create/reuse V7 internal network, call `RunContainerDetached` for proxy sidecar, connect proxy to bridge, attach `valv-proxy` alias on internal network, return `PolicyMaterial`.
+
+- `RunContainerDetached` returns `(string, error)` — the string is the container ID. D.1 passes this ID to `ConnectNetwork` as `NetworkConnectRequest.Container`. Interface supplies this shape.
+- `ConnectNetwork` accepts `docker.NetworkConnectRequest` with `Network`, `Container`, and `Aliases []string` (confirmed at `network.go:120-128`). D.1 connects the sidecar to bridge with the `valv-proxy` alias — both fields are present in the request type.
+- The returned container ID is already trimmed: `SystemRunner.Output` at `os_runner.go:87` returns `strings.TrimSpace(stdout.String())`; `executor.go:90` applies a second `strings.TrimSpace` — idempotent, benign. D.1 can pass the ID directly to `ConnectNetwork.Container` without further sanitization.
+
+**Verdict: MITIGATED.** The seam is correctly shaped for D.1's sidecar lifecycle sequence.
+
+### Attack 4 — Multi-line docker output / ErrOutputUnsupported reachability
+
+**Attack:** what if `docker run -d` emits a warning line on stdout before the container ID, or the runner's Output returns multi-line content?
+
+Analysis:
+- `SystemRunner.Output` returns `strings.TrimSpace(stdout.String())` at `os_runner.go:87` — captures ONLY stdout, not stderr. Docker `run -d` sends warning messages to stderr; the container ID is the sole stdout content.
+- `RunContainerDetached` applies a second `strings.TrimSpace(out)` at `executor.go:90`. Since `SystemRunner.Output` already trimmed, this is a no-op for normal output.
+- Theoretical edge case: if Docker ever emits multiple lines to stdout with `run -d`, `strings.TrimSpace` on the full multi-line string strips outer whitespace but preserves internal newlines. The caller (D.1) would receive a string like `<warn>
+<id>`; `BuildNetworkConnectArgs` only does outer-whitespace trim on `Container` (`network.go:175`), so the internal newline survives into a broken container ID arg. This is theoretical — Docker `run -d` consistently outputs only the container ID on stdout in all known versions.
+- `ErrOutputUnsupported`: both production runners (`SystemRunner` at `os_runner.go:60` and `QuietRunner` at `os_runner.go:167`) implement `Output`. In production, `NewExecutor(docker.NewSystemRunner(...))` is always used (confirmed at `cli/codex.go:127`, `cli/claude.go:122`, `cli/run.go:184`). The sentinel path is unreachable in current production wiring but correctly exercised by `TestExecutorRunContainerDetachedOutputUnsupported` (PASS confirmed).
+
+**Verdict: ACCEPTED RISK.** Multi-line stdout from `docker run -d` is theoretical. The double-trim is idempotent and benign. `ErrOutputUnsupported` is unreachable in production but is a valid correctness guard for any future non-outputting runner. No corrective action required.
+
+### Attack 5 — forvar lint at service_test.go:143
+
+**Attack:** is the forvar lint at `service_test.go:143` masking a real loop-variable capture bug?
+
+Line 143: `tc := tc` inside `for _, tc := range cases { tc := tc; t.Run(tc.name, func(t *testing.T) { t.Parallel() ... }) }`.
+
+Analysis: as of Go 1.22 the loop variable capture issue is fixed by the language spec (loopvar promoted to default). Valv uses Go 1.26+ (CLAUDE.md). The `tc := tc` shadowing pattern was the standard pre-1.22 fix and is now a no-op. Static analysis tools flag it as "copying variable is unneeded" (SA4006). There is no loop-variable capture bug here; the test is correct with or without the shadow. This pattern pre-dates this unit's additions.
+
+**Verdict: BENIGN NIL.** Pre-existing test-only nit.
+
+### Attack 6 — Budget re-measurement
+
+**Actual diff measurement (production files only):**
+
+| File | Lines before | Lines after | Net delta |
+|---|---|---|---|
+| `internal/adapters/docker/executor.go` | 113 | 137 | +24 lines |
+| `internal/services/networkpolicy/service.go` | 272 | 280 | +8 lines |
+
+**Total production LOC delta: +32 lines** (well under the 80-line ceiling).
+
+**Production symbols added:**
+1. `Executor.RunContainerDetached` — new method on existing struct
+2. `NetworkExecutor.RunContainerDetached` — new method signature on interface
+3. `NetworkExecutor.ConnectNetwork` — new method signature on interface (`ConnectNetwork` already existed on `docker.Executor`; this only adds it to the consumer-side interface)
+
+**Count: 3 production symbols at the 3-symbol ceiling.** Builder's measurement is accurate.
+
+**Production files: 2** (executor.go + service.go) — under the 3-file ceiling.
+
+**Verdict: CONFIRMED WITHIN BUDGET.** All three dimensions (symbols, LOC, files) are at or below the `aa130dd` limits.
+
+### YAGNI Check
+
+Both new symbols (`RunContainerDetached` + `ConnectNetwork` on the interface) have a concrete caller in D.1 per the locked sidecar-proxy topology. `RunContainerDetached` is needed to launch the sidecar in detached mode and retrieve its container ID; `ConnectNetwork` is needed to attach the sidecar to bridge with the `valv-proxy` alias. Neither is speculative. The `RunContainerDetached` implementation reuses the existing `outputter` typecast pattern established by `ListNetworks` and `RemoveContainer`.
+
+**Verdict: PASS.**
+
+### Hidden Dep Check
+
+- No new global state introduced. `ErrOutputUnsupported` is an existing sentinel (`types.go:11`); `RunContainerDetached` returns it under the same condition as `ListNetworks`.
+- No init-time side effects.
+- `Executor` is a value receiver throughout; no new pointer receivers.
+- No error swallowing: `BuildRunArgs` validation errors and `outputter.Output` errors are returned directly. Leaf errors need no `%w` chain; runner errors carry context from `SystemRunner`'s `fmt.Errorf` wrapper.
+
+**Verdict: PASS.**
+
+### Concurrency Check
+
+`RunContainerDetached` has no shared mutable state. Value-receiver method; delegates to the runner. Runner is set at `NewExecutor` time and never mutated. No goroutines spawned. `mage testFunc` runs with `-race`. **PASS.**
+
+### Confirmed Counterexamples
+
+None.
+
+### Unknowns (route to future units or orchestrator)
+
+1. **Multi-line stdout from `docker run -d` (theoretical).** D.1 could defensively split on `\n` and take the last non-empty line when processing the returned container ID. Low priority; accepted for now.
+
+2. **`ErrOutputUnsupported` reachability in production.** Currently unreachable because all production runners implement `Output`. If a future unit introduces a non-outputting runner and accidentally wires it to `networkpolicy.Service`, the sentinel path surfaces at runtime. Accepted for current wiring.
+
+### Evidence
+
+- `git diff b22cdc7~1 b22cdc7` — full diff read
+- `git show b22cdc7:internal/adapters/docker/executor.go | wc -l` and `git show b22cdc7~1:...|wc -l` — LOC measurement (+24 executor.go, +8 service.go)
+- `Read /Users/evanschultz/Documents/Code/hylla/valv/main/internal/services/networkpolicy/service.go` — interface shape, lines 55-73
+- `Read /Users/evanschultz/Documents/Code/hylla/valv/main/internal/adapters/docker/executor.go` — method signatures lines 75 and 96, outputter pattern
+- `Read /Users/evanschultz/Documents/Code/hylla/valv/main/internal/adapters/docker/os_runner.go:60-88` — Output returns stdout-only + already-trims
+- `Read /Users/evanschultz/Documents/Code/hylla/valv/main/internal/services/images/service.go:100-154` — confirms distinct `NetworkPolicy` interface, no `NetworkExecutor` dep
+- `Read /Users/evanschultz/Documents/Code/hylla/valv/main/internal/services/images/service_integration_test.go:245-363` — confirms `docker.NewExecutor` passed as `networkpolicy.Options.Executor`
+- `Read /Users/evanschultz/Documents/Code/hylla/valv/main/internal/services/networkpolicy/service_test.go:571-573` — compile-time guard
+- `Read /Users/evanschultz/Documents/Code/hylla/valv/main/internal/services/networkpolicy/service_test.go:130-155` — forvar lint context
+- `Read /Users/evanschultz/Documents/Code/hylla/valv/main/drops/DROP_15_NETWORK_POLICY/PLAN.md:147-155,176-184` — unit spec + D.1 consumer contract
+- `grep -rn "NetworkExecutor" --include="*.go" .` — exhaustive implementer search (4 files total)
+- `grep -rn "docker.NewExecutor" --include="*.go" . | grep -v "_test.go"` — production construction sites
+- `grep -rn "NetworkExecutor" --include="*_test.go" . | grep -v "networkpolicy/service_test"` — sibling-package fake audit (empty)
+- `mage testFunc ./internal/adapters/docker TestExecutorRunContainerDetachedReturnsContainerID` — PASS
+- `mage testFunc ./internal/adapters/docker TestExecutorRunContainerDetachedOutputUnsupported` — PASS
+- `mage testFunc ./internal/services/networkpolicy TestNew_RequiresExecutor` — PASS
+- `mage testFunc ./internal/services/networkpolicy TestProvision_CreatesNetworkOnFreshHost` — PASS
+- `Read /Users/evanschultz/Documents/Code/hylla/valv/main/internal/services/run/service.go:35-40` — run.Executor interface shape (confirms no NetworkExecutor dep)
+
+### Summary
+
+| Attack | Result |
+|---|---|
+| 1. Interface-widening cross-package breakage | MITIGATED — only one external implementer; compile-time guard confirms satisfaction |
+| 2. Signature mismatch | MITIGATED — signatures match exactly; guard breaks build on drift |
+| 3. Consumer contract (D.1 seam fit) | MITIGATED — return type and method signatures correctly shaped for D.1 sidecar lifecycle |
+| 4. Multi-line output / ErrOutputUnsupported | ACCEPTED RISK — Docker behavior is ID-only stdout; double-trim is idempotent; production runner always has Output |
+| 5. forvar lint at service_test.go:143 | BENIGN NIL — loop-variable fix pattern; pre-existing test-only nit |
+| 6. Budget re-measurement | CONFIRMED — 3 symbols / +32 LOC / 2 files — at or under all ceilings |
+
+**Verdict: pass** — no unmitigated counterexample found. Unit 15.2.5.A is correctly implemented and within budget.

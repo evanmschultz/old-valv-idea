@@ -539,3 +539,58 @@ Commit `d4ca96a` — additive network-connect surface for the proxy sidecar (aft
 - N1: package coverage 67.9% < CLAUDE.md's 70% aspiration. The mage gate is set to 60% via a documented TODO (`magefile.go:23`); this is pre-existing project debt tracked for DROP_17 / Unit 11.5 (coverage-floor bump), not introduced by 15.2-R3. Gate is green.
 
 **Verdict: pass-with-nits** — all five acceptance bullets met; gate green; sole NIT is tracked pre-existing coverage debt.
+
+## Unit 15.2.5.A — Round 1
+
+**Date:** 2026-06-02
+**QA Proof backend:** claude-native (orchestrator dispatch, opus)
+**Verdict:** `pass`
+**Commit:** `b22cdc7` (`git diff b22cdc7~1 b22cdc7`)
+
+### Path Discipline
+
+`git diff b22cdc7~1 b22cdc7 --stat` touches exactly: `internal/adapters/docker/executor.go` (+24), `internal/services/networkpolicy/service.go` (+8), `internal/adapters/docker/network_test.go` (+95), `internal/services/networkpolicy/service_test.go` (+22/-3), plus drop-dir `PLAN.md` (state flip) + `BUILDER_WORKLOG.md`. Production files match the spec's declared `paths` exactly (`executor.go` + `service.go`). No out-of-scope production edits.
+
+### Per-Acceptance Audit
+
+**A1. `Executor.RunContainerDetached(ctx, ContainerRunRequest) (string, error)` exists, reuses `BuildRunArgs` + `ContainerRunRequest.Detached`, returns trimmed container id via runner output path, wraps command errors.**
+
+- `internal/adapters/docker/executor.go:75-91`: signature `func (e Executor) RunContainerDetached(ctx context.Context, request ContainerRunRequest) (string, error)`.
+- Reuses `BuildRunArgs` at line 82 (`args, err := BuildRunArgs(request)`). `BuildRunArgs` → `buildRunLikeArgs("run", request, true)` (`types.go:133-134`) which emits `-d` when `request.Detached` is set (`types.go:147-149`). The `Detached` reuse is structural — the method does not re-derive the flag.
+- Returns trimmed id: line 90 `return strings.TrimSpace(out), nil` over the `outputter.Output` result (line 86). Correct: docker `run -d` appends a newline to the printed container id.
+- Command-error path: line 86-89 returns the runner's `Output` error directly (`out, err := outputter.Output(...); if err != nil { return "", err }`). PASS.
+
+**A2. `outputter`/`ErrOutputUnsupported` path correct (sentinel when runner lacks Output).**
+
+- `executor.go:76-81`: runtime type-asserts `e.runner` to `interface{ Output(context.Context, []string) (string, error) }`; `if !ok { return "", ErrOutputUnsupported }`. Mirrors the committed `RemoveContainer` (line 30-32) and `ListNetworks` (line 113-117) patterns exactly. `ErrOutputUnsupported` is the package sentinel at `types.go:11`. The check fires BEFORE `BuildRunArgs`, so a non-outputting runner returns the sentinel even with a valid request (matches `TestExecutorRunContainerDetachedOutputUnsupported`, which uses a valid `valv-proxy:latest` req + `CommandRunnerFunc`). PASS.
+
+**A3. `NetworkExecutor` interface includes BOTH `RunContainerDetached` AND `ConnectNetwork`; signatures match concrete `docker.Executor` exactly.**
+
+- `service.go:58-73`: interface now lists `CreateNetwork`/`RemoveNetwork`/`ListNetworks` (pre-existing) + `RunContainerDetached(ctx context.Context, request docker.ContainerRunRequest) (string, error)` (line 68) + `ConnectNetwork(ctx context.Context, request docker.NetworkConnectRequest) error` (line 72).
+- Signature match vs concrete: `Executor.RunContainerDetached` (`executor.go:75`) = `(ctx context.Context, request ContainerRunRequest) (string, error)` — identical modulo the `docker.` qualifier from the consumer package. `Executor.ConnectNetwork` (`executor.go:96`) = `(ctx context.Context, request NetworkConnectRequest) error` — identical. Exact-match is machine-proven by the compile-time guard (A4) + green gate. PASS.
+
+**A4. `fakeNetworkExecutor` satisfies the widened interface; `var _ NetworkExecutor = docker.Executor{}` guard present and valid.**
+
+- `service_test.go:71-77` (`RunContainerDetached`) + `:79-82` (`ConnectNetwork`) add the two new stubs; the fake records `runDetachedCalls`/`connectCalls` and honors `runDetachedErr`/`runDetachedResult` fields (`:24-32`). All five interface methods present on the fake.
+- Compile-time guard at `service_test.go:573`: `var _ NetworkExecutor = docker.Executor{}`. This is a hard compile assertion that the production `docker.Executor` satisfies the WIDENED interface (incl. both new methods). It compiled — `mage testPkg ./internal/services/networkpolicy` GREEN proves both the fake and the production adapter satisfy the interface. PASS.
+
+**A5. The 4 new tests genuinely cover happy-path id return, output-error wrapping, ErrOutputUnsupported, build/validation error.**
+
+- `TestExecutorRunContainerDetachedReturnsContainerID` (`network_test.go:646-665`): `outputRunner{output: "abc123def456\n"}` → asserts trimmed `"abc123def456"`. Covers happy-path id return + trim. GENUINE.
+- `TestExecutorRunContainerDetachedOutputError` (`:667-685`): `outputRunner{outErr: sentinel}` → asserts `errors.Is(err, sentinel)`. Covers output-error propagation. GENUINE (note: the implementation returns the runner error verbatim, not `%w`-wrapped — `errors.Is` still holds for an identity-returned sentinel; the test is correct for the actual contract).
+- `TestExecutorRunContainerDetachedOutputUnsupported` (`:687-704`): `CommandRunnerFunc` (no `Output`) + valid req → asserts `errors.Is(err, ErrOutputUnsupported)`. Covers the sentinel branch. GENUINE.
+- `TestExecutorRunContainerDetachedBuildError` (`:706-728`): empty `Image.Repository` → asserts substring `"image is required"` (the `ContainerRunRequest.Valid()` error at `types.go:110`). Covers validation-before-runner. GENUINE — and the empty-repo path is reached only because the outputter check passes first (the `outputRunner` does implement `Output`), so this genuinely exercises the `BuildRunArgs` error return at `executor.go:82-85`.
+- `outputRunner` helper (`:638-645`) implements both `Run` and `Output`, so the build-error test isolates the validation path. All 4 are real, non-tautological. PASS.
+
+### Gate Re-Run (QA-verified, not builder-trusted)
+
+- `mage testPkg ./internal/adapters/docker` → **86 tests, 86 passed, 0 failed** (matches worklog claim of 86; baseline 82 + 4 new).
+- `mage testPkg ./internal/services/networkpolicy` → **23 tests, 23 passed, 0 failed** (count unchanged — fake stubs are compile-time only, as the worklog states).
+
+### Budget / Symbol Grounding
+
+- 3 production symbols: `Executor.RunContainerDetached` (new) + `NetworkExecutor.RunContainerDetached` + `NetworkExecutor.ConnectNetwork` (interface method additions). At the 3-symbol ceiling but within it. `ConnectNetwork` on the concrete `docker.Executor` was pre-existing (`executor.go:96`, committed R2) — this unit only exposed it on the consumer interface, not re-implemented. Production LOC delta +32 (executor +24, service +8), 2 production files. Under the 80-LOC / 3-file budget.
+
+### Verdict
+
+`verdict: pass` — all five acceptance items proven against committed code at `b22cdc7` with file:line evidence; both mage gates re-run GREEN; path discipline clean; interface↔concrete signature match machine-proven by the compile-time guard.
