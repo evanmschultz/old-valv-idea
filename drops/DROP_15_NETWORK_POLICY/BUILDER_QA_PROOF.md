@@ -683,3 +683,94 @@ All required cases present and GREEN. PROVEN.
 ### Verdict
 
 `verdict: pass` — all three acceptance criteria proven against committed code at `ea18fc5` with file:line + quoted evidence; matcher is exact-host/lowercase/port-stripped/no-wildcard per Schema Decision 1; all required test cases present; mage gate re-run GREEN (27/27); path discipline clean.
+
+## Unit 15.2.5.B.2 — Round 1
+
+**verdict: pass**
+
+Committed at `2f70e89` (`feat(valv-proxy): fail-closed CONNECT/HTTP allowlist proxy server`). Files: `internal/cmd/valv-proxy/main.go` (103 LOC) + `internal/cmd/valv-proxy/main_test.go` (255 LOC), both new. `allowlist.go` (53 LOC, B.1) untouched — `hostAllowed`/`parseAllowlist` consumed as the committed B.1 contract.
+
+### Acceptance Criterion 1 — `hostAllowed` checked BEFORE any network I/O on both paths; denied → 403/close, no dial
+
+**CONNECT path.** `main.go:30-35` — the first statement inside the CONNECT branch is the allowlist check, before any `WriteHeader`, `Hijack`, or `Dial`:
+
+```go
+if r.Method == http.MethodConnect {
+    if !hostAllowed(r.Host, allowed) {
+        http.Error(w, "forbidden by allowlist", http.StatusForbidden)
+        return
+    }
+    w.WriteHeader(http.StatusOK)   // line 36 — only reached on allow
+    ...
+    targetConn, err := net.Dial("tcp", r.Host)  // line 50 — dial only after allow
+```
+
+The `return` at line 34 guarantees no `net.Dial` (line 50) executes on deny. 403 via `http.StatusForbidden`.
+
+**Plain HTTP path.** `main.go:77-80` — first statement after the CONNECT branch, before the reverse-proxy dial:
+
+```go
+if !hostAllowed(r.Host, allowed) {
+    http.Error(w, "forbidden by allowlist", http.StatusForbidden)
+    return
+}
+...
+httputil.NewSingleHostReverseProxy(target).ServeHTTP(w, r)  // line 87 — only on allow
+```
+
+`hostAllowed` is the committed B.1 matcher (`allowlist.go:41-53`): port-stripped (`strings.Cut(target, ":")`), lowercased, exact-match, no wildcards — so `r.Host` of form `github.com:443` is correctly normalized. No host pre-processing before the call (B.1 owns port-strip). FAIL-CLOSED: every path not passing `hostAllowed` returns 403 or silently closes.
+
+### Acceptance Criterion 2 — CONNECT: 200 + hijack + net.Dial + bidirectional io.Copy with correct goroutine/WaitGroup/CloseWrite teardown
+
+`main.go:36-73`:
+- `w.WriteHeader(http.StatusOK)` (line 36) + optional `Flusher.Flush()` (37-39).
+- Hijack via `w.(http.Hijacker)` (40-47); non-hijackable or hijack error → `return` (silent close), no dial. `defer clientConn.Close()` (48).
+- `net.Dial("tcp", r.Host)` (50); dial error → `return` (52), `defer targetConn.Close()` (54).
+- Bidirectional copy: `wg.Add(2)` (57), two goroutines each `defer wg.Done()` (58-71), `io.Copy(targetConn, clientConn)` and `io.Copy(clientConn, targetConn)`. Each goroutine calls `CloseWrite()` on its destination `*net.TCPConn` after the copy completes (61-63, 68-70) so the peer sees EOF and its copy terminates. `wg.Wait()` (72) blocks until both finish before the deferred closes fire — no premature teardown.
+
+Test proof: `TestNewProxyHandler_CONNECT_AllowedHostTunnels` (`main_test.go:39-81`) stands up a real TCP backend, issues a raw CONNECT, asserts 200 (69-71), and reads a sentinel back through the tunnel (74-80) — proves the full hijack+dial+copy round-trip.
+
+### Acceptance Criterion 3 — main() reads VALV_PROXY_ADDR (default :8080) + VALV_PROXY_ALLOWLIST, parses via parseAllowlist, serves the handler
+
+`main.go:91-103`:
+```go
+addr := os.Getenv("VALV_PROXY_ADDR")
+if addr == "" { addr = ":8080" }                          // default :8080 (line 92-95)
+allowed := parseAllowlist(os.Getenv("VALV_PROXY_ALLOWLIST"))  // line 96
+...
+http.ListenAndServe(addr, newProxyHandler(allowed))       // line 99
+```
+Matches PLAN.md line 376/379 env contract exactly. `parseAllowlist` is the committed B.1 helper. Handler injected with the parsed slice (testable without env reads).
+
+### Acceptance Criterion 4 — test coverage
+
+| Required case | Test | Evidence |
+|---|---|---|
+| CONNECT allowed → tunnels to backend | `TestNewProxyHandler_CONNECT_AllowedHostTunnels` | `main_test.go:39-81` real TCP backend, 200 + sentinel through tunnel |
+| CONNECT denied → 403, no dial | `TestNewProxyHandler_CONNECT_DeniedHost` | `main_test.go:85-130` asserts 403 (124) AND `dialCount == 0` (127-129) |
+| plain HTTP allowed | `TestNewProxyHandler_PlainHTTP_AllowedHost` | `main_test.go:134-170` proxied GET returns backend body |
+| plain HTTP denied | `TestNewProxyHandler_PlainHTTP_DeniedHost` | `main_test.go:174-208` asserts 403 |
+| empty allowlist denies all | `TestNewProxyHandler_EmptyAllowlistDeniesAll` | `main_test.go:212-255` two sub-tests (CONNECT + PlainHTTP) both 403 |
+
+The CONNECT-denied test's `dialCount == 0` assertion is strong fail-closed evidence: the backend's `Accept` goroutine never fires.
+
+### Mage Gate (re-run independently)
+
+- `mage testPkg ./internal/cmd/valv-proxy` → **34/34 pass, 0 fail** (confirms builder's 34/34 claim).
+- Per-function via `mage test-func` (full import path `github.com/evanmschultz/valv/internal/cmd/valv-proxy`): all 5 named functions pass individually — `..._CONNECT_AllowedHostTunnels` (1/1), `..._CONNECT_DeniedHost` (1/1), `..._PlainHTTP_AllowedHost` (1/1), `..._PlainHTTP_DeniedHost` (1/1), `..._EmptyAllowlistDeniesAll` (3/3 incl. sub-tests).
+
+### Path Discipline
+
+`git diff-tree 2f70e89` production files: only `internal/cmd/valv-proxy/main.go` + `main_test.go` (+ tracking mds PLAN.md/BUILDER_WORKLOG.md). No out-of-scope edits. 2 prod symbols (`newProxyHandler` + `main`), 1 prod file — within the 15.2.5.B.2 budget (~75 LOC / 2 symbols / 1 file).
+
+### Tools Used
+
+- `git show --stat 2f70e89`, `git show 2f70e89 --stat -- internal/cmd/valv-proxy/`, `git diff-tree --no-commit-id --name-only -r 2f70e89` — commit + path discipline.
+- `Read` main.go (103 LOC), main_test.go (255 LOC), allowlist.go (53 LOC), PLAN.md sections 370-414, BUILDER_WORKLOG.md lines 1-50, WORKFLOW.md.
+- `grep` for `hostAllowed`/`parseAllowlist` defs + unit refs + verdict anchors; `wc -l` for LOC counts.
+- `mage testPkg ./internal/cmd/valv-proxy` -> 34/34 GREEN.
+- `mage test-func github.com/evanmschultz/valv/internal/cmd/valv-proxy <Func>` x5 — all named functions GREEN individually.
+
+### Verdict
+
+`verdict: pass` — fail-closed allowlist check precedes all network I/O on both CONNECT and plain-HTTP paths (no dial on deny, proven by `dialCount==0`); CONNECT teardown (hijack/dial/dual-goroutine io.Copy/CloseWrite/WaitGroup) correct; `main()` env contract matches spec; all 4 required test cases present; mage gate independently GREEN (34/34, plus 5/5 per-function); path discipline clean.

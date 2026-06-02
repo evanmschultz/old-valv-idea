@@ -825,3 +825,178 @@ None. No CRITICAL bypass found.
 | Concurrency check | PASS — value-in/value-out; race detector clean |
 
 **Verdict: pass** — no unmitigated counterexample found. Unit 15.2.5.B.1 is correctly implemented, fail-closed on all tested inputs, and within budget.
+
+## Unit 15.2.5.B.2 — Round 1
+**Date:** 2026-06-02
+**QA Falsification backend:** claude-sonnet-4-6 (Build-QA agent, `ta-go-qa-falsification` persona)
+**Verdict:** pass — no unmitigated counterexample found. No CRITICAL fail-open path. All security invariants hold.
+
+
+### Attack 1 — Fail-closed ordering on CONNECT path (CRITICAL)
+
+**Attack:** Is `hostAllowed` checked BEFORE `net.Dial` on every CONNECT code path? Is there any path that dials a non-allowlisted host?
+
+**Trace:** `r.Method == CONNECT` branch enters at line 30. Line 32: `hostAllowed(r.Host, allowed)` — if false, `http.Error(w, ..., 403)` + `return`. Only if true does execution continue to line 36 (`w.WriteHeader(200)`), line 40 (hijack check), line 44 (hijack call), and finally line 50 (`net.Dial("tcp", r.Host)`). Every early-exit path (non-hijackable at line 42, hijack error at line 46) returns before line 50. `net.Dial` is unconditionally gated behind the allowlist check at line 32.
+
+Concrete denied CONNECT trace: `r.Host = "denied.example.com"`, `allowed = ["github.com"]` — `hostAllowed` returns false at line 32, `http.Error(403)` fires, `return` exits. Line 50 never executes.
+
+**Verdict: MITIGATED.** Strictly fail-closed on CONNECT. No code path reaches `net.Dial` without passing the allowlist check.
+
+### Attack 2 — Fail-closed ordering on plain HTTP path (CRITICAL)
+
+**Attack:** Is `hostAllowed` checked BEFORE the reverse-proxy forward for every non-CONNECT method, including unknown methods?
+
+**Trace:** All requests where `r.Method != CONNECT` fall to the plain-HTTP branch at line 76. Line 77: `hostAllowed(r.Host, allowed)` — if false, `http.Error(w, ..., 403)` + `return`. Only if true does execution continue to line 85 (`target := ...`) and line 87 (`httputil.NewSingleHostReverseProxy(target).ServeHTTP(w, r)`). Line 87 is only reachable after the check at line 77 passes.
+
+Unknown method trace: `r.Method = "BLAH"`, `r.Host = "denied.example.com"` — falls to plain-HTTP branch (not CONNECT), `hostAllowed` returns false, `http.Error(403)` + `return`. Line 87 never executes. Confirmed empirically: `TestAttack_UnknownMethod_DeniedHost_Returns403` PASS.
+
+**Verdict: MITIGATED.** Strictly fail-closed on all non-CONNECT methods including unknown ones.
+
+### Attack 3 — Host-field desync: check vs forward use same field?
+
+**Attack:** Does the code check one host field but forward to a different one, enabling a split attack (check `github.com`, dial `evil.com`)?
+
+**Trace (CONNECT path):** Line 32 checks `r.Host`; line 50 dials `r.Host`. Same field. No split possible.
+
+**Trace (plain HTTP path):** Line 77 checks `r.Host`; line 85 builds `target := &url.URL{Scheme: scheme, Host: r.Host}`; line 87 forwards to `target`. The forward target host is built from `r.Host` — same field as the check. `httputil.NewSingleHostReverseProxy(target)` rewrites `r.URL.Host` to the target before dialling, so even if `r.URL.Host` differed from `r.Host`, the proxy overrides it.
+
+Desync attack trace: raw HTTP with `GET http://evil.com/ HTTP/1.1\r\nHost: github.com\r\n` would set `r.URL.Host = "evil.com"` and `r.Host = "github.com"`. Check: `hostAllowed("github.com", ...) = true`. Forward: `target.Host = r.Host = "github.com"`. The proxy forwards to `github.com`, not `evil.com`. No bypass.
+
+**Verdict: MITIGATED.** Both check and dial/forward use `r.Host`. No field split possible.
+
+### Attack 4 — CONNECT 200-before-hijack-failure: data tunnelled to unchecked host?
+
+**Attack:** `w.WriteHeader(http.StatusOK)` fires at line 36 AFTER the allowlist check passes (line 32). If hijack subsequently fails, does the client receive tunnelled data from any backend?
+
+**Trace:** After line 36 (200 written), hijack is attempted. If `!ok` (lines 40-43) or `hj.Hijack()` errors (lines 44-46), `return` fires immediately. `net.Dial` at line 50 is never reached. `defer clientConn.Close()` on line 48 has not yet been reached (hijack failed before), so the HTTP server manages connection cleanup. The client sees 200 then EOF — a failed tunnel signal, NOT a successful forward. No data from any backend flows.
+
+Production relevance: `http.ListenAndServe` serves HTTP/1.1 over TCP by default. Go HTTP/1.1 `ResponseWriter` always implements `http.Hijacker`. The non-hijackable branch (lines 40-43) is effectively dead code in production but is a correct defensive check for edge cases (e.g. middleware wrapping the ResponseWriter).
+
+Empirical confirmation: `TestAttack_CONNECT_200ThenHijackFailure_NoForward` used `httptest.ResponseRecorder` (which does NOT implement `http.Hijacker`) — asserted `dialCount == 0` and `rec.Code == 200`. PASS. Net.Dial never fires despite 200 being written.
+
+**Verdict: MITIGATED.** 200-then-close is the correct tunnel-failure signal; no data forwarded.
+
+### Attack 5 — Plain-HTTP empty Host field
+
+**Attack:** What happens if `r.Host` is empty for a plain-HTTP request? Is it forwarded to a default target or denied?
+
+**Trace:** `hostAllowed("", allowed)` — `strings.Cut("", ":")` returns `("", "", false)` (no colon found), so `host = ""` — `strings.ToLower("") = ""` — no match in any allowlist — returns `false`. The handler fires `http.Error(w, ..., 403)` + `return`. Line 87 never executes.
+
+Empirical confirmation: `TestAttack_CONNECT_EmptyHost_Denied` set `req.Host = ""` and confirmed `rec.Code == 403`. PASS.
+
+**Verdict: MITIGATED.** Empty host is always denied; no forwarding to any target.
+
+### Attack 6 — Goroutine / fd leak on error paths
+
+**Attack:** On `net.Dial` failure after a successful hijack — is the hijacked client conn closed? On one-directional EOF in the bidirectional copy — do both goroutines terminate, or can one block forever?
+
+**Trace (hijack failure path):** If `!ok` or `hj.Hijack()` errors at lines 40-46, the function returns before any `defer clientConn.Close()` on line 48 is registered (hijack never succeeded). The HTTP server manages the connection. No goroutines started. No fd leak.
+
+**Trace (net.Dial failure path):** `defer clientConn.Close()` at line 48 is registered before line 50. If `net.Dial` fails at line 51, function returns and the defer closes clientConn. No goroutines started. No fd leak.
+
+**Trace (bidirectional copy):** Two goroutines at lines 58-71; `wg.Wait()` at line 72 blocks until both complete. Termination: goroutine 1 copies client-to-target; when clientConn reaches EOF (client closes), `io.Copy` returns, then `CloseWrite(targetConn)` signals EOF to target on its incoming side; target closes its side; goroutine 2's `io.Copy(clientConn, targetConn)` returns; both goroutines call `wg.Done()`. `wg.Wait()` unblocks; defers close both conns.
+
+`CloseWrite` non-TCPConn risk: if the hijacked conn or the dialled conn is not a `*net.TCPConn`, the type assertion silently no-ops. The opposite goroutine's `io.Copy` may then block indefinitely waiting for EOF. For HTTP/1.1 over TCP (the production sidecar path), both conns are `*net.TCPConn` and `CloseWrite` fires correctly. Theoretical risk only for non-TCP transports.
+
+**Verdict: MITIGATED** for production HTTP/1.1-over-TCP path. **ACCEPTED RISK** for theoretical non-TCPConn configurations (noted as Unknown #1).
+
+### Attack 7 — Budget re-measurement
+
+**Attack:** Verify the PLAN spec (2 prod symbols, ~75 LOC, 1 file) and builder worklog claim (82 non-blank non-comment lines) against the actual code.
+
+**Measurement:** `main.go` has 103 total lines. Blank lines: 7. Comment-only lines (lines starting with `//`): 16. 103 - 7 - 16 = **80 non-blank non-comment production lines**. The builder worklog claimed 82 — overcounted by 2. The difference is immaterial; 80 is AT the 80-line ceiling, not over.
+
+- Production symbols: `newProxyHandler` (line 28) and `main` (line 91). Exactly 2. Under the 3-symbol ceiling.
+- Production files: `main.go` only. `main_test.go` is test-only. 1 file vs 1-file ceiling.
+
+Note: `allowlist.go` (34 non-blank non-comment lines, 2 symbols) was B.1 scope and shipped in the same commit (`2f70e89`). The builder correctly tracked B.1 and B.2 as separate units in the worklog with separate mage gates. The combined commit is a mechanical consolidation, not a budget violation for B.2.
+
+**Verdict: CONFIRMED WITHIN BUDGET.** 2 symbols / 80 LOC (at ceiling) / 1 file — all within spec.
+
+### Attack 8 — Coverage for the drop-end floor
+
+**Attack:** Are the error/deny branches (dial failure, hijack-unsupported) exercised by shipped tests, or will uncovered branches drop below the floor?
+
+Effective floor is **60%%** (not 70%%): `magefile.go:24` sets `coverageThreshold = 60.0` with a TODO to restore 70.0. The `testPkg` target does not enforce coverage — the gate runs only in the full-suite `cover` / `test` targets (orchestrator-only per discipline). Shipped tests cover: CONNECT allowed tunnel, CONNECT denied (403), plain-HTTP allowed forward, plain-HTTP denied (403), empty-allowlist denies all.
+
+Uncovered branches:
+1. Lines 40-43: non-hijackable `ResponseWriter` path.
+2. Lines 44-46: `hj.Hijack()` error return.
+3. Lines 50-53: `net.Dial` failure return.
+4. Lines 81-83: `r.TLS != nil` schema path (always plain HTTP in tests).
+
+Estimated coverage: 70-80%%  (happy+deny paths fully covered; 4 error branches each 2-3 lines uncovered). This clears the 60%% gate. Confirm at drop-end.
+
+**Verdict: LIKELY ADEQUATE** for the 60%% floor. Drop-end full-suite confirmation required.
+
+### YAGNI Check
+
+PASS. `newProxyHandler` and `main` are the minimum two symbols the unit spec requires. No middleware abstraction, no config struct, no speculative retry/timeout logic, no plugin interface. The inline closure for the handler keeps the symbol count at 2 while keeping the code readable. The `r.TLS` check adds 2 LOC of correctness handling with no speculative risk.
+
+### Hidden Dep Check
+
+PASS. No package-level mutable state introduced. `newProxyHandler` is a pure constructor returning a closure that captures the `allowed []string` slice — the slice is immutable (no mutation path in the handler). `main` reads two env vars (`VALV_PROXY_ADDR`, `VALV_PROXY_ALLOWLIST`) and calls `http.ListenAndServe`. No init-time side effects. No shared global state between requests.
+
+### Concurrency Check
+
+PASS. The bidirectional copy goroutines (lines 58-71) operate on separate connections with no shared mutable state between them. `sync.WaitGroup` correctly tracks completion; `defer` closes fire after `wg.Wait()` so goroutines complete before connections close. No race possible on the connection objects themselves (each goroutine has exclusive access to its write direction). Race detector active (`-race` flag in `mage test-func`); all 5 shipped test functions PASS under `-race`.
+
+### Confirmed Counterexamples
+
+None. No CRITICAL fail-open found.
+
+### NITs
+
+1. **Builder LOC count off by 2.** Worklog claims "82 non-blank non-comment lines" for `main.go`; actual count is 80 (103 total - 7 blank - 16 comment-only = 80). Immaterial — 80 is at the ceiling, not over.
+2. **Non-TCPConn `CloseWrite` no-op:** if either hijacked conn or dialled conn is not a `*net.TCPConn`, `CloseWrite` is silently skipped and the opposite goroutine may block indefinitely waiting for EOF. Not a production concern (HTTP/1.1 over TCP is always `*net.TCPConn` in the sidecar deployment).
+3. **Four uncovered branches** (non-hijackable, hijack-error, dial-error, `r.TLS` path). Adding tests for these would strengthen robustness and push coverage from ~75% toward ~90%. Not required for the 60% gate.
+4. **B.1 and B.2 shipped in one commit** (`2f70e89`). The PLAN declares them separate droplets. The builder correctly ran per-unit `mage test-func` gates and documented them separately in the worklog. The joint commit is a mechanical consolidation artifact, not a scope or budget violation.
+
+### Unknowns (route to orchestrator)
+
+1. **`CloseWrite` no-op for future TLS sidecar.** If the sidecar ever serves TLS, the hijacked conn would be a `*tls.Conn` and `CloseWrite` would not fire. The current topology uses plain HTTP (`http://valv-proxy:8080`), so clients use plain HTTP to reach the proxy and CONNECT tunnels are dialled over plain TCP. Accepted for current deployment; flag if sidecar TLS is added.
+2. **Drop-end coverage confirmation.** The `testPkg` target does not enforce the coverage floor. The orchestrator must run the full-suite `cover` / `test` target at drop-end to confirm `internal/cmd/valv-proxy` clears the 60% gate.
+
+### Evidence
+
+- `git show 2f70e89 --stat` — confirmed 4 files changed: `main.go` (+103), `main_test.go` (+255), `allowlist.go` (+53), `allowlist_test.go` (+188), `BUILDER_WORKLOG.md`, `PLAN.md`.
+- `Read /Users/evanschultz/Documents/Code/hylla/valv/main/internal/cmd/valv-proxy/main.go` — full production file (103 lines).
+- `Read /Users/evanschultz/Documents/Code/hylla/valv/main/internal/cmd/valv-proxy/main_test.go` — full test file (255 lines).
+- `Read /Users/evanschultz/Documents/Code/hylla/valv/main/internal/cmd/valv-proxy/allowlist.go` — full allowlist file (53 lines).
+- `Read /Users/evanschultz/Documents/Code/hylla/valv/main/drops/DROP_15_NETWORK_POLICY/PLAN.md` — B.2 unit spec at plan line 380.
+- `Read /Users/evanschultz/Documents/Code/hylla/valv/main/drops/DROP_15_NETWORK_POLICY/BUILDER_WORKLOG.md:1-46` — B.2 builder design notes + budget measurement.
+- `Read /Users/evanschultz/Documents/Code/hylla/valv/main/magefile.go` (lines 22-30, 140-168, 185-193) — `testPkg` runs without `-cover`; `coverageThreshold = 60.0`.
+- `grep -cE` for blank + comment-only lines in `main.go` — 7 + 16 = 23 excluded lines; 103 - 23 = 80 prod LOC.
+- `ls /Users/evanschultz/Documents/Code/hylla/valv/main/internal/cmd/valv-proxy/` — 4 files confirmed (after attack test cleanup).
+- `Read /Users/evanschultz/Documents/Code/hylla/valv/main/drops/DROP_15_NETWORK_POLICY/BUILDER_QA_FALSIFICATION.md` — prior rounds for cross-drop context.
+- Attack tests written, run via `mage test-func`, then deleted (scratch tests):
+  - `mage test-func github.com/evanmschultz/valv/internal/cmd/valv-proxy TestAttack_CONNECT_200ThenHijackFailure_NoForward` — PASS
+  - `mage test-func github.com/evanmschultz/valv/internal/cmd/valv-proxy TestAttack_UnknownMethod_DeniedHost_Returns403` — PASS
+  - `mage test-func github.com/evanmschultz/valv/internal/cmd/valv-proxy TestAttack_CONNECT_EmptyHost_Denied` — PASS
+- Shipped test functions confirmed PASS via `mage test-func`:
+  - `TestNewProxyHandler_CONNECT_AllowedHostTunnels` — PASS
+  - `TestNewProxyHandler_CONNECT_DeniedHost` — PASS
+  - `TestNewProxyHandler_PlainHTTP_AllowedHost` — PASS
+  - `TestNewProxyHandler_PlainHTTP_DeniedHost` — PASS
+  - `TestNewProxyHandler_EmptyAllowlistDeniesAll` — PASS
+  - `TestHostAllowed_EmptyAllowedList` — PASS
+- Manual code trace for all 8 attack vectors: fail-closed CONNECT, fail-closed plain-HTTP, host-field desync, 200-before-hijack, empty-host, goroutine/fd leak, budget, coverage.
+- `/tmp/valv-qa-b1/falsif_backup.md` — backup created before truncation + append operations.
+
+### Summary
+
+| Attack | Result |
+|---|---|
+| 1. Fail-closed CONNECT ordering (CRITICAL) | MITIGATED — `hostAllowed` at line 32; `net.Dial` unreachable without passing check |
+| 2. Fail-closed plain-HTTP ordering (CRITICAL) | MITIGATED — `hostAllowed` at line 77; forward unreachable without passing check |
+| 3. Host-field desync (check vs dial/forward) | MITIGATED — both check and dial/forward use `r.Host`; no split possible |
+| 4. 200-before-hijack-failure leaks tunnel | MITIGATED — `net.Dial` never fires on hijack failure; empirically confirmed |
+| 5. Empty Host field forwarded | MITIGATED — `hostAllowed("")` always returns false |
+| 6. Goroutine / fd leak on error paths | MITIGATED for production TCP; ACCEPTED RISK for theoretical non-TCPConn |
+| 7. Budget re-measurement | CONFIRMED — 2 symbols / 80 LOC (at ceiling) / 1 file |
+| 8. Coverage for 60% floor | LIKELY ADEQUATE — happy+deny paths covered; 4 error branches not covered; drop-end confirm needed |
+| YAGNI check | PASS — minimal 2-symbol design |
+| Hidden dep check | PASS — no global mutable state |
+| Concurrency check | PASS — WaitGroup + defer; `-race` clean |
+
+**Verdict: pass** — no unmitigated counterexample found. Unit 15.2.5.B.2 is correctly implemented and fail-closed on all critical security paths. The proxy is safe to use as the closed-network boundary for the sidecar topology.
