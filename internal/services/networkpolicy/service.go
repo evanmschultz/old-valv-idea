@@ -62,6 +62,14 @@ type NetworkExecutor interface {
 	// filter (key=value). The returned slice may be empty when no matches
 	// exist; errors from the underlying docker invocation are wrapped.
 	ListNetworks(ctx context.Context, label string) ([]string, error)
+	// RunContainerDetached launches a container in detached mode and returns
+	// the container ID from Docker's stdout. Used to start the proxy sidecar
+	// container (Schema Decision 5). The request must have Detached set true.
+	RunContainerDetached(ctx context.Context, request docker.ContainerRunRequest) (string, error)
+	// ConnectNetwork attaches a running container to an additional network
+	// with optional aliases. Used to connect the proxy sidecar to the bridge
+	// network so it can reach the internet (Schema Decision 5).
+	ConnectNetwork(ctx context.Context, request docker.NetworkConnectRequest) error
 }
 
 // Options configures a Service.

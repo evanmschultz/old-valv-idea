@@ -2,6 +2,7 @@ package docker
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -630,5 +631,99 @@ func TestExecutorConnectNetworkReturnsBuildError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "network is required") {
 		t.Fatalf("ConnectNetwork() error = %q, want substring %q", err.Error(), "network is required")
+	}
+}
+
+// outputRunner is a CommandRunner that also implements the Output interface,
+// returning a configurable string and error on each call. Used to test
+// Executor methods that capture docker stdout (e.g. RunContainerDetached).
+type outputRunner struct {
+	output string
+	outErr error
+}
+
+func (r *outputRunner) Run(_ context.Context, _ []string) error { return nil }
+func (r *outputRunner) Output(_ context.Context, _ []string) (string, error) {
+	return r.output, r.outErr
+}
+
+func TestExecutorRunContainerDetachedReturnsContainerID(t *testing.T) {
+	t.Parallel()
+
+	const wantID = "abc123def456"
+	runner := &outputRunner{output: wantID + "\n"}
+	exec := NewExecutor(runner)
+
+	req := ContainerRunRequest{
+		Image:    ImageRef{Repository: "valv-proxy:latest"},
+		Detached: true,
+	}
+	got, err := exec.RunContainerDetached(context.Background(), req)
+	if err != nil {
+		t.Fatalf("RunContainerDetached() error = %v", err)
+	}
+	if got != wantID {
+		t.Fatalf("RunContainerDetached() = %q, want %q", got, wantID)
+	}
+}
+
+func TestExecutorRunContainerDetachedOutputError(t *testing.T) {
+	t.Parallel()
+
+	sentinel := errors.New("docker daemon unavailable")
+	runner := &outputRunner{outErr: sentinel}
+	exec := NewExecutor(runner)
+
+	req := ContainerRunRequest{
+		Image:    ImageRef{Repository: "valv-proxy:latest"},
+		Detached: true,
+	}
+	_, err := exec.RunContainerDetached(context.Background(), req)
+	if err == nil {
+		t.Fatalf("RunContainerDetached() error = nil, want wrapped error")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("RunContainerDetached() error = %v, want errors.Is sentinel", err)
+	}
+}
+
+func TestExecutorRunContainerDetachedOutputUnsupported(t *testing.T) {
+	t.Parallel()
+
+	// CommandRunnerFunc does not implement Output — should return ErrOutputUnsupported.
+	exec := NewExecutor(CommandRunnerFunc(func(_ context.Context, _ []string) error {
+		return nil
+	}))
+
+	req := ContainerRunRequest{
+		Image:    ImageRef{Repository: "valv-proxy:latest"},
+		Detached: true,
+	}
+	_, err := exec.RunContainerDetached(context.Background(), req)
+	if err == nil {
+		t.Fatalf("RunContainerDetached() error = nil, want ErrOutputUnsupported")
+	}
+	if !errors.Is(err, ErrOutputUnsupported) {
+		t.Fatalf("RunContainerDetached() error = %v, want errors.Is ErrOutputUnsupported", err)
+	}
+}
+
+func TestExecutorRunContainerDetachedBuildError(t *testing.T) {
+	t.Parallel()
+
+	// Empty image repository triggers a validation error before the runner is invoked.
+	runner := &outputRunner{}
+	exec := NewExecutor(runner)
+
+	req := ContainerRunRequest{
+		Image:    ImageRef{Repository: ""},
+		Detached: true,
+	}
+	_, err := exec.RunContainerDetached(context.Background(), req)
+	if err == nil {
+		t.Fatalf("RunContainerDetached() error = nil, want validation error")
+	}
+	if !strings.Contains(err.Error(), "image is required") {
+		t.Fatalf("RunContainerDetached() error = %q, want substring %q", err.Error(), "image is required")
 	}
 }

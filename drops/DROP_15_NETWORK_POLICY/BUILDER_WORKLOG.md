@@ -2,6 +2,50 @@
 
 Append a `## Unit 15.M — Round K` section per build attempt. See `main/drops/WORKFLOW.md` § "Phase 4 — Build (per unit)" for what each section should contain.
 
+## Unit 15.2.5.A — Round 1
+
+**Date:** 2026-06-02
+**Builder backend:** claude-sonnet-4-6 (orchestrator dispatch)
+
+### Files Touched
+
+- `internal/adapters/docker/executor.go` (137 LOC) — added `Executor.RunContainerDetached(ctx, ContainerRunRequest) (string, error)`. Uses the `outputter` interface typecast pattern (identical to `Executor.Create` and `ListNetworks`): returns `ErrOutputUnsupported` when the runner doesn't implement `Output`; calls `BuildRunArgs` for arg construction (validation errors returned before any runner invocation); trims whitespace from stdout (docker `run -d` appends a newline to the container ID).
+- `internal/services/networkpolicy/service.go` (280 LOC) — extended `NetworkExecutor` consumer-side interface with two new method signatures: `RunContainerDetached` and `ConnectNetwork` (the latter already existed on `docker.Executor` at executor.go:72 and was absent from this interface). Doc comments explain sidecar-proxy topology (Schema Decision 5) context for each method.
+- `internal/adapters/docker/network_test.go` (729 LOC) — added 4 test functions for `RunContainerDetached`: `TestExecutorRunContainerDetachedReturnsContainerID` (happy path — output trimmed), `TestExecutorRunContainerDetachedOutputError` (sentinel `errors.Is` wrap), `TestExecutorRunContainerDetachedOutputUnsupported` (runner without `Output` → `ErrOutputUnsupported`), `TestExecutorRunContainerDetachedBuildError` (invalid image → validation error, runner not invoked). Added `outputRunner` test helper struct (implements `Run` + `Output`) and `errors` import.
+- `internal/services/networkpolicy/service_test.go` (599 LOC) — extended `fakeNetworkExecutor` with `runDetachedResult`, `runDetachedErr`, `runDetachedCalls`, and `connectCalls` fields plus `RunContainerDetached` and `ConnectNetwork` method stubs satisfying the extended `NetworkExecutor` interface. The compile-time `var _ NetworkExecutor = docker.Executor{}` guard at line 554 also validates `docker.Executor` satisfies the extended interface.
+
+### Mage Targets Run
+
+- `mage testPkg ./internal/adapters/docker` → **86 tests pass, 0 failures**. (Baseline was 82 tests per Round 3 worklog; new tests bring count to 86 via the 4 new `RunContainerDetached` tests.)
+- `mage testPkg ./internal/services/networkpolicy` → **23 tests pass, 0 failures**. (Count unchanged — no new service-level tests added; the fakeNetworkExecutor stubs are compile-time correctness.)
+- `mage format` → clean (no output).
+
+### Design Notes
+
+- **`outputter` pattern for `RunContainerDetached`.** Mirrors `Executor.Create` and `ListNetworks` exactly: runtime-typecast to the `Output(context.Context, []string) (string, error)` interface, return `ErrOutputUnsupported` when absent. This avoids requiring the production `OSRunner` to implement `Output` at struct-definition time — callers that use a non-outputting runner get a clear error.
+- **`strings.TrimSpace` on container ID output.** Docker `run -d` appends `\n` to the container ID; downstream callers (D.1's sidecar lifecycle) pass the ID to `ConnectNetwork` and `RemoveContainer` which both trim on their own, but returning a clean ID avoids downstream confusion.
+- **Interface extension preserves existing callers.** The `fakeNetworkExecutor` in `service_test.go` is the only concrete type implementing `NetworkExecutor` in tests; the compile-time `var _ NetworkExecutor = docker.Executor{}` check at line 554 confirms the production adapter satisfies the extended interface. No other file in the tree implements `NetworkExecutor` — verified by absence of other usages.
+- **`ConnectNetwork` addition to interface.** The method already existed on `docker.Executor`; this unit only makes it visible to the consumer-side interface so D.1's `Provision` can call it via the injected `NetworkExecutor`. No implementation change on `docker.Executor`.
+- **Did NOT touch `buildNoProxy`** (Unit 15.2.5.C, which shares `service.go`). The only edit to `service.go` is the interface block addition.
+
+### Budget Measurement (vs. 3-symbol / 80-LOC / 3-file ceiling)
+
+| Dimension | Budget | Actual |
+|---|---|---|
+| Production symbols | 3 | 3 (`Executor.RunContainerDetached` + `NetworkExecutor.RunContainerDetached` method sig + `NetworkExecutor.ConnectNetwork` method sig) |
+| Production LOC delta | ≤80 | ~47 net-added LOC across both prod files (executor.go +23, service.go +11 interface body, ~13 comments/whitespace) |
+| Production files | ≤3 | 2 (`executor.go` + `service.go`) |
+
+Under budget on all dimensions.
+
+### Hylla Feedback
+
+Not used. Evidence from direct `Read` of existing executor patterns (`Executor.Create`, `Executor.ListNetworks`, `Executor.ConnectNetwork`) was sufficient. Hylla is at `@main` which predates this unit's uncommitted code, so LSP was the live-code tool.
+
+### Atomicity Confirmation
+
+Unit 15.2.5.A is fully self-contained: (1) `executor.go` addition + (2) `service.go` interface extension are the complete production scope. No partial logic shipped. Both mage gates GREEN.
+
 ## Unit 15.2 — Round 3 (ADDITIVE — NetworkConnect surface)
 
 **Date:** 2026-05-24

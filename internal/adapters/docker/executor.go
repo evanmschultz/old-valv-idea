@@ -66,6 +66,30 @@ func (e Executor) RemoveNetwork(ctx context.Context, request NetworkRemoveReques
 	return e.runner.Run(ctx, args)
 }
 
+// RunContainerDetached shells out `docker run -d` for the supplied request and
+// returns the container ID printed by Docker on stdout. The request must have
+// Detached set to true by the caller; BuildRunArgs handles the -d flag. The
+// underlying runner must implement Output; if it does not,
+// ErrOutputUnsupported is returned. DROP_15 uses this to launch the proxy
+// sidecar container (Schema Decision 5).
+func (e Executor) RunContainerDetached(ctx context.Context, request ContainerRunRequest) (string, error) {
+	outputter, ok := e.runner.(interface {
+		Output(context.Context, []string) (string, error)
+	})
+	if !ok {
+		return "", ErrOutputUnsupported
+	}
+	args, err := BuildRunArgs(request)
+	if err != nil {
+		return "", err
+	}
+	out, err := outputter.Output(ctx, args)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
 // ConnectNetwork shells out `docker network connect` to attach a container
 // to a network with optional aliases. The sidecar-proxy topology uses this to
 // attach the proxy to both the internal network and bridge (Schema Decision 5).

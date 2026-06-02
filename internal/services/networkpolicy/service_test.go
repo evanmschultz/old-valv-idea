@@ -21,9 +21,15 @@ type fakeNetworkExecutor struct {
 	createErr error
 	removeErr error
 
-	createCalls []docker.NetworkCreateRequest
-	removeCalls []docker.NetworkRemoveRequest
-	listCalls   []string
+	// runDetachedResult is the container ID returned by RunContainerDetached.
+	runDetachedResult string
+	runDetachedErr    error
+
+	createCalls      []docker.NetworkCreateRequest
+	removeCalls      []docker.NetworkRemoveRequest
+	listCalls        []string
+	runDetachedCalls []docker.ContainerRunRequest
+	connectCalls     []docker.NetworkConnectRequest
 }
 
 func (f *fakeNetworkExecutor) CreateNetwork(_ context.Context, req docker.NetworkCreateRequest) error {
@@ -60,6 +66,19 @@ func (f *fakeNetworkExecutor) ListNetworks(_ context.Context, label string) ([]s
 	out := make([]string, len(f.listResult))
 	copy(out, f.listResult)
 	return out, nil
+}
+
+func (f *fakeNetworkExecutor) RunContainerDetached(_ context.Context, req docker.ContainerRunRequest) (string, error) {
+	f.runDetachedCalls = append(f.runDetachedCalls, req)
+	if f.runDetachedErr != nil {
+		return "", f.runDetachedErr
+	}
+	return f.runDetachedResult, nil
+}
+
+func (f *fakeNetworkExecutor) ConnectNetwork(_ context.Context, req docker.NetworkConnectRequest) error {
+	f.connectCalls = append(f.connectCalls, req)
+	return nil
 }
 
 func TestNew_RequiresExecutor(t *testing.T) {

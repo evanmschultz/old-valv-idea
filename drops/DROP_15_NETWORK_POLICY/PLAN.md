@@ -146,7 +146,7 @@ Locked design (do not re-litigate): sidecar-proxy topology with workload attache
 
 ##### Unit 15.2.5.A — Detached-run Executor seam + ConnectNetwork interface extension
 
-- state: todo
+- state: done
 - blocked_by: none
 - paths: `internal/adapters/docker/executor.go`, `internal/services/networkpolicy/service.go` (interface extension)
 - packages: `./internal/adapters/docker`, `./internal/services/networkpolicy`
