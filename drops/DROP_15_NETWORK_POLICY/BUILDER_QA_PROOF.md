@@ -594,3 +594,49 @@ Commit `d4ca96a` — additive network-connect surface for the proxy sidecar (aft
 ### Verdict
 
 `verdict: pass` — all five acceptance items proven against committed code at `b22cdc7` with file:line evidence; both mage gates re-run GREEN; path discipline clean; interface↔concrete signature match machine-proven by the compile-time guard.
+
+---
+
+## Unit 15.2.5.C — Round 1
+
+**Date:** 2026-06-02
+**QA backend:** claude-opus (build-qa-proof, orchestrator dispatch)
+**Committed at:** `4d20566` (`git diff 4d20566~1 4d20566`)
+**Mage gate:** `mage testPkg ./internal/services/networkpolicy` → 27 tests pass, 0 fail (re-run by QA, GREEN)
+
+### Acceptance Criterion 1 — buildNoProxy returns ONLY loopback + sidecar alias, deterministic, no allowlist leak
+
+`service.go:278-281`:
+
+```go
+func buildNoProxy() string {
+	entries := []string{"127.0.0.1", "localhost", "valv-proxy"}
+	sort.Strings(entries)
+	return strings.Join(entries, ",")
+}
+```
+
+- Signature is now parameterless (`buildNoProxy()`), so no input path can introduce an allowlist host. The output is a static slice of exactly `127.0.0.1`, `localhost`, `valv-proxy`.
+- `sort.Strings` over a fixed slice yields a deterministic `"127.0.0.1,localhost,valv-proxy"` on every call. No input → no input-dependent variation possible. PROVEN.
+
+### Acceptance Criterion 2 — call site + doc comments corrected; Allowlist still used where it should be
+
+- Call site `service.go:225`: `NoProxy: buildNoProxy(),` — no longer `buildNoProxy(request.Allowlist)`. PROVEN by diff hunk.
+- `PolicyMaterial.NoProxy` doc `service.go:144-152` (diff): now states it contains "ONLY loopback addresses (localhost, 127.0.0.1) and the sidecar proxy alias (valv-proxy)" and that "Allowlist hosts are intentionally absent". Matches corrected semantics. PROVEN.
+- `ProvisionRequest.Allowlist` doc `service.go:~97-105` (diff): rewritten to state allowlist feeds "network-name derivation … but does NOT place allowlist entries in NO_PROXY". PROVEN.
+- Allowlist STILL correctly used: `service.go:187` `desiredName := networkName(request.Allowlist)` (network-name hash) and `networkName` at `service.go:258-264` hashes the sorted allowlist. The allowlist is therefore retained for network naming (and per PLAN §356 the proxy filter), removed only from NO_PROXY. PROVEN.
+
+### Acceptance Criterion 3 — table-driven tests + Provision leak test
+
+- `service_test.go:499` `TestBuildNoProxy` — table-driven, 3 cases (`empty_allowlist`, `non_empty_allowlist_no_leak`, `loopback_entries_already_covered`), each asserts `buildNoProxy() == "127.0.0.1,localhost,valv-proxy"`. Covers empty/non-empty allowlist + loopback presence per acceptance. PROVEN.
+- `service_test.go:537` `TestBuildNoProxy_AllowlistHostsNeverLeak` — end-to-end: calls `svc.Provision(...)` with a 5-host allowlist (`service_test.go:563-570`), asserts `NoProxy == "127.0.0.1,localhost,valv-proxy"` AND loops `strings.Contains(material.NoProxy, host)` over all 5 hosts asserting none leak. This is the Provision leak test. PROVEN.
+- `service_test.go:637` `TestBuildNoProxy_LoopbackAndSidecarAlwaysPresent` — regression pin: confirms each of the three fixed entries is present.
+- `TestProvision_CreatesNetworkOnFreshHost` `service_test.go:157,211-217` — `wantNoProxy` updated to `"127.0.0.1,localhost,valv-proxy"` and adds a loop asserting no allowlist host leaks. PROVEN.
+
+### Path Discipline
+
+`git diff --stat 4d20566~1 4d20566`: only `service.go` + `service_test.go` (declared `paths`) + drop mds (PLAN.md state flip, BUILDER_WORKLOG.md). No out-of-scope code. `NetworkExecutor`, `Service.Provision` flow, `networkName`, `CleanupStale` byte-identical except the single `buildNoProxy()` call-site change. CLEAN.
+
+### Verdict
+
+`verdict: pass` — all three acceptance criteria proven against committed code at `4d20566` with file:line + quoted evidence; allowlist correctly retained for `networkName` hash and removed only from NO_PROXY; mage gate re-run GREEN (27/27); path discipline clean.

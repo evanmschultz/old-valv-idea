@@ -497,3 +497,183 @@ None.
 | 6. Budget re-measurement | CONFIRMED — 3 symbols / +32 LOC / 2 files — at or under all ceilings |
 
 **Verdict: pass** — no unmitigated counterexample found. Unit 15.2.5.A is correctly implemented and within budget.
+
+## Unit 15.2.5.C — Round 1
+
+**Date:** 2026-06-02
+**QA Falsification backend:** claude-sonnet-4-6 (Build-QA agent, `ta-go-qa-falsification` persona)
+**Verdict:** `pass` — no unmitigated counterexample found.
+
+### Attack 1 — Signature blast radius: `buildNoProxy(allowlist []string)` → `buildNoProxy()`
+
+**Attack:** the function dropped its parameter. Find every caller — was any stale caller left in the repo, or does an unused-parameter lint trap anywhere?
+
+**Evidence:**
+
+`grep -rn "buildNoProxy" /Users/evanschultz/Documents/Code/hylla/valv/main/` returns these production-code sites (excluding worklog/agent-run files):
+
+- `internal/services/networkpolicy/service.go:225` — `NoProxy: buildNoProxy()` (the only call site; no argument passed — correct)
+- `internal/services/networkpolicy/service.go:278` — function definition `func buildNoProxy() string`
+
+No other `.go` production file references `buildNoProxy`. The function is unexported and there is only one call site. The old `buildNoProxy(request.Allowlist)` call was replaced in the same file (`service.go:225`). No stale caller exists anywhere in the tree.
+
+The removed `allowlist []string` parameter: since `buildNoProxy` is now parameter-free, there is no unused-parameter lint concern — Go's compiler only flags unused local variables declared with `:=`/`var`, not absent parameters. Compiler vet confirms the package builds clean (via mage gate). No compile or vet issue.
+
+**Verdict: MITIGATED.** Single call site, updated correctly; no stale caller anywhere.
+
+### Attack 2 — Allowlist still threaded correctly (orphan check)
+
+**Attack:** removing `allowlist` from `buildNoProxy` must not have orphaned it — `ProvisionRequest.Allowlist` must still be consumed for the network-name hash and must still travel to the proxy filter. If `Allowlist` is now a dead field, the proxy would have no filter list.
+
+**Evidence:**
+
+`service.go:187`: `desiredName := networkName(request.Allowlist)` — `Allowlist` is still passed to `networkName`, which computes `sha256(sorted allowlist)` at lines 258-264. This is unchanged from the pre-C state.
+
+The allowlist's second role — as the proxy sidecar's internal filter list — is not yet wired in 15.2.5.C scope. That wiring belongs to Unit 15.2.5.D.1 (the sidecar launch), which passes the allowlist to the proxy binary's runtime configuration. That is explicitly not 15.2.5.C territory. `ProvisionRequest.Allowlist` doc comment was updated to state: "The service passes this to the network-name derivation (deterministic network naming) but does NOT place allowlist entries in NO_PROXY — the sidecar proxy enforces the allowlist internally."
+
+So: `Allowlist` is NOT a dead field. It is consumed by `networkName` (deterministic naming) today, and will be consumed by D.1 for the proxy's runtime filter. Its role in `buildNoProxy` was the bug — it was placed in NO_PROXY (wrong place), not absent entirely.
+
+`ProvisionRequest.Valid()` still rejects `len(r.Allowlist) == 0` at line 121, so the required-field contract holds and callers cannot silently pass an empty allowlist.
+
+**Verdict: MITIGATED.** `Allowlist` is consumed correctly. No orphaned field.
+
+### Attack 3 — Sufficiency of `valv-proxy` alias in NO_PROXY (Decision 5 reasoning check)
+
+**Attack:** is `valv-proxy` (alias only) sufficient in NO_PROXY, or does the workload also need the sidecar's IP or a port-qualified form? Does anything address the sidecar by anything other than the alias?
+
+**Analysis:**
+
+Schema Decision 5 (PLAN.md lines 37-42) specifies the workload reaches the sidecar via the Docker network alias `valv-proxy`. The `HTTP_PROXY`/`HTTPS_PROXY` env vars are set to `http://valv-proxy:<port>` (unit 15.2.5.D.1 will provide the port from `ProxyEndpoint`). Go's `http.ProxyFromEnvironment` evaluates `NO_PROXY` against the TARGET host being connected to, NOT the proxy host — so `valv-proxy` in NO_PROXY means "don't use a proxy when connecting TO valv-proxy directly." That is exactly the anti-loop-back semantics the code comment describes: a client connecting to `valv-proxy:port` directly (e.g. a health check) should not route through itself.
+
+For IP-based exclusion: Docker assigns the sidecar a dynamic IP on the internal network. The workload has no stable IP for the sidecar other than the alias. Adding a dynamic IP to NO_PROXY is both impractical and unnecessary — DNS-alias exclusions in NO_PROXY cover all connections by that hostname.
+
+For port-qualified forms: `NO_PROXY` for Go's `http.ProxyFromEnvironment` accepts host-only entries (no port needed); per Go source, port-qualified forms in NO_PROXY are supported but not required when excluding all ports on a host. The fixed string `valv-proxy` covers all ports.
+
+The `127.0.0.1` and `localhost` entries cover in-container loopback traffic (standard practice). Nothing in the workload container should use `::1` (IPv6 loopback) — IPv6 is not present in the sidecar-proxy design — but this is a theoretical gap with zero practical impact for the current macOS Docker Desktop topology.
+
+**Verdict: MITIGATED.** The three fixed entries are sufficient for the described topology. One accepted theoretical residual: IPv6 loopback (`::1`) is not in NO_PROXY; this is acceptable for the Docker Desktop macOS topology and matches industry practice for `NO_PROXY` values.
+
+### Attack 4 — Deleted tests: was anything still-valid lost?
+
+**Attack:** `TestBuildNoProxy_SortedDedupedAndTrimmed` and `TestPolicyMaterial_NoProxyOmitsBlankAllowlistEntries` were deleted. Confirm those only asserted the OLD inverted behavior and that dedup/trim/blank-entry handling the new code still needs is covered.
+
+**Evidence:**
+
+`TestBuildNoProxy_SortedDedupedAndTrimmed` called `buildNoProxy([]string{"  b ", "a", "b", "c", "a"})` and asserted `"a,b,c"`. This asserted:
+- Sort order of the allowlist
+- Deduplication of the allowlist
+- Trim of whitespace-padded entries
+
+All three of those properties were only relevant when `buildNoProxy` consumed the allowlist. The new `buildNoProxy()` takes no input and returns the fixed string `"127.0.0.1,localhost,valv-proxy"`. There is no dynamic list to sort, dedup, or trim. The removed behaviors are no longer part of `buildNoProxy`'s contract — they were behaviors of the WRONG implementation.
+
+`TestPolicyMaterial_NoProxyOmitsBlankAllowlistEntries` called `buildNoProxy([]string{"", " github.com ", "proxy.golang.org"})` and asserted `"github.com,proxy.golang.org"`. Same: asserted blank-entry filtering on the allowlist input, which is now irrelevant.
+
+The new code has `sort.Strings(entries)` on a static three-element slice. This is technically a no-op since `[]string{"127.0.0.1", "localhost", "valv-proxy"}` is already in alphabetical/lexicographic order. The builder retained it "for consistency with the package's determinism pattern and to make the sorted output self-documenting." This is a minor YAGNI nit (sorting a static literal) but not a correctness problem — the output is deterministic regardless. No test is needed to cover "does sort work on a static slice."
+
+The new tests (`TestBuildNoProxy`, `TestBuildNoProxy_AllowlistHostsNeverLeak`, `TestBuildNoProxy_LoopbackAndSidecarAlwaysPresent`) all confirmed PASS via `mage test-func`. They pin the now-correct invariant: fixed output regardless of any context.
+
+**Verdict: MITIGATED.** The deleted tests only pinned the old inverted semantics. Nothing still-valid was discarded. The static `sort.Strings` is a benign no-op worth noting as a NIT.
+
+### Attack 5 — Output format correctness for `http.ProxyFromEnvironment` and provider CLIs
+
+**Attack:** `"127.0.0.1,localhost,valv-proxy"` — is the comma-separated, no-scheme, no-spaces format correct for Go's proxy machinery and for the provider CLIs (Codex, Claude Code)?
+
+**Evidence:**
+
+Go stdlib `net/http.ProxyFromEnvironment` parses `NO_PROXY` (or `no_proxy`) as a comma-separated list of host entries with optional leading dot or wildcard. Each entry is matched against the target host. Comma-separated with no spaces is the canonical form — spaces around entries are stripped by Go's parser but the comma separator is required. No scheme or port qualifiers are needed for a pure hostname bypass. The format `"127.0.0.1,localhost,valv-proxy"` is correct.
+
+For Docker `buildx build` `--build-arg NO_PROXY=...`: Docker documents predefined proxy build args accept the same standard `no_proxy` env-var format. The `--build-arg` value is passed verbatim into the build container's environment, where Go tool invocations and curl respect it.
+
+Claude Code docs (PLAN.md line 46, Schema Decision 9): "Claude Code docs currently state support for `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY`." No special format required beyond the standard env-var convention.
+
+OpenAI Codex: PLAN.md notes proxy regressions as of 2026-05-22 (`openai/codex#16079`, `#14080`), but those concern `HTTP_PROXY` routing issues, not `NO_PROXY` format. The format itself is standard.
+
+**Verdict: MITIGATED.** The format is correct for Go's HTTP client, Docker build args, and the provider CLIs.
+
+### Attack 6 — Budget re-measurement
+
+**Actual production diff (commit `4d20566`):**
+
+| File | Change |
+|---|---|
+| `internal/services/networkpolicy/service.go` | Doc-comment updates (ProvisionRequest.Allowlist, PolicyMaterial.NoProxy) + `buildNoProxy()` rewrite + call-site update. Net ~18 LOC changed; 1 file; 1 production symbol changed (`buildNoProxy`). |
+
+- **Production symbols changed:** 1 (`buildNoProxy` signature + body rewrite). Under the 3-symbol ceiling.
+- **Production LOC delta:** ~18 changed lines in `service.go`. Under the 80-line ceiling.
+- **Production files:** 1 (`service.go`). Under the 3-file ceiling.
+
+Builder's self-measurement is accurate. Confirmed within budget on all three dimensions.
+
+**Verdict: CONFIRMED WITHIN BUDGET.**
+
+### NIT: stale `NoProxy` fixture in `internal/services/images/service_test.go`
+
+At `internal/services/images/service_test.go:1801` and `1862`, `TestEnsureProjectImage_NetworkPolicyInjectsProxyArgsAndNetwork` hardcodes:
+
+```
+NoProxy: "github.com,objects.githubusercontent.com,proxy.golang.org,sum.golang.org"
+```
+
+and expects:
+
+```
+"NO_PROXY=github.com,objects.githubusercontent.com,proxy.golang.org,sum.golang.org"
+```
+
+This is the OLD (inverted) `NoProxy` value. The images service test uses a `fakeNetworkPolicy` that returns whatever `PolicyMaterial` the test hardcodes — the images service does not call `buildNoProxy` itself. The test PASSES because it is testing the images service's pass-through behavior (whatever the fake returns goes into the build arg verbatim). The images service is correct; the test is internally consistent.
+
+However, the fixture now misleads future readers about what a real `networkpolicy.Service` returns. A future developer integrating the real `networkpolicy.Service` with the images service would see this test and expect the old allowlist-in-NO_PROXY behavior. The integration test at `service_integration_test.go:357` uses `material.NoProxy` from the real service (which is now `"127.0.0.1,localhost,valv-proxy"`), so the real-wiring path is correct.
+
+This is a NIT / misleading comment in the wrong test package — NOT a bug in 15.2.5.C's scope (`paths: internal/services/networkpolicy/service.go`). The images test's scope is the images service's pass-through contract, not networkpolicy semantics. No corrective action required within this unit. Recommend updating the images test fixture in a follow-up (or when the images service is fully wired with the real `networkpolicy.Service`).
+
+### YAGNI Check
+
+PASS. The rewrite is strictly subtractive: the old `buildNoProxy` had ~20 lines of sort/dedup/trim logic operating on a parameter that should never have been passed to it. The new implementation is 3 lines. The `sort.Strings` on a static slice is a no-op carried for pattern consistency (benign, see Attack 4). No new abstraction introduced.
+
+### Hidden Dep Check
+
+PASS. `buildNoProxy` is unexported, parameter-free, pure (no I/O, no shared state, no context), and has exactly one call site. It cannot have hidden dependencies. The import set for `service.go` (`sort`, `strings`, `fmt`, `crypto/sha256`, `encoding/hex`, `context`) is unchanged from the pre-C state.
+
+### Concurrency Check
+
+PASS. `buildNoProxy` is a pure function — no goroutines, no channels, no shared mutable state. Race detector runs via `mage test-func` (confirmed `-race` flag in mage gate). All four new tests confirmed PASS.
+
+### Confirmed Counterexamples
+
+None.
+
+### Unknowns (route to future units or orchestrator)
+
+1. **`valv-proxy` alias establishment is D.1's responsibility.** The `valv-proxy` string in NO_PROXY assumes the sidecar is connected to the internal network with that alias. If D.1 uses a different alias string, NO_PROXY would not exclude the correct host. The string should be a shared constant (e.g. `const ProxyAlias = "valv-proxy"` in the networkpolicy package) so `buildNoProxy` and D.1's `ConnectNetwork` call use the same value. Currently `valv-proxy` is a string literal at `service.go:279` only. Low priority for this unit (D.1 is not yet shipped), but this is a contract coupling point to track.
+
+2. **IPv6 loopback (`::1`) not in NO_PROXY.** See Attack 3. Accepted for the Docker Desktop macOS topology.
+
+### Evidence
+
+- `git diff 4d20566~1 4d20566` — full diff read
+- `Read /Users/evanschultz/Documents/Code/hylla/valv/main/internal/services/networkpolicy/service.go` — full production file (282 lines)
+- `grep -rn "buildNoProxy" /Users/evanschultz/Documents/Code/hylla/valv/main/` — all references across the repo
+- `grep -rn "NoProxy|NO_PROXY|no_proxy" --include="*.go"` — all consumers across the codebase
+- `Read /Users/evanschultz/Documents/Code/hylla/valv/main/internal/services/images/service_test.go:1790-1888` — stale fixture context
+- `Read /Users/evanschultz/Documents/Code/hylla/valv/main/internal/services/images/service.go:85-137` — images service seam (NetworkPolicy interface, pass-through contract)
+- `Read /Users/evanschultz/Documents/Code/hylla/valv/main/drops/DROP_15_NETWORK_POLICY/PLAN.md:37-42` — Schema Decision 5 (sidecar alias, NO_PROXY rationale)
+- `Read /Users/evanschultz/Documents/Code/hylla/valv/main/internal/adapters/docker/network.go` — full file (Aliases + NetworkConnectRequest shape)
+- `grep -rn "valv-proxy|sidecar|ConnectNetwork" --include="*.go" internal/` — alias usage in production
+- `mage test-func ./internal/services/networkpolicy TestBuildNoProxy` — 4 tests PASS
+- `mage test-func ./internal/services/networkpolicy TestBuildNoProxy_AllowlistHostsNeverLeak` — 1 test PASS
+- `mage test-func ./internal/services/networkpolicy TestBuildNoProxy_LoopbackAndSidecarAlwaysPresent` — 1 test PASS
+- `mage test-func ./internal/services/images TestEnsureProjectImage_NetworkPolicyInjectsProxyArgsAndNetwork` — 1 test PASS (confirms images test internally consistent)
+
+### Summary
+
+| Attack | Result |
+|---|---|
+| 1. Signature blast radius — stale caller | MITIGATED — single call site updated; no stale caller anywhere in tree |
+| 2. Allowlist still threaded (orphan check) | MITIGATED — `Allowlist` consumed by `networkName`; D.1 will use it for proxy filter; not dead |
+| 3. NO_PROXY sufficiency — alias only | MITIGATED — `valv-proxy` alias is correct form; IP/port-qualified forms not needed; IPv6 loopback accepted risk |
+| 4. Deleted tests — lost still-valid assertions | MITIGATED — deleted tests only pinned the OLD inverted semantics; nothing valid discarded |
+| 5. Output format correctness | MITIGATED — comma-separated, no-scheme form is correct for Go HTTP client, Docker build args, and provider CLIs |
+| 6. Budget re-measurement | CONFIRMED — 1 symbol / ~18 LOC / 1 file — well under all ceilings |
+| NIT: stale images fixture | NIT only — images test is internally consistent; misleading fixture for future readers; recommend fix in follow-up |
+
+**Verdict: pass** — no unmitigated counterexample found. Unit 15.2.5.C is correctly implemented and within budget.
