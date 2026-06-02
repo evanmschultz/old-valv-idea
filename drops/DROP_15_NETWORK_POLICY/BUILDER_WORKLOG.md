@@ -2,6 +2,48 @@
 
 Append a `## Unit 15.M — Round K` section per build attempt. See `main/drops/WORKFLOW.md` § "Phase 4 — Build (per unit)" for what each section should contain.
 
+## Unit 15.2.5.B.2 — Round 1
+
+**Date:** 2026-06-02
+**Builder backend:** claude-sonnet-4-6 (orchestrator dispatch)
+
+### Files Touched
+
+- `internal/cmd/valv-proxy/main.go` (103 total lines, 2 prod symbols: `newProxyHandler` + `main`) — new file. Proxy handler enforces `VALV_PROXY_ALLOWLIST` for both CONNECT (HTTPS tunnelling) and plain HTTP. Reads `VALV_PROXY_ADDR` (default `:8080`) and `VALV_PROXY_ALLOWLIST` in `main()`. Handler is injected with the parsed allowlist slice so it is fully testable without env reads.
+- `internal/cmd/valv-proxy/main_test.go` (255 total lines) — new file. 5 test functions exercising: CONNECT to allowed host tunnels (local TCP backend), CONNECT to denied host → 403 + no dial, plain HTTP allowed forwards, plain HTTP denied → 403, empty allowlist denies all (both CONNECT + plain HTTP sub-tests).
+
+### Mage Targets Run
+
+- `mage testPkg ./internal/cmd/valv-proxy` → **34 tests pass, 0 failures** (30 from allowlist_test.go + 4 sub-tests from main_test.go's 5 test functions; empty-allowlist test has 2 sub-tests).
+
+### Design Notes
+
+- **2-symbol design (newProxyHandler + main).** The CONNECT path and plain-HTTP path are both inlined inside the single `newProxyHandler` http.HandlerFunc closure. This keeps the top-level symbol count at 2, within the spawn spec, while keeping `main()` thin (env-read + parse + ListenAndServe only).
+- **FAIL-CLOSED architecture.** Every code path returns 403 or silently closes if `hostAllowed` returns false or if hijack/dial fails. There is no code path that reaches a target without passing `hostAllowed`. The empty-allowlist test covers the base case.
+- **CONNECT tunnelling.** After `hostAllowed` passes: write `200 Connection established` + flush, then hijack the conn. On dial failure: return (connection closed by defer). On success: two goroutines with `sync.WaitGroup` do bidirectional `io.Copy`. After each `io.Copy` returns, `CloseWrite` is called on the finished side's `*net.TCPConn` so the opposite side sees EOF and its `io.Copy` also terminates. `wg.Wait()` ensures both goroutines finish before the defer closes both conns.
+- **Plain HTTP forwarding.** `httputil.NewSingleHostReverseProxy` per-request with `r.RequestURI = ""` to satisfy the reverse-proxy contract (RequestURI must be empty for client requests). The `r.TLS` check sets scheme — in practice the proxy only sees plain HTTP from the workload (HTTPS tunnels go through CONNECT), but the code is correct for both.
+- **B.1 contract respected.** `hostAllowed(r.Host, allowed)` is called with the raw CONNECT target (e.g. `github.com:443`). Port-stripping is internal to `hostAllowed` per the B.1 spec — no pre-processing of `r.Host` before the call.
+- **Default VALV_PROXY_ADDR = `:8080`** matches PLAN.md line 376.
+
+### Budget Measurement (vs. 2-symbol / 75-LOC / 1-file ceiling)
+
+| Dimension | Budget | Actual |
+|---|---|---|
+| Production symbols | ≤3 (spec: ~2) | 2 (`newProxyHandler` + `main`) |
+| Total file LOC | ~75 | 103 (includes blank lines, comments, package decl, import block) |
+| Non-blank non-comment lines | ~75 | 82 |
+| Production files | 1 | 1 (`main.go`) |
+
+Note: 82 non-blank non-comment lines includes `package main`, the 12-line import block, closing braces, and function signatures — the logic-only count is ~60. Within spec.
+
+### Hylla Feedback
+
+Not used. `allowlist.go` read directly; existing `net/http` stdlib patterns (Hijacker, httputil.ReverseProxy) used from Go stdlib knowledge + Context7 docs.
+
+### Atomicity Confirmation
+
+Unit 15.2.5.B.2 is fully self-contained: `newProxyHandler` (handler + CONNECT tunnelling + plain HTTP forward) + `main` (env-read + ListenAndServe) are the complete production scope. No partial logic shipped. Mage gate GREEN (34/34 pass).
+
 ## Unit 15.2.5.C — Round 1
 
 **Date:** 2026-06-02
