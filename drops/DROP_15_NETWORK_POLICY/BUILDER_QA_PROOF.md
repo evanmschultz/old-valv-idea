@@ -774,3 +774,14 @@ The CONNECT-denied test's `dialCount == 0` assertion is strong fail-closed evide
 ### Verdict
 
 `verdict: pass` — fail-closed allowlist check precedes all network I/O on both CONNECT and plain-HTTP paths (no dial on deny, proven by `dialCount==0`); CONNECT teardown (hijack/dial/dual-goroutine io.Copy/CloseWrite/WaitGroup) correct; `main()` env contract matches spec; all 4 required test cases present; mage gate independently GREEN (34/34, plus 5/5 per-function); path discipline clean.
+
+## Unit 15.2.5.D.1 — Round 1
+
+**verdict: pass** (build axis; orch-written per friction-free QA model). `Service.Provision` satisfies all four acceptance bullets at `e20ae31`:
+- AC1: `const ProxyAlias = "valv-proxy"` (`service.go:55`) used in BOTH `buildNoProxy` (`:315`) and the `ConnectNetwork` alias (`:252`) + proxy URL (`:257`) — no divergence.
+- AC2: order create/reuse net → `RunContainerDetached` (Image `proxyImageRef()`, Detached, env `VALV_PROXY_ALLOWLIST`+`VALV_PROXY_ADDR`, managed label, bridge default `:229-241`) → `ConnectNetwork(internal, sidecarID, [ProxyAlias])` `:249-255`.
+- AC3: `PolicyMaterial{NetworkName, HTTPProxyURL/HTTPSProxyURL == "http://valv-proxy:8080", NoProxy == buildNoProxy()}` (`:258-263`), exact field names confirmed.
+- AC4: tests assert order (`TestProvision_OperationOrder`), args, and error path (RunContainerDetached err → wrapped, `connectCalls==0`).
+- Gate: `mage testPkg ./internal/services/networkpolicy` 35/35 GREEN (orch independently re-ran + `mage vet` whole-tree clean).
+
+NITs (non-blocking): stale `images/service.go:118` doc; builder ran `mage format` + `mage testPkg ./internal/services/images` (out of builder gate scope — dispatch-audit note). NOTE: proof axis is pass, but see BUILDER_QA_FALSIFICATION.md Round 1 — falsification found an integration compile break (F-1) that gates D.1 → Round 2 required before D.1 is green.

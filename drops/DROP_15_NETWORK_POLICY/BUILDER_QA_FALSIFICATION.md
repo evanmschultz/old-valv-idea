@@ -1000,3 +1000,13 @@ None. No CRITICAL fail-open found.
 | Concurrency check | PASS — WaitGroup + defer; `-race` clean |
 
 **Verdict: pass** — no unmitigated counterexample found. Unit 15.2.5.B.2 is correctly implemented and fail-closed on all critical security paths. The proxy is safe to use as the closed-network boundary for the sidecar topology.
+
+## Unit 15.2.5.D.1 — Round 1
+
+**verdict: FAIL** (orch-written per friction-free QA model) — one real compile break; the security-critical topology invariant itself is clean.
+
+**F-1 (CRITICAL, the failure):** `internal/services/images/service_integration_test.go:349` constructs `networkpolicy.ProvisionRequest{Allowlist: req.Allowlist, ProxyEndpoint: req.ProxyEndpoint}` — but D.1 removed `ProxyEndpoint` from `networkpolicy.ProvisionRequest`. The file is `//go:build integration`, so `mage testPkg`/`mage vet` (no `-tags=integration`) cannot see it, but `mage integration` (`-tags=integration ./internal/services/images`) WILL fail to compile (`unknown field 'ProxyEndpoint'`). This is the `feedback_mage_integration_when_deleting_symbols` lesson: symbol-deletion units must run `mage integration`. Fix (Round 2): drop the `ProxyEndpoint:` assignment(s) at `service_integration_test.go:281` + `:349` (req.Allowlist is the only field networkpolicy.ProvisionRequest still needs). Extends D.1 paths to the images integration adapter (the break D.1 caused).
+
+**Topology invariant (CRITICAL attack) — MITIGATED (clean):** `Provision` attaches ONLY the sidecar to bridge (`RunContainerDetached` with no `Network` → bridge default, `:229-241`) + connects the sidecar to the internal net with `[ProxyAlias]` (`:249-255`); the WORKLOAD is never touched here (15.3.C attaches it internal-only). `sidecarID` from `RunContainerDetached` is the exact `Container` passed to `ConnectNetwork`. Tests pin `run.Network == ""` + order. No workload-bridge leak.
+
+NITs / routed: (N-1) stale `<ProxyEndpoint>` format strings in `PolicyMaterial` comments `service.go:137,140` → fix in Round 2. (N-2) orphan sidecar leaked if `ConnectNetwork` errors after `RunContainerDetached` succeeds → accepted-risk, assigned to 15.2.5.E (cleanup). (N-3) `images.NetworkPolicyRequest.ProxyEndpoint` + `s.proxyEndpoint` now vestigial (sidecar owns the endpoint) → route the images→sidecar egress wiring to 15.2.5.G (Decision 6). (N-4) benign `tc := tc` for-var nits in service_test.go. Budget 39 net prod LOC / 1 prod file — confirmed.
