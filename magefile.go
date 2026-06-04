@@ -82,6 +82,16 @@ func Build() error {
 	return nil
 }
 
+// BuildProxy builds the valv-proxy sidecar Docker image and loads it into the
+// local daemon as valv-proxy:dev. The build context is the repository root so
+// the Dockerfile at internal/cmd/valv-proxy/Dockerfile can COPY the compiled
+// binary from the multi-stage builder stage.
+func BuildProxy() error {
+	return run("docker", "buildx", "build", "--load",
+		"-f", "internal/cmd/valv-proxy/Dockerfile",
+		".", "-t", "valv-proxy:dev")
+}
+
 // Install installs the valv binary to $GOBIN (or $GOPATH/bin).
 func Install() error {
 	printer := newMagePrinter(os.Stdout)

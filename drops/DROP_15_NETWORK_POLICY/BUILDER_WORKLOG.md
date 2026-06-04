@@ -666,3 +666,53 @@ Not applicable. No committed Go symbols were introduced in this unit. Dockerfile
 ### Atomicity Confirmation
 
 Unit 15.2.5.B.3 is fully self-contained: 0 Go production symbols, 1 file created, docker build green. No mage gate applies.
+
+## Unit 15.2.5.B.4 — Round 1
+
+**Date:** 2026-06-04
+**Builder backend:** claude-sonnet-4-6 (orchestrator dispatch)
+
+### Files Touched
+
+- `internal/services/networkpolicy/imageref.go` (25 LOC) — new file. `proxyImageRef() dockeradapter.ImageRef`: reads `VALV_PROXY_IMAGE` env override, defaults to `dockeradapter.NewImageRef("valv-proxy", "dev")`. Uses identical `lastSlash`/`lastColon` comparison logic from `claudeImageRef` and `codexImageRef` for repo:tag split.
+- `internal/services/networkpolicy/imageref_test.go` (51 LOC) — new file. `TestProxyImageRef`: 5 table-driven cases (no env, repo/img:v1 parsed, repo/img no-tag, registry.example.com/org/img:latest with multi-slash, registry.example.com:5000/img colon-before-slash).
+- `magefile.go` (809 LOC total, +10 LOC) — added `BuildProxy() error` target (shells `docker buildx build --load -f internal/cmd/valv-proxy/Dockerfile . -t valv-proxy:dev` via `run("docker", ...)`).
+- `drops/DROP_15_NETWORK_POLICY/PLAN.md` — Unit 15.2.5.B.4 state `todo` → `in_progress` → `done`; Unit 15.2.5.B parent state updated to `done (B.1 done, B.2 done, B.3 done, B.4 done)`.
+
+### Mage Targets Run
+
+- `mage testPkg ./internal/services/networkpolicy` (R1 attempt 1) → **FAIL** — `t.Setenv` incompatible with `t.Parallel()` in Go 1.26 (panics: "test using t.Setenv can not use t.Parallel"). Fixed: removed `t.Parallel()` from test function and all subtests.
+- `mage testPkg ./internal/services/networkpolicy` (R1 attempt 2) → **33 tests pass, 0 failures**. GREEN.
+
+### Design Notes
+
+- **VALV_PROXY_IMAGE parsing semantics.** Verbatim copy of the `lastSlash`/`lastColon` split from `claudeImageRef()` (`internal/cli/claude_image.go:19-24`) and `codexImageRef()` (`internal/cli/codex.go:278-281`). The rule: if `lastColon > lastSlash`, split there (repo = left, tag = right); otherwise the whole value is the repository, tag is empty. This correctly handles `registry:5000/img` (colon before slash → whole string is repo) and `org/img:v1` (colon after slash → tagged).
+- **`proxyImageRef` in `networkpolicy` package.** Placed here instead of `cli` to avoid the import cycle: D.1's `Service.Provision` (in `networkpolicy`) needs the image ref; if it were in `cli`, `networkpolicy` would import `cli`. No cycle in the current placement.
+- **`BuildProxy` in magefile.** Uses `run("docker", ...)` exactly like `(Dev).Clean()` (line 338). Build context is repo root (`.`) per the Dockerfile comment — the multi-stage Dockerfile needs the full source tree for `COPY go.mod go.sum` + `go build`. The orchestrator runs `mage buildProxy` as a separate out-of-band step to populate `valv-proxy:dev` locally before D.1's integration tests.
+- **R1 fix: t.Setenv + t.Parallel incompatibility.** Go 1.26's `t.Setenv` implementation calls `t.checkParallel()` and panics if the test is parallel. The fix is to drop `t.Parallel()` from both the outer test function and all subtests. The subtests are sequential within the function, which is correct for env-mutation tests.
+
+### Budget Measurement (vs. 2-symbol / ~50 LOC inc tests / 2-file ceiling)
+
+| Dimension | Budget | Actual |
+|---|---|---|
+| Production symbols | 2 | 2 (`proxyImageRef` + `BuildProxy`) |
+| Total LOC incl. tests | ~50 | 76 (25 prod + 51 test) |
+| Production files | 2 | 2 (`imageref.go` + `magefile.go`) |
+
+Note: spec says "~50 LOC inc tests". Actual 76 is slightly over the estimate but the two production files (25 LOC prod, 51 LOC tests) are correct per the per-file ceiling logic. The magefile addition is 10 LOC (a mage target has no unit test by convention, consistent with all other mage targets). Under budget on symbols and files.
+
+### Hylla Feedback
+
+Not used. Evidence from direct `Read` of `claude_image.go`, `codex.go`, `types.go`, and `magefile.go` was sufficient — all mirrored patterns are in the current checkout.
+
+### Atomicity Confirmation
+
+Unit 15.2.5.B.4 is fully self-contained: `proxyImageRef` (env-override image resolution) + `BuildProxy` (mage target) are the complete production scope. No partial logic shipped. Mage gate GREEN (33/33 pass). `BuildProxy` compilation verified by mage loading the magefile to run `testPkg` (mage targets compile when any mage command runs).
+
+## Tools Used
+
+- `Read`: `internal/cli/claude_image.go`, `internal/cli/codex.go` (offset 260), `internal/adapters/docker/types.go`, `magefile.go` (multiple offsets), `drops/DROP_15_NETWORK_POLICY/PLAN.md` (multiple offsets), `drops/DROP_15_NETWORK_POLICY/BUILDER_WORKLOG.md`
+- `Bash`: `ls internal/services/networkpolicy/`, `grep -n "^func run"`, `grep -n "docker"`, `grep -n "func.*Build"`, `grep -n "15.2.5.B.4"`, `wc -l` (imageref.go, imageref_test.go, magefile.go, BUILDER_WORKLOG.md)
+- `Write`: `internal/services/networkpolicy/imageref_test.go` (new), `internal/services/networkpolicy/imageref.go` (new)
+- `Edit`: `magefile.go` (BuildProxy insertion), `PLAN.md` (state transitions), `BUILDER_WORKLOG.md` (this entry)
+- `mage testPkg ./internal/services/networkpolicy` × 2 (R1a fail → R1b GREEN)
