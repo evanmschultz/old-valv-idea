@@ -154,14 +154,13 @@ Locked design (do not re-litigate): sidecar-proxy topology with workload attache
 - acceptance: `mage testPkg ./internal/adapters/docker` + `mage testPkg ./internal/services/networkpolicy` GREEN. Tests prove detached run returns container id via runner output path; command errors wrap; networkpolicy fake executor compiles with both new methods.
 - measurement: 3 production symbols (`Executor.RunContainerDetached` + 2 interface method additions on `NetworkExecutor`). At the 3-symbol ceiling but at the boundary — interface method additions are 1-line embeddings and the cohesive purpose is "expose Docker primitives needed by D.1's sidecar lifecycle". ~50 prod LOC, 2 prod files. **At-ceiling under budget**; if builder measures actual diff over 80 LOC, split into A.1 (Executor method) + A.2 (interface extension).
 
-##### Unit 15.2.5.B — Proxy image/binary (SUB-PLANNER)
+##### Unit 15.2.5.B — Proxy image/binary (SUB-PLANNER — fully decomposed)
 
-- state: todo (kind=plan)
+- state: building (B.1 done, B.2 done, B.3 done; B.4 todo — see Round-2 Sub-decompositions § Unit 15.2.5.B.4)
 - blocked_by: none
-- scope: minimal Go HTTP CONNECT proxy + SNI/CONNECT host filter from effective allowlist + Dockerfile/image build wiring. Expected child droplets: B.1 (allowlist matcher / CONNECT decision), B.2 (proxy server main/handler), B.3 (Dockerfile/build wiring).
-- expected paths: new proxy package + Dockerfile.
-- measurement: estimated ≥3 prod symbols, >80 LOC, likely >3 files → emit sub-planner.
-- consumer: D.1 sidecar launch.
+- scope: minimal Go HTTP CONNECT proxy + SNI/CONNECT host filter + Dockerfile + image build wiring. Child droplets: B.1 (allowlist matcher — done), B.2 (proxy server — done), B.3 (Dockerfile — done), B.4 (`BuildProxy` mage target + `proxyImageRef` helper — todo).
+- paths: `internal/cmd/valv-proxy/` (B.1–B.3), `magefile.go` + `internal/services/networkpolicy/imageref.go` (B.4).
+- consumer: D.1 sidecar launch (calls `proxyImageRef()` from B.4 to resolve the image ref for `RunContainerDetached`).
 
 ##### Unit 15.2.5.C — PolicyMaterial NO_PROXY inversion
 
@@ -176,10 +175,10 @@ Locked design (do not re-litigate): sidecar-proxy topology with workload attache
 ##### Unit 15.2.5.D.1 — Provision sidecar core lifecycle
 
 - state: todo
-- blocked_by: 15.2.5.A, 15.2.5.B, 15.2.5.C
+- blocked_by: 15.2.5.A, 15.2.5.B.4, 15.2.5.C
 - paths: `internal/services/networkpolicy/service.go`
 - packages: `./internal/services/networkpolicy`
-- change: Change existing `Service.Provision` to create/reuse V7 internal network → call `RunContainerDetached` for proxy sidecar → connect proxy to bridge → attach `valv-proxy` alias on internal network → return `PolicyMaterial` with sidecar-alias proxy URLs.
+- change: Change existing `Service.Provision` to create/reuse V7 internal network → call `RunContainerDetached(ctx, docker.ContainerRunRequest{Image: proxyImageRef(), Detached: true, ...})` for the proxy sidecar (image resolved via `proxyImageRef()` from B.4, supports `VALV_PROXY_IMAGE` override) → connect proxy to bridge → attach `valv-proxy` alias on internal network → return `PolicyMaterial` with sidecar-alias proxy URLs (`http://valv-proxy:8080`).
 - acceptance: `mage testPkg ./internal/services/networkpolicy` GREEN. Tests assert operation order: net create/reuse, detached run, bridge connect, internal alias, returned `PolicyMaterial.NetworkName` + proxy URLs + `NO_PROXY`.
 - measurement: 1 changed prod symbol (`Service.Provision`), ~75 prod LOC, 1 prod file. Near LOC ceiling but under budget.
 - qa-routed precondition (from 15.2.5.C falsification, commit `da7ffb5`): promote the `valv-proxy` string literal to a shared `const ProxyAlias = "valv-proxy"` in the networkpolicy package and use it in BOTH `buildNoProxy` (already shipped with the literal — refactor it) AND this unit's `ConnectNetwork` alias, so the `NO_PROXY` exclusion and the real sidecar alias can never diverge. If this pushes D.1 over the LOC ceiling, split the const-introduction into its own micro-unit D.0.
@@ -378,8 +377,9 @@ New package `internal/cmd/valv-proxy/`. Env-injected runtime config: port via `V
 - **15.2.5.B.1** — state: done — `internal/cmd/valv-proxy/allowlist.go` + test: `parseAllowlist` + `hostAllowed` (exact-host matcher, case/port-normalized, no wildcards). 2 prod symbols, ~45 LOC, 1 file. blocked_by: none.
 - **15.2.5.B.2** — state: done — `internal/cmd/valv-proxy/main.go` + test: proxy `main` + HTTP/CONNECT handler. Reads `VALV_PROXY_ALLOWLIST` + `VALV_PROXY_ADDR`. 2 prod symbols, ~75 LOC, 1 file. blocked_by: B.1.
 - **15.2.5.B.3** — state: done — `internal/cmd/valv-proxy/Dockerfile`: image runs the binary with env-injected config. 0 Go prod symbols, ~20 LOC, 1 file. blocked_by: B.2.
-- **15.2.5.B.4** — `magefile.go` proxy-image build target. 1 build-target symbol, ~35 LOC, 1 file. blocked_by: B.3.
-- **Cross-drop:** 15.2.5.D.1 build is now ALSO blocked_by 15.2.5.B.4 (image must exist locally before sidecar integration tests).
+- **15.2.5.B.4** — state: todo — proxy image build wiring. 2 prod symbols / ~50 LOC inc tests / 2 files. blocked_by: B.3. (1) `func BuildProxy() error` in `magefile.go` — shells `docker buildx build --load -f internal/cmd/valv-proxy/Dockerfile . -t valv-proxy:dev` via the existing `run("docker", ...)` helper (build context = REPO ROOT per the Dockerfile comment; out-of-band from the provider-image `images.Options.ContextDir` path). (2) `func proxyImageRef() docker.ImageRef` in new `internal/services/networkpolicy/imageref.go` — reads `VALV_PROXY_IMAGE` override, defaults `docker.NewImageRef("valv-proxy", "dev")`; mirrors `claudeImageRef()` (`internal/cli/claude_image.go:13`) + `codexImageRef()` (`internal/cli/codex.go:270`); returns `docker.ImageRef` to match `ContainerRunRequest.Image` (`types.go:45`). Placed in `networkpolicy` (NOT `cli`) so `Service.Provision`/D.1 consume it without an import cycle. acceptance: `mage testPkg ./internal/services/networkpolicy` GREEN with new `imageref_test.go` (no env → `valv-proxy:dev`; `VALV_PROXY_IMAGE=repo/img:v1` → parsed repo+tag; `repo/img` no-tag → repo set, tag empty). `BuildProxy` has no unit test (consistent with all mage targets); builder runs `mage buildProxy` ONCE so `valv-proxy:dev` exists locally before D.1's integration tests.
+- **Cross-drop:** 15.2.5.D.1 build is ALSO blocked_by 15.2.5.B.4 — D.1 calls `proxyImageRef()`; the image must be locally built before D.1's integration tests run the sidecar.
+- **Publishing (DROP_22, out of scope here):** registry push/pull of the proxy image for `go install`/brew users who lack the repo (and can't run `mage buildProxy`) is deferred to DROP_22 release engineering.
 
 ### 15.2.5.E — Orphan cleanup + concurrency-safe Provision (3 droplets, serialized)
 
