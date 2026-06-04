@@ -6,23 +6,20 @@
 //  1. Network lifecycle. Provision creates a single Docker network with the
 //     --internal flag and a deterministic Valv label so the network can be
 //     reclaimed across restarts. The network is the only network the closed-
-//     default container attaches to; per Schema Decision 5 there is no
-//     bridge fallback.
-//  2. Policy material. The PolicyMaterial returned by Provision carries the
+//     default workload container attaches to; per Schema Decision 5 the proxy
+//     sidecar spans both the internal network and the default bridge.
+//  2. Sidecar launch. Provision starts a valv-proxy sidecar container on the
+//     default bridge network (so it can egress) and then connects it to the
+//     internal network with a stable DNS alias (ProxyAlias). The workload
+//     reaches the proxy by DNS name on the shared internal subnet.
+//  3. Policy material. The PolicyMaterial returned by Provision carries the
 //     proxy URLs, NO_PROXY value, and resolved network name that callers
 //     thread into ImageBuildRequest / ContainerRunRequest. The material is
-//     stable for the life of the provisioned network.
-//  3. Orphan cleanup. On every Provision call the service first scans for
-//     networks labeled valv=network-policy from prior runs. If a matching
-//     network is found it is reused (idempotent reclaim); if a stale network
-//     with a different prefix is found it is removed. The contract proves
-//     that a SIGKILLed prior invocation cannot wedge subsequent launches.
+//     stable for the life of the provisioned sidecar + network.
 //
-// The proxy daemon itself is NOT started by this service. Unit 15.2.5 owns
-// the policy material + the network lifecycle; the proxy daemon lives with
-// the runtime caller (Unit 15.3) that decides whether closed mode is active
-// and supplies the daemon endpoint. Callers pass ProxyEndpoint into
-// ProvisionRequest; the service composes the proxy URLs from that endpoint.
+// Orphan cleanup is handled on every Provision call: networks labeled
+// valv=network-policy from prior runs are reclaimed (same name) or removed
+// (different name / stale). Unit 15.2.5.E adds container-level cleanup.
 package networkpolicy
 
 import (
@@ -50,6 +47,14 @@ const (
 	// generating the docker network name. Keeping the prefix human-readable
 	// makes `docker network ls` output easier to scan for operators.
 	networkNamePrefix = "valv-netpol-"
+	// ProxyAlias is the DNS alias assigned to the proxy sidecar container on
+	// the internal network. The workload resolves this name to reach the
+	// sidecar on the shared internal subnet. Using a named constant ensures
+	// buildNoProxy (NO_PROXY exclusion) and the ConnectNetwork alias are
+	// always identical — they can never diverge.
+	ProxyAlias = "valv-proxy"
+	// proxyPort is the port the valv-proxy sidecar listens on.
+	proxyPort = "8080"
 )
 
 // NetworkExecutor is the subset of docker.Executor surface area the
@@ -98,22 +103,16 @@ type ProvisionRequest struct {
 	// Allowlist is the effective allowlist hosts (built-in defaults unioned
 	// with user-declared hosts). Callers compute this via
 	// tools.EffectiveAllowlist before invoking Provision. The service passes
-	// this to the network-name derivation (deterministic network naming) but
-	// does NOT place allowlist entries in NO_PROXY — the sidecar proxy
-	// enforces the allowlist internally (see buildNoProxy for rationale).
+	// this to the network-name derivation (deterministic network naming) and
+	// to the VALV_PROXY_ALLOWLIST env var on the sidecar container. It does
+	// NOT place allowlist entries in NO_PROXY — the sidecar proxy enforces
+	// the allowlist internally (see buildNoProxy for rationale).
 	//
 	// At least one allowlist entry is required so that the proxy sidecar has
 	// a defined set of hosts to permit; a zero-length allowlist would make
 	// the proxy block all egress. Callers that want unrestricted egress should
 	// run in open mode instead of invoking Provision.
 	Allowlist []string
-
-	// ProxyEndpoint is the host:port the policy proxy daemon listens on.
-	// The service uses this verbatim to compose HTTP_PROXY and HTTPS_PROXY
-	// values. Example: "host.docker.internal:18080".
-	//
-	// Required. A blank value returns a validation error.
-	ProxyEndpoint string
 }
 
 // Valid reports any input violations for a ProvisionRequest.
@@ -125,9 +124,6 @@ func (r ProvisionRequest) Valid() error {
 		if strings.TrimSpace(host) == "" {
 			return fmt.Errorf("validate provision request: allowlist entry is empty")
 		}
-	}
-	if strings.TrimSpace(r.ProxyEndpoint) == "" {
-		return fmt.Errorf("validate provision request: proxy endpoint is required")
 	}
 	return nil
 }
@@ -172,7 +168,14 @@ type Cleanup func(ctx context.Context) error
 //     (idempotent reclaim). Otherwise remove every label-matched network
 //     before creating a fresh one (orphan cleanup).
 //  3. Create the network with --internal and the managed label.
-//  4. Return the PolicyMaterial plus a Cleanup that removes the network.
+//  4. Launch the proxy sidecar container on the default bridge network
+//     (so it has external egress) with the allowlist in VALV_PROXY_ALLOWLIST.
+//  5. Connect the proxy sidecar to the internal network with ProxyAlias as
+//     the DNS alias, so the workload can resolve the sidecar by name.
+//  6. Return the PolicyMaterial plus a Cleanup that removes the network.
+//
+// The workload container is NOT attached here; callers (Unit 15.3.C) attach
+// the workload to the internal network only after Provision returns.
 //
 // The returned PolicyMaterial is always non-zero on success. The returned
 // Cleanup is never nil on success; callers may safely invoke it on the
@@ -219,9 +222,42 @@ func (s Service) Provision(ctx context.Context, request ProvisionRequest) (Polic
 		}
 	}
 
+	// Launch the proxy sidecar on the default bridge network. The bridge
+	// attachment gives the sidecar external egress while the internal network
+	// attachment (below) lets the workload reach it by ProxyAlias. Schema
+	// Decision 5: ONLY the proxy spans bridge; the workload is internal-only.
+	sidecarID, err := s.executor.RunContainerDetached(ctx, docker.ContainerRunRequest{
+		Image:    proxyImageRef(),
+		Detached: true,
+		Env: map[string]string{
+			"VALV_PROXY_ALLOWLIST": strings.Join(request.Allowlist, ","),
+			"VALV_PROXY_ADDR":      ":" + proxyPort,
+		},
+		Labels: map[string]string{
+			ManagedLabelKey: ManagedLabelValue,
+		},
+		// No Network field: defaults to Docker's bridge network, giving the
+		// sidecar external egress per Schema Decision 5.
+	})
+	if err != nil {
+		return PolicyMaterial{}, nil, fmt.Errorf("networkpolicy provision: start proxy sidecar: %w", err)
+	}
+
+	// Connect the sidecar to the internal network with a stable DNS alias.
+	// The workload (attached to internal-only by 15.3.C) resolves ProxyAlias
+	// to the sidecar IP on the shared internal subnet.
+	if err := s.executor.ConnectNetwork(ctx, docker.NetworkConnectRequest{
+		Network:   desiredName,
+		Container: sidecarID,
+		Aliases:   []string{ProxyAlias},
+	}); err != nil {
+		return PolicyMaterial{}, nil, fmt.Errorf("networkpolicy provision: connect proxy sidecar to internal network: %w", err)
+	}
+
+	proxyURL := "http://" + ProxyAlias + ":" + proxyPort
 	material := PolicyMaterial{
-		HTTPProxyURL:  "http://" + strings.TrimSpace(request.ProxyEndpoint),
-		HTTPSProxyURL: "http://" + strings.TrimSpace(request.ProxyEndpoint),
+		HTTPProxyURL:  proxyURL,
+		HTTPSProxyURL: proxyURL,
 		NoProxy:       buildNoProxy(),
 		NetworkName:   desiredName,
 	}
@@ -265,7 +301,7 @@ func networkName(allowlist []string) string {
 
 // buildNoProxy returns the NO_PROXY value for a closed-default workload
 // container. It contains only loopback exclusions and the sidecar proxy
-// alias so that:
+// alias (ProxyAlias) so that:
 //
 //   - The sidecar itself is reached directly (no proxy-through-proxy loop).
 //   - Loopback traffic bypasses the proxy (standard no-proxy semantics).
@@ -275,8 +311,11 @@ func networkName(allowlist []string) string {
 // Allowlist hosts must NEVER appear in NO_PROXY: the internal-only network
 // has no direct route to the outside, so a client that bypasses the sidecar
 // for an allowlist host would get a connection failure instead of egress.
+//
+// ProxyAlias is used here rather than the literal "valv-proxy" string so
+// that the NO_PROXY exclusion and the ConnectNetwork alias can never diverge.
 func buildNoProxy() string {
-	entries := []string{"127.0.0.1", "localhost", "valv-proxy"}
+	entries := []string{"127.0.0.1", "localhost", ProxyAlias}
 	sort.Strings(entries)
 	return strings.Join(entries, ",")
 }

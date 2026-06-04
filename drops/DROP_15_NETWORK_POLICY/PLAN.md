@@ -174,7 +174,7 @@ Locked design (do not re-litigate): sidecar-proxy topology with workload attache
 
 ##### Unit 15.2.5.D.1 — Provision sidecar core lifecycle
 
-- state: todo
+- state: done
 - blocked_by: 15.2.5.A, 15.2.5.B.4, 15.2.5.C
 - paths: `internal/services/networkpolicy/service.go`
 - packages: `./internal/services/networkpolicy`

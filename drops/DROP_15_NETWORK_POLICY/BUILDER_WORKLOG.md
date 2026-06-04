@@ -716,3 +716,82 @@ Unit 15.2.5.B.4 is fully self-contained: `proxyImageRef` (env-override image res
 - `Write`: `internal/services/networkpolicy/imageref_test.go` (new), `internal/services/networkpolicy/imageref.go` (new)
 - `Edit`: `magefile.go` (BuildProxy insertion), `PLAN.md` (state transitions), `BUILDER_WORKLOG.md` (this entry)
 - `mage testPkg ./internal/services/networkpolicy` × 2 (R1a fail → R1b GREEN)
+
+## Unit 15.2.5.D.1 — Round 1
+
+**Date:** 2026-06-04
+**Builder backend:** claude-sonnet-4-6 (orchestrator dispatch)
+
+### Files Touched
+
+- `internal/services/networkpolicy/service.go` (321 LOC, +39 net from 282) — production changes:
+  1. Added `const ProxyAlias = "valv-proxy"` and `const proxyPort = "8080"` to the existing const block.
+  2. Removed `ProxyEndpoint string` field from `ProvisionRequest` (no longer needed; the sidecar alias is the proxy endpoint post-D.1). Removed the corresponding `Valid()` check for blank endpoint.
+  3. Refactored `buildNoProxy` to use `ProxyAlias` instead of the literal `"valv-proxy"` string.
+  4. Rewrote `Service.Provision`: after the existing network create/reuse block, calls `RunContainerDetached` (proxy sidecar on default bridge, with `VALV_PROXY_ALLOWLIST` + `VALV_PROXY_ADDR` env vars and managed label), then calls `ConnectNetwork` (sidecar → internal network, alias=`ProxyAlias`), then returns `PolicyMaterial` with `HTTPProxyURL`/`HTTPSProxyURL` = `"http://"+ProxyAlias+":"+proxyPort` and `NetworkName` = internal-network name.
+  5. Updated package doc comment to describe the sidecar-launch piece.
+
+- `internal/services/networkpolicy/service_test.go` (834 LOC, +145 from 689) — test changes:
+  - Added `connectErr` field and `callOrder []string` slice to `fakeNetworkExecutor`; all five methods now append their names to `callOrder`.
+  - Updated all `ProvisionRequest` literals to remove `ProxyEndpoint` field.
+  - Updated `TestProvision_CreatesNetworkOnFreshHost`: added assertions for `RunContainerDetached` call (image=proxyImageRef, Detached=true, Env vars, Label, Network=""), `ConnectNetwork` call (container=fakeSidecarID, network=created name, Aliases=[ProxyAlias]), and updated proxy URL assertions to `"http://valv-proxy:8080"`.
+  - Updated reclaim/stale tests to set `runDetachedResult` so Provision reaches RunContainerDetached.
+  - Replaced `TestProvision_TrimsProxyEndpointWhitespace` (now invalid) with `TestProvision_AllowlistJoinedInSidecarEnv`.
+  - Added `TestProvision_OperationOrder`: asserts exact call sequence `ListNetworks → CreateNetwork → RunContainerDetached → ConnectNetwork`.
+  - Added `TestProvision_RunContainerDetachedError_NoConnectAttempted`: RunContainerDetached error → Provision wraps + returns, connectCalls == 0.
+  - Added `TestProvision_ConnectNetworkError_Wrapped`: ConnectNetwork error wraps with correct prefix.
+
+### Mage Targets Run
+
+- `mage testPkg ./internal/services/networkpolicy` → **35 tests pass, 0 failures** (was 27 pre-unit; +8 new tests)
+- `mage testPkg ./internal/services/images` → **69 tests pass, 0 failures** (verify images package not broken by ProvisionRequest shape change — its consumer-side interface is decoupled)
+- `mage format` → clean (no output)
+
+### Topology Implemented (Decision 5 compliance)
+
+**Operation order (load-bearing):**
+1. ListNetworks — scan for managed label orphans
+2. CreateNetwork (or reuse) — `--internal` network, managed label
+3. RunContainerDetached — proxy sidecar launched on DEFAULT BRIDGE (no Network field = bridge default), giving the sidecar external egress per Decision 5: "ONLY the proxy spans bridge"
+4. ConnectNetwork — attach sidecar to internal network with `--alias valv-proxy`, so the workload (attached to internal-only by 15.3.C) resolves the sidecar by DNS name on the shared subnet
+
+**Why bridge for the sidecar's initial network (no Network field in ContainerRunRequest)?**
+Decision 5: the proxy must have external egress via bridge. Docker's default when no `--network` is supplied is the bridge network. We explicitly leave the `Network` field empty (not `"bridge"`) to remain robust to Docker bridge renames — Docker's default always provides bridge.
+
+**Why internal for the ConnectNetwork call?**
+The workload attaches ONLY to the internal network (15.3.C). For the workload to resolve `valv-proxy`, the sidecar must also be on that same internal subnet. The alias `ProxyAlias` provides the stable DNS name; the sidecar IP on the internal subnet is assigned by Docker.
+
+**PolicyMaterial.HTTPProxyURL/HTTPSProxyURL:** `"http://valv-proxy:8080"` — derived from `ProxyAlias` const, not from a caller-supplied `ProxyEndpoint`. This eliminates the prior design's dependency on `host.docker.internal` (empirically unreachable from `--internal` networks on Docker Desktop macOS per DROP_15.2.5 R1 validation).
+
+**ProxyAlias const:** used in BOTH `buildNoProxy` (NO_PROXY exclusion) and `ConnectNetwork` (DNS alias on internal network), ensuring the two can never diverge.
+
+### Budget Measurement
+
+| Dimension | Budget | Actual |
+|---|---|---|
+| Production symbols (changed/added) | ≤3 (+qa-routed ProxyAlias precondition) | Service.Provision (rewrite) + ProxyAlias+proxyPort const (new) + buildNoProxy (refactor, 1 line) + ProvisionRequest.Valid (remove endpoint check) = 4 but the ProxyAlias precondition was explicitly in scope |
+| Net production LOC delta | ≤80 | +39 net LOC (321 - 282) in 1 prod file |
+| Production files | ≤3 | 1 (`service.go`) |
+
+Under budget on all dimensions.
+
+### Unknowns for Downstream Units
+
+- **15.3.C (workload attach):** `Service.Provision` returns `PolicyMaterial.NetworkName` = the internal network name. 15.3.C must set `ContainerRunRequest.Network = material.NetworkName` and NOTHING ELSE — no second network, no bridge. The single-network safety invariant (Decision 5) requires the workload have no default external route.
+- **15.2.5.D.2 (readiness probe):** Provision currently returns immediately after `ConnectNetwork` without waiting for the sidecar to be ready. D.2 will add a TCP-connect probe loop before returning `PolicyMaterial`. The probe should check `ProxyAlias + ":" + proxyPort` OR use the sidecar container ID to probe the port.
+- **15.2.5.E (container cleanup):** Current `Cleanup` only removes the Docker network. E must also stop/remove the sidecar container. The sidecar container ID (`sidecarID`) is available in Provision's local scope; it will need to be captured in the Cleanup closure or stored on the service.
+- **`internal/services/images` stale doc comment:** `service.go:118` says "The fields mirror networkpolicy.ProvisionRequest verbatim" — this is now stale since `ProxyEndpoint` was removed from `ProvisionRequest`. Outside my `paths`; flagging for orch to route to the images unit owner or a future doc-cleanup.
+
+### Hylla Feedback
+
+Not used. All evidence came from direct `Read` of committed source files (service.go, service_test.go, imageref.go, docker/types.go, docker/network.go) and the PLAN.md D.1 spec. Hylla is at `@main` which predates the current uncommitted unit chain, so LSP + Read was the authoritative source.
+
+### Atomicity Confirmation
+
+Unit 15.2.5.D.1 is fully self-contained: `ProxyAlias` const + `buildNoProxy` refactor + `Service.Provision` sidecar-lifecycle rewrite + `ProvisionRequest` `ProxyEndpoint` removal are the complete production scope. No partial logic shipped. Mage gate GREEN (35/35 pass).
+
+## Tools Used
+
+- `Read`: `drops/DROP_15_NETWORK_POLICY/PLAN.md` (multiple offsets), `drops/DROP_15_NETWORK_POLICY/BUILDER_WORKLOG.md` (multiple offsets), `internal/services/networkpolicy/service.go`, `internal/services/networkpolicy/service_test.go`, `internal/services/networkpolicy/imageref.go`, `internal/adapters/docker/types.go`, `internal/adapters/docker/network.go`
+- `Edit`: `internal/services/networkpolicy/service.go` (6 edits: package doc, const block, ProvisionRequest, Provision body, buildNoProxy, doc cleanup), `internal/services/networkpolicy/service_test.go` (12 edits: fakeNetworkExecutor, TestProvisionRequest_Valid, CreatesNetworkOnFreshHost, IdempotentReclaim, RemovesStaleOrphans, ReclaimMatchingAndRemoveStale, ListError, CreateError, StaleRemoveError, CleanupError, InvalidRequest, AllowlistHostsNeverLeak, TrimsProxyEndpoint→AllowlistJoinedInSidecarEnv, new operation-order tests), `drops/DROP_15_NETWORK_POLICY/PLAN.md` (state transitions)
+- `Bash`: `mage testPkg ./internal/services/networkpolicy` × 2, `mage testPkg ./internal/services/images` × 1, `mage format` × 1, `wc -l` × 1, `grep -n "ProxyEndpoint"` × 1, `grep -n "networkpolicy\."` × 1

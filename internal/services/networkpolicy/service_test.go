@@ -25,14 +25,22 @@ type fakeNetworkExecutor struct {
 	runDetachedResult string
 	runDetachedErr    error
 
+	// connectErr is returned by ConnectNetwork when non-nil.
+	connectErr error
+
 	createCalls      []docker.NetworkCreateRequest
 	removeCalls      []docker.NetworkRemoveRequest
 	listCalls        []string
 	runDetachedCalls []docker.ContainerRunRequest
 	connectCalls     []docker.NetworkConnectRequest
+
+	// callOrder records the method names in invocation order so tests can
+	// assert operation sequencing.
+	callOrder []string
 }
 
 func (f *fakeNetworkExecutor) CreateNetwork(_ context.Context, req docker.NetworkCreateRequest) error {
+	f.callOrder = append(f.callOrder, "CreateNetwork")
 	f.createCalls = append(f.createCalls, req)
 	if f.createErr != nil {
 		return f.createErr
@@ -44,6 +52,7 @@ func (f *fakeNetworkExecutor) CreateNetwork(_ context.Context, req docker.Networ
 }
 
 func (f *fakeNetworkExecutor) RemoveNetwork(_ context.Context, req docker.NetworkRemoveRequest) error {
+	f.callOrder = append(f.callOrder, "RemoveNetwork")
 	f.removeCalls = append(f.removeCalls, req)
 	if f.removeErr != nil {
 		return f.removeErr
@@ -59,6 +68,7 @@ func (f *fakeNetworkExecutor) RemoveNetwork(_ context.Context, req docker.Networ
 }
 
 func (f *fakeNetworkExecutor) ListNetworks(_ context.Context, label string) ([]string, error) {
+	f.callOrder = append(f.callOrder, "ListNetworks")
 	f.listCalls = append(f.listCalls, label)
 	if f.listErr != nil {
 		return nil, f.listErr
@@ -69,6 +79,7 @@ func (f *fakeNetworkExecutor) ListNetworks(_ context.Context, label string) ([]s
 }
 
 func (f *fakeNetworkExecutor) RunContainerDetached(_ context.Context, req docker.ContainerRunRequest) (string, error) {
+	f.callOrder = append(f.callOrder, "RunContainerDetached")
 	f.runDetachedCalls = append(f.runDetachedCalls, req)
 	if f.runDetachedErr != nil {
 		return "", f.runDetachedErr
@@ -77,8 +88,9 @@ func (f *fakeNetworkExecutor) RunContainerDetached(_ context.Context, req docker
 }
 
 func (f *fakeNetworkExecutor) ConnectNetwork(_ context.Context, req docker.NetworkConnectRequest) error {
+	f.callOrder = append(f.callOrder, "ConnectNetwork")
 	f.connectCalls = append(f.connectCalls, req)
-	return nil
+	return f.connectErr
 }
 
 func TestNew_RequiresExecutor(t *testing.T) {
@@ -110,31 +122,19 @@ func TestProvisionRequest_Valid(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name: "happy_path",
-			request: ProvisionRequest{
-				Allowlist:     []string{"proxy.golang.org"},
-				ProxyEndpoint: "host.docker.internal:18080",
-			},
+			name:    "happy_path",
+			request: ProvisionRequest{Allowlist: []string{"proxy.golang.org"}},
 			wantErr: false,
 		},
 		{
 			name:    "empty_allowlist_rejected",
-			request: ProvisionRequest{ProxyEndpoint: "host.docker.internal:18080"},
+			request: ProvisionRequest{},
 			wantErr: true,
 		},
 		{
 			name: "blank_allowlist_entry_rejected",
 			request: ProvisionRequest{
-				Allowlist:     []string{"proxy.golang.org", "  "},
-				ProxyEndpoint: "host.docker.internal:18080",
-			},
-			wantErr: true,
-		},
-		{
-			name: "blank_endpoint_rejected",
-			request: ProvisionRequest{
-				Allowlist:     []string{"proxy.golang.org"},
-				ProxyEndpoint: "   ",
+				Allowlist: []string{"proxy.golang.org", "  "},
 			},
 			wantErr: true,
 		},
@@ -157,17 +157,15 @@ func TestProvisionRequest_Valid(t *testing.T) {
 func TestProvision_CreatesNetworkOnFreshHost(t *testing.T) {
 	t.Parallel()
 
-	fake := &fakeNetworkExecutor{}
+	const fakeSidecarID = "abc123def456"
+	fake := &fakeNetworkExecutor{runDetachedResult: fakeSidecarID}
 	svc, err := New(Options{Executor: fake})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
 
 	allowlist := []string{"proxy.golang.org", "sum.golang.org", "github.com", "objects.githubusercontent.com"}
-	req := ProvisionRequest{
-		Allowlist:     allowlist,
-		ProxyEndpoint: "host.docker.internal:18080",
-	}
+	req := ProvisionRequest{Allowlist: allowlist}
 
 	material, cleanup, err := svc.Provision(context.Background(), req)
 	if err != nil {
@@ -197,18 +195,58 @@ func TestProvision_CreatesNetworkOnFreshHost(t *testing.T) {
 		t.Errorf("CreateNetwork Name = %q, want prefix %q", create.Name, networkNamePrefix)
 	}
 
+	// One RunContainerDetached call: correct image, Detached=true, env vars, managed label, no network (bridge default).
+	if len(fake.runDetachedCalls) != 1 {
+		t.Fatalf("runDetachedCalls = %d, want 1", len(fake.runDetachedCalls))
+	}
+	run := fake.runDetachedCalls[0]
+	if run.Image != proxyImageRef() {
+		t.Errorf("RunContainerDetached Image = %v, want %v", run.Image, proxyImageRef())
+	}
+	if !run.Detached {
+		t.Errorf("RunContainerDetached Detached = false, want true")
+	}
+	if run.Env["VALV_PROXY_ADDR"] != ":"+proxyPort {
+		t.Errorf("RunContainerDetached Env[VALV_PROXY_ADDR] = %q, want %q", run.Env["VALV_PROXY_ADDR"], ":"+proxyPort)
+	}
+	if run.Env["VALV_PROXY_ALLOWLIST"] == "" {
+		t.Errorf("RunContainerDetached Env[VALV_PROXY_ALLOWLIST] is empty, want non-empty")
+	}
+	if run.Labels[ManagedLabelKey] != ManagedLabelValue {
+		t.Errorf("RunContainerDetached Labels[%q] = %q, want %q", ManagedLabelKey, run.Labels[ManagedLabelKey], ManagedLabelValue)
+	}
+	if run.Network != "" {
+		t.Errorf("RunContainerDetached Network = %q, want empty (bridge default)", run.Network)
+	}
+
+	// One ConnectNetwork call: proxy sidecar connected to internal network with ProxyAlias.
+	if len(fake.connectCalls) != 1 {
+		t.Fatalf("connectCalls = %d, want 1", len(fake.connectCalls))
+	}
+	conn := fake.connectCalls[0]
+	if conn.Container != fakeSidecarID {
+		t.Errorf("ConnectNetwork Container = %q, want %q (sidecar ID from RunContainerDetached)", conn.Container, fakeSidecarID)
+	}
+	if conn.Network != create.Name {
+		t.Errorf("ConnectNetwork Network = %q, want %q (internal network)", conn.Network, create.Name)
+	}
+	if len(conn.Aliases) != 1 || conn.Aliases[0] != ProxyAlias {
+		t.Errorf("ConnectNetwork Aliases = %v, want [%q]", conn.Aliases, ProxyAlias)
+	}
+
 	// Material assertions.
 	if material.NetworkName != create.Name {
 		t.Errorf("material.NetworkName = %q, want %q (matching created network)", material.NetworkName, create.Name)
 	}
-	if material.HTTPProxyURL != "http://host.docker.internal:18080" {
-		t.Errorf("HTTPProxyURL = %q, want %q", material.HTTPProxyURL, "http://host.docker.internal:18080")
+	wantProxyURL := "http://" + ProxyAlias + ":" + proxyPort
+	if material.HTTPProxyURL != wantProxyURL {
+		t.Errorf("HTTPProxyURL = %q, want %q", material.HTTPProxyURL, wantProxyURL)
 	}
-	if material.HTTPSProxyURL != "http://host.docker.internal:18080" {
-		t.Errorf("HTTPSProxyURL = %q, want %q", material.HTTPSProxyURL, "http://host.docker.internal:18080")
+	if material.HTTPSProxyURL != wantProxyURL {
+		t.Errorf("HTTPSProxyURL = %q, want %q", material.HTTPSProxyURL, wantProxyURL)
 	}
 	// NO_PROXY: only loopback + sidecar alias; allowlist hosts must NOT appear.
-	wantNoProxy := "127.0.0.1,localhost,valv-proxy"
+	wantNoProxy := "127.0.0.1,localhost," + ProxyAlias
 	if material.NoProxy != wantNoProxy {
 		t.Errorf("NoProxy = %q, want %q", material.NoProxy, wantNoProxy)
 	}
@@ -237,17 +275,15 @@ func TestProvision_IdempotentReclaimOfMatchingNetwork(t *testing.T) {
 	expectedName := networkName(allowlist)
 
 	fake := &fakeNetworkExecutor{
-		listResult: []string{expectedName},
+		listResult:        []string{expectedName},
+		runDetachedResult: "sidecar-reclaim-id",
 	}
 	svc, err := New(Options{Executor: fake})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	material, cleanup, err := svc.Provision(context.Background(), ProvisionRequest{
-		Allowlist:     allowlist,
-		ProxyEndpoint: "host.docker.internal:18080",
-	})
+	material, cleanup, err := svc.Provision(context.Background(), ProvisionRequest{Allowlist: allowlist})
 	if err != nil {
 		t.Fatalf("Provision() error = %v", err)
 	}
@@ -261,6 +297,14 @@ func TestProvision_IdempotentReclaimOfMatchingNetwork(t *testing.T) {
 	}
 	if material.NetworkName != expectedName {
 		t.Errorf("material.NetworkName = %q, want %q", material.NetworkName, expectedName)
+	}
+
+	// Sidecar still launched even on reclaim path.
+	if len(fake.runDetachedCalls) != 1 {
+		t.Errorf("runDetachedCalls = %d, want 1 (sidecar always launched)", len(fake.runDetachedCalls))
+	}
+	if len(fake.connectCalls) != 1 {
+		t.Errorf("connectCalls = %d, want 1 (sidecar always connected)", len(fake.connectCalls))
 	}
 
 	// Cleanup still removes the reclaimed network so callers don't have
@@ -282,17 +326,15 @@ func TestProvision_RemovesStaleOrphansBeforeCreate(t *testing.T) {
 	staleA := "valv-netpol-deadbeefcafe"
 	staleB := "valv-netpol-feedfacebeef"
 	fake := &fakeNetworkExecutor{
-		listResult: []string{staleA, staleB},
+		listResult:        []string{staleA, staleB},
+		runDetachedResult: "sidecar-stale-test",
 	}
 	svc, err := New(Options{Executor: fake})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	material, cleanup, err := svc.Provision(context.Background(), ProvisionRequest{
-		Allowlist:     allowlist,
-		ProxyEndpoint: "host.docker.internal:18080",
-	})
+	material, cleanup, err := svc.Provision(context.Background(), ProvisionRequest{Allowlist: allowlist})
 	if err != nil {
 		t.Fatalf("Provision() error = %v", err)
 	}
@@ -320,6 +362,10 @@ func TestProvision_RemovesStaleOrphansBeforeCreate(t *testing.T) {
 	if material.NetworkName != expectedName {
 		t.Errorf("material.NetworkName = %q, want %q", material.NetworkName, expectedName)
 	}
+	// Sidecar launched after orphan cleanup.
+	if len(fake.runDetachedCalls) != 1 {
+		t.Errorf("runDetachedCalls = %d, want 1", len(fake.runDetachedCalls))
+	}
 }
 
 func TestProvision_ReclaimMatchingAndRemoveStaleSimultaneously(t *testing.T) {
@@ -330,17 +376,15 @@ func TestProvision_ReclaimMatchingAndRemoveStaleSimultaneously(t *testing.T) {
 	stale := "valv-netpol-0123456789ab"
 
 	fake := &fakeNetworkExecutor{
-		listResult: []string{expectedName, stale},
+		listResult:        []string{expectedName, stale},
+		runDetachedResult: "sidecar-reclaim-stale",
 	}
 	svc, err := New(Options{Executor: fake})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	material, cleanup, err := svc.Provision(context.Background(), ProvisionRequest{
-		Allowlist:     allowlist,
-		ProxyEndpoint: "host.docker.internal:18080",
-	})
+	material, cleanup, err := svc.Provision(context.Background(), ProvisionRequest{Allowlist: allowlist})
 	if err != nil {
 		t.Fatalf("Provision() error = %v", err)
 	}
@@ -371,8 +415,7 @@ func TestProvision_ListError_Wrapped(t *testing.T) {
 	}
 
 	_, _, err = svc.Provision(context.Background(), ProvisionRequest{
-		Allowlist:     []string{"github.com"},
-		ProxyEndpoint: "host.docker.internal:18080",
+		Allowlist: []string{"github.com"},
 	})
 	if err == nil {
 		t.Fatal("Provision() error = nil, want list error")
@@ -396,8 +439,7 @@ func TestProvision_CreateError_Wrapped(t *testing.T) {
 	}
 
 	_, _, err = svc.Provision(context.Background(), ProvisionRequest{
-		Allowlist:     []string{"github.com"},
-		ProxyEndpoint: "host.docker.internal:18080",
+		Allowlist: []string{"github.com"},
 	})
 	if err == nil {
 		t.Fatal("Provision() error = nil, want create error")
@@ -424,8 +466,7 @@ func TestProvision_StaleRemoveError_Wrapped(t *testing.T) {
 	}
 
 	_, _, err = svc.Provision(context.Background(), ProvisionRequest{
-		Allowlist:     []string{"github.com"},
-		ProxyEndpoint: "host.docker.internal:18080",
+		Allowlist: []string{"github.com"},
 	})
 	if err == nil {
 		t.Fatal("Provision() error = nil, want stale-removal error")
@@ -438,15 +479,14 @@ func TestProvision_StaleRemoveError_Wrapped(t *testing.T) {
 func TestProvision_CleanupError_Wrapped(t *testing.T) {
 	t.Parallel()
 
-	fake := &fakeNetworkExecutor{}
+	fake := &fakeNetworkExecutor{runDetachedResult: "cleanup-test-sidecar"}
 	svc, err := New(Options{Executor: fake})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
 
 	_, cleanup, err := svc.Provision(context.Background(), ProvisionRequest{
-		Allowlist:     []string{"github.com"},
-		ProxyEndpoint: "host.docker.internal:18080",
+		Allowlist: []string{"github.com"},
 	})
 	if err != nil {
 		t.Fatalf("Provision() error = %v", err)
@@ -470,7 +510,7 @@ func TestProvision_InvalidRequest_Wrapped(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	_, _, err = svc.Provision(context.Background(), ProvisionRequest{ProxyEndpoint: "host.docker.internal:18080"})
+	_, _, err = svc.Provision(context.Background(), ProvisionRequest{})
 	if err == nil {
 		t.Fatal("Provision(invalid) error = nil, want validation error")
 	}
@@ -545,22 +585,21 @@ func TestBuildNoProxy_AllowlistHostsNeverLeak(t *testing.T) {
 		"registry-1.docker.io",
 	}
 
-	fake := &fakeNetworkExecutor{}
+	fake := &fakeNetworkExecutor{runDetachedResult: "allowlist-no-leak-sidecar"}
 	svc, err := New(Options{Executor: fake})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
 
 	material, cleanup, err := svc.Provision(context.Background(), ProvisionRequest{
-		Allowlist:     allowlistHosts,
-		ProxyEndpoint: "host.docker.internal:18080",
+		Allowlist: allowlistHosts,
 	})
 	if err != nil {
 		t.Fatalf("Provision() error = %v", err)
 	}
 	defer func() { _ = cleanup(context.Background()) }()
 
-	const wantNoProxy = "127.0.0.1,localhost,valv-proxy"
+	wantNoProxy := "127.0.0.1,localhost," + ProxyAlias
 	if material.NoProxy != wantNoProxy {
 		t.Errorf("NoProxy = %q, want %q", material.NoProxy, wantNoProxy)
 	}
@@ -657,32 +696,139 @@ func TestBuildNoProxy_LoopbackAndSidecarAlwaysPresent(t *testing.T) {
 	}
 }
 
-// Compile-time interface check: docker.Executor must satisfy NetworkExecutor.
-// Confirms the production path lines up with the consumer-side interface.
-var _ NetworkExecutor = docker.Executor{}
-
-func TestProvision_TrimsProxyEndpointWhitespace(t *testing.T) {
+// TestProvision_OperationOrder asserts that Provision executes its Docker
+// operations in the required sequence: (1) ListNetworks, (2) CreateNetwork,
+// (3) RunContainerDetached, (4) ConnectNetwork. This order is load-bearing:
+// the sidecar must be running before ConnectNetwork is called, and the network
+// must exist before both.
+func TestProvision_OperationOrder(t *testing.T) {
 	t.Parallel()
 
-	fake := &fakeNetworkExecutor{}
+	fake := &fakeNetworkExecutor{runDetachedResult: "ordered-sidecar"}
 	svc, err := New(Options{Executor: fake})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	material, cleanup, err := svc.Provision(context.Background(), ProvisionRequest{
-		Allowlist:     []string{"github.com"},
-		ProxyEndpoint: "  host.docker.internal:18080  ",
+
+	_, cleanup, err := svc.Provision(context.Background(), ProvisionRequest{
+		Allowlist: []string{"github.com"},
 	})
 	if err != nil {
 		t.Fatalf("Provision() error = %v", err)
 	}
 	defer func() { _ = cleanup(context.Background()) }()
 
-	want := "http://host.docker.internal:18080"
-	if material.HTTPProxyURL != want {
-		t.Errorf("HTTPProxyURL = %q, want %q", material.HTTPProxyURL, want)
+	want := []string{"ListNetworks", "CreateNetwork", "RunContainerDetached", "ConnectNetwork"}
+	if len(fake.callOrder) != len(want) {
+		t.Fatalf("callOrder = %v, want %v", fake.callOrder, want)
 	}
-	if material.HTTPSProxyURL != want {
-		t.Errorf("HTTPSProxyURL = %q, want %q", material.HTTPSProxyURL, want)
+	for i, op := range want {
+		if fake.callOrder[i] != op {
+			t.Errorf("callOrder[%d] = %q, want %q", i, fake.callOrder[i], op)
+		}
+	}
+}
+
+// TestProvision_RunContainerDetachedError_NoConnectAttempted asserts that a
+// RunContainerDetached failure causes Provision to return immediately without
+// calling ConnectNetwork.
+func TestProvision_RunContainerDetachedError_NoConnectAttempted(t *testing.T) {
+	t.Parallel()
+
+	sentinel := errors.New("image not found")
+	fake := &fakeNetworkExecutor{runDetachedErr: sentinel}
+	svc, err := New(Options{Executor: fake})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	_, _, err = svc.Provision(context.Background(), ProvisionRequest{
+		Allowlist: []string{"github.com"},
+	})
+	if err == nil {
+		t.Fatal("Provision() error = nil, want sidecar-launch error")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("Provision() error = %v, want errors.Is sentinel", err)
+	}
+	if !strings.Contains(err.Error(), "networkpolicy provision") {
+		t.Errorf("Provision() error = %q, want context prefix 'networkpolicy provision'", err.Error())
+	}
+	// ConnectNetwork must NOT have been called.
+	if len(fake.connectCalls) != 0 {
+		t.Errorf("connectCalls = %d, want 0 (ConnectNetwork must not fire after RunContainerDetached error)", len(fake.connectCalls))
+	}
+}
+
+// TestProvision_ConnectNetworkError_Wrapped asserts that a ConnectNetwork
+// failure wraps and propagates correctly.
+func TestProvision_ConnectNetworkError_Wrapped(t *testing.T) {
+	t.Parallel()
+
+	sentinel := errors.New("network connect refused")
+	fake := &fakeNetworkExecutor{
+		runDetachedResult: "connect-error-sidecar",
+		connectErr:        sentinel,
+	}
+	svc, err := New(Options{Executor: fake})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	_, _, err = svc.Provision(context.Background(), ProvisionRequest{
+		Allowlist: []string{"github.com"},
+	})
+	if err == nil {
+		t.Fatal("Provision() error = nil, want connect error")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("Provision() error = %v, want errors.Is sentinel", err)
+	}
+	if !strings.Contains(err.Error(), "networkpolicy provision") {
+		t.Errorf("Provision() error = %q, want context prefix 'networkpolicy provision'", err.Error())
+	}
+}
+
+// Compile-time interface check: docker.Executor must satisfy NetworkExecutor.
+// Confirms the production path lines up with the consumer-side interface.
+var _ NetworkExecutor = docker.Executor{}
+
+// TestProvision_AllowlistJoinedInSidecarEnv verifies that the VALV_PROXY_ALLOWLIST
+// env var on the sidecar is the comma-joined effective allowlist.
+func TestProvision_AllowlistJoinedInSidecarEnv(t *testing.T) {
+	t.Parallel()
+
+	fake := &fakeNetworkExecutor{runDetachedResult: "allowlist-env-sidecar"}
+	svc, err := New(Options{Executor: fake})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	allowlist := []string{"github.com", "proxy.golang.org"}
+	material, cleanup, err := svc.Provision(context.Background(), ProvisionRequest{
+		Allowlist: allowlist,
+	})
+	if err != nil {
+		t.Fatalf("Provision() error = %v", err)
+	}
+	defer func() { _ = cleanup(context.Background()) }()
+
+	// Proxy URLs must point at ProxyAlias, not a caller-supplied endpoint.
+	wantProxyURL := "http://" + ProxyAlias + ":" + proxyPort
+	if material.HTTPProxyURL != wantProxyURL {
+		t.Errorf("HTTPProxyURL = %q, want %q", material.HTTPProxyURL, wantProxyURL)
+	}
+	if material.HTTPSProxyURL != wantProxyURL {
+		t.Errorf("HTTPSProxyURL = %q, want %q", material.HTTPSProxyURL, wantProxyURL)
+	}
+
+	// VALV_PROXY_ALLOWLIST must contain the allowlist entries.
+	if len(fake.runDetachedCalls) != 1 {
+		t.Fatalf("runDetachedCalls = %d, want 1", len(fake.runDetachedCalls))
+	}
+	envAllowlist := fake.runDetachedCalls[0].Env["VALV_PROXY_ALLOWLIST"]
+	for _, host := range allowlist {
+		if !strings.Contains(envAllowlist, host) {
+			t.Errorf("VALV_PROXY_ALLOWLIST = %q does not contain %q", envAllowlist, host)
+		}
 	}
 }
