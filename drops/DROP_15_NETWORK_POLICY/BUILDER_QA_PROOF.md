@@ -785,3 +785,11 @@ The CONNECT-denied test's `dialCount == 0` assertion is strong fail-closed evide
 - Gate: `mage testPkg ./internal/services/networkpolicy` 35/35 GREEN (orch independently re-ran + `mage vet` whole-tree clean).
 
 NITs (non-blocking): stale `images/service.go:118` doc; builder ran `mage format` + `mage testPkg ./internal/services/images` (out of builder gate scope — dispatch-audit note). NOTE: proof axis is pass, but see BUILDER_QA_FALSIFICATION.md Round 1 — falsification found an integration compile break (F-1) that gates D.1 → Round 2 required before D.1 is green.
+
+## Unit 15.2.5.D.2 — Rounds 1-2
+
+**verdict: PASS** (orch-written/orch-verified). `Provision` waits for sidecar readiness before returning. R1 added `waitForSidecar` + `defaultReadyProbe` but asserted an interface the prod executor didn't satisfy (silent no-op, F-2 below). R2 fixed it. Acceptance proven at `a478d67`:
+- Readiness is HOST-reachable: `docker.Executor.ContainerRunning` (`executor.go:116`, value receiver) shells `docker inspect --format {{.State.Running}} <id>` via the runner `Output` type-assert (same pattern as `Create`); no internal-network TCP. `defaultReadyProbe` asserts the narrow `containerChecker` interface (`service.go:176`) that `docker.Executor` satisfies.
+- Regression-proof: compile guard `var _ containerChecker = docker.Executor{}` (`service_test.go:802`) — build fails if `ContainerRunning` is dropped/renamed.
+- `NetworkExecutor` interface UNCHANGED (5 methods) — `ContainerRunning` is additive on the concrete type + a separate narrow interface; no sibling break, no `mage integration` needed.
+- Gates orch-re-ran: `mage testPkg ./internal/adapters/docker` 90/90 + `./internal/services/networkpolicy` 43/43 GREEN. Budget 2 symbols / ~47 LOC / 2 files.
