@@ -152,6 +152,49 @@ func New(opts Options) (Service, error) {
 	}, nil
 }
 
+// staleSweeper is the narrow interface sweepStaleSidecars requires of the
+// executor. docker.Executor satisfies this via ListContainersByLabel and
+// RemoveContainer. Test fakes that implement both methods satisfy the interface;
+// fakes that omit it cause sweepStaleSidecars to skip the sweep silently.
+//
+// Defined consumer-side to keep NetworkExecutor stable (no sibling breakage).
+// The compile-time guard var _ staleSweeper = docker.Executor{} in service_test.go
+// ensures docker.Executor always satisfies it.
+type staleSweeper interface {
+	ListContainersByLabel(ctx context.Context, label string) ([]string, error)
+	RemoveContainer(ctx context.Context, request docker.ContainerRemoveRequest) error
+}
+
+// sweepStaleSidecars enumerates containers carrying the managed label and
+// removes each one before the caller creates a fresh sidecar. This is the
+// reclaim-on-collision path: if a prior Provision run left a sidecar behind
+// (e.g. from a SIGKILLed process), the stale container is cleaned up before
+// the new one is started so there are no duplicate sidecars on the bridge.
+//
+// If the executor does not implement staleSweeper (e.g. a minimal test fake),
+// the sweep is a silent no-op. Errors from ListContainersByLabel or
+// RemoveContainer are wrapped and returned; callers should propagate them.
+func (s Service) sweepStaleSidecars(ctx context.Context) error {
+	sweeper, ok := s.executor.(staleSweeper)
+	if !ok {
+		return nil
+	}
+	managedFilter := ManagedLabelKey + "=" + ManagedLabelValue
+	ids, err := sweeper.ListContainersByLabel(ctx, managedFilter)
+	if err != nil {
+		return fmt.Errorf("networkpolicy sweep stale sidecars: list containers: %w", err)
+	}
+	for _, id := range ids {
+		if rmErr := sweeper.RemoveContainer(ctx, docker.ContainerRemoveRequest{
+			IDs:   []string{id},
+			Force: true,
+		}); rmErr != nil {
+			return fmt.Errorf("networkpolicy sweep stale sidecars: remove container %q: %w", id, rmErr)
+		}
+	}
+	return nil
+}
+
 // containerChecker is the narrow interface defaultReadyProbe requires of the
 // executor. docker.Executor satisfies this interface via its ContainerRunning
 // method; test fakes that do not implement it cause defaultReadyProbe to fall
@@ -346,6 +389,14 @@ func (s Service) Provision(ctx context.Context, request ProvisionRequest) (Polic
 		}
 	}
 
+	// Reclaim-on-collision: remove any stale sidecar containers from a prior
+	// run (e.g. from a SIGKILLed process) before starting a fresh sidecar.
+	// Stale sidecars are identified by the managed label (valv=network-policy).
+	// This prevents duplicate sidecars accumulating on the bridge network.
+	if err := s.sweepStaleSidecars(ctx); err != nil {
+		return PolicyMaterial{}, nil, fmt.Errorf("networkpolicy provision: %w", err)
+	}
+
 	// Launch the proxy sidecar on the default bridge network. The bridge
 	// attachment gives the sidecar external egress while the internal network
 	// attachment (below) lets the workload reach it by ProxyAlias. Schema
@@ -403,10 +454,17 @@ func (s Service) Provision(ctx context.Context, request ProvisionRequest) (Polic
 	return material, cleanup, nil
 }
 
-// CleanupStale removes every Valv-managed network without provisioning a
-// replacement. Callers use this during startup recovery when the runtime
-// has not yet decided whether closed mode is active.
+// CleanupStale removes every Valv-managed network and sidecar container
+// without provisioning a replacement. Callers use this during startup recovery
+// when the runtime has not yet decided whether closed mode is active.
+// Sidecar containers are removed first (with force) so Docker can remove the
+// internal network they may still be attached to.
 func (s Service) CleanupStale(ctx context.Context) error {
+	// Remove stale sidecar containers first so network removal succeeds even
+	// when a sidecar is still attached to the internal network.
+	if err := s.sweepStaleSidecars(ctx); err != nil {
+		return fmt.Errorf("networkpolicy cleanup stale: %w", err)
+	}
 	managedFilter := ManagedLabelKey + "=" + ManagedLabelValue
 	existing, err := s.executor.ListNetworks(ctx, managedFilter)
 	if err != nil {

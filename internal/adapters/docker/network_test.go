@@ -789,3 +789,96 @@ func TestExecutorContainerRunningOutputUnsupported(t *testing.T) {
 		t.Fatalf("ContainerRunning() error = %v, want errors.Is ErrOutputUnsupported", err)
 	}
 }
+
+// TestExecutorListContainersByLabel_ReturnsParsedIDs asserts that
+// ListContainersByLabel parses a multi-line ID output correctly and passes the
+// expected docker args to the runner.
+func TestExecutorListContainersByLabel_ReturnsParsedIDs(t *testing.T) {
+	t.Parallel()
+
+	const wantLabel = "valv=network-policy"
+	wantIDs := []string{"aabbccdd1122", "eeff33445566"}
+	runner := &recordingOutputRunner{output: strings.Join(wantIDs, "\n") + "\n"}
+	exec := NewExecutor(runner)
+
+	got, err := exec.ListContainersByLabel(context.Background(), wantLabel)
+	if err != nil {
+		t.Fatalf("ListContainersByLabel() error = %v", err)
+	}
+	if !reflect.DeepEqual(got, wantIDs) {
+		t.Fatalf("ListContainersByLabel() = %#v, want %#v", got, wantIDs)
+	}
+
+	wantArgs := []string{"ps", "-a", "--filter", "label=" + wantLabel, "--format", "{{.ID}}"}
+	if !reflect.DeepEqual(runner.lastArgs, wantArgs) {
+		t.Fatalf("docker args = %#v, want %#v", runner.lastArgs, wantArgs)
+	}
+}
+
+// TestExecutorListContainersByLabel_EmptyOutput asserts that an empty docker
+// output returns a nil slice rather than a slice containing an empty string.
+func TestExecutorListContainersByLabel_EmptyOutput(t *testing.T) {
+	t.Parallel()
+
+	runner := &recordingOutputRunner{output: ""}
+	exec := NewExecutor(runner)
+
+	got, err := exec.ListContainersByLabel(context.Background(), "valv=network-policy")
+	if err != nil {
+		t.Fatalf("ListContainersByLabel() error = %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("ListContainersByLabel() = %#v, want empty slice", got)
+	}
+}
+
+// TestExecutorListContainersByLabel_OutputError asserts that a runner error is
+// wrapped and returned.
+func TestExecutorListContainersByLabel_OutputError(t *testing.T) {
+	t.Parallel()
+
+	sentinel := errors.New("daemon unavailable")
+	runner := &recordingOutputRunner{outErr: sentinel}
+	exec := NewExecutor(runner)
+
+	_, err := exec.ListContainersByLabel(context.Background(), "valv=network-policy")
+	if err == nil {
+		t.Fatalf("ListContainersByLabel() error = nil, want wrapped error")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("ListContainersByLabel() error = %v, want errors.Is sentinel", err)
+	}
+}
+
+// TestExecutorListContainersByLabel_OutputUnsupported asserts that a runner
+// without the Output method returns ErrOutputUnsupported.
+func TestExecutorListContainersByLabel_OutputUnsupported(t *testing.T) {
+	t.Parallel()
+
+	exec := NewExecutor(CommandRunnerFunc(func(_ context.Context, _ []string) error {
+		return nil
+	}))
+
+	_, err := exec.ListContainersByLabel(context.Background(), "valv=network-policy")
+	if err == nil {
+		t.Fatalf("ListContainersByLabel() error = nil, want ErrOutputUnsupported")
+	}
+	if !errors.Is(err, ErrOutputUnsupported) {
+		t.Fatalf("ListContainersByLabel() error = %v, want errors.Is ErrOutputUnsupported", err)
+	}
+}
+
+// recordingOutputRunner is a CommandRunner+Output stub that records the last
+// args passed to Output, so tests can assert the correct docker command was
+// assembled.
+type recordingOutputRunner struct {
+	output   string
+	outErr   error
+	lastArgs []string
+}
+
+func (r *recordingOutputRunner) Run(_ context.Context, _ []string) error { return nil }
+func (r *recordingOutputRunner) Output(_ context.Context, args []string) (string, error) {
+	r.lastArgs = append([]string(nil), args...)
+	return r.output, r.outErr
+}

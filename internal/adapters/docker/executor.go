@@ -128,6 +128,44 @@ func (e Executor) ContainerRunning(ctx context.Context, containerID string) (boo
 	return strings.TrimSpace(out) == "true", nil
 }
 
+// ListContainersByLabel shells out `docker ps -a --filter label=<label>
+// --format {{.ID}}` and returns one container ID per line. The label filter
+// accepts either a key (e.g. "valv") or a key=value pair (e.g.
+// "valv=network-policy"); Docker treats both forms uniformly.
+//
+// Returns an empty slice when no containers match. Requires the underlying
+// runner to implement Output(context.Context, []string) (string, error); a
+// non-outputting runner returns ErrOutputUnsupported.
+//
+// DROP_15 Unit 15.2.5.E.2 uses this to enumerate stale proxy sidecar
+// containers so they can be removed before a fresh sidecar is launched.
+func (e Executor) ListContainersByLabel(ctx context.Context, label string) ([]string, error) {
+	outputter, ok := e.runner.(interface {
+		Output(context.Context, []string) (string, error)
+	})
+	if !ok {
+		return nil, ErrOutputUnsupported
+	}
+	args := []string{"ps", "-a", "--filter", "label=" + label, "--format", "{{.ID}}"}
+	out, err := outputter.Output(ctx, args)
+	if err != nil {
+		return nil, fmt.Errorf("docker ps: %w", err)
+	}
+	if strings.TrimSpace(out) == "" {
+		return nil, nil
+	}
+	lines := strings.Split(out, "\n")
+	ids := make([]string, 0, len(lines))
+	for _, line := range lines {
+		id := strings.TrimSpace(line)
+		if id == "" {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
 // ListNetworks shells out `docker network ls --filter label=<label>
 // --format {{.Name}}` and returns one network name per line. The label
 // filter accepts either a key (e.g. "valv") or a key=value pair (e.g.

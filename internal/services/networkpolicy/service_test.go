@@ -801,6 +801,49 @@ var _ NetworkExecutor = docker.Executor{}
 // degrading to a no-op probe.
 var _ containerChecker = docker.Executor{}
 
+// Compile-time interface check: docker.Executor must satisfy staleSweeper.
+// This guard ensures ListContainersByLabel and RemoveContainer remain present
+// on docker.Executor — without it, sweepStaleSidecars would silently no-op
+// in production (the same pattern that caught F-2 regression).
+var _ staleSweeper = docker.Executor{}
+
+// staleSweeperExecutor embeds fakeNetworkExecutor and additionally implements
+// staleSweeper (ListContainersByLabel + RemoveContainer). It is used in tests
+// that assert the stale-sidecar sweep actually fires and removes containers.
+type staleSweeperExecutor struct {
+	fakeNetworkExecutor
+
+	// listContainerResult is the slice of container IDs returned by
+	// ListContainersByLabel on the next call.
+	listContainerResult []string
+	listContainerErr    error
+
+	// removeContainerErr is returned by RemoveContainer when non-nil.
+	removeContainerErr error
+
+	// listContainerCalls records the label argument for each call.
+	listContainerCalls []string
+	// removeContainerCalls records each ContainerRemoveRequest issued.
+	removeContainerCalls []docker.ContainerRemoveRequest
+}
+
+func (f *staleSweeperExecutor) ListContainersByLabel(_ context.Context, label string) ([]string, error) {
+	f.callOrder = append(f.callOrder, "ListContainersByLabel")
+	f.listContainerCalls = append(f.listContainerCalls, label)
+	if f.listContainerErr != nil {
+		return nil, f.listContainerErr
+	}
+	out := make([]string, len(f.listContainerResult))
+	copy(out, f.listContainerResult)
+	return out, nil
+}
+
+func (f *staleSweeperExecutor) RemoveContainer(_ context.Context, req docker.ContainerRemoveRequest) error {
+	f.callOrder = append(f.callOrder, "RemoveContainer")
+	f.removeContainerCalls = append(f.removeContainerCalls, req)
+	return f.removeContainerErr
+}
+
 // TestProvision_AllowlistJoinedInSidecarEnv verifies that the VALV_PROXY_ALLOWLIST
 // env var on the sidecar is the comma-joined effective allowlist.
 func TestProvision_AllowlistJoinedInSidecarEnv(t *testing.T) {
@@ -1071,4 +1114,210 @@ func TestDefaultReadyProbe_FiresWhenExecutorImplementsContainerChecker(t *testin
 			t.Fatalf("probe() = %v, want nil (no-op fallback for non-checker executor)", err)
 		}
 	})
+}
+
+// TestSweepStaleSidecars_RemovesExistingContainers asserts that when
+// staleSweeperExecutor reports pre-existing containers carrying the managed
+// label, Provision calls RemoveContainer for each before launching the fresh
+// sidecar. This is the reclaim-on-collision path (DROP_15 Unit 15.2.5.E.2).
+func TestSweepStaleSidecars_RemovesExistingContainers(t *testing.T) {
+	t.Parallel()
+
+	staleA := "aabbccdd1122"
+	staleB := "eeff33445566"
+	exec := &staleSweeperExecutor{
+		listContainerResult: []string{staleA, staleB},
+	}
+	exec.runDetachedResult = "fresh-sidecar-id"
+
+	svc, err := New(Options{Executor: exec})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	_, cleanup, err := svc.Provision(context.Background(), ProvisionRequest{
+		Allowlist: []string{"github.com"},
+	})
+	if err != nil {
+		t.Fatalf("Provision() error = %v", err)
+	}
+	defer func() { _ = cleanup(context.Background()) }()
+
+	// ListContainersByLabel must have been called with the managed filter.
+	wantFilter := ManagedLabelKey + "=" + ManagedLabelValue
+	if len(exec.listContainerCalls) != 1 || exec.listContainerCalls[0] != wantFilter {
+		t.Errorf("listContainerCalls = %#v, want [%q]", exec.listContainerCalls, wantFilter)
+	}
+
+	// Both stale containers must have been removed.
+	if len(exec.removeContainerCalls) != 2 {
+		t.Fatalf("removeContainerCalls = %d, want 2", len(exec.removeContainerCalls))
+	}
+	removed := map[string]bool{}
+	for _, r := range exec.removeContainerCalls {
+		if len(r.IDs) == 1 {
+			removed[r.IDs[0]] = true
+		}
+	}
+	if !removed[staleA] || !removed[staleB] {
+		t.Errorf("removeContainerCalls = %#v, want both %q and %q removed", exec.removeContainerCalls, staleA, staleB)
+	}
+
+	// RemoveContainer calls must carry Force=true so stopped containers are
+	// cleaned up unconditionally.
+	for i, r := range exec.removeContainerCalls {
+		if !r.Force {
+			t.Errorf("removeContainerCalls[%d].Force = false, want true", i)
+		}
+	}
+
+	// Sweep must fire BEFORE RunContainerDetached.
+	sweepIdx := -1
+	runIdx := -1
+	for i, op := range exec.callOrder {
+		if op == "ListContainersByLabel" {
+			sweepIdx = i
+		}
+		if op == "RunContainerDetached" {
+			runIdx = i
+		}
+	}
+	if sweepIdx == -1 || runIdx == -1 {
+		t.Fatalf("callOrder = %v, missing ListContainersByLabel or RunContainerDetached", exec.callOrder)
+	}
+	if sweepIdx >= runIdx {
+		t.Errorf("callOrder = %v: ListContainersByLabel (idx %d) must precede RunContainerDetached (idx %d)", exec.callOrder, sweepIdx, runIdx)
+	}
+}
+
+// TestSweepStaleSidecars_NoopWhenEmpty asserts that Provision completes
+// normally and does not call RemoveContainer when no stale containers exist.
+func TestSweepStaleSidecars_NoopWhenEmpty(t *testing.T) {
+	t.Parallel()
+
+	exec := &staleSweeperExecutor{}
+	exec.runDetachedResult = "clean-sidecar"
+
+	svc, err := New(Options{Executor: exec})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	_, cleanup, err := svc.Provision(context.Background(), ProvisionRequest{
+		Allowlist: []string{"github.com"},
+	})
+	if err != nil {
+		t.Fatalf("Provision() error = %v", err)
+	}
+	defer func() { _ = cleanup(context.Background()) }()
+
+	// ListContainersByLabel was called (sweep attempted).
+	if len(exec.listContainerCalls) != 1 {
+		t.Fatalf("listContainerCalls = %d, want 1", len(exec.listContainerCalls))
+	}
+	// No RemoveContainer calls when no stale containers.
+	if len(exec.removeContainerCalls) != 0 {
+		t.Errorf("removeContainerCalls = %d, want 0 (no stale containers)", len(exec.removeContainerCalls))
+	}
+}
+
+// TestSweepStaleSidecars_RemoveError_Propagates asserts that a RemoveContainer
+// failure during the sweep causes Provision to return a wrapped error.
+func TestSweepStaleSidecars_RemoveError_Propagates(t *testing.T) {
+	t.Parallel()
+
+	sentinel := errors.New("container in use")
+	exec := &staleSweeperExecutor{
+		listContainerResult: []string{"dead-sidecar-id"},
+		removeContainerErr:  sentinel,
+	}
+
+	svc, err := New(Options{Executor: exec})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	_, _, err = svc.Provision(context.Background(), ProvisionRequest{
+		Allowlist: []string{"github.com"},
+	})
+	if err == nil {
+		t.Fatal("Provision() error = nil, want sweep remove error")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("Provision() error = %v, want errors.Is sentinel", err)
+	}
+	if !strings.Contains(err.Error(), "networkpolicy provision") {
+		t.Errorf("Provision() error = %q, want context prefix 'networkpolicy provision'", err.Error())
+	}
+}
+
+// TestSweepStaleSidecars_NoopWhenExecutorLacksSweeper asserts that when the
+// executor does not implement staleSweeper (the minimal fakeNetworkExecutor),
+// Provision still succeeds and no sweep methods are invoked. This confirms the
+// optional-interface fallback behaves correctly.
+func TestSweepStaleSidecars_NoopWhenExecutorLacksSweeper(t *testing.T) {
+	t.Parallel()
+
+	// fakeNetworkExecutor does NOT implement staleSweeper.
+	exec := &fakeNetworkExecutor{runDetachedResult: "no-sweeper-sidecar"}
+	svc, err := New(Options{Executor: exec})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	_, cleanup, err := svc.Provision(context.Background(), ProvisionRequest{
+		Allowlist: []string{"github.com"},
+	})
+	if err != nil {
+		t.Fatalf("Provision() error = %v, want nil (no-op sweep when sweeper absent)", err)
+	}
+	defer func() { _ = cleanup(context.Background()) }()
+}
+
+// TestCleanupStale_SweepsContainersBeforeNetworks asserts that CleanupStale
+// removes stale sidecar containers (via staleSweeper) before removing networks.
+// This ordering is required because Docker refuses to remove a network while a
+// container is still attached to it.
+func TestCleanupStale_SweepsContainersBeforeNetworks(t *testing.T) {
+	t.Parallel()
+
+	exec := &staleSweeperExecutor{
+		listContainerResult: []string{"stale-container-abc"},
+	}
+	exec.listResult = []string{"valv-netpol-aaaa11112222"}
+
+	svc, err := New(Options{Executor: exec})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if err := svc.CleanupStale(context.Background()); err != nil {
+		t.Fatalf("CleanupStale() error = %v", err)
+	}
+
+	// Container sweep must have fired.
+	if len(exec.removeContainerCalls) != 1 {
+		t.Fatalf("removeContainerCalls = %d, want 1", len(exec.removeContainerCalls))
+	}
+	// Network removal must have fired.
+	if len(exec.removeCalls) != 1 {
+		t.Fatalf("removeCalls = %d, want 1", len(exec.removeCalls))
+	}
+	// Container sweep must precede network removal in call order.
+	containerIdx := -1
+	networkIdx := -1
+	for i, op := range exec.callOrder {
+		if op == "RemoveContainer" && containerIdx == -1 {
+			containerIdx = i
+		}
+		if op == "RemoveNetwork" && networkIdx == -1 {
+			networkIdx = i
+		}
+	}
+	if containerIdx == -1 || networkIdx == -1 {
+		t.Fatalf("callOrder = %v, missing RemoveContainer or RemoveNetwork", exec.callOrder)
+	}
+	if containerIdx >= networkIdx {
+		t.Errorf("callOrder = %v: RemoveContainer (idx %d) must precede RemoveNetwork (idx %d)", exec.callOrder, containerIdx, networkIdx)
+	}
 }
