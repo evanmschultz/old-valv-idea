@@ -793,3 +793,7 @@ NITs (non-blocking): stale `images/service.go:118` doc; builder ran `mage format
 - Regression-proof: compile guard `var _ containerChecker = docker.Executor{}` (`service_test.go:802`) — build fails if `ContainerRunning` is dropped/renamed.
 - `NetworkExecutor` interface UNCHANGED (5 methods) — `ContainerRunning` is additive on the concrete type + a separate narrow interface; no sibling break, no `mage integration` needed.
 - Gates orch-re-ran: `mage testPkg ./internal/adapters/docker` 90/90 + `./internal/services/networkpolicy` 43/43 GREEN. Budget 2 symbols / ~47 LOC / 2 files.
+
+## Unit 15.2.5.E.2 — Round 1
+
+**verdict: PASS** (orch-verified). `sweepStaleSidecars` (lists managed-label containers via new `docker.Executor.ListContainersByLabel`, force-removes each) wired into `Provision` (reclaim BEFORE `RunContainerDetached`, `service.go:396`) + `CleanupStale` (containers before networks, `:465`). Narrow `staleSweeper` interface + compile guard `var _ staleSweeper = docker.Executor{}` (`service_test.go:808`) — `NetworkExecutor` UNCHANGED (no sibling break, no `mage integration`). `ListContainersByLabel` uses `docker ps -a` (stale STOPPED sidecars reclaimed), empty output → `nil,nil`. Gates orch-re-ran: docker 94/94 + networkpolicy 48/48 GREEN. Budget 2 symbols / ~57 LOC / 2 files. See falsification F-1 (global-sweep concurrent-clobber) → routed to E.3, not a blocker.
