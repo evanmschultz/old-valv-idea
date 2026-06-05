@@ -834,3 +834,153 @@ Orchestrator must run `mage integration` to confirm the integration-tagged file 
 ### Atomicity Confirmation
 
 Round 2 is fully self-contained: 1 line removed from one integration test struct literal + 2 doc comment lines updated in service.go. Zero runtime logic changed. No new production symbols.
+
+## Unit 15.2.5.D.2 — Round 1
+
+**Date:** 2026-06-04
+**Builder backend:** claude-sonnet-4-6 (orchestrator dispatch)
+
+### Files Touched
+
+- `internal/services/networkpolicy/service.go` (446 total lines, was 322 after D.1) — added probe injection seam + `waitForSidecar` helper + wired into `Provision`.
+- `internal/services/networkpolicy/service_test.go` (977 total lines, was 835) — added `time` import, `noopSleep` helper, and 3 new test functions.
+
+### Readiness Mechanism — Why Host-Reachable
+
+The valv process runs on the macOS host, which cannot resolve `valv-proxy` (a Docker internal-network alias) nor dial the sidecar's internal-network IP. TCP dial from the host would fail.
+
+**Chosen mechanism:** `docker inspect --format {{.State.Running}} <containerID>` via `docker.Executor`'s `Output` interface. This shells to the Docker daemon over the host Unix socket — fully host-side, zero TCP to the internal network. Returns `true` when the container is running, error otherwise.
+
+**Host-reachability chain:** host process → Docker daemon Unix socket → daemon looks up container state → returns string. No network packet ever enters the Docker internal network. VALID.
+
+### Injection Seam
+
+Function fields on `Options` (and mirrored on `Service`):
+- `ReadyProbe func(ctx context.Context, containerID string) error` — nil → `New` wires `defaultReadyProbe(executor)`.
+- `ProbeSleep func(ctx context.Context, d time.Duration) error` — nil → `New` wires `contextSleep`.
+- `ProbeAttempts int` — 0 → `New` uses 30 (= 3 seconds at 100ms intervals).
+
+`defaultReadyProbe` type-asserts the executor to `interface { Output(ctx, args) (string, error) }`. If the assertion fails (e.g. `fakeNetworkExecutor` in unit tests) → returns a no-op probe (always nil). This means ALL EXISTING TESTS pass without any change: they never set `ReadyProbe`, the fake lacks `Output`, so the probe is no-op and `callOrder` is unaffected.
+
+Tests inject explicit `ReadyProbe` + `ProbeSleep: noopSleep` so probe loops are instantaneous and fully deterministic.
+
+### NetworkExecutor Interface Change
+
+**No change.** `NetworkExecutor` is unchanged. `docker.Executor` is unchanged. Images service is unaffected. `mage integration` flag is NOT required from this unit.
+
+### Production Symbols Added
+
+1. `defaultReadyProbe` (factory function, unexported)
+2. `contextSleep` (unexported helper)
+3. `waitForSidecar` (method on `Service`)
+
+Three unexported symbols, all one coherent probe concern. The spec says "~1 prod symbol" for the primary (`waitForSidecar`); the two helpers are its implementation plumbing.
+
+### Mage Targets Run
+
+- `mage testFunc ./internal/services/networkpolicy TestProvision_ReadyImmediately` — PASS (1/1)
+- `mage testFunc ./internal/services/networkpolicy TestProvision_ReadyAfterRetries` — PASS (1/1)
+- `mage testFunc ./internal/services/networkpolicy TestProvision_ProbeTimeout` — PASS (1/1)
+- `mage testPkg ./internal/services/networkpolicy` — PASS (38/38; +3 new tests from this unit, baseline was 35)
+
+### Budget Measurement (vs. 1-symbol / 55-LOC / 1-file ceiling)
+
+| Dimension | Budget | Actual |
+|---|---|---|
+| Primary prod symbol | ~1 | 1 (`waitForSidecar` method) + 2 plumbing helpers = 3 total |
+| Production LOC delta (service.go) | ~55 | +124 total lines; ~75 non-blank non-comment logic lines |
+| Production files | 1 | 1 (`service.go`) |
+
+LOC is over the "~55" estimate but under the cascade methodology's 80 LOC ceiling. The injection seam (Options fields + New wiring + `defaultReadyProbe` + `contextSleep`) accounts for the overage vs estimate — it's inherent to making the probe testable. The per-droplet ceiling is "≤80 prod LOC" and this stays under it.
+
+### Hylla Feedback
+
+Not used. Direct `Read` of service.go + service_test.go + executor.go was sufficient. Uncommitted code predates Hylla ingest.
+
+### Atomicity Confirmation
+
+Unit 15.2.5.D.2 is fully self-contained: probe injection seam + `waitForSidecar` + `Provision` wiring are the complete production scope. No partial logic shipped. Mage gate GREEN (38/38).
+
+## Tools Used
+
+- `Read`: `service.go`, `service_test.go`, `executor.go`, `ops.go`, `PLAN.md`, `BUILDER_WORKLOG.md`, `WORKFLOW.md`
+- `Bash`: `find` (file discovery), `grep` (NetworkExecutor/inspect usage), `wc -l` (LOC measurement), `mage testFunc` ×3, `mage testPkg` ×2
+- `Edit`: `PLAN.md` (state flip ×2), `service.go` (3 edits), `service_test.go` (2 edits), `BUILDER_WORKLOG.md` (this entry)
+
+## Unit 15.2.5.D.2 — Round 2
+
+**Date:** 2026-06-04
+**Builder backend:** claude-sonnet-4-6 (orchestrator dispatch)
+
+### F-2 Root Cause
+
+`defaultReadyProbe` (Round 1) type-asserted `NetworkExecutor` for `interface{ Output(context.Context, []string) (string, error) }`. However, `docker.Executor` holds its runner as an **unexported named field** (`runner CommandRunner` — `command.go:8-10`), NOT embedded. `Output` is defined on `SystemRunner`/`QuietRunner`, not on `Executor` itself. The method is not promoted. Therefore `exec.(outputter)` always fails for `docker.Executor` → the probe returned the `func(...) error { return nil }` no-op branch → the readiness probe never ran in production. Round 1 tests all passed because they inject explicit `ReadyProbe` stubs or use `fakeNetworkExecutor` (which also lacks `Output`).
+
+### Fix
+
+**Design choice: `ContainerRunning` on `docker.Executor` (preferred path).**
+Added `func (e Executor) ContainerRunning(ctx context.Context, containerID string) (bool, error)` to `internal/adapters/docker/executor.go`. Uses the identical `outputter` type-assert pattern already used by `Executor.Create`, `Executor.RunContainerDetached`, and `Executor.ListNetworks`: if the runner doesn't implement `Output`, return `ErrOutputUnsupported`. Builds `["inspect","--format","{{.State.Running}}",containerID]` args inline (no arg-builder needed — this is a 1-liner call, not a reusable request type). Returns `strings.TrimSpace(out) == "true"` as the bool result.
+
+Rationale for `ContainerRunning` over a generic forwarding `func (e Executor) Output(...)`: `ContainerRunning` is semantically narrow — it expresses intent at the call site (`is this container running?`) rather than exposing a raw command runner surface. The probe logic (build inspect args, parse "true") lives in the docker adapter where it belongs, not scattered in networkpolicy.
+
+**`containerChecker` narrow interface in `service.go`:**
+Replaced the anonymous `outputter` interface inside `defaultReadyProbe` with a named `containerChecker` interface (package-level, unexported):
+```go
+type containerChecker interface {
+    ContainerRunning(ctx context.Context, containerID string) (bool, error)
+}
+```
+`defaultReadyProbe` now asserts `exec.(containerChecker)` and calls `checker.ContainerRunning(ctx, containerID)`. The probe body is simpler: no arg-building, no string parsing — that logic moved to the docker adapter.
+
+**`NetworkExecutor` interface: UNCHANGED.** `ContainerRunning` is NOT added to `NetworkExecutor`. It remains an optional interface the probe asserts, exactly like the prior `outputter` pattern — but now `docker.Executor` actually satisfies it.
+
+### Compile-Time Regression Guard
+
+Added to `service_test.go` (line after the existing `var _ NetworkExecutor = docker.Executor{}`):
+```go
+var _ containerChecker = docker.Executor{}
+```
+If someone removes or renames `ContainerRunning` on `docker.Executor`, the build fails immediately rather than silently falling back to the no-op probe.
+
+### New Tests
+
+**`internal/adapters/docker/network_test.go`** — 4 new test functions:
+- `TestExecutorContainerRunningReturnsTrue` — output "true\n" → `(true, nil)`
+- `TestExecutorContainerRunningReturnsFalse` — output "false\n" → `(false, nil)`
+- `TestExecutorContainerRunningOutputError` — runner error wrapped and propagated via `errors.Is`
+- `TestExecutorContainerRunningOutputUnsupported` — non-outputting runner → `ErrOutputUnsupported`
+
+**`internal/services/networkpolicy/service_test.go`** — new type `containerCheckerExecutor` (embeds `fakeNetworkExecutor`, adds `ContainerRunning` + call recording) + `TestDefaultReadyProbe_FiresWhenExecutorImplementsContainerChecker` with 4 sub-tests:
+- `running_returns_nil` — probe calls `ContainerRunning` with correct ID + returns nil
+- `not_running_returns_error` — `ContainerRunning(false)` → probe returns non-nil error
+- `inspect_error_propagates` — `ContainerRunning` error wraps via `errors.Is` sentinel
+- `noop_when_no_container_checker` — `fakeNetworkExecutor` (no `ContainerRunning`) → no-op probe returns nil
+
+### Mage Results
+
+- `mage testPkg ./internal/adapters/docker` → **90 tests pass, 0 failures** (was 86 before Round 2; +4 new ContainerRunning tests)
+- `mage testPkg ./internal/services/networkpolicy` → **43 tests pass, 0 failures** (was 38 before Round 2; +5 new probe-fires tests)
+- `mage format` → clean (no output)
+
+### Budget Re-Measurement (spans 2 packages post-F-2 fix)
+
+| File | LOC (total) | Net-added LOC (prod) |
+|---|---|---|
+| `internal/adapters/docker/executor.go` | 164 | +26 (`ContainerRunning` method + doc) |
+| `internal/adapters/docker/network_test.go` | 791 | +62 (4 new test funcs) |
+| `internal/services/networkpolicy/service.go` | 454 | +21 (`containerChecker` iface + `defaultReadyProbe` rewrite) |
+| `internal/services/networkpolicy/service_test.go` | 1074 | +97 (compile guard + `containerCheckerExecutor` + test func) |
+
+Production LOC added: ~47 (executor.go +26, service.go +21). Under the 80-LOC ceiling.
+Production files: 2 (`executor.go` + `service.go`). Under the 3-file ceiling.
+Production symbols added: 2 (`Executor.ContainerRunning` + `containerChecker` interface type). Under the 3-symbol ceiling.
+
+### Atomicity Confirmation
+
+Round 2 is the complete fix for F-2: the production no-op probe is replaced by a working `ContainerRunning`-backed probe + a compile-time guard that prevents silent regression. No partial logic shipped. Both mage gates GREEN.
+
+## Tools Used (Round 2)
+
+- `Read`: `executor.go`, `command.go`, `os_runner.go`, `types.go`, `service.go`, `service_test.go`, `network_test.go`, `BUILDER_WORKLOG.md`, `WORKFLOW.md`
+- `Bash`: `grep` (strings usage, NetworkExecutor interface, ErrOutputUnsupported, outputRunner), `wc -l` (LOC), `mage testPkg ./internal/adapters/docker`, `mage testPkg ./internal/services/networkpolicy`, `mage format`
+- `Edit`: `executor.go` (ContainerRunning method), `service.go` (containerChecker + defaultReadyProbe rewrite), `service_test.go` (compile guard + new type + new test func), `network_test.go` (4 new test funcs), `BUILDER_WORKLOG.md` (this entry)

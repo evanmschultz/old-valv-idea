@@ -29,8 +29,18 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/evanmschultz/valv/internal/adapters/docker"
+)
+
+const (
+	// defaultProbeAttempts is the number of polling iterations waitForSidecar
+	// performs before giving up. At defaultProbeInterval each attempt that is
+	// 3 seconds of wall time before Provision returns an error.
+	defaultProbeAttempts = 30
+	// defaultProbeInterval is the sleep duration between probe attempts.
+	defaultProbeInterval = 100 * time.Millisecond
 )
 
 // Label keys/values applied to managed Docker networks so the orphan-cleanup
@@ -81,12 +91,35 @@ type NetworkExecutor interface {
 type Options struct {
 	// Executor is the docker network executor. Required.
 	Executor NetworkExecutor
+
+	// ReadyProbe is called by Provision after ConnectNetwork to test whether
+	// the sidecar container is ready to accept connections. It receives the
+	// container ID returned by RunContainerDetached. Returning nil signals
+	// readiness; returning a non-nil error causes a retry.
+	//
+	// If nil, New wires a default probe that queries the Docker daemon for
+	// the container's running state via `docker inspect`. Tests should inject
+	// a deterministic stub so no real Docker call is made and no real time
+	// elapses.
+	ReadyProbe func(ctx context.Context, containerID string) error
+
+	// ProbeSleep is called between probe attempts. If nil, New wires
+	// time.Sleep wrapped in a context-cancellation check. Tests inject a
+	// no-op so probe loops complete instantly.
+	ProbeSleep func(ctx context.Context, d time.Duration) error
+
+	// ProbeAttempts is the maximum number of probe calls before Provision
+	// returns a timeout error. Zero selects the default (30 attempts).
+	ProbeAttempts int
 }
 
 // Service provisions and cleans up the docker network plus policy material
 // required by closed-default network policy callers.
 type Service struct {
-	executor NetworkExecutor
+	executor      NetworkExecutor
+	readyProbe    func(ctx context.Context, containerID string) error
+	probeSleep    func(ctx context.Context, d time.Duration) error
+	probeAttempts int
 }
 
 // New constructs a Service from the supplied Options. Returns a non-nil
@@ -95,7 +128,98 @@ func New(opts Options) (Service, error) {
 	if opts.Executor == nil {
 		return Service{}, fmt.Errorf("new networkpolicy service: executor is required")
 	}
-	return Service{executor: opts.Executor}, nil
+
+	probe := opts.ReadyProbe
+	if probe == nil {
+		probe = defaultReadyProbe(opts.Executor)
+	}
+
+	sleep := opts.ProbeSleep
+	if sleep == nil {
+		sleep = contextSleep
+	}
+
+	attempts := opts.ProbeAttempts
+	if attempts <= 0 {
+		attempts = defaultProbeAttempts
+	}
+
+	return Service{
+		executor:      opts.Executor,
+		readyProbe:    probe,
+		probeSleep:    sleep,
+		probeAttempts: attempts,
+	}, nil
+}
+
+// containerChecker is the narrow interface defaultReadyProbe requires of the
+// executor. docker.Executor satisfies this interface via its ContainerRunning
+// method; test fakes that do not implement it cause defaultReadyProbe to fall
+// back to a no-op probe.
+//
+// Defined here (consumer-side) so the interface is minimal and the probe
+// never takes a broader dependency on docker.Executor directly.
+type containerChecker interface {
+	ContainerRunning(ctx context.Context, containerID string) (bool, error)
+}
+
+// defaultReadyProbe returns a probe function that queries the Docker daemon
+// for the container's running state via the executor's ContainerRunning
+// method. The inspect call shells to the Docker daemon over the host Unix
+// socket and never dials the sidecar's internal-network address.
+//
+// If the executor does not implement containerChecker (e.g. a minimal test
+// stub that only implements NetworkExecutor), the returned probe always
+// returns nil (ready immediately). This preserves backward compatibility with
+// existing tests that inject a fakeNetworkExecutor lacking ContainerRunning.
+func defaultReadyProbe(exec NetworkExecutor) func(ctx context.Context, containerID string) error {
+	checker, ok := exec.(containerChecker)
+	if !ok {
+		return func(_ context.Context, _ string) error { return nil }
+	}
+	return func(ctx context.Context, containerID string) error {
+		running, err := checker.ContainerRunning(ctx, containerID)
+		if err != nil {
+			return fmt.Errorf("probe container %s: %w", containerID, err)
+		}
+		if !running {
+			return fmt.Errorf("probe container %s: not running", containerID)
+		}
+		return nil
+	}
+}
+
+// contextSleep sleeps for d, returning ctx.Err() if the context is
+// cancelled before d elapses.
+func contextSleep(ctx context.Context, d time.Duration) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(d):
+		return nil
+	}
+}
+
+// waitForSidecar polls readyProbe until the sidecar container reports running
+// or attempts are exhausted. It returns nil as soon as the probe succeeds.
+// On exhaustion it returns a wrapped error describing the timeout; callers
+// (Provision) propagate this directly so no PolicyMaterial is returned to
+// the caller in the failure case.
+func (s Service) waitForSidecar(ctx context.Context, containerID string) error {
+	var lastErr error
+	for i := range s.probeAttempts {
+		lastErr = s.readyProbe(ctx, containerID)
+		if lastErr == nil {
+			return nil
+		}
+		if i < s.probeAttempts-1 {
+			if sleepErr := s.probeSleep(ctx, defaultProbeInterval); sleepErr != nil {
+				return fmt.Errorf("networkpolicy probe: context cancelled: %w", sleepErr)
+			}
+		}
+	}
+	return fmt.Errorf("networkpolicy provision: sidecar %s not ready after %d attempts: %w",
+		containerID, s.probeAttempts, lastErr)
 }
 
 // ProvisionRequest carries the inputs needed to provision policy material.
@@ -252,6 +376,15 @@ func (s Service) Provision(ctx context.Context, request ProvisionRequest) (Polic
 		Aliases:   []string{ProxyAlias},
 	}); err != nil {
 		return PolicyMaterial{}, nil, fmt.Errorf("networkpolicy provision: connect proxy sidecar to internal network: %w", err)
+	}
+
+	// Wait until the sidecar container is running before returning the
+	// PolicyMaterial. The probe checks Docker container state on the macOS
+	// host (no TCP dial to the internal network). If the sidecar does not
+	// become ready within the probe budget, Provision returns an error and
+	// no PolicyMaterial is handed to the caller.
+	if err := s.waitForSidecar(ctx, sidecarID); err != nil {
+		return PolicyMaterial{}, nil, err
 	}
 
 	proxyURL := "http://" + ProxyAlias + ":" + proxyPort

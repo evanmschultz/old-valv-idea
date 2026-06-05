@@ -727,3 +727,65 @@ func TestExecutorRunContainerDetachedBuildError(t *testing.T) {
 		t.Fatalf("RunContainerDetached() error = %q, want substring %q", err.Error(), "image is required")
 	}
 }
+
+func TestExecutorContainerRunningReturnsTrue(t *testing.T) {
+	t.Parallel()
+
+	runner := &outputRunner{output: "true\n"}
+	exec := NewExecutor(runner)
+
+	running, err := exec.ContainerRunning(context.Background(), "abc123")
+	if err != nil {
+		t.Fatalf("ContainerRunning() error = %v", err)
+	}
+	if !running {
+		t.Fatalf("ContainerRunning() = false, want true")
+	}
+}
+
+func TestExecutorContainerRunningReturnsFalse(t *testing.T) {
+	t.Parallel()
+
+	runner := &outputRunner{output: "false\n"}
+	exec := NewExecutor(runner)
+
+	running, err := exec.ContainerRunning(context.Background(), "abc123")
+	if err != nil {
+		t.Fatalf("ContainerRunning() error = %v", err)
+	}
+	if running {
+		t.Fatalf("ContainerRunning() = true, want false")
+	}
+}
+
+func TestExecutorContainerRunningOutputError(t *testing.T) {
+	t.Parallel()
+
+	sentinel := errors.New("docker daemon unavailable")
+	runner := &outputRunner{outErr: sentinel}
+	exec := NewExecutor(runner)
+
+	_, err := exec.ContainerRunning(context.Background(), "abc123")
+	if err == nil {
+		t.Fatalf("ContainerRunning() error = nil, want wrapped error")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("ContainerRunning() error = %v, want errors.Is sentinel", err)
+	}
+}
+
+func TestExecutorContainerRunningOutputUnsupported(t *testing.T) {
+	t.Parallel()
+
+	exec := NewExecutor(CommandRunnerFunc(func(_ context.Context, _ []string) error {
+		return nil
+	}))
+
+	_, err := exec.ContainerRunning(context.Background(), "abc123")
+	if err == nil {
+		t.Fatalf("ContainerRunning() error = nil, want ErrOutputUnsupported")
+	}
+	if !errors.Is(err, ErrOutputUnsupported) {
+		t.Fatalf("ContainerRunning() error = %v, want errors.Is ErrOutputUnsupported", err)
+	}
+}

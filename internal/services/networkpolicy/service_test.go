@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/evanmschultz/valv/internal/adapters/docker"
 )
@@ -793,6 +794,13 @@ func TestProvision_ConnectNetworkError_Wrapped(t *testing.T) {
 // Confirms the production path lines up with the consumer-side interface.
 var _ NetworkExecutor = docker.Executor{}
 
+// Compile-time interface check: docker.Executor must satisfy containerChecker.
+// This guard makes it impossible for a future refactor to silently break the
+// production readiness probe by removing or renaming ContainerRunning on
+// docker.Executor — the build fails immediately rather than silently
+// degrading to a no-op probe.
+var _ containerChecker = docker.Executor{}
+
 // TestProvision_AllowlistJoinedInSidecarEnv verifies that the VALV_PROXY_ALLOWLIST
 // env var on the sidecar is the comma-joined effective allowlist.
 func TestProvision_AllowlistJoinedInSidecarEnv(t *testing.T) {
@@ -831,4 +839,236 @@ func TestProvision_AllowlistJoinedInSidecarEnv(t *testing.T) {
 			t.Errorf("VALV_PROXY_ALLOWLIST = %q does not contain %q", envAllowlist, host)
 		}
 	}
+}
+
+// noopSleep is a ProbeSleep stub that returns immediately without sleeping.
+// Injected into tests so probe loops complete in nanoseconds.
+func noopSleep(_ context.Context, _ time.Duration) error { return nil }
+
+// TestProvision_ReadyImmediately asserts that when the injected ReadyProbe
+// returns nil on the first attempt, Provision completes successfully and
+// returns a non-zero PolicyMaterial.
+func TestProvision_ReadyImmediately(t *testing.T) {
+	t.Parallel()
+
+	const fakeSidecarID = "ready-immediately-sidecar"
+	fake := &fakeNetworkExecutor{runDetachedResult: fakeSidecarID}
+
+	callCount := 0
+	svc, err := New(Options{
+		Executor: fake,
+		ReadyProbe: func(_ context.Context, id string) error {
+			callCount++
+			if id != fakeSidecarID {
+				t.Errorf("ReadyProbe: containerID = %q, want %q", id, fakeSidecarID)
+			}
+			return nil // ready on first attempt
+		},
+		ProbeSleep:    noopSleep,
+		ProbeAttempts: 5,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	material, cleanup, err := svc.Provision(context.Background(), ProvisionRequest{
+		Allowlist: []string{"github.com"},
+	})
+	if err != nil {
+		t.Fatalf("Provision() error = %v", err)
+	}
+	if cleanup == nil {
+		t.Fatalf("Provision() cleanup = nil, want non-nil")
+	}
+	if material.NetworkName == "" {
+		t.Errorf("material.NetworkName is empty, want non-empty")
+	}
+	if callCount != 1 {
+		t.Errorf("ReadyProbe called %d times, want 1 (ready on first attempt)", callCount)
+	}
+	_ = cleanup(context.Background())
+}
+
+// TestProvision_ReadyAfterRetries asserts that when the injected ReadyProbe
+// returns an error for the first two attempts and nil on the third, Provision
+// completes successfully after exactly three probe calls.
+func TestProvision_ReadyAfterRetries(t *testing.T) {
+	t.Parallel()
+
+	const fakeSidecarID = "retry-sidecar"
+	fake := &fakeNetworkExecutor{runDetachedResult: fakeSidecarID}
+
+	attempts := 0
+	probeErr := errors.New("container not yet running")
+	svc, err := New(Options{
+		Executor: fake,
+		ReadyProbe: func(_ context.Context, _ string) error {
+			attempts++
+			if attempts < 3 {
+				return probeErr
+			}
+			return nil // ready on third attempt
+		},
+		ProbeSleep:    noopSleep,
+		ProbeAttempts: 10,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	material, cleanup, err := svc.Provision(context.Background(), ProvisionRequest{
+		Allowlist: []string{"github.com"},
+	})
+	if err != nil {
+		t.Fatalf("Provision() error = %v, want nil (ready after retries)", err)
+	}
+	if cleanup == nil {
+		t.Fatalf("Provision() cleanup = nil, want non-nil")
+	}
+	if material.NetworkName == "" {
+		t.Errorf("material.NetworkName is empty")
+	}
+	if attempts != 3 {
+		t.Errorf("ReadyProbe called %d times, want 3", attempts)
+	}
+	_ = cleanup(context.Background())
+}
+
+// TestProvision_ProbeTimeout asserts that when the injected ReadyProbe always
+// returns an error, Provision exhausts all attempts and returns a wrapped
+// error. No PolicyMaterial is returned on timeout.
+func TestProvision_ProbeTimeout(t *testing.T) {
+	t.Parallel()
+
+	const fakeSidecarID = "timeout-sidecar"
+	fake := &fakeNetworkExecutor{runDetachedResult: fakeSidecarID}
+
+	const maxAttempts = 3
+	probeErr := errors.New("sidecar still starting")
+	attempts := 0
+	svc, err := New(Options{
+		Executor: fake,
+		ReadyProbe: func(_ context.Context, _ string) error {
+			attempts++
+			return probeErr // always not ready
+		},
+		ProbeSleep:    noopSleep,
+		ProbeAttempts: maxAttempts,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	material, cleanup, err := svc.Provision(context.Background(), ProvisionRequest{
+		Allowlist: []string{"github.com"},
+	})
+	if err == nil {
+		t.Fatal("Provision() error = nil, want timeout error")
+	}
+	// Timeout error must wrap the last probe error.
+	if !errors.Is(err, probeErr) {
+		t.Errorf("Provision() error = %v, want errors.Is(%v)", err, probeErr)
+	}
+	// Cleanup must be nil on timeout (no half-ready material returned).
+	if cleanup != nil {
+		t.Errorf("Provision() cleanup = non-nil, want nil on timeout")
+	}
+	// Zero-value PolicyMaterial on timeout.
+	if material != (PolicyMaterial{}) {
+		t.Errorf("Provision() material = %+v, want zero value on timeout", material)
+	}
+	// All attempts must have been consumed.
+	if attempts != maxAttempts {
+		t.Errorf("ReadyProbe called %d times, want %d (all attempts consumed)", attempts, maxAttempts)
+	}
+}
+
+// containerCheckerExecutor is a fakeNetworkExecutor that also implements
+// containerChecker. It records ContainerRunning calls so tests can assert the
+// probe was actually invoked — proving defaultReadyProbe is not a no-op when
+// the executor satisfies containerChecker.
+type containerCheckerExecutor struct {
+	fakeNetworkExecutor
+
+	// containerRunningResult is returned by ContainerRunning.
+	containerRunningResult bool
+	// containerRunningErr is returned by ContainerRunning when non-nil.
+	containerRunningErr error
+	// containerRunningCalls records the containerID argument for each call.
+	containerRunningCalls []string
+}
+
+func (f *containerCheckerExecutor) ContainerRunning(_ context.Context, containerID string) (bool, error) {
+	f.containerRunningCalls = append(f.containerRunningCalls, containerID)
+	return f.containerRunningResult, f.containerRunningErr
+}
+
+// TestDefaultReadyProbe_FiresWhenExecutorImplementsContainerChecker proves
+// that defaultReadyProbe is NOT a no-op when the executor implements
+// containerChecker. It uses a containerCheckerExecutor (which embeds
+// fakeNetworkExecutor AND adds ContainerRunning) and asserts:
+//  1. The probe calls ContainerRunning with the correct containerID.
+//  2. The probe returns nil when ContainerRunning returns (true, nil).
+//  3. The probe returns an error when ContainerRunning returns (false, nil).
+func TestDefaultReadyProbe_FiresWhenExecutorImplementsContainerChecker(t *testing.T) {
+	t.Parallel()
+
+	const sidecarID = "test-sidecar-probe-fires"
+
+	t.Run("running_returns_nil", func(t *testing.T) {
+		t.Parallel()
+		exec := &containerCheckerExecutor{containerRunningResult: true}
+		probe := defaultReadyProbe(exec)
+
+		if err := probe(context.Background(), sidecarID); err != nil {
+			t.Fatalf("probe() = %v, want nil (container running)", err)
+		}
+		if len(exec.containerRunningCalls) != 1 {
+			t.Fatalf("ContainerRunning called %d times, want 1", len(exec.containerRunningCalls))
+		}
+		if exec.containerRunningCalls[0] != sidecarID {
+			t.Errorf("ContainerRunning containerID = %q, want %q", exec.containerRunningCalls[0], sidecarID)
+		}
+	})
+
+	t.Run("not_running_returns_error", func(t *testing.T) {
+		t.Parallel()
+		exec := &containerCheckerExecutor{containerRunningResult: false}
+		probe := defaultReadyProbe(exec)
+
+		err := probe(context.Background(), sidecarID)
+		if err == nil {
+			t.Fatal("probe() = nil, want error (container not running)")
+		}
+		if len(exec.containerRunningCalls) != 1 {
+			t.Fatalf("ContainerRunning called %d times, want 1", len(exec.containerRunningCalls))
+		}
+	})
+
+	t.Run("inspect_error_propagates", func(t *testing.T) {
+		t.Parallel()
+		sentinel := errors.New("daemon unavailable")
+		exec := &containerCheckerExecutor{containerRunningErr: sentinel}
+		probe := defaultReadyProbe(exec)
+
+		err := probe(context.Background(), sidecarID)
+		if err == nil {
+			t.Fatal("probe() = nil, want error from ContainerRunning")
+		}
+		if !errors.Is(err, sentinel) {
+			t.Errorf("probe() error = %v, want errors.Is sentinel %v", err, sentinel)
+		}
+	})
+
+	t.Run("noop_when_no_container_checker", func(t *testing.T) {
+		t.Parallel()
+		// fakeNetworkExecutor does NOT implement containerChecker.
+		exec := &fakeNetworkExecutor{}
+		probe := defaultReadyProbe(exec)
+
+		// Must return nil (no-op) — does not panic or call any method.
+		if err := probe(context.Background(), sidecarID); err != nil {
+			t.Fatalf("probe() = %v, want nil (no-op fallback for non-checker executor)", err)
+		}
+	})
 }

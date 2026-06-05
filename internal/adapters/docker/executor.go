@@ -101,6 +101,33 @@ func (e Executor) ConnectNetwork(ctx context.Context, request NetworkConnectRequ
 	return e.runner.Run(ctx, args)
 }
 
+// ContainerRunning queries the Docker daemon for the running state of the
+// named container by executing `docker inspect --format {{.State.Running}}
+// <containerID>`. It returns true when the daemon reports "true", false when
+// the state is any other non-error value (e.g. "false", ""), and an error
+// when the underlying runner fails.
+//
+// Requires the underlying runner to implement
+// Output(context.Context, []string) (string, error); a non-outputting runner
+// returns ErrOutputUnsupported.
+//
+// DROP_15 Unit 15.2.5.D.2 uses this as the production-side readiness probe
+// for the valv-proxy sidecar container.
+func (e Executor) ContainerRunning(ctx context.Context, containerID string) (bool, error) {
+	outputter, ok := e.runner.(interface {
+		Output(context.Context, []string) (string, error)
+	})
+	if !ok {
+		return false, ErrOutputUnsupported
+	}
+	args := []string{"inspect", "--format", "{{.State.Running}}", containerID}
+	out, err := outputter.Output(ctx, args)
+	if err != nil {
+		return false, fmt.Errorf("docker inspect container %s: %w", containerID, err)
+	}
+	return strings.TrimSpace(out) == "true", nil
+}
+
 // ListNetworks shells out `docker network ls --filter label=<label>
 // --format {{.Name}}` and returns one network name per line. The label
 // filter accepts either a key (e.g. "valv") or a key=value pair (e.g.

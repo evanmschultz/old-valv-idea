@@ -185,7 +185,7 @@ Locked design (do not re-litigate): sidecar-proxy topology with workload attache
 
 ##### Unit 15.2.5.D.2 — Provision readiness probe
 
-- state: todo
+- state: done
 - blocked_by: 15.2.5.D.1
 - paths: `internal/services/networkpolicy/service.go`
 - packages: `./internal/services/networkpolicy`
