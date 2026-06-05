@@ -345,8 +345,7 @@ type networkPolicyAdapter struct {
 
 func (a networkPolicyAdapter) Provision(ctx context.Context, req NetworkPolicyRequest) (NetworkPolicyMaterial, NetworkPolicyCleanup, error) {
 	material, cleanup, err := a.svc.Provision(ctx, networkpolicy.ProvisionRequest{
-		Allowlist:     req.Allowlist,
-		ProxyEndpoint: req.ProxyEndpoint,
+		Allowlist: req.Allowlist,
 	})
 	if err != nil {
 		return NetworkPolicyMaterial{}, nil, err

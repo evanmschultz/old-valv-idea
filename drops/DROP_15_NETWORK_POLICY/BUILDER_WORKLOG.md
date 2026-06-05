@@ -795,3 +795,42 @@ Unit 15.2.5.D.1 is fully self-contained: `ProxyAlias` const + `buildNoProxy` ref
 - `Read`: `drops/DROP_15_NETWORK_POLICY/PLAN.md` (multiple offsets), `drops/DROP_15_NETWORK_POLICY/BUILDER_WORKLOG.md` (multiple offsets), `internal/services/networkpolicy/service.go`, `internal/services/networkpolicy/service_test.go`, `internal/services/networkpolicy/imageref.go`, `internal/adapters/docker/types.go`, `internal/adapters/docker/network.go`
 - `Edit`: `internal/services/networkpolicy/service.go` (6 edits: package doc, const block, ProvisionRequest, Provision body, buildNoProxy, doc cleanup), `internal/services/networkpolicy/service_test.go` (12 edits: fakeNetworkExecutor, TestProvisionRequest_Valid, CreatesNetworkOnFreshHost, IdempotentReclaim, RemovesStaleOrphans, ReclaimMatchingAndRemoveStale, ListError, CreateError, StaleRemoveError, CleanupError, InvalidRequest, AllowlistHostsNeverLeak, TrimsProxyEndpoint→AllowlistJoinedInSidecarEnv, new operation-order tests), `drops/DROP_15_NETWORK_POLICY/PLAN.md` (state transitions)
 - `Bash`: `mage testPkg ./internal/services/networkpolicy` × 2, `mage testPkg ./internal/services/images` × 1, `mage format` × 1, `wc -l` × 1, `grep -n "ProxyEndpoint"` × 1, `grep -n "networkpolicy\."` × 1
+
+## Unit 15.2.5.D.1 — Round 2
+
+### Trigger
+
+Build-QA Falsification F-1: `internal/services/images/service_integration_test.go:349` constructed `networkpolicy.ProvisionRequest{Allowlist: req.Allowlist, ProxyEndpoint: req.ProxyEndpoint}` — but D.1 Round 1 removed `ProxyEndpoint` from `networkpolicy.ProvisionRequest`. The file is `//go:build integration` so `mage testPkg`/`mage vet` (no `-tags=integration`) cannot see it, but `mage integration` WILL fail to compile (`unknown field 'ProxyEndpoint'`). Per `feedback_mage_integration_when_deleting_symbols` lesson.
+
+### Files Changed
+
+1. `internal/services/images/service_integration_test.go` (387 lines total)
+   - **Lines 347–350:** `networkPolicyAdapter.Provision` method — removed dead `ProxyEndpoint: req.ProxyEndpoint` field from `networkpolicy.ProvisionRequest{...}` literal. `Allowlist` is the only remaining field. The literal was at line 347–350 (old) and is now lines 347–349.
+   - Line 281 (`images.New(Options{..., ProxyEndpoint: endpoint})`) was intentionally NOT touched — that is the `images` package's own `Options.ProxyEndpoint` field (separate type/seam), not `networkpolicy.ProvisionRequest`.
+
+2. `internal/services/networkpolicy/service.go` (321 lines total)
+   - **Lines 137–141 (doc comment on `PolicyMaterial.HTTPProxyURL` / `HTTPSProxyURL`):** Updated stale `Format: "http://<ProxyEndpoint>"` in BOTH doc comments to `Format: "http://<ProxyAlias>:<proxyPort>" (e.g. "http://valv-proxy:8080")`. No runtime logic changed.
+
+3. `drops/DROP_15_NETWORK_POLICY/PLAN.md` — D.1 state cycled `done` → `in_progress` → `done` for Round 2 work tracking.
+
+### No Other Instances
+
+`grep -rn "networkpolicy\.ProvisionRequest"` across the full `main/` source tree found exactly ONE source-code hit (line 347 of `service_integration_test.go`). All other hits were in drops/agent-runs (non-source). Confirmed zero remaining `ProxyEndpoint` references in `networkpolicy.ProvisionRequest` literal constructions.
+
+### Mage Gates
+
+- `mage test-func ./internal/services/networkpolicy TestNew_RequiresExecutor` — PASS (1/1)
+- `mage test-func ./internal/services/networkpolicy TestNew_Success` — PASS (1/1)
+- `mage test-func ./internal/services/networkpolicy TestProvisionRequest_Valid` — PASS (4/4)
+- `mage test-func ./internal/services/networkpolicy TestProvision_CreatesNetworkOnFreshHost` — PASS (1/1)
+- `mage test-func ./internal/services/networkpolicy TestProvision_OperationOrder` — PASS (1/1)
+- `mage test-func ./internal/services/networkpolicy TestProvision_AllowlistJoinedInSidecarEnv` — PASS (1/1)
+- `mage test-func ./internal/services/networkpolicy TestProvision_ConnectNetworkError_Wrapped` — PASS (1/1)
+- `mage test-func ./internal/services/networkpolicy TestProvision_RunContainerDetachedError_NoConnectAttempted` — PASS (1/1)
+- `mage test-func ./internal/services/images TestServiceBuildAddsVersionAndUsesDefaultImageInfo` — PASS (1/1, confirms images non-integration build green)
+
+Orchestrator must run `mage integration` to confirm the integration-tagged file now compiles (Docker-heavy; not run here per instructions).
+
+### Atomicity Confirmation
+
+Round 2 is fully self-contained: 1 line removed from one integration test struct literal + 2 doc comment lines updated in service.go. Zero runtime logic changed. No new production symbols.

@@ -134,10 +134,10 @@ func (r ProvisionRequest) Valid() error {
 // docker.ImageBuildRequest.Network / docker.ContainerRunRequest.Network.
 type PolicyMaterial struct {
 	// HTTPProxyURL is the value callers pass as the HTTP_PROXY build arg or
-	// env var. Format: "http://<ProxyEndpoint>".
+	// env var. Format: "http://<ProxyAlias>:<proxyPort>" (e.g. "http://valv-proxy:8080").
 	HTTPProxyURL string
 	// HTTPSProxyURL is the value callers pass as the HTTPS_PROXY build arg
-	// or env var. Format: "http://<ProxyEndpoint>" — the proxy daemon
+	// or env var. Format: "http://<ProxyAlias>:<proxyPort>" — the proxy daemon
 	// receives CONNECT for HTTPS targets over plain HTTP.
 	HTTPSProxyURL string
 	// NoProxy is the comma-separated value suitable for use as the NO_PROXY
