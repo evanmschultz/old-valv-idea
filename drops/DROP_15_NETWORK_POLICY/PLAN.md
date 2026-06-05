@@ -385,7 +385,7 @@ New package `internal/cmd/valv-proxy/`. Env-injected runtime config: port via `V
 
 NEW work only — network labels already exist (committed at `Provision` :196-203); E adds proxy-container labels + container-scoped sweep + cleanup ordering.
 
-- **15.2.5.E.1** — Proxy container managed-label propagation (`Labels: {ManagedLabelKey: ManagedLabelValue}` on the sidecar `ContainerRunRequest` in D.1's Provision). 1 edit cluster, ~40 LOC including tests, 2 files (`networkpolicy/service.go` + test). blocked_by: 15.2.5.D.1.
+- **15.2.5.E.1** — state: done (SUBSUMED by D.1) — Proxy container managed-label propagation. D.1 already set `Labels: {ManagedLabelKey: ManagedLabelValue}` on the sidecar `ContainerRunRequest` (`networkpolicy/service.go:360-362`); no separate work needed.
 - **15.2.5.E.2** — Container-label sweep + reclaim. Adds `docker.Executor.ListContainersByLabel(ctx, label string) ([]string, error)` using existing `BuildContainerListArgs`; extends `NetworkExecutor` interface; extends `Provision` + `CleanupStale` to enumerate + remove stale managed sidecars before creating new. 2 prod symbols, ~70-80 LOC, 3 prod files (`adapters/docker/executor.go` + `networkpolicy/service.go` + tests). blocked_by: 15.2.5.D.1, E.1.
 - **15.2.5.E.3** — Cleanup ordering (Provision-returned `Cleanup` stops/removes proxy BEFORE rm network). 1 service edit cluster, ≤60 LOC, 1 prod file (+ test). blocked_by: 15.2.5.D.1, E.2. NOTE: if `docker.Executor` lacks an explicit stop-container method after E.2 lands, E.3 splits into E.3a (add stop) + E.3b (ordering); builder re-measures.
 
