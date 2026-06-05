@@ -1143,8 +1143,13 @@ func TestSweepStaleSidecars_RemovesExistingContainers(t *testing.T) {
 	}
 	defer func() { _ = cleanup(context.Background()) }()
 
-	// ListContainersByLabel must have been called with the managed filter.
-	wantFilter := ManagedLabelKey + "=" + ManagedLabelValue
+	// ListContainersByLabel must have been called with the per-network filter
+	// (valv-network=<desiredName>), NOT the global managed filter. Provision
+	// scopes its reclaim sweep to this network's sidecars only so that a
+	// concurrent valv run's active sidecar (with a different NetworkLabelKey
+	// value) is never force-removed.
+	expectedName := networkName([]string{"github.com"})
+	wantFilter := NetworkLabelKey + "=" + expectedName
 	if len(exec.listContainerCalls) != 1 || exec.listContainerCalls[0] != wantFilter {
 		t.Errorf("listContainerCalls = %#v, want [%q]", exec.listContainerCalls, wantFilter)
 	}
@@ -1272,6 +1277,197 @@ func TestSweepStaleSidecars_NoopWhenExecutorLacksSweeper(t *testing.T) {
 		t.Fatalf("Provision() error = %v, want nil (no-op sweep when sweeper absent)", err)
 	}
 	defer func() { _ = cleanup(context.Background()) }()
+}
+
+// TestProvision_SidecarCarriesBothLabels asserts that the ContainerRunRequest
+// for the proxy sidecar carries BOTH the global managed label (valv=network-policy)
+// AND the per-network label (valv-network=<desiredName>). The global label is
+// required for startup-recovery sweeps (CleanupStale); the per-network label is
+// required for scoped reclaim-on-collision during active sessions (Provision).
+func TestProvision_SidecarCarriesBothLabels(t *testing.T) {
+	t.Parallel()
+
+	allowlist := []string{"github.com", "proxy.golang.org"}
+	desiredName := networkName(allowlist)
+
+	fake := &fakeNetworkExecutor{runDetachedResult: "labels-test-sidecar"}
+	svc, err := New(Options{Executor: fake})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	_, cleanup, err := svc.Provision(context.Background(), ProvisionRequest{Allowlist: allowlist})
+	if err != nil {
+		t.Fatalf("Provision() error = %v", err)
+	}
+	defer func() { _ = cleanup(context.Background()) }()
+
+	if len(fake.runDetachedCalls) != 1 {
+		t.Fatalf("runDetachedCalls = %d, want 1", len(fake.runDetachedCalls))
+	}
+	labels := fake.runDetachedCalls[0].Labels
+
+	// Global managed label must be present.
+	if labels[ManagedLabelKey] != ManagedLabelValue {
+		t.Errorf("Labels[%q] = %q, want %q", ManagedLabelKey, labels[ManagedLabelKey], ManagedLabelValue)
+	}
+	// Per-network label must be present and set to the deterministic network name.
+	if labels[NetworkLabelKey] != desiredName {
+		t.Errorf("Labels[%q] = %q, want %q (desiredName)", NetworkLabelKey, labels[NetworkLabelKey], desiredName)
+	}
+}
+
+// TestProvision_ReclaimSweepIsPerNetworkScoped asserts that Provision's
+// reclaim-on-collision sweep uses the per-network label filter
+// (valv-network=<desiredName>) and NOT the global managed label, so that a
+// concurrent valv run's sidecar carrying a DIFFERENT NetworkLabelKey value is
+// NOT swept.
+func TestProvision_ReclaimSweepIsPerNetworkScoped(t *testing.T) {
+	t.Parallel()
+
+	allowlist := []string{"sum.golang.org"}
+	desiredName := networkName(allowlist)
+
+	// The stale sweeper's listContainerResult is returned for any label query.
+	// We verify correctness by asserting the LABEL ARGUMENT passed to
+	// ListContainersByLabel — if it is the per-network filter, the executor
+	// would only return THIS network's sidecars in production. A foreign-network
+	// sidecar (different NetworkLabelKey value) would never appear in the list
+	// because Docker's label filter would exclude it.
+	exec := &staleSweeperExecutor{}
+	exec.runDetachedResult = "scoped-sweep-sidecar"
+
+	svc, err := New(Options{Executor: exec})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	_, cleanup, err := svc.Provision(context.Background(), ProvisionRequest{Allowlist: allowlist})
+	if err != nil {
+		t.Fatalf("Provision() error = %v", err)
+	}
+	defer func() { _ = cleanup(context.Background()) }()
+
+	// ListContainersByLabel must have been called with the per-network filter,
+	// not the global managed filter.
+	wantFilter := NetworkLabelKey + "=" + desiredName
+	if len(exec.listContainerCalls) != 1 {
+		t.Fatalf("listContainerCalls = %d, want 1", len(exec.listContainerCalls))
+	}
+	if exec.listContainerCalls[0] != wantFilter {
+		t.Errorf("listContainerCalls[0] = %q, want %q (per-network filter)", exec.listContainerCalls[0], wantFilter)
+	}
+
+	// Confirm it is NOT the global managed filter.
+	globalFilter := ManagedLabelKey + "=" + ManagedLabelValue
+	if exec.listContainerCalls[0] == globalFilter {
+		t.Errorf("Provision sweep used global filter %q; want per-network filter %q", globalFilter, wantFilter)
+	}
+}
+
+// TestCleanupStale_SweepIsGlobal asserts that CleanupStale uses the global
+// managed label filter (valv=network-policy) for its container sweep, not a
+// per-network filter. During startup recovery no sessions are active, so
+// all orphaned managed sidecars should be reclaimed regardless of which
+// network they belonged to.
+func TestCleanupStale_SweepIsGlobal(t *testing.T) {
+	t.Parallel()
+
+	exec := &staleSweeperExecutor{
+		listContainerResult: []string{"orphan-sidecar-1", "orphan-sidecar-2"},
+	}
+	exec.listResult = []string{"valv-netpol-aaaa11112222"}
+
+	svc, err := New(Options{Executor: exec})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if err := svc.CleanupStale(context.Background()); err != nil {
+		t.Fatalf("CleanupStale() error = %v", err)
+	}
+
+	// CleanupStale must use the global managed label, not a per-network label.
+	wantFilter := ManagedLabelKey + "=" + ManagedLabelValue
+	if len(exec.listContainerCalls) != 1 {
+		t.Fatalf("listContainerCalls = %d, want 1", len(exec.listContainerCalls))
+	}
+	if exec.listContainerCalls[0] != wantFilter {
+		t.Errorf("listContainerCalls[0] = %q, want %q (global managed filter)", exec.listContainerCalls[0], wantFilter)
+	}
+}
+
+// TestCleanup_RemovesSidecarBeforeNetwork asserts that the Cleanup closure
+// returned by Provision removes the proxy sidecar container BEFORE removing
+// the network. Docker refuses to remove a network while a container is still
+// attached to it, so container removal must precede network removal.
+// This test uses a staleSweeperExecutor so RemoveContainer is available.
+func TestCleanup_RemovesSidecarBeforeNetwork(t *testing.T) {
+	t.Parallel()
+
+	const fakeSidecarID = "cleanup-order-sidecar"
+
+	exec := &staleSweeperExecutor{}
+	exec.fakeNetworkExecutor.runDetachedResult = fakeSidecarID
+
+	svc, err := New(Options{Executor: exec})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	_, cleanup, err := svc.Provision(context.Background(), ProvisionRequest{
+		Allowlist: []string{"github.com"},
+	})
+	if err != nil {
+		t.Fatalf("Provision() error = %v", err)
+	}
+
+	// Execute the cleanup closure.
+	if err := cleanup(context.Background()); err != nil {
+		t.Fatalf("cleanup() error = %v", err)
+	}
+
+	// Container must have been removed.
+	if len(exec.removeContainerCalls) != 1 {
+		t.Fatalf("removeContainerCalls = %d, want 1 (sidecar removal)", len(exec.removeContainerCalls))
+	}
+	// The correct sidecar ID must have been removed with Force=true.
+	rc := exec.removeContainerCalls[0]
+	if len(rc.IDs) != 1 || rc.IDs[0] != fakeSidecarID {
+		t.Errorf("removeContainerCalls[0].IDs = %v, want [%q]", rc.IDs, fakeSidecarID)
+	}
+	if !rc.Force {
+		t.Errorf("removeContainerCalls[0].Force = false, want true (Force stops+removes atomically)")
+	}
+
+	// Network must have been removed.
+	// Note: RemoveNetwork is recorded in fakeNetworkExecutor.removeCalls.
+	// We need to count removeCalls that happened during cleanup (not sweeps).
+	if len(exec.fakeNetworkExecutor.removeCalls) != 1 {
+		t.Fatalf("removeCalls = %d, want 1 (network removal)", len(exec.fakeNetworkExecutor.removeCalls))
+	}
+
+	// RemoveContainer (sidecar) must precede RemoveNetwork in call order.
+	containerIdx := -1
+	networkIdx := -1
+	for i, op := range exec.callOrder {
+		if op == "RemoveContainer" && containerIdx == -1 {
+			containerIdx = i
+		}
+		if op == "RemoveNetwork" && networkIdx == -1 {
+			networkIdx = i
+		}
+	}
+	if containerIdx == -1 {
+		t.Fatalf("callOrder = %v, missing RemoveContainer", exec.callOrder)
+	}
+	if networkIdx == -1 {
+		t.Fatalf("callOrder = %v, missing RemoveNetwork", exec.callOrder)
+	}
+	if containerIdx >= networkIdx {
+		t.Errorf("callOrder = %v: RemoveContainer (idx %d) must precede RemoveNetwork (idx %d)",
+			exec.callOrder, containerIdx, networkIdx)
+	}
 }
 
 // TestCleanupStale_SweepsContainersBeforeNetworks asserts that CleanupStale

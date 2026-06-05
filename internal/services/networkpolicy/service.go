@@ -53,6 +53,15 @@ const (
 	// (key,value) pair together identifies a Valv-managed network-policy
 	// resource and gates the orphan reclaim flow.
 	ManagedLabelValue = "network-policy"
+	// NetworkLabelKey is a per-network label key stamped onto the proxy sidecar
+	// container at creation time. Its value is the deterministic docker network
+	// name (desiredName) for the provisioning session. This second label scopes
+	// Provision's reclaim sweep to THIS network's stale sidecars only, so a
+	// concurrent valv run with a different allowlist (and therefore a different
+	// desiredName) never has its active sidecar force-removed by a racing
+	// Provision call. CleanupStale (startup recovery) uses only ManagedLabelKey
+	// for its global sweep because no sessions are active during startup.
+	NetworkLabelKey = "valv-network"
 	// networkNamePrefix is prepended to the deterministic suffix when
 	// generating the docker network name. Keeping the prefix human-readable
 	// makes `docker network ls` output easier to scan for operators.
@@ -165,22 +174,28 @@ type staleSweeper interface {
 	RemoveContainer(ctx context.Context, request docker.ContainerRemoveRequest) error
 }
 
-// sweepStaleSidecars enumerates containers carrying the managed label and
+// sweepStaleSidecars enumerates containers carrying the given label filter and
 // removes each one before the caller creates a fresh sidecar. This is the
 // reclaim-on-collision path: if a prior Provision run left a sidecar behind
 // (e.g. from a SIGKILLed process), the stale container is cleaned up before
 // the new one is started so there are no duplicate sidecars on the bridge.
 //
+// The label parameter is a "key=value" Docker label filter string. Provision
+// passes a per-network label (NetworkLabelKey=<desiredName>) so only THIS
+// network's stale sidecars are swept — a concurrent valv run's active sidecar
+// carrying a different NetworkLabelKey value is never touched. CleanupStale
+// (startup recovery) passes the global managed label so all orphaned sidecars
+// are removed regardless of which network they belonged to.
+//
 // If the executor does not implement staleSweeper (e.g. a minimal test fake),
 // the sweep is a silent no-op. Errors from ListContainersByLabel or
 // RemoveContainer are wrapped and returned; callers should propagate them.
-func (s Service) sweepStaleSidecars(ctx context.Context) error {
+func (s Service) sweepStaleSidecars(ctx context.Context, label string) error {
 	sweeper, ok := s.executor.(staleSweeper)
 	if !ok {
 		return nil
 	}
-	managedFilter := ManagedLabelKey + "=" + ManagedLabelValue
-	ids, err := sweeper.ListContainersByLabel(ctx, managedFilter)
+	ids, err := sweeper.ListContainersByLabel(ctx, label)
 	if err != nil {
 		return fmt.Errorf("networkpolicy sweep stale sidecars: list containers: %w", err)
 	}
@@ -390,10 +405,12 @@ func (s Service) Provision(ctx context.Context, request ProvisionRequest) (Polic
 	}
 
 	// Reclaim-on-collision: remove any stale sidecar containers from a prior
-	// run (e.g. from a SIGKILLed process) before starting a fresh sidecar.
-	// Stale sidecars are identified by the managed label (valv=network-policy).
-	// This prevents duplicate sidecars accumulating on the bridge network.
-	if err := s.sweepStaleSidecars(ctx); err != nil {
+	// run for THIS network (identified by per-network label valv-network=<name>).
+	// Using the per-network label scopes the sweep to sidecars belonging to the
+	// same desiredName, so a concurrent valv run's active sidecar carrying a
+	// different NetworkLabelKey value is never force-removed by this call.
+	perNetworkFilter := NetworkLabelKey + "=" + desiredName
+	if err := s.sweepStaleSidecars(ctx, perNetworkFilter); err != nil {
 		return PolicyMaterial{}, nil, fmt.Errorf("networkpolicy provision: %w", err)
 	}
 
@@ -401,6 +418,9 @@ func (s Service) Provision(ctx context.Context, request ProvisionRequest) (Polic
 	// attachment gives the sidecar external egress while the internal network
 	// attachment (below) lets the workload reach it by ProxyAlias. Schema
 	// Decision 5: ONLY the proxy spans bridge; the workload is internal-only.
+	// Two labels are stamped: the global managed label (valv=network-policy)
+	// for startup-recovery sweeps, and the per-network label (valv-network=
+	// <desiredName>) for scoped reclaim-on-collision during active sessions.
 	sidecarID, err := s.executor.RunContainerDetached(ctx, docker.ContainerRunRequest{
 		Image:    proxyImageRef(),
 		Detached: true,
@@ -410,6 +430,7 @@ func (s Service) Provision(ctx context.Context, request ProvisionRequest) (Polic
 		},
 		Labels: map[string]string{
 			ManagedLabelKey: ManagedLabelValue,
+			NetworkLabelKey: desiredName,
 		},
 		// No Network field: defaults to Docker's bridge network, giving the
 		// sidecar external egress per Schema Decision 5.
@@ -445,7 +466,23 @@ func (s Service) Provision(ctx context.Context, request ProvisionRequest) (Polic
 		NoProxy:       buildNoProxy(),
 		NetworkName:   desiredName,
 	}
+	// Capture sidecarID so cleanup can remove the proxy container before the
+	// network. Docker refuses to remove a network while a container is still
+	// attached to it, so container removal must precede network removal.
+	// Force=true stops and removes the container atomically — no separate
+	// StopContainer call is needed. The sidecarID is captured by value from
+	// the enclosing Provision scope; subsequent Provision calls produce their
+	// own independent Cleanup closures.
+	capturedSidecarID := sidecarID
 	cleanup := func(ctx context.Context) error {
+		if sweeper, ok := s.executor.(staleSweeper); ok {
+			if rmErr := sweeper.RemoveContainer(ctx, docker.ContainerRemoveRequest{
+				IDs:   []string{capturedSidecarID},
+				Force: true,
+			}); rmErr != nil {
+				return fmt.Errorf("networkpolicy cleanup: remove proxy sidecar %q: %w", capturedSidecarID, rmErr)
+			}
+		}
 		if err := s.executor.RemoveNetwork(ctx, docker.NetworkRemoveRequest{Name: desiredName}); err != nil {
 			return fmt.Errorf("networkpolicy cleanup: remove network %q: %w", desiredName, err)
 		}
@@ -461,8 +498,12 @@ func (s Service) Provision(ctx context.Context, request ProvisionRequest) (Polic
 // internal network they may still be attached to.
 func (s Service) CleanupStale(ctx context.Context) error {
 	// Remove stale sidecar containers first so network removal succeeds even
-	// when a sidecar is still attached to the internal network.
-	if err := s.sweepStaleSidecars(ctx); err != nil {
+	// when a sidecar is still attached to the internal network. Startup
+	// recovery uses the global managed label so ALL orphaned sidecars are
+	// removed regardless of which network they belonged to (no sessions are
+	// active during startup, so global sweep is correct here).
+	globalFilter := ManagedLabelKey + "=" + ManagedLabelValue
+	if err := s.sweepStaleSidecars(ctx, globalFilter); err != nil {
 		return fmt.Errorf("networkpolicy cleanup stale: %w", err)
 	}
 	managedFilter := ManagedLabelKey + "=" + ManagedLabelValue

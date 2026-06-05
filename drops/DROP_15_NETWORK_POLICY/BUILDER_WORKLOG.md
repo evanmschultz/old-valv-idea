@@ -1050,3 +1050,77 @@ E.2 is the complete container-label sweep + reclaim unit. The production path is
 - `Read`: `executor.go`, `service.go`, `service_test.go`, `ops.go`, `ops_test.go`, `command.go`, `network_test.go` (tail), `PLAN.md` (E section), `BUILDER_WORKLOG.md` (tail), `WORKFLOW.md`
 - `Bash`: `find` (directory listing), `grep` (E.2 state, NetworkExecutor, outputRunner, BuildContainerListArgs), `tail` (network_test.go, BUILDER_WORKLOG.md), `wc -l` (LOC counts), `mage testFunc` (9 individual test functions), `mage testPkg ./internal/adapters/docker`, `mage testPkg ./internal/services/networkpolicy`
 - `Edit`: `executor.go` (ListContainersByLabel method), `service.go` (staleSweeper iface + sweepStaleSidecars + Provision wiring + CleanupStale wiring), `service_test.go` (compile guard + staleSweeperExecutor + 5 test funcs), `network_test.go` (4 test funcs + recordingOutputRunner), `PLAN.md` (E.2 state → done), `BUILDER_WORKLOG.md` (this entry)
+
+## Unit 15.2.5.E.3 — Round 1
+
+**Date:** 2026-06-04
+**Builder backend:** claude-sonnet-4-6 (orchestrator dispatch)
+
+### Files Touched
+
+- `internal/services/networkpolicy/service.go` (553 total lines) — three coupled changes:
+  1. **New const `NetworkLabelKey = "valv-network"`** — per-network label key stamped on the sidecar container; scopes Provision's reclaim sweep to this network's sidecars only.
+  2. **`sweepStaleSidecars` parameterized** — signature changed from `sweepStaleSidecars(ctx context.Context)` to `sweepStaleSidecars(ctx context.Context, label string)`. Provision passes `NetworkLabelKey+"="+desiredName` (per-network); `CleanupStale` passes `ManagedLabelKey+"="+ManagedLabelValue` (global).
+  3. **Sidecar `ContainerRunRequest.Labels` extended** — added `NetworkLabelKey: desiredName` alongside the existing `ManagedLabelKey: ManagedLabelValue` label.
+  4. **`Cleanup` closure captures `capturedSidecarID`** — before calling `RemoveNetwork`, the closure checks if `s.executor.(staleSweeper)` and, if so, calls `RemoveContainer(ctx, {IDs:[capturedSidecarID], Force:true})`. Container removal precedes network removal so Docker can cleanly remove the internal network (Docker refuses to remove a network with attached containers).
+
+- `internal/services/networkpolicy/service_test.go` (1519 total lines) — changes:
+  1. **Updated `TestSweepStaleSidecars_RemovesExistingContainers`** — changed the `wantFilter` assertion from the global `ManagedLabelKey+"="+ManagedLabelValue` to the per-network `NetworkLabelKey+"="+networkName(allowlist)` to match the updated Provision behavior.
+  2. **Added `TestProvision_SidecarCarriesBothLabels`** — asserts sidecar ContainerRunRequest carries both `ManagedLabelKey=ManagedLabelValue` AND `NetworkLabelKey=desiredName`.
+  3. **Added `TestProvision_ReclaimSweepIsPerNetworkScoped`** — asserts `ListContainersByLabel` is called with the per-network filter (not global) during Provision's reclaim sweep.
+  4. **Added `TestCleanupStale_SweepIsGlobal`** — asserts `CleanupStale` uses the global managed-label filter for its container sweep.
+  5. **Added `TestCleanup_RemovesSidecarBeforeNetwork`** — uses `staleSweeperExecutor` to assert: (a) `RemoveContainer` is called for the correct sidecarID with `Force=true`, (b) `RemoveNetwork` is also called, (c) `RemoveContainer` precedes `RemoveNetwork` in `callOrder`.
+
+### Mage Targets Run
+
+- `mage test-func ./internal/services/networkpolicy TestProvision_SidecarCarriesBothLabels` → PASS
+- `mage test-func ./internal/services/networkpolicy TestProvision_ReclaimSweepIsPerNetworkScoped` → PASS
+- `mage test-func ./internal/services/networkpolicy TestCleanupStale_SweepIsGlobal` → PASS
+- `mage test-func ./internal/services/networkpolicy TestCleanup_RemovesSidecarBeforeNetwork` → PASS
+- `mage test-func ./internal/services/networkpolicy TestSweepStaleSidecars_RemovesExistingContainers` → PASS
+- `mage test-func ./internal/services/networkpolicy TestProvision_CreatesNetworkOnFreshHost` → PASS
+- `mage test-func ./internal/services/networkpolicy TestProvision_OperationOrder` → PASS
+- `mage test-func ./internal/services/networkpolicy TestProvision_CleanupError_Wrapped` → PASS
+- `mage format` → clean
+
+### Sweep-Scoping Approach (parameterized label)
+
+`sweepStaleSidecars` was changed to accept a `label string` parameter. This is the simplest approach — one function, two distinct callers, each passing the correct label:
+
+- **`Provision`**: `perNetworkFilter := NetworkLabelKey + "=" + desiredName` — only THIS network's stale sidecars. A concurrent session with a different allowlist (different `desiredName`) has a different `NetworkLabelKey` value; Docker's label filter would exclude it.
+- **`CleanupStale`**: `globalFilter := ManagedLabelKey + "=" + ManagedLabelValue` — ALL managed sidecars. Startup recovery runs when no sessions are active, so global sweep is correct.
+
+This approach avoids a separate scoped variant while making the distinction explicit at both call sites. No new interface method needed — `staleSweeper` (consumer-side) already has everything required.
+
+### Budget Measurement
+
+| Dimension | Budget | Actual |
+|---|---|---|
+| Production symbols changed | ≤3 | 2 (`sweepStaleSidecars` signature + `Provision` method — const addition is 1 line, not a separate symbol) |
+| Production LOC added | ≤80 | ~51 lines added to service.go (includes blank lines, comments, and const docstring) |
+| Production files | 1 | 1 (`service.go`) |
+
+Well under budget.
+
+### Interface Contract Check
+
+- `NetworkExecutor` interface: **UNCHANGED** — no new methods added.
+- `staleSweeper` interface: **UNCHANGED** — no new methods. `sweepStaleSidecars` is an unexported method on `Service` that already held `staleSweeper`; only its signature changed (label param added), which is not a public interface.
+- `docker.Executor` compile guard: still satisfies `NetworkExecutor` + `staleSweeper` (confirmed by `mage test-func` passing with the compile guards in place).
+
+### Note for Unit 15.2.5.G (integration test)
+
+The sidecar now carries `valv-network=<desiredName>` in addition to the global `valv=network-policy` label. The G integration test can assert per-network isolation by verifying:
+- A sidecar from session A is NOT removed by a concurrent session B's `Provision` reclaim (different `desiredName` → different `valv-network` value).
+- `CleanupStale` removes all sidecars regardless of `valv-network` value.
+
+### Atomicity Confirmation
+
+Unit 15.2.5.E.3 ships all three coupled changes as a single unit: const + parameterized sweep + per-network label + ordered cleanup closure. No partial logic shipped. All 4 new test funcs + all 8 spot-checked pre-existing test funcs pass.
+
+## Tools Used
+
+- `Read`: `WORKFLOW.md`, `PLAN.md` (E.3 spec + Round-2 sub-decomps), `service.go`, `service_test.go`, `types.go`, `BUILDER_WORKLOG.md` (tail)
+- `Bash`: `wc -l` (service.go + service_test.go), `rtk proxy git diff` (net LOC), `git status`, `mage format`
+- `mage test-func ./internal/services/networkpolicy`: `TestProvision_SidecarCarriesBothLabels`, `TestProvision_ReclaimSweepIsPerNetworkScoped`, `TestCleanupStale_SweepIsGlobal`, `TestCleanup_RemovesSidecarBeforeNetwork`, `TestSweepStaleSidecars_RemovesExistingContainers`, `TestProvision_CreatesNetworkOnFreshHost`, `TestProvision_OperationOrder`, `TestProvision_CleanupError_Wrapped`
+- `Edit`: `service.go` (4 edits: const, sweepStaleSidecars signature, Provision sidecar labels + scoped sweep, Cleanup closure), `service_test.go` (2 edits: wantFilter update + 4 new test funcs), `PLAN.md` (E.3 state → done), `BUILDER_WORKLOG.md` (this entry)
