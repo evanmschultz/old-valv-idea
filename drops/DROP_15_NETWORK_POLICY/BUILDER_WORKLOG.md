@@ -1124,3 +1124,91 @@ Unit 15.2.5.E.3 ships all three coupled changes as a single unit: const + parame
 - `Bash`: `wc -l` (service.go + service_test.go), `rtk proxy git diff` (net LOC), `git status`, `mage format`
 - `mage test-func ./internal/services/networkpolicy`: `TestProvision_SidecarCarriesBothLabels`, `TestProvision_ReclaimSweepIsPerNetworkScoped`, `TestCleanupStale_SweepIsGlobal`, `TestCleanup_RemovesSidecarBeforeNetwork`, `TestSweepStaleSidecars_RemovesExistingContainers`, `TestProvision_CreatesNetworkOnFreshHost`, `TestProvision_OperationOrder`, `TestProvision_CleanupError_Wrapped`
 - `Edit`: `service.go` (4 edits: const, sweepStaleSidecars signature, Provision sidecar labels + scoped sweep, Cleanup closure), `service_test.go` (2 edits: wantFilter update + 4 new test funcs), `PLAN.md` (E.3 state → done), `BUILDER_WORKLOG.md` (this entry)
+
+## Unit 15.2.5.G — Round 1
+
+**Date:** 2026-06-05
+**Builder backend:** claude-sonnet-4-6 (orchestrator dispatch)
+
+### What Was Deleted
+
+From `internal/services/images/service_integration_test.go`:
+
+1. **In-process `http.Server` CONNECT proxy** (lines 197–251): `net.Listen("tcp", "0.0.0.0:0")`, `http.Server` with a hijacking handler that recorded `seenHosts` and rejected non-allowlisted `CONNECT` targets, `srv.Serve(listener)` goroutine, and the deferred `srv.Shutdown` call. The handler recorded seen hosts via `sync.Mutex`-guarded `seenHosts []string` and `atomic.AddInt64(&blockedHits, 1)`.
+2. **`endpoint` local var** (line 253): `"host.docker.internal:" + intToStr(port)` — used to pass to `Options.ProxyEndpoint`.
+3. **`VALV_NETPOL_INTEGRATION_RUN=1` manual skip gate** (line 181–183): the entire `if os.Getenv(...) == "" { t.Skipf(...) }` block.
+4. **`intToStr` helper function** (lines 363–387): the decimal-string renderer used only for the port number.
+5. **`Options.ProxyEndpoint: endpoint`** in the `New()` call.
+6. **Proxy-log assertions** (lines 319–334): the `seenHosts` inspection, `sawAllowed` loop, and proxy summary log.
+7. **Imports no longer needed**: `net`, `net/http`, `sync`, `sync/atomic`, `time`.
+
+### New Sidecar Topology
+
+The rewritten test body:
+
+1. **Skip gates**: `runtime.GOOS != "darwin"` (kept) + `docker version` availability check (kept). The `VALV_NETPOL_INTEGRATION_RUN=1` gate is removed — the test now runs automatically on darwin+docker.
+2. **Base image build**: A single combined base Dockerfile (`FROM golang:1.23-alpine` + `apk add nodejs npm` + `addgroup/adduser valv`) is built with open networking before the policy test begins. This base supports both sub-assertions: `go install` (requires `go`) and `npm install -g` (requires `npm`). The `valv` user is required because `BuildOverlayDockerfile` appends `USER valv` to every overlay Dockerfile. Built with `docker.BuildImageArgs` + `baseRunner.Run`; cleaned up in `t.Cleanup`.
+3. **Service wiring**: `docker.NewExecutor(docker.NewSystemRunner(...))` → `networkpolicy.New(Options{Executor: dockerExec})` → `networkPolicyAdapter{svc: policySvc}` → `images.New(Options{..., NetworkPolicy: networkPolicyAdapter{...}})`.
+4. **Allowed assertion**: `EnsureProjectImage` with manifest `go install rsc.io/quote@v1.5.2`. This contacts `proxy.golang.org` and `sum.golang.org` (both in the default allowlist). Expected: `err == nil`.
+5. **Blocked assertion**: `EnsureProjectImage` with manifest `npm install -g cowsay`. npm contacts `registry.npmjs.org:443` which is NOT in the default allowlist (`proxy.golang.org`, `sum.golang.org`, `github.com`, `objects.githubusercontent.com`). The sidecar rejects the CONNECT tunnel. Expected: `err != nil`.
+6. **Cleanup**: `EnsureProjectImage` defers `networkpolicy.Cleanup` internally (Step 5a in `service.go:860–878`), so the sidecar container + internal network are removed after each build finishes — no manual `Cleanup` call needed in the test. Overlay images (if built) cleaned up in `t.Cleanup`.
+
+### `mage integration` Result
+
+```
+FAIL: TestEnsureProjectImage_NetworkPolicyOverlayBuildReachesProxy_DockerDesktopMacOS
+ALLOWED path: EnsureProjectImage returned unexpected error:
+  ensure project image: run docker buildx build --load --no-cache -f ... 
+  --network valv-netpol-58c4e33949bf ... exit status 1
+  ERROR: failed to build: network mode "valv-netpol-58c4e33949bf" not supported 
+  by buildkit - you can define a custom network for your builder using the 
+  network driver-opt in buildx create
+```
+
+**Both the allowed and blocked cases fail for the SAME reason**: buildkit does NOT support user-defined Docker networks for `--network` on `docker buildx build --load`. Buildkit only accepts `none`, `host`, or `default`. The `ImageBuildRequest.Network = policyMaterial.NetworkName` (an internal Docker network) is passed as `--network <internal-network>` → buildkit rejects it.
+
+This is the **Decision 6 empirical-validation finding** the PLAN.md explicitly anticipated:
+
+> "Empirical-validation requirement: if buildx build-RUN steps cannot reach a sidecar on the --internal network on Docker Desktop macOS (ephemeral build containers attach differently than docker run), Unit 15.2.5 must adopt a build-specific equivalent."
+
+The test exercises the correct production code path. The failure is a **production bug in `EnsureProjectImage`**, not a test bug.
+
+### BLOCKED — Production Gap Identified
+
+Unit 15.2.5.G is BLOCKED on a PRODUCTION fix to `internal/services/images/service.go`. The current `EnsureProjectImage` code at `service.go:891` sets `buildNetwork = policyMaterial.NetworkName` (a `valv-netpol-*` name) and passes it directly to `ImageBuildRequest.Network`. Buildkit rejects this.
+
+**Required production fix** (for a new droplet, 0-prod-symbols constraint on G prevents me from making this change):
+
+The fix must align `EnsureProjectImage`'s build network strategy with what buildkit actually supports. Options per Decision 6 "build-specific equivalent":
+- Use `--network=host` for the buildx builder (the proxy sidecar would still be on the bridge and reachable by the workload... but `host` mode bypasses the internal network entirely).
+- Use `--network=default` and route proxy via the builder's default bridge network.
+- Use a custom buildx builder configured with `--driver-opt=network=<internal-network>` at builder creation time.
+- Use a different mechanism to inject the proxy: instead of `--network`, use only the proxy build args (`HTTP_PROXY`, `HTTPS_PROXY`) with a network that buildkit supports, and connect the sidecar to that network.
+
+The most compatible approach: keep the sidecar running on bridge (for external egress) + connect it to an internal network (for workload runtime isolation), but for the BUILD phase, use `--network=default` (so build containers can reach the sidecar via its bridge IP/alias) and rely on `HTTP_PROXY`/`HTTPS_PROXY` for egress filtering. The sidecar IS reachable on bridge; buildkit CAN use `--network=default` which IS the bridge.
+
+**This is a production change in `internal/services/images/service.go`** — outside 15.2.5.G's test-only scope. The orchestrator should create a new production droplet (possibly `15.2.5.G.build-network-fix` or fold into `15.2.5.G.cli`) before re-running G.
+
+### Test File
+
+`internal/services/images/service_integration_test.go` — 326 total lines.
+- Removed: ~187 lines (deleted test body + imports + intToStr helper + proxy machinery)
+- Added: ~160 lines (new test body + base image build + service wiring + two sub-assertions + comments + updated imports)
+- Net: file reduced by ~62 lines (388 → 326)
+
+### 0 Production Symbols Confirmation
+
+Only `service_integration_test.go` was modified. No production files changed. The `networkPolicyAdapter` and all three other test functions are untouched.
+
+### Unknowns
+
+1. **Correct buildx network mode for sidecar reachability**: `--network=default` should let buildkit build containers reach the sidecar on the bridge network — but this needs empirical verification on Docker Desktop macOS. The sidecar is started on bridge by default (no `Network` field in `RunContainerDetached`), so its bridge IP should be reachable by buildkit containers running on `--network=default`. This is the hypothesis for the next production fix droplet.
+2. **`networkPolicyAdapter.ProxyEndpoint` field**: The adapter currently drops `req.ProxyEndpoint` (it was always vestigial in the production-networkpolicy path). Per spec, 15.2.5.G.cli defers retiring `images.Options.ProxyEndpoint`/`NetworkPolicyRequest.ProxyEndpoint` to DROP_23 cleanup. No change needed in the test.
+
+## Tools Used
+
+- `Read`: `PLAN.md` (§15.2.5.G spec + §15.2.5 Decision 6), `service_integration_test.go` (existing full body), `networkpolicy/service.go` (full), `images/service.go` (Options + EnsureProjectImage body), `images/overlay.go` (BuildOverlayDockerfile), `tools/allowlist.go` + `tools/tools.go` (AllowlistConfig + EffectiveAllowlist), `networkpolicy/imageref.go` (proxyImageRef)
+- `Bash`: `grep` (multiple symbol searches across packages), `wc -l` (service_integration_test.go = 326 lines)
+- `Write`: `service_integration_test.go` (full rewrite)
+- `Edit`: `BUILDER_WORKLOG.md` (this entry)
+- `mage integration` → FAIL (buildkit network limitation found; test compiles and runs; ALLOWED assertion fails with buildkit error; BLOCKED assertion also fails for same reason)

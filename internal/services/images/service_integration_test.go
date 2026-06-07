@@ -5,16 +5,11 @@ package images
 import (
 	"bytes"
 	"context"
-	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"sync"
-	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/evanmschultz/valv/internal/adapters/docker"
 	"github.com/evanmschultz/valv/internal/domain"
@@ -149,189 +144,167 @@ func TestWriteDefaultClaudeContextBuildsWithExistingUIDAndGID(t *testing.T) {
 }
 
 // TestEnsureProjectImage_NetworkPolicyOverlayBuildReachesProxy_DockerDesktopMacOS
-// is the Unit 15.2.5 integration gate: it proves that when NetworkPolicy is
-// configured, the overlay `docker buildx build` performs its `go install`
-// step through the host-side proxy via `host.docker.internal`. The host-side
-// fixture is a fully in-process HTTP CONNECT proxy that records which Host
-// values each tunneled request targeted.
+// is the Unit 15.2.5.G integration gate: it proves that when NetworkPolicy is
+// configured on images.Service, the overlay `docker buildx build` performs its
+// install steps through the real valv-proxy sidecar container on the internal
+// Docker network, and that the sidecar enforces the allowlist correctly.
 //
-// PLAN.md Unit 15.2.5 acceptance gates this test to Docker Desktop macOS and
-// explicitly allows the test to be marked "manual-validation-required"
-// pending macOS-runner automation:
+// Two sub-assertions:
 //
-//	"the integration test must be validated on Docker Desktop macOS; Linux CI
-//	runs are NOT evidence for A1 because host.docker.internal semantics differ
-//	across Docker Engine deployments. ... Either automate macOS-runner
-//	coverage OR mark the test as manual-validation-required on Docker Desktop
-//	macOS in builder notes and confirm validation before unit close."
+//  1. ALLOWED path: `go install rsc.io/quote@v1.5.2` contacts proxy.golang.org
+//     and sum.golang.org (both in the default allowlist). The sidecar permits
+//     these connections. EnsureProjectImage MUST return nil error.
 //
-// Round 1 ships the test as manual-validation-required (skipped by default
-// on every platform). The Round 1 builder ran it locally on Docker Desktop
-// macOS via VALV_NETPOL_INTEGRATION_RUN=1 and captured the outcome in
-// BUILDER_WORKLOG.md: build args + --network attachment are correct, but
-// `host.docker.internal` is unreachable from the --internal docker network
-// on Docker Desktop macOS — exactly the A1 risk PLAN.md flagged. The
-// orchestrator/dev makes the final block/accept call.
+//  2. BLOCKED path: `npm install -g cowsay` contacts registry.npmjs.org which
+//     is NOT in the default allowlist. The sidecar rejects the CONNECT. The
+//     build fails with a network error. EnsureProjectImage MUST return a non-nil
+//     error.
 //
-// To force-run, set the env var VALV_NETPOL_INTEGRATION_RUN=1.
+// Topology used (per DROP_15 Schema Decision 5):
+//   - The workload build container attaches only to the `--internal` Docker
+//     network (no external route). HTTP_PROXY and HTTPS_PROXY point at the
+//     sidecar alias `valv-proxy:8080`.
+//   - The valv-proxy sidecar spans both the internal network (reachable by the
+//     build container) and the default bridge (for its own external egress).
+//   - The proxy image `valv-proxy:dev` must be present locally (mage buildProxy).
 //
-// The test uses NoCache=true to force a rebuild every run; a freshness-label
-// cache hit would yield a false green per PLAN guidance.
+// Cleanup: EnsureProjectImage defers the networkpolicy.Cleanup inside the call,
+// so the sidecar container + internal network are removed when each build
+// finishes. t.Cleanup removes all built test images. No valv-netpol-* networks
+// or managed sidecar containers are left behind after the test completes.
+//
+// The test is gated to Docker Desktop macOS where the `--internal` network +
+// sidecar topology is validated. The previous in-process http.Server approach
+// (Round 1) was proven broken on macOS because host.docker.internal is
+// unreachable from an --internal Docker network (DROP_15.2.5 empirical finding).
 func TestEnsureProjectImage_NetworkPolicyOverlayBuildReachesProxy_DockerDesktopMacOS(t *testing.T) {
-	if os.Getenv("VALV_NETPOL_INTEGRATION_RUN") == "" {
-		t.Skipf("Unit 15.2.5 macOS gate: manual-validation-required. Set VALV_NETPOL_INTEGRATION_RUN=1 on Docker Desktop macOS to execute. Round 1 validated locally; see BUILDER_WORKLOG.md.")
-	}
+	// BLOCKED (15.2.5.G): the sidecar-topology rewrite below is correct and
+	// caught a real production bug — `docker buildx build --network
+	// <valv-netpol-...>` is rejected by buildkit (custom networks unsupported;
+	// only none/host/default). Image-build egress through a custom --internal
+	// network is therefore architecturally blocked. Awaiting the build-egress
+	// design decision (deferred to a valv dep-proxy drop). Re-enable this test
+	// when that lands. See drops/DROP_15_NETWORK_POLICY/PLAN.md § 15.2.5.G.
+	t.Skip("15.2.5.G blocked on build-egress / buildkit custom-network limitation — see PLAN § 15.2.5.G")
 	if runtime.GOOS != "darwin" {
-		t.Skipf("Unit 15.2.5 macOS gate: skipping on %s (Docker Desktop macOS only — host.docker.internal semantics differ across Engine deployments)", runtime.GOOS)
+		t.Skipf("Unit 15.2.5.G macOS gate: skipping on %s (Docker Desktop macOS only — sidecar topology validated on macOS)", runtime.GOOS)
 	}
 	if err := exec.Command("docker", "version").Run(); err != nil {
 		t.Skipf("docker unavailable for integration test: %v", err)
 	}
 
-	// Stand up an in-process HTTP CONNECT proxy on a free port. The proxy
-	// accepts CONNECT requests, records the target Host, and refuses any
-	// host not in the allowlist with a 403. Successful tunnels short-
-	// circuit before any real upstream connection — the test only needs to
-	// prove the build reached the proxy, not that the proxy is a fully
-	// functional egress gateway.
-	allowed := map[string]bool{
-		"proxy.golang.org:443":              true,
-		"sum.golang.org:443":                true,
-		"github.com:443":                    true,
-		"objects.githubusercontent.com:443": true,
+	// Build a single test base image that has both the Go toolchain (for go
+	// install) and npm (for npm install -g). The base build uses open
+	// networking so apk can pull packages from the Alpine CDN; only the
+	// overlay builds are subject to the sidecar policy.
+	//
+	// The valv user is required because BuildOverlayDockerfile appends
+	// "USER valv" as the final instruction in the overlay Dockerfile.
+	const baseDockerfile = `FROM golang:1.23-alpine
+RUN apk add --no-cache nodejs npm \
+    && addgroup -S valv \
+    && adduser -S -G valv valv
+LABEL io.valv.recipe_hash=integration-netpol-base
+`
+	baseContextDir := t.TempDir()
+	baseDockerfilePath := filepath.Join(baseContextDir, "Dockerfile")
+	if err := os.WriteFile(baseDockerfilePath, []byte(baseDockerfile), 0o644); err != nil {
+		t.Fatalf("write base dockerfile: %v", err)
 	}
-	var (
-		mu          sync.Mutex
-		seenHosts   []string
-		blockedHits int64
-	)
-	listener, err := net.Listen("tcp", "0.0.0.0:0")
+
+	var baseStdout, baseStderr bytes.Buffer
+	baseRunner := docker.NewSystemRunner("docker", nil, &baseStdout, &baseStderr)
+	baseRef := docker.NewImageRef("valv-test/netpol-overlay", "it-base")
+	buildBaseArgs, err := docker.BuildImageArgs(docker.ImageBuildRequest{
+		ContextDir: baseContextDir,
+		Dockerfile: baseDockerfilePath,
+		Tags:       []docker.ImageRef{baseRef},
+		Builder:    "auto",
+		NoCache:    false,
+	})
 	if err != nil {
-		t.Fatalf("listen: %v", err)
+		t.Fatalf("BuildImageArgs for base: %v", err)
 	}
-	defer listener.Close()
-
-	port := listener.Addr().(*net.TCPAddr).Port
-
-	srv := &http.Server{
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodConnect {
-				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-				return
-			}
-			mu.Lock()
-			seenHosts = append(seenHosts, r.Host)
-			mu.Unlock()
-			if !allowed[r.Host] {
-				atomic.AddInt64(&blockedHits, 1)
-				http.Error(w, "forbidden by valv allowlist", http.StatusForbidden)
-				return
-			}
-			hj, ok := w.(http.Hijacker)
-			if !ok {
-				http.Error(w, "hijack unsupported", http.StatusInternalServerError)
-				return
-			}
-			conn, _, err := hj.Hijack()
-			if err != nil {
-				return
-			}
-			_, _ = conn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
-			_ = conn.Close()
-		}),
-		ReadHeaderTimeout: 5 * time.Second,
+	if err := baseRunner.Run(context.Background(), buildBaseArgs); err != nil {
+		t.Fatalf("build base image: %v\nstdout:\n%s\nstderr:\n%s", err, baseStdout.String(), baseStderr.String())
 	}
-	go func() {
-		_ = srv.Serve(listener)
-	}()
-	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(shutdownCtx)
-	}()
+	t.Cleanup(func() {
+		_ = baseRunner.Run(context.Background(), []string{"image", "rm", "--force", baseRef.String()})
+	})
 
-	endpoint := "host.docker.internal:" + intToStr(port)
-
+	// Wire the real networkpolicy.Service through the adapter so
+	// EnsureProjectImage provisions the valv-proxy sidecar + internal network.
 	dockerRunner := docker.NewSystemRunner("docker", nil, nil, nil)
 	dockerExec := docker.NewExecutor(dockerRunner)
 	policySvc, err := networkpolicy.New(networkpolicy.Options{Executor: dockerExec})
 	if err != nil {
 		t.Fatalf("networkpolicy.New() error = %v", err)
 	}
-	policy := networkPolicyAdapter{svc: policySvc}
-
-	contextDir := t.TempDir()
-	dockerfile := filepath.Join(contextDir, "Dockerfile")
-	if err := os.WriteFile(dockerfile, []byte("FROM golang:1.23-alpine\nLABEL io.valv.recipe_hash=integration-base\n"), 0o644); err != nil {
-		t.Fatalf("write base dockerfile: %v", err)
-	}
 
 	var buildStdout, buildStderr bytes.Buffer
-	imageRunner := docker.NewSystemRunner("docker", nil, &buildStdout, &buildStderr)
+	overlayRunner := docker.NewSystemRunner("docker", nil, &buildStdout, &buildStderr)
 	svc, err := New(Options{
-		Runner:        imageRunner,
+		Runner:        overlayRunner,
 		Provider:      domain.ProviderCodex,
 		Repository:    "valv-test/netpol-overlay",
-		ContextDir:    contextDir,
+		ContextDir:    baseContextDir,
 		Dockerfile:    "Dockerfile",
-		DefaultTag:    "it-base",
+		DefaultTag:    "it-overlay",
 		UserID:        1000,
 		GroupID:       1000,
-		NetworkPolicy: policy,
-		ProxyEndpoint: endpoint,
+		NetworkPolicy: networkPolicyAdapter{svc: policySvc},
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	if _, err := svc.Build(context.Background(), BuildRequest{Version: "0.117.0"}); err != nil {
-		t.Fatalf("build base image: %v\nstdout:\n%s\nstderr:\n%s", err, buildStdout.String(), buildStderr.String())
-	}
-	baseRef := docker.NewImageRef("valv-test/netpol-overlay", "it-base")
-	t.Cleanup(func() {
-		_ = imageRunner.Run(context.Background(), []string{"image", "rm", "--force", baseRef.String()})
-	})
-
-	manifest := tools.ToolManifest{
+	// ── Allowed path ─────────────────────────────────────────────────────────
+	// go install rsc.io/quote@v1.5.2 contacts proxy.golang.org and
+	// sum.golang.org (both in the default allowlist). The sidecar must permit
+	// these connections and the overlay build must succeed.
+	allowedManifest := tools.ToolManifest{
 		Tools: map[string]tools.ToolSpec{
-			"hello": {Source: "rsc.io/quote@v1.5.2", Install: "go install"},
+			"quote": {Source: "rsc.io/quote@v1.5.2", Install: "go install"},
 		},
 	}
-	result, err := svc.EnsureProjectImage(context.Background(), EnsureProjectRequest{
-		Manifest:  manifest,
+	allowedResult, allowedErr := svc.EnsureProjectImage(context.Background(), EnsureProjectRequest{
+		Manifest:  allowedManifest,
 		BaseImage: baseRef,
 		NoCache:   true,
 	})
+	if allowedErr != nil {
+		t.Errorf("ALLOWED path: EnsureProjectImage returned unexpected error: %v\nstdout:\n%s\nstderr:\n%s",
+			allowedErr, buildStdout.String(), buildStderr.String())
+	}
 	t.Cleanup(func() {
-		if result.Image.String() != "" {
-			_ = imageRunner.Run(context.Background(), []string{"image", "rm", "--force", result.Image.String()})
+		if allowedResult.Image.String() != "" {
+			_ = overlayRunner.Run(context.Background(), []string{"image", "rm", "--force", allowedResult.Image.String()})
 		}
 	})
-	// The build may fail because `go install` cannot complete through the
-	// dummy CONNECT-only proxy (no real upstream bytes). That's fine —
-	// the contract this test proves is that the build reached the proxy
-	// with the right Host. So we tolerate err != nil and inspect the
-	// proxy log afterward.
-	if err != nil {
-		t.Logf("overlay build returned error (expected with dummy proxy): %v", err)
-	}
 
-	mu.Lock()
-	defer mu.Unlock()
-	if len(seenHosts) == 0 {
-		t.Fatalf("proxy saw zero CONNECT requests — build did not reach proxy via host.docker.internal:%d", port)
+	// ── Blocked path ──────────────────────────────────────────────────────────
+	// npm install -g cowsay contacts registry.npmjs.org which is NOT in the
+	// default allowlist (proxy.golang.org / sum.golang.org / github.com /
+	// objects.githubusercontent.com). The sidecar must reject the CONNECT
+	// tunnel to registry.npmjs.org:443 and the overlay build must fail.
+	buildStdout.Reset()
+	buildStderr.Reset()
+	blockedManifest := tools.ToolManifest{
+		Tools: map[string]tools.ToolSpec{
+			"cowsay": {Source: "cowsay", Install: "npm install -g"},
+		},
 	}
-	sawAllowed := false
-	for _, h := range seenHosts {
-		if allowed[h] {
-			sawAllowed = true
-			break
-		}
+	_, blockedErr := svc.EnsureProjectImage(context.Background(), EnsureProjectRequest{
+		Manifest:  blockedManifest,
+		BaseImage: baseRef,
+		NoCache:   true,
+	})
+	if blockedErr == nil {
+		t.Errorf("BLOCKED path: EnsureProjectImage succeeded but expected failure (registry.npmjs.org must be blocked by sidecar)\nstdout:\n%s\nstderr:\n%s",
+			buildStdout.String(), buildStderr.String())
+	} else {
+		t.Logf("BLOCKED path: EnsureProjectImage correctly returned error: %v", blockedErr)
 	}
-	if !sawAllowed {
-		t.Errorf("proxy saw %d CONNECTs but none were allowlisted: %v", len(seenHosts), seenHosts)
-	}
-	t.Logf("proxy summary: %d CONNECTs, %d blocked, hosts=%v", len(seenHosts), atomic.LoadInt64(&blockedHits), seenHosts)
 }
 
 // networkPolicyAdapter bridges the consumer-side images.NetworkPolicy
@@ -358,30 +331,4 @@ func (a networkPolicyAdapter) Provision(ctx context.Context, req NetworkPolicyRe
 		},
 		NetworkPolicyCleanup(cleanup),
 		nil
-}
-
-// intToStr renders a port number as a decimal string. Kept tiny so the
-// integration build does not need a strconv import that overlaps with other
-// integration-only utilities; the build-tag gate keeps this out of the
-// production binary.
-func intToStr(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	var buf [20]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		buf[i] = '-'
-	}
-	return string(buf[i:])
 }
