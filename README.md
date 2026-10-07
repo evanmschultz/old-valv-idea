@@ -1,4 +1,13 @@
-# Valv
+# old-valv-idea (archived)
+
+> **This repository is archived and no longer maintained.** It was the first idea for Valv: a
+> Docker-based launcher that isolated AI coding CLIs per account. It is kept public only to show
+> the idea that led to the new one. Nothing here is reused.
+>
+> **The new Valv** is a Rust vault and security layer that lets agents use secrets without ever
+> seeing them: [hylla-io/valv](https://github.com/hylla-io/valv).
+
+# Valv (original README)
 
 Valv is a macOS-first control plane for per-account isolated, containerized agentic-dev workloads. Each workload runs in a Docker container with its own provider credential home, project bindings, and mounts, so multiple identities (for example `personal` and `work`) stay isolated per project.
 
